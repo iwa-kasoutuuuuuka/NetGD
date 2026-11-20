@@ -410,6 +410,15 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   - FPGA（AG16K）の内蔵フラッシュの中身を読み出せるかは不明。
 - INSTALL.md や README の「吸い出せない」は v5.5 クローンでの上流の経験に基づく記述で、6.0 では未確認。
 
+### R30 G2-4：PC 側の送信ツール `tools/netgd-send`（Sonnet 実装、Opus がテストを確認）
+- 設計書 §7.1 のパッケージ構成。`prepare`（GDI/CDI の検査、8.3 名への変換と `disc.gdi` の書き直し、8 MiB ごとのチェックポイント CRC、`job.ngj`・`manifest.ngm`・`src.txt`）、
+  `collect`（Dreamcast 側が書く `result.ngr` を検証。終了コード 0 成功／1 失敗／2 未完了で再開可）、`status`。ファイルはハードリンクで置き、複製しない。
+  dc_auto 用プリセット `integrations/dcdevtools/netgd.ps1`（Dreamcast 側アプリ `netgd-recv` は未作成なので ELF は仮のパス）。
+- **テスト（Opus が実行）**：42 件パス（約 30 秒、ファイル I/O が遅いため）。プリセットは PowerShell で構文だけ確認、dc_auto では未実行。
+- **設計の穴（DESIGN-GAP、12 件。コード中に印あり）**：主なもの ― ファイルは分割せずチェックポイントの境界を「チャンク」とする、PC 側にだけ `manifest.ngc` を追加、
+  `src.txt` のパスは `/pc/...`、既定の SD フォルダの決め方、`result.ngr` の行の形式（`NGD:RESUME`・`NGD:FILE`・`NGD:END` などは提案）、
+  CDI の末尾の検査は記憶に基づく、設計の `--prepare` フラグをサブコマンドにした。→ Dreamcast 側アプリ（G2-3）を作るときに合わせて確定する。
+
 ---
 
 ## 判断の記録（Decisions）
