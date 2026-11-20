@@ -299,4 +299,105 @@ with open(os.path.join(out, "image3.txt"), "w", newline="\n") as f:
             "# reader (format 3 only) checks it: header, payload CRC, vectors, descriptor, trailer, in that order\n")
     for p, h, e in F3:
         f.write(f"{p} {h} {e}\n")
+# --- GPBR1 report (resident -> app), design 3-2 -------------------------------
+# E button request wrote locked slb unsealed result word   (encode and parse)
+# R word button request wrote locked slb unsealed result    (parse only: reserved bits set)
+# N word                                                     (no mark: not a report)
+REPORT_ROWS = [
+    "E 0 0 0 0 0 0 0 4eb10000",
+    "E 0 0 0 0 0 0 1 4eb10001",
+    "E 1 0 0 0 0 0 1 4eb10101",
+    "E 0 1 0 0 0 0 1 4eb10201",
+    "E 0 0 1 0 0 0 1 4eb10401",
+    "E 0 0 0 1 0 0 0 4eb10800",
+    "E 0 0 0 1 0 0 1 4eb10801",
+    "E 0 0 0 0 1 0 0 4eb11000",
+    "E 0 0 0 0 0 1 0 4eb12000",
+    "E 0 1 0 1 1 0 6 4eb11a06",
+    "E 1 1 1 1 1 1 9 4eb13f09",
+    "E 0 0 0 0 0 0 2 4eb10002",
+    "E 0 1 0 0 0 0 5 4eb10205",
+    "E 0 0 0 1 0 0 8 4eb10808",
+    "E 0 0 0 0 0 0 255 4eb100ff",
+    "R 4eb1c001 0 0 0 0 0 0 1",
+    "R 4eb1ff09 1 1 1 1 1 1 9",
+    "R 4eb14000 0 0 0 0 0 0 0",
+    "N 00000000",
+    "N ffffffff",
+    "N 5a5aa5a5",
+    "N 00004eb1",
+    "N b14e0000",
+    "N 4eb00001",
+    "N 4eb20001",
+    "N 4fb10001",
+    "N 0eb10001",
+]
+with open(os.path.join(out, "report.txt"), "w", newline="\n") as f:
+    f.write("# GPBR1 word: mark 0x4EB1 << 16 | flags << 8 | result; flags BTN=0x100 REQ=0x200 WROTE=0x400 LOCKED=0x800 SLB=0x1000 UNSEALED=0x2000\n"
+            "# E button request wrote locked slb unsealed result(dec) word | R word b r w l s u result | N word (no mark -> not a report)\n")
+    for r in REPORT_ROWS:
+        f.write(r + "\n")
+
+# --- resident information block, design 3-3 -----------------------------------
+# I hex16 gen flags layout>>8 version crc    N hex16 (version unknown)
+INFO_ROWS = [
+    "I 4e475253" "011e2000" "03020100" "efbeadde 1 1e 20 00010203 deadbeef",
+    "I 4e475253" "01012000" "00000000" "00000000 1 01 20 00000000 00000000",
+    "I 4e475253" "01ff2000" "ffffffff" "ffffffff 1 ff 20 ffffffff ffffffff",
+    "I 4e475253" "02002000" "0c0b0a00" "00000000 2 00 20 000a0b0c 00000000",  # a newer generation still parses
+    "I 4e475253" "ff002000" "01000000" "78563412 ff 00 20 00000001 12345678",
+    "I 4e475253" "01004000" "01000000" "78563412 1 00 40 00000001 12345678",  # another layout: the caller compares it
+    "N 4e475253" "00002000" "01000000" "78563412",  # generation 0
+    "N 4e475253" "00ff2000" "01000000" "78563412",  # generation 0, flags set
+    "N 4e475254" "01002000" "01000000" "78563412",  # NGRT
+    "N 53524e47" "01002000" "01000000" "78563412",  # byte-swapped magic
+    "N ffffffff" "ffffffff" "ffffffff" "ffffffff",  # erased
+    "N 00000000" "00000000" "00000000" "00000000",
+]
+with open(os.path.join(out, "info.txt"), "w", newline="\n") as f:
+    f.write("# the 16 bytes at 0x81FF0: magic NGRS, word1 = layout>>8 << 16 | flags << 8 | gen, version, region crc\n"
+            "# I bytes16 gen flags layout>>8 version crc (hex) | N bytes16 (no magic or generation 0: version unknown)\n")
+    for r in INFO_ROWS:
+        f.write(r + "\n")
+
+# --- NGAX extension block, design 3-5 -----------------------------------------
+# block32(hex) bitstream-trailer-word(hex) expect(OK NoAx BadAx StampMismatch)
+def ax(magic=b"NGAX", n=32, min_gen=1, stamp=0, iface=0, tail=b"\0" * 12):
+    return (magic + struct.pack("<4I", n, min_gen, stamp, iface) + tail).hex()
+
+
+AX_ROWS = [
+    (ax(), "00000000", "OK"),
+    (ax(), "12345678", "OK"),  # stamp 0: not checked
+    (ax(stamp=0xCAFE1234), "cafe1234", "OK"),
+    (ax(stamp=0xCAFE1234), "cafe1235", "StampMismatch"),
+    (ax(stamp=0xCAFE1234), "00000000", "StampMismatch"),
+    (ax(stamp=0xCAFE1234), "ffffffff", "StampMismatch"),
+    (ax(stamp=0xCAFE1234, iface=0x77), "cafe1234", "OK"),
+    (ax(min_gen=0), "00000000", "OK"),  # min_gen is not part of this check
+    (ax(min_gen=9), "00000000", "OK"),
+    (ax(iface=0xFFFFFFFF), "00000000", "OK"),
+    (ax(tail=bytes(range(1, 13))), "00000000", "OK"),  # reserved bytes are ignored
+    (ax(n=64), "00000000", "OK"),  # the block may grow
+    (ax(n=36, stamp=0x11), "00000011", "OK"),
+    (ax(n=16), "00000000", "BadAx"),
+    (ax(n=0), "00000000", "BadAx"),
+    (ax(n=33), "00000000", "BadAx"),
+    (ax(n=0xFFFFFFFC), "00000000", "OK"),  # a huge length is a multiple of 4 and not 32's business
+    (ax(n=30), "00000000", "BadAx"),
+    (ax(magic=b"NGAY"), "00000000", "NoAx"),
+    (ax(magic=b"XAGN"), "00000000", "NoAx"),
+    ("ff" * 32, "00000000", "NoAx"),
+    ("00" * 32, "00000000", "NoAx"),
+    (ax(magic=b"NGAY", stamp=5), "00000006", "NoAx"),  # magic first
+    (ax(n=16, stamp=5), "00000006", "BadAx"),  # then length, then the stamp
+]
+with open(os.path.join(out, "ax.txt"), "w", newline="\n") as f:
+    f.write("# NGAX block (32 bytes at app +0x120: magic, length, min_gen, bs_stamp, bs_iface, reserved) and the last 4 bytes of the\n"
+            "# plane-1 image as a little-endian word, written in hex as the number. Order: magic (NoAx), length >= 32 and a multiple of 4 (BadAx),\n"
+            "# bs_stamp != 0 and != the word (StampMismatch)\n"
+            "# block-hex tail-word-hex expect\n")
+    for b, t, e in AX_ROWS:
+        f.write(f"{b} {t} {e}\n")
+
 print("vectors written to", out)

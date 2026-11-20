@@ -32,6 +32,11 @@ pub const DESC_OFF: u32 = 0x100;
 pub const DESC_LEN: usize = 32;
 /// `"NGAP"` read as a little-endian word.
 pub const DESC_MAGIC: u32 = u32::from_le_bytes(*b"NGAP");
+/// The descriptor version, **for ever 1**: the resident refuses any other
+/// (`parse_descriptor`), and the resident's flash cannot be rewritten once it
+/// is locked, so a version 2 could never be accepted by a deployed board.
+/// What the application wants to add goes into the extension block "NGAX"
+/// ([`AX_OFF`]), which the resident does not read.
 pub const DESC_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -170,4 +175,89 @@ pub fn verify_flash_app<F: Flash>(f: &mut F, part: Part, allow_unsealed: bool) -
         }
     }
     Ok(d.image_len)
+}
+
+// ------------------------------------------------------------------ "NGAX", the extension block
+
+/// Offset of the extension block in the image: right behind the descriptor.
+pub const AX_OFF: u32 = 0x120;
+/// Length of the block as laid out now (it may grow: the length word says).
+pub const AX_LEN: usize = 32;
+/// `"NGAX"` read as a little-endian word.
+pub const AX_MAGIC: u32 = u32::from_le_bytes(*b"NGAX");
+
+/// The extension block (design 3-5): fields only the application and the
+/// tools read. **The resident never reads it**; it is covered by the image's
+/// trailer CRC. Layout (little endian):
+///
+/// ```text
+///   +0   magic "NGAX"
+///   +4   block length (32 now; a multiple of 4, at least 32)
+///   +8   min_gen   resident interface generation the app needs (1)
+///   +12  bs_stamp  CRC-32 of the plane-1 bitstream without its last four
+///                  bytes, which hold the same value (4E, "V3"); 0 = not checked
+///   +16  bs_iface  FPGA interface/version register value expected; 0 = not checked
+///   +20..+27 reserved, 0
+///   +28  reserved, 0 (no CRC of its own)
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ax {
+    pub len: u32,
+    pub min_gen: u32,
+    pub bs_stamp: u32,
+    pub bs_iface: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AxError {
+    /// No `"NGAX"` magic (an older image, or erased).
+    NoAx,
+    /// Magic right, length word below 32 or not a multiple of 4.
+    BadAx,
+    /// `bs_stamp` is not 0 and differs from the bitstream's trailing word.
+    StampMismatch,
+}
+
+/// Parse the block and check `bs_stamp` against `bs_tail`, the last four
+/// bytes of the plane-1 image as a little-endian word (shared vector
+/// `ax.txt`). Order: magic, length, stamp. A stamp of 0 means "do not check".
+pub fn check_ax(b: &[u8; AX_LEN], bs_tail: u32) -> Result<Ax, AxError> {
+    let a = parse_ax(b)?;
+    if a.bs_stamp != 0 && a.bs_stamp != bs_tail {
+        return Err(AxError::StampMismatch);
+    }
+    Ok(a)
+}
+
+/// Magic and length only.
+pub fn parse_ax(b: &[u8; AX_LEN]) -> Result<Ax, AxError> {
+    if rd32(b, 0) != AX_MAGIC {
+        return Err(AxError::NoAx);
+    }
+    let len = rd32(b, 4);
+    if len < AX_LEN as u32 || len % 4 != 0 {
+        return Err(AxError::BadAx);
+    }
+    Ok(Ax { len, min_gen: rd32(b, 8), bs_stamp: rd32(b, 12), bs_iface: rd32(b, 16) })
+}
+
+impl Ax {
+    /// Does a resident of interface generation `gen` (`Info::gen`, 0 =
+    /// unknown) satisfy `min_gen`? The application starts either way (design
+    /// 3-4); it only leaves out what needs the newer resident.
+    #[inline]
+    pub fn gen_ok(&self, gen: u8) -> bool {
+        gen as u32 >= self.min_gen
+    }
+}
+
+/// The 32-byte block (tools and tests; the application writes it with
+/// `global_asm!`).
+pub fn pack_ax(min_gen: u32, bs_stamp: u32, bs_iface: u32) -> [u8; AX_LEN] {
+    let mut b = [0u8; AX_LEN];
+    let w = [AX_MAGIC, AX_LEN as u32, min_gen, bs_stamp, bs_iface];
+    for (i, v) in w.iter().enumerate() {
+        b[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    b
 }

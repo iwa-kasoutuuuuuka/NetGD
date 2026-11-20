@@ -5,6 +5,9 @@ mod common;
 use bootcore::fat::*;
 use common::*;
 
+/// Another name on the card (the resident no longer knows `NETGD.BIT`).
+const NAME_OTHER: [u8; 11] = *b"NETGD   BIT";
+
 const NAME: [u8; 11] = *b"NETGD   OGF";
 
 fn read_all(card: &mut Card, vol: &Volume, ent: &DirEnt) -> Result<Vec<u8>, FatError> {
@@ -106,7 +109,7 @@ fn name_must_match_exactly() {
     f.add_file(b"NETGD   BIT", &d, Layout::Contig, false);
     let (_, r) = open(f.img.clone(), &NAME);
     assert_eq!(r.err(), Some(FatError::NotFound));
-    let (mut card, r) = open(f.img.clone(), &NAME_BITSTREAM);
+    let (mut card, r) = open(f.img.clone(), &NAME_OTHER);
     let (vol, ent) = r.unwrap();
     assert_eq!(read_all(&mut card, &vol, &ent).unwrap(), d);
 }

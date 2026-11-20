@@ -7,12 +7,12 @@
 #![no_main]
 
 use bootcore::app::{verify_flash_app, APP_BASE};
-use bootcore::boot::{decide, Action};
+use bootcore::boot::{decide, lock_resident, report, Action, Trigger};
 use bootcore::fat::{BlockRead, NAME_APP};
 use bootcore::fcr::{Cmd, FcrCmd, Plane};
 use bootcore::flash::{Flash, FlashError, PAGE};
 use bootcore::part::Part;
-use bootcore::update::sd_recover;
+use bootcore::update::sd_recover_ex;
 use core::ptr::{read_volatile, write_volatile};
 
 #[panic_handler]
@@ -25,6 +25,37 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 struct Hw(Part);
 
 impl Flash for Hw {
+    fn set_fws(&mut self, fws: u8) {
+        unsafe {
+            write_volatile(bootcore::fcr::EEFC0_BASE as *mut u32, (fws as u32) << 8);
+            if self.0.has_plane1() {
+                write_volatile(bootcore::fcr::EEFC1_BASE as *mut u32, (fws as u32) << 8);
+            }
+        }
+    }
+
+    // On the board: RAM routine, FCR write, poll FSR with a timeout.
+    fn slb(&mut self, cmd: FcrCmd) -> Result<(), FlashError> {
+        unsafe { write_volatile(cmd.fcr_addr() as *mut u32, cmd.word()) };
+        let mut n = 0u32;
+        loop {
+            let fsr = unsafe { read_volatile(cmd.fsr_addr() as *const u32) };
+            if fsr & 1 != 0 {
+                return if fsr & 4 != 0 {
+                    Err(FlashError::Locked)
+                } else if fsr & 2 != 0 {
+                    Err(FlashError::Refused)
+                } else {
+                    Ok(())
+                };
+            }
+            n += 1;
+            if n > 4_000_000 {
+                return Err(FlashError::Timeout);
+            }
+        }
+    }
+
     fn read(&mut self, addr: u32, out: &mut [u8]) {
         for (i, b) in out.iter_mut().enumerate() {
             *b = unsafe { read_volatile((addr as usize + i) as *const u8) };
@@ -126,10 +157,24 @@ pub extern "C" fn probe_boot(part: u32, allow_unsealed: u32, button: u32, gpbr: 
 #[inline(never)]
 pub extern "C" fn probe_recover(part: u32, buf: *mut [u8; 512]) -> u32 {
     let buf = unsafe { &mut *buf };
-    match sd_recover(&mut Sd, &mut Hw(part_of(part)), part_of(part), buf, &NAME_APP) {
-        Ok(l) => l,
-        Err(_) => 0,
-    }
+    // the report word this boot would leave in GPBR1 (code size of the
+    // report and of the error mapping included)
+    let t = Trigger { button: part & 2 != 0, request: part & 4 != 0 };
+    let p = part_of(part & 1);
+    let w = match sd_recover_ex(&mut Sd, &mut Hw(p), p, buf, &NAME_APP) {
+        Ok(r) => report(t, r.wrote, true, false, false, 1) ^ r.len,
+        Err(e) => report(t, false, true, false, false, e.result_code()),
+    };
+    unsafe { write_volatile(0x400E_1294 as *mut u32, w) };
+    w
+}
+
+/// Design 4-1: GLB, SLB if unlocked, GLB; the outcome for the report.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn probe_lock(part: u32, dev: u32) -> u32 {
+    let o = lock_resident(&mut Hw(part_of(part)), part_of(part), dev != 0);
+    o.locked as u32 | (o.slb as u32) << 1
 }
 
 #[no_mangle]
@@ -158,6 +203,7 @@ pub extern "C" fn Reset() -> ! {
     let mut buf = [0u8; 512];
     let mut x = probe_boot(0, 0, 0, 0);
     x ^= probe_recover(x, &mut buf);
+    x ^= probe_lock(x, x);
     x ^= probe_crc(buf.as_ptr(), 512);
     x ^= probe_fcr(x, x, x, x);
     let _ = APP_BASE;

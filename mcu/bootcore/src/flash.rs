@@ -11,6 +11,21 @@
 //! crate, so no bootcore code runs from flash while a command is busy. The
 //! host model in `tests/common` checks that `read` is never entered while
 //! an `ewp` is in progress and cuts power inside `ewp`.
+//!
+//! **Wait states** (design 2-2 K6; datasheet errata 46.1.1.3, 46.2.1.2): a
+//! flash command runs with FWS = 6, everything else with FWS = 4. The portable
+//! code owns that: it calls [`Flash::set_fws`] (`FWS_WRITE` before
+//! `ewp`/`slb`, `FWS_RUN` right after, also on error), so the host model can
+//! count every EWP or SLB at the wrong FWS, and every flash read (and so the
+//! hand-off) at FWS = 6, as violations.
+//!
+//! **Watchdog** (design 2-3 W1/W3): the resident never writes `WDT_MR`. While
+//! it recovers it rewinds the counter (`WDT_CR` = `0xA5000001`); the
+//! implementations of [`Flash::ewp`] and of [`crate::fat::BlockRead::read_block`]
+//! do that as their first act, so every SD sector and every flash page rewinds
+//! it. The pure code in between (CRC over the flash, a FAT chain step) is
+//! bounded: `tests/watchdog.rs` bounds the flash bytes read between two
+//! rewinds in the model.
 
 use crate::fcr::{FcrCmd, Plane};
 
@@ -36,10 +51,20 @@ pub trait Flash {
     /// is running.
     fn read(&mut self, addr: u32, out: &mut [u8]);
 
+    /// Set `EEFC_FMR.FWS` of every plane the part has ([`crate::part::FWS_RUN`]
+    /// or [`crate::part::FWS_WRITE`]; FRDY interrupt off).
+    fn set_fws(&mut self, fws: u8);
+
     /// Latch `data` into the page `cmd` names (an EWP command) and run it to
     /// completion, with a timeout (`Err(Timeout)`). FLOCKE gives
-    /// `Err(Locked)`, FCMDE `Err(Refused)`.
+    /// `Err(Locked)`, FCMDE `Err(Refused)`. Called with FWS = 6; rewinds the
+    /// watchdog first.
     fn ewp(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError>;
+
+    /// Run SLB (`cmd` from [`FcrCmd::slb`]): write FCR, wait for FRDY with a
+    /// timeout. Errors as for `ewp`. Called with FWS = 6. Flash may be read
+    /// while it runs (datasheet 20.4.3.4) but the resident does not.
+    fn slb(&mut self, cmd: FcrCmd) -> Result<(), FlashError>;
 
     /// GLB: bit n set = lock region n of `plane` is locked. A failure must
     /// be reported as all ones (everything locked).

@@ -40,6 +40,9 @@
 //!   cycle in a bounded number of steps).
 
 /// Whatever reads 512-byte sectors (the HSMCI polling reader on the board).
+///
+/// An implementation rewinds the watchdog (`WDT_CR`) before it starts a
+/// sector, and has its own timeout; see [`crate::flash`].
 pub trait BlockRead {
     fn read_block(&mut self, lba: u32, buf: &mut [u8; 512]) -> Result<(), ()>;
 }
@@ -65,9 +68,9 @@ pub enum FatError {
     Empty,
 }
 
-/// The names the resident looks for (design D6).
+/// The name the resident looks for (design D6). It does not read
+/// `NETGD.BIT`: that file belongs to the application (R66).
 pub const NAME_APP: [u8; 11] = *b"NETGD   OGF";
-pub const NAME_BITSTREAM: [u8; 11] = *b"NETGD   BIT";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Volume {

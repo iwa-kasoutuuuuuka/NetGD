@@ -7,7 +7,56 @@ use bootcore::crc;
 use bootcore::fat::BlockRead;
 use bootcore::fcr::{FcrCmd, Plane, EEFC0_BASE, EEFC1_BASE};
 use bootcore::flash::{Flash, FlashError, FLASH_BASE, PAGE, PLANE1_BASE};
-use bootcore::part::Part;
+use bootcore::part::{Part, FWS_RUN, FWS_WRITE};
+use std::cell::Cell;
+use std::rc::Rc;
+
+pub mod sim;
+
+// ---------------------------------------------------------------- watchdog
+
+/// What the watchdog sees of a run: the resident rewinds it in every
+/// `Card::read_block` and every `Model::ewp`; between two rewinds the model
+/// adds up the "work" of the pure code in between, as bytes read from flash
+/// (the one thing that loops without I/O: CRC passes over the image).
+#[derive(Clone, Default)]
+pub struct Wdt(Rc<Cell<WdtState>>);
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct WdtState {
+    /// Flash bytes read since the last rewind.
+    pub since: u64,
+    /// Largest `since` ever seen at a rewind or at [`Wdt::finish`].
+    pub max: u64,
+    pub feeds: u64,
+}
+
+impl Wdt {
+    pub fn feed(&self) {
+        let mut s = self.0.get();
+        s.max = s.max.max(s.since);
+        s.since = 0;
+        s.feeds += 1;
+        self.0.set(s);
+    }
+
+    pub fn work(&self, bytes: u64) {
+        let mut s = self.0.get();
+        s.since += bytes;
+        self.0.set(s);
+    }
+
+    /// Close the last interval (at hand-off).
+    pub fn finish(&self) {
+        let mut s = self.0.get();
+        s.max = s.max.max(s.since);
+        self.0.set(s);
+    }
+
+    pub fn state(&self) -> WdtState {
+        self.0.get()
+    }
+}
 
 // ---------------------------------------------------------------- rng
 
@@ -102,6 +151,8 @@ pub struct Card {
     /// From the n-th read on, serve this image instead (the card changed
     /// between two passes).
     pub swap: Option<(usize, std::sync::Arc<Vec<u8>>)>,
+    /// Rewound at every `read_block`, as the real implementation must.
+    pub wdt: Option<Wdt>,
 }
 
 impl Card {
@@ -111,7 +162,7 @@ impl Card {
 
     /// Many cards over one image (the sweeps make tens of thousands).
     pub fn shared(img: std::sync::Arc<Vec<u8>>) -> Card {
-        Card { img, reads: 0, fail_at: None, glitch: None, swap: None }
+        Card { img, reads: 0, fail_at: None, glitch: None, swap: None, wdt: None }
     }
 }
 
@@ -119,6 +170,9 @@ impl BlockRead for Card {
     fn read_block(&mut self, lba: u32, buf: &mut [u8; 512]) -> Result<(), ()> {
         let n = self.reads;
         self.reads += 1;
+        if let Some(w) = &self.wdt {
+            w.feed();
+        }
         if let Some(f) = self.fail_at {
             if n >= f {
                 return Err(());
@@ -198,6 +252,32 @@ pub struct Model {
     /// A stuck bit: after an EWP that covers this address, bit 0 of that
     /// byte reads back flipped (a failing cell).
     pub stuck: Option<u32>,
+    /// `EEFC_FMR.FWS` as the portable code last set it. Starts at 4 (the
+    /// resident sets it right after reset).
+    pub fws: u8,
+    /// Flash commands (EWP, SLB) issued at an FWS other than 6, and flash
+    /// reads at FWS 6 (which includes the hand-off): must stay 0. Not reset
+    /// by `power_up`.
+    pub fws_violations: u32,
+    /// SLB commands issued.
+    pub slbs: u32,
+    /// SLB commands issued while region 0 already read locked (must stay 0:
+    /// SLB 0 is one bit from CLB 0).
+    pub slb_while_locked: u32,
+    /// Fault for the next SLB only.
+    pub slb_fault: Option<SlbFault>,
+    pub wdt: Option<Wdt>,
+}
+
+/// What happens to the next SLB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlbFault {
+    /// The command word arrives as CLB 0: lock bit 0 is cleared, not set.
+    BecomesClb,
+    /// Nothing happens (and the command reports success).
+    Ignored,
+    /// Power goes in the middle; the lock bit is left set (`true`) or clear.
+    PowerCut { bit_set: bool },
 }
 
 impl Model {
@@ -217,6 +297,12 @@ impl Model {
             weak_erase: None,
             ignore: None,
             stuck: None,
+            fws: FWS_RUN,
+            fws_violations: 0,
+            slbs: 0,
+            slb_while_locked: 0,
+            slb_fault: None,
+            wdt: None,
         };
         // A resident that nobody may touch.
         let r = lcg(99, 0x2000);
@@ -251,6 +337,7 @@ impl Model {
         self.in_ewp = false;
         self.cut = None;
         self.timeout = None;
+        self.fws = FWS_RUN;
         self.violations = 0;
         self.ops = 0;
         self.log.clear();
@@ -347,13 +434,59 @@ impl Flash for Model {
         if self.in_ewp {
             self.violations += 1;
         }
+        if self.fws == FWS_WRITE {
+            self.fws_violations += 1;
+        }
+        if let Some(w) = &self.wdt {
+            w.work(out.len() as u64);
+        }
         match Model::idx(addr) {
             Some(i) if i + out.len() <= self.mem.len() => out.copy_from_slice(&self.mem[i..i + out.len()]),
             _ => out.fill(0xFF),
         }
     }
 
+    fn set_fws(&mut self, fws: u8) {
+        self.fws = fws;
+    }
+
+    fn slb(&mut self, cmd: FcrCmd) -> Result<(), FlashError> {
+        assert_eq!(cmd.word(), 0x5A00_0008, "not SLB 0");
+        assert_eq!(cmd.eefc_base(), EEFC0_BASE);
+        if self.fws != FWS_WRITE {
+            self.fws_violations += 1;
+        }
+        if self.dead {
+            return Err(FlashError::Failed);
+        }
+        self.slbs += 1;
+        if self.lock[0] & 1 != 0 {
+            self.slb_while_locked += 1;
+        }
+        match self.slb_fault.take() {
+            None => self.lock[0] |= 1,
+            Some(SlbFault::BecomesClb) => self.lock[0] &= !1,
+            Some(SlbFault::Ignored) => {}
+            Some(SlbFault::PowerCut { bit_set }) => {
+                if bit_set {
+                    self.lock[0] |= 1;
+                } else {
+                    self.lock[0] &= !1;
+                }
+                self.dead = true;
+                return Err(FlashError::Failed);
+            }
+        }
+        Ok(())
+    }
+
     fn ewp(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError> {
+        if let Some(w) = &self.wdt {
+            w.feed();
+        }
+        if self.fws != FWS_WRITE {
+            self.fws_violations += 1;
+        }
         assert!(!self.in_ewp, "EWP entered re-entrantly");
         self.in_ewp = true;
         let r = self.ewp_inner(cmd, data);

@@ -134,6 +134,45 @@ class SharedVectors(unittest.TestCase):
                 got = e.kind
             self.assertEqual(got, want, data)
 
+    def test_report(self):
+        rows = vector_lines("report.txt")
+        self.assertGreaterEqual(len(rows), 20)
+        for r in rows:
+            if r[0] == "E":
+                b, rq, w, l, sl, u = (x == "1" for x in r[1:7])
+                word = int(r[8], 16)
+                self.assertEqual(F.pack_report(b, rq, w, l, sl, u, int(r[7])), word, r)
+                self.assertEqual(F.parse_report(word), (b, rq, w, l, sl, u, int(r[7])), r)
+            elif r[0] == "R":
+                self.assertEqual(F.parse_report(int(r[1], 16)),
+                                 tuple([x == "1" for x in r[2:8]] + [int(r[8])]), r)
+            else:
+                self.assertEqual(r[0], "N")
+                self.assertIsNone(F.parse_report(int(r[1], 16)), r)
+
+    def test_info(self):
+        rows = vector_lines("info.txt")
+        self.assertGreaterEqual(len(rows), 10)
+        for r in rows:
+            got = F.parse_info(bytes.fromhex(r[1]))
+            if r[0] == "I":
+                gen, flags, lay, ver, crc = (int(x, 16) for x in r[2:7])
+                self.assertEqual(got, F.Info(gen, flags, lay, ver, crc), r)
+            else:
+                self.assertEqual(r[0], "N")
+                self.assertIsNone(got, r)
+
+    def test_ax(self):
+        rows = vector_lines("ax.txt")
+        self.assertGreaterEqual(len(rows), 20)
+        for blk, tail, want in rows:
+            try:
+                F.check_ax(bytes.fromhex(blk), int(tail, 16))
+                got = "OK"
+            except F.FwImageError as e:
+                got = e.kind
+            self.assertEqual(got, want, (blk, tail))
+
     def test_image3(self):
         rows = vector_lines("image3.txt")
         self.assertGreaterEqual(len(rows), 10)
@@ -423,6 +462,209 @@ class Format3(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(F.main(["build", "--elf", old, "--target", "2e", "-o", out]), 0)  # default: format 2
                 self.assertEqual(F.main(["inspect", out]), 0)
+
+
+class Contract(unittest.TestCase):
+    """GPBR1 report, resident info block, NGAX, V3 bitstream stamp, seal-resident."""
+
+    def test_constants_are_the_documented_ones(self):
+        self.assertEqual(F.GPBR_RECOVER_MAGIC, struct.unpack("<I", b"NGRC")[0])
+        self.assertEqual(F.INFO_OFFSET + F.RESIDENT_BASE, 0x00081FF0)
+        self.assertEqual(struct.unpack("<I", F.INFO_MAGIC)[0], 0x5352474E)
+        self.assertEqual(F.AX_OFFSET, 0x120)
+        self.assertEqual(F.pack_report(), 0x4EB10000)
+
+    def test_info_and_ax_roundtrip(self):
+        b = F.pack_info(1, 0x1E, 0x2000, 0x010203, 0xDEADBEEF)
+        self.assertEqual(len(b), 16)
+        self.assertEqual(F.parse_info(b), F.Info(1, 0x1E, 0x20, 0x010203, 0xDEADBEEF))
+        self.assertEqual(F.parse_info(b).layout, 0x2000)
+        ax = F.pack_ax(1, 0xCAFE1234, 0)
+        self.assertEqual(len(ax), 32)
+        self.assertEqual(F.parse_ax(ax), (32, 1, 0xCAFE1234, 0))
+
+    # --- V3 ----------------------------------------------------------------
+
+    def app_with_ax(self, n=0x800, stamp=0):
+        app = bytearray(app_blob(n))
+        app[F.AX_OFFSET:F.AX_OFFSET + 32] = F.pack_ax(1, stamp, 0)
+        app[n - 4:] = bytes(4)
+        return bytes(app)
+
+    def v3_elf(self, bs_len=1024, with_ax=True, stamp=0, n=0x800):
+        app = self.app_with_ax(n, stamp) if with_ax else bytes(app_blob(n)[:n - 4]) + bytes(4)
+        bits = bytes(range(251)) * 8
+        bits = (bits + b"\x77" * bs_len)[:bs_len - 4] + bytes(4)
+        secs = [(".app_desc", AB + 0x100, 32), (".image_crc", AB + n - 4, 4),
+                (".bs_crc", 0x100000 + bs_len - 4, 4)]
+        if with_ax:
+            secs.append((".app_ax", AB + F.AX_OFFSET, 32))
+        return make_elf([(AB, app), (0x100000, bits)], secs), bits
+
+    def test_build_stamps_both_images(self):
+        elf, bits = self.v3_elf()
+        code, bs = F.images_from_elf(elf, "4e", fmt=3)
+        stamp = F.crc32(bits[:-4])
+        self.assertEqual(bs.payload[:-4], bits[:-4])
+        self.assertEqual(struct.unpack_from("<I", bs.payload, len(bs.payload) - 4)[0], stamp)
+        self.assertEqual(F.parse_ax(code.payload[0x120:0x140])[2], stamp)
+        # the app's trailer covers the stamp
+        F.validate_file([code, bs], "4e")
+        F.check_trailer(code.payload)
+        data = b"".join(i.pack() for i in (code, bs))
+        F.validate_file(list(F.iter_images(data, (3,))), "4e")
+
+    def test_stamp_pair_is_checked(self):
+        elf, bits = self.v3_elf()
+        code, bs = F.images_from_elf(elf, "4e", fmt=3)
+        # a different bitstream (self-consistent) with the old code: the combination is refused
+        other = bytes(bits[:-4]).replace(b"\x77", b"\x78") + bytes(4)
+        other = other[:-4] + struct.pack("<I", F.crc32(other[:-4]))
+        self.assertNotEqual(other, bs.payload)
+        bad = F.make_image(F.KIND_BITSTREAM, "4e", F.PLANE1_BASE, other, 0, F.FORMAT_3)
+        with self.assertRaises(F.FwImageError) as cm:
+            F.validate_file([code, bad], "4e")
+        self.assertEqual(cm.exception.kind, "StampMismatch")
+        # a damaged bitstream image (its trailer is not its CRC)
+        dam = bytearray(bs.payload)
+        dam[10] ^= 1
+        dmg = F.make_image(F.KIND_BITSTREAM, "4e", F.PLANE1_BASE, bytes(dam), 0, F.FORMAT_3)
+        with self.assertRaises(F.FwImageError) as cm:
+            F.validate_file([code, dmg], "4e")
+        self.assertEqual(cm.exception.kind, "BadTrailer")
+        # code alone is fine: the board's own bitstream is checked at boot
+        F.validate_file([code], "4e")
+
+    def test_stamp_needs_ax_and_a_4e(self):
+        elf, _ = self.v3_elf(with_ax=False)
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(elf, "4e", fmt=3)
+        self.assertEqual(cm.exception.kind, "BadAx")
+        elf, _ = self.v3_elf(stamp=0x1234)  # the ELF already holds a different stamp
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(elf, "4e", fmt=3)
+        self.assertEqual(cm.exception.kind, "StampMismatch")
+        # a code image with a stamp on a part without plane 1
+        code = F.make_image(F.KIND_CODE, "2e", AB, self.app_with_ax(0x800, 0x1234), 0, F.FORMAT_3)
+        with self.assertRaises(F.FwImageError) as cm:
+            F.validate_file([code], "2e")
+        self.assertEqual(cm.exception.kind, "BadAx")
+
+    def test_bs_crc_must_end_the_plane1_image(self):
+        app = self.app_with_ax()
+        base = [(".app_desc", AB + 0x100, 32), (".image_crc", AB + 0x7FC, 4)]
+        # the section is not at the end of the plane-1 content
+        elf = make_elf([(AB, app), (0x100000, bytes(2048))], base + [(".bs_crc", 0x100000 + 1020, 4)])
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(elf, "4e", fmt=3)
+        self.assertEqual(cm.exception.kind, "BadElf")
+        # it is, but the image is not a multiple of 512
+        elf = make_elf([(AB, app), (0x100000, bytes(1000))], base + [(".bs_crc", 0x100000 + 996, 4)])
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(elf, "4e", fmt=3)
+        self.assertEqual(cm.exception.kind, "BadLength")
+
+    def test_seal_stamps_the_elf_and_is_idempotent(self):
+        elf, bits = self.v3_elf()
+        sealed = F.seal_elf(elf)
+        self.assertEqual(F.seal_elf(sealed), sealed)
+        secs = F.elf_sections(sealed)
+        stamp = F.crc32(bits[:-4])
+        off = secs[".bs_crc"][1]
+        self.assertEqual(struct.unpack_from("<I", sealed, off)[0], stamp)
+        aoff = secs[".app_ax"][1]
+        self.assertEqual(F.parse_ax(sealed[aoff:aoff + 32])[2], stamp)
+        # sealed and unsealed ELFs build the same file
+        a = [i.pack() for i in F.images_from_elf(elf, "4e", fmt=3)]
+        b = [i.pack() for i in F.images_from_elf(sealed, "4e", fmt=3)]
+        self.assertEqual(a, b)
+        # only the intended bytes changed
+        diff = [i for i in range(len(elf)) if elf[i] != sealed[i]]
+        ok = [(secs[n][1], secs[n][1] + secs[n][2]) for n in (".app_desc", ".image_crc", ".bs_crc", ".app_ax")]
+        self.assertTrue(all(any(lo <= i < hi for lo, hi in ok) for i in diff))
+
+    def test_inspect_prints_ax_and_checks(self):
+        elf, _ = self.v3_elf()
+        with tempfile.TemporaryDirectory() as d:
+            e, o = os.path.join(d, "x.elf"), os.path.join(d, "x.ogfw")
+            with open(e, "wb") as f:
+                f.write(elf)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(F.main(["build", "--elf", e, "--target", "4e", "--format", "3", "-o", o]), 0)
+                self.assertEqual(F.main(["inspect", o]), 0)
+            self.assertIn("NGAX: len=32 min_gen=1 bs_stamp=0x", buf.getvalue())
+
+    # --- the resident ------------------------------------------------------
+
+    def resident_elf(self, flags=F.INFO_F_SELF_LOCK | F.INFO_F_BUTTON, gen=1, layout=0x2000, size=0x1800,
+                     sp=0x20004000, base=0x80000):
+        b = bytearray(b"\xa5" * size)
+        b[:16] = struct.pack("<4I", sp, base + 0x41, base + 0x43, base + 0x45)
+        info = F.pack_info(gen, flags, layout, 0x000102, 0)
+        return make_elf([(0x80000, bytes(b)), (0x80000 + 0x1FF0, info)])
+
+    def test_seal_resident(self):
+        region = F.seal_resident(self.resident_elf())
+        self.assertEqual(len(region), 8192)
+        self.assertEqual(region[0x1800:0x1FF0], b"\xff" * (0x1FF0 - 0x1800))
+        F.check_region(region)
+        self.assertEqual(struct.unpack_from("<I", region, 8188)[0], F.crc32(region[:8188]))
+        info = F.inspect_resident(region)
+        self.assertEqual((info.gen, info.version), (1, 0x102))
+        self.assertEqual(info.crc, F.crc32(region[:8188]))
+        # twice gives the same bytes; the application's trailer rule accepts it
+        self.assertEqual(F.seal_resident(self.resident_elf()), region)
+        F.check_trailer(region)
+
+    def test_seal_resident_refusals(self):
+        for elf, kind in (
+            (self.resident_elf(gen=0), "BadResident"),
+            (self.resident_elf(gen=2), "BadResident"),
+            (self.resident_elf(layout=0x4000), "BadResident"),
+            (self.resident_elf(sp=0x20008000), "BadVector"),  # 4E SP does not fit a 2E
+            (make_elf([(0x80000, struct.pack("<4I", 0x20004000, 0x80081, 0x80083, 0x80085) + bytes(100))]), "BadResident"),
+            (make_elf([(0x80000, bytes(16)), (0x82000, bytes(16))]), "BadDest"),  # runs into the app
+            (make_elf([(0x80000, bytes(16)), (0x100000, bytes(16))]), "BadDest"),  # plane 1
+        ):
+            with self.assertRaises(F.FwImageError, msg=kind) as cm:
+                F.seal_resident(elf)
+            self.assertEqual(cm.exception.kind, kind)
+        # an oversized resident
+        big = bytearray(b"\xa5" * 0x2100)
+        big[:16] = struct.pack("<4I", 0x20004000, 0x81, 0x83, 0x85)
+        with self.assertRaises(F.FwImageError):
+            F.seal_resident(make_elf([(0x80000, bytes(big))]))
+
+    def test_distribution_refuses_a_dev_build(self):
+        dev = self.resident_elf(flags=F.INFO_F_DEV | F.INFO_F_BUTTON)
+        F.seal_resident(dev)  # fine for development
+        for elf in (dev, self.resident_elf(flags=F.INFO_F_BUTTON),
+                    self.resident_elf(flags=F.INFO_F_SELF_LOCK | F.INFO_F_WDT_MR)):
+            with self.assertRaises(F.FwImageError) as cm:
+                F.seal_resident(elf, distribution=True)
+            self.assertEqual(cm.exception.kind, "BadResident")
+        F.seal_resident(self.resident_elf(), distribution=True)
+
+    def test_inspect_reads_a_resident_binary(self):
+        region = F.seal_resident(self.resident_elf())
+        with tempfile.TemporaryDirectory() as d:
+            elf, out = os.path.join(d, "r.elf"), os.path.join(d, "r.bin")
+            with open(elf, "wb") as f:
+                f.write(self.resident_elf())
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(F.main(["seal-resident", elf, "-o", out, "--distribution"]), 0)
+                self.assertEqual(F.main(["inspect", out]), 0)
+            with open(out, "rb") as f:
+                self.assertEqual(f.read(), region)
+            self.assertIn("resident: gen=1", buf.getvalue())
+            bad = bytearray(region)
+            bad[100] ^= 1
+            with open(out, "wb") as f:
+                f.write(bad)
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(F.main(["inspect", out]), 1)
 
 
 def real(env):

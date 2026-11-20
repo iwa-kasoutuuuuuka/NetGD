@@ -3,7 +3,8 @@
 
     fwimage.py build --elf netgd --target 2e|4e -o out.ogfw [--image-version N] [--format 2|3]
     fwimage.py seal in.elf -o sealed.elf
-    fwimage.py inspect out.ogfw [--target 2e|4e]
+    fwimage.py seal-resident resident.elf -o resident.bin [--target 2e|4e] [--distribution]
+    fwimage.py inspect out.ogfw|resident.bin [--target 2e|4e]
 
 The format is what `mcu/fwupdater` expects over vendor opcode 0xF9; see
 FORMAT.md. The checks here (header, CRC, vector table) are the same ones
@@ -55,6 +56,42 @@ DESC_LEN = 32
 DESC_MAGIC = b"NGAP"
 DESC_VERSION = 1
 TRAILER_LEN = 4
+
+# --- resident / application contract (docs/design/resident-app-contract.md;
+# --- keep in step with mcu/bootcore/src/{boot,info,app,part}.rs) -----------
+
+# GPBR0, app -> resident: the request word "NGRC".
+GPBR_RECOVER_MAGIC = 0x4352474E
+# GPBR1, resident -> app: mark 0x4EB1 << 16 | flags << 8 | result
+GPBR1_MARK = 0x4EB1
+REPORT_BTN = 1 << 8
+REPORT_REQ = 1 << 9
+REPORT_WROTE = 1 << 10
+REPORT_LOCKED = 1 << 11
+REPORT_SLB = 1 << 12
+REPORT_UNSEALED = 1 << 13
+RESULT_NAMES = {0: "none", 1: "recovered", 2: "no card", 3: "no file", 4: "read error", 5: "header refused",
+                6: "app region locked", 7: "write error", 8: "CRC mismatch", 9: "verify failed"}
+
+# The resident's information block, the last 16 bytes of the 8 KB region.
+RESIDENT_BASE = PLANE0_BASE
+RESIDENT_LEN = LAYOUT
+INFO_LEN = 16
+INFO_OFFSET = RESIDENT_LEN - INFO_LEN          # 0x1FF0: absolute 0x00081FF0
+INFO_MAGIC = b"NGRS"
+IFACE_GEN = 1
+INFO_F_DEV = 1 << 0
+INFO_F_SELF_LOCK = 1 << 1
+INFO_F_BUTTON = 1 << 2
+INFO_F_LED = 1 << 3
+INFO_F_WDT_MR = 1 << 4
+
+# The app's extension block, right behind the descriptor.
+AX_OFFSET = 0x120
+AX_LEN = 32
+AX_MAGIC = b"NGAX"
+SEC_AX = ".app_ax"      # ELF section: AX_LEN bytes at APP_BASE + AX_OFFSET
+SEC_BS_CRC = ".bs_crc"  # ELF section: the last 4 bytes of the plane-1 image
 
 SRAM0_BASE = 0x20000000
 CIDR_VERSION_MASK = 0x1F
@@ -244,6 +281,144 @@ def seal_payload(buf):
     return bytes(buf)
 
 
+# --- GPBR1 report, resident info block, NGAX (design 3-2, 3-3, 3-5) ---------
+
+
+def pack_report(button=False, request=False, wrote=False, locked=False, slb=False, unsealed=False, result=0):
+    """The GPBR1 word (bootcore::boot::report)."""
+    w = (GPBR1_MARK << 16) | (result & 0xFF)
+    for on, bit in ((button, REPORT_BTN), (request, REPORT_REQ), (wrote, REPORT_WROTE),
+                    (locked, REPORT_LOCKED), (slb, REPORT_SLB), (unsealed, REPORT_UNSEALED)):
+        if on:
+            w |= bit
+    return w
+
+
+def parse_report(w):
+    """(button, request, wrote, locked, slb, unsealed, result) or None when the
+    mark is missing. Reserved bits are ignored (bootcore::boot::Report::parse)."""
+    if w >> 16 != GPBR1_MARK:
+        return None
+    return (bool(w & REPORT_BTN), bool(w & REPORT_REQ), bool(w & REPORT_WROTE), bool(w & REPORT_LOCKED),
+            bool(w & REPORT_SLB), bool(w & REPORT_UNSEALED), w & 0xFF)
+
+
+@dataclass(frozen=True)
+class Info:
+    gen: int
+    flags: int
+    layout_shr8: int
+    version: int
+    crc: int
+
+    @property
+    def layout(self):
+        return self.layout_shr8 << 8
+
+
+def pack_info(gen=IFACE_GEN, flags=0, layout=LAYOUT, version=0, crc=0):
+    w1 = gen | (flags << 8) | ((layout >> 8) << 16)
+    return INFO_MAGIC + struct.pack("<3I", w1, version, crc)
+
+
+def parse_info(b):
+    """bootcore::info::resident_info: None when the magic is wrong or the
+    generation is 0 (the application then treats the version as unknown)."""
+    b = bytes(b)
+    if len(b) < INFO_LEN or b[:4] != INFO_MAGIC:
+        return None
+    w1, version, crc = struct.unpack_from("<3I", b, 4)
+    if w1 & 0xFF == 0:
+        return None
+    return Info(w1 & 0xFF, (w1 >> 8) & 0xFF, w1 >> 16, version, crc)
+
+
+def check_region(region):
+    """The 8192 bytes of the resident region: right length, last four bytes
+    the CRC-32 of the rest (bootcore::info::check_region)."""
+    if len(region) != RESIDENT_LEN:
+        raise FwImageError("BadResident", f"{len(region)} bytes, expected {RESIDENT_LEN}")
+    try:
+        check_trailer(region)
+    except FwImageError:
+        raise FwImageError("BadResident", "region CRC") from None
+
+
+def pack_ax(min_gen=1, bs_stamp=0, bs_iface=0):
+    return AX_MAGIC + struct.pack("<4I", AX_LEN, min_gen, bs_stamp, bs_iface) + bytes(AX_LEN - 20)
+
+
+def parse_ax(b):
+    """(len, min_gen, bs_stamp, bs_iface). Raises NoAx / BadAx
+    (bootcore::app::parse_ax)."""
+    b = bytes(b)
+    if len(b) < AX_LEN or b[:4] != AX_MAGIC:
+        raise FwImageError("NoAx", "no NGAX magic")
+    n, min_gen, stamp, iface = struct.unpack_from("<4I", b, 4)
+    if n < AX_LEN or n % 4:
+        raise FwImageError("BadAx", f"block length {n}")
+    return n, min_gen, stamp, iface
+
+
+def check_ax(b, bs_tail):
+    """bootcore::app::check_ax: magic, length, then bs_stamp (0 = not checked)
+    against `bs_tail`, the last four bytes of the plane-1 image as a number."""
+    a = parse_ax(b)
+    if a[2] != 0 and a[2] != bs_tail:
+        raise FwImageError("StampMismatch", f"bs_stamp {a[2]:#010x} != bitstream trailer {bs_tail:#010x}")
+    return a
+
+
+def ax_of(code):
+    """The NGAX block of an app image, or None if the image has none (or is
+    too short to)."""
+    blk = bytes(code[AX_OFFSET:AX_OFFSET + AX_LEN])
+    if len(blk) < AX_LEN or blk[:4] != AX_MAGIC:
+        return None
+    return blk
+
+
+def stamp_bitstream(bits):
+    """V3: the plane-1 image's last four bytes are the CRC-32 of the rest.
+    `bits` is the loaded plane-1 content including those four (zero) bytes;
+    returns (bytes with the trailer filled, stamp)."""
+    if len(bits) % BLOCK or len(bits) <= TRAILER_LEN:
+        raise FwImageError("BadLength", f"plane-1 image of {len(bits)} bytes: {SEC_BS_CRC} must end a multiple of {BLOCK}")
+    stamp = crc32(bytes(bits[:-TRAILER_LEN]))
+    return bytes(bits[:-TRAILER_LEN]) + struct.pack("<I", stamp), stamp
+
+
+def patch_stamp(code, stamp):
+    """Set bs_stamp in the NGAX block of `code` (bytes), refusing a different
+    non-zero value that is already there."""
+    if ax_of(code) is None:
+        raise FwImageError("BadAx", f"{SEC_BS_CRC} needs an NGAX block at +{AX_OFFSET:#x} in the app")
+    code = bytearray(code)
+    old = struct.unpack_from("<I", code, AX_OFFSET + 12)[0]
+    if old not in (0, stamp):
+        raise FwImageError("StampMismatch", f"NGAX bs_stamp {old:#010x} but the bitstream's is {stamp:#010x}")
+    struct.pack_into("<I", code, AX_OFFSET + 12, stamp)
+    return bytes(code)
+
+
+def check_stamp_pair(code, bits, part):
+    """The combination check of a file: the code image's `bs_stamp` against
+    the bitstream image that goes with it. A code-only file is fine (the
+    board keeps its stored bitstream; the app checks it at boot)."""
+    blk = ax_of(code)
+    if blk is None:
+        return
+    n, min_gen, stamp, iface = parse_ax(blk)
+    if stamp == 0:
+        return
+    if not PARTS[part].has_plane1:
+        raise FwImageError("BadAx", f"bs_stamp is set but {PARTS[part].name} has no plane 1")
+    if bits is None:
+        return
+    check_trailer(bits)  # BadTrailer: the bitstream image is not self-consistent
+    check_ax(blk, struct.unpack_from("<I", bits, len(bits) - TRAILER_LEN)[0])
+
+
 # --- images -----------------------------------------------------------------
 
 
@@ -304,6 +479,9 @@ def validate_image(img, part):
         if h.format == FORMAT_3:
             check_descriptor(img.payload[DESC_OFFSET:DESC_OFFSET + DESC_LEN], h.length)
             check_trailer(img.payload)
+            blk = bytes(img.payload[AX_OFFSET:AX_OFFSET + AX_LEN])
+            if blk[:4] == AX_MAGIC:
+                parse_ax(blk)
 
 
 def validate_file(images, part):
@@ -314,6 +492,11 @@ def validate_file(images, part):
         raise FwImageError("BadHeader", "images of different formats")
     for img in images:
         validate_image(img, part)
+    if images and images[0].header.format == FORMAT_3:
+        code = next((i.payload for i in images if i.header.kind == KIND_CODE), None)
+        bits = next((i.payload for i in images if i.header.kind == KIND_BITSTREAM), None)
+        if code is not None:
+            check_stamp_pair(code, bits, part)
 
 
 # --- ELF --------------------------------------------------------------------
@@ -438,6 +621,14 @@ def images_from_elf(elf, target, image_version=0, fmt=FORMAT_2):
     bits = flash_plane_bytes(segs, PLANE1_BASE)
     if bits is not None and not PARTS[target].has_plane1:
         raise FwImageError("BadDest", f"ELF has plane-1 content but {PARTS[target].name} has no plane 1")
+    if fmt == FORMAT_3:
+        bs_sec = elf_sections(elf).get(SEC_BS_CRC)
+        if bs_sec:
+            # V3: the bitstream image ends in its own CRC-32, and the app's NGAX block carries it
+            if bits is None or bs_sec[0] + TRAILER_LEN - PLANE1_BASE != len(bits) or bs_sec[2] != TRAILER_LEN:
+                raise FwImageError("BadElf", f"{SEC_BS_CRC} must be the last {TRAILER_LEN} bytes of the plane-1 content")
+            bits, stamp = stamp_bitstream(bits)
+            code = patch_stamp(code, stamp)
     images = [make_image(KIND_CODE, target, code_dest, code, image_version, fmt)]
     if bits is not None:
         images.append(make_image(KIND_BITSTREAM, target, PLANE1_BASE, bits, image_version, fmt))
@@ -468,11 +659,88 @@ def seal_elf(elf):
     app = app_bytes_from_elf(elf_load_segments(elf))
     if app is None or len(app) != n:
         raise FwImageError("BadElf", f"{SEC_CRC} is not at the end of the loaded image")
-    sealed = seal_payload(app[:n - TRAILER_LEN] + bytes(TRAILER_LEN))
     out = bytearray(elf)
+    app = app[:n - TRAILER_LEN] + bytes(TRAILER_LEN)
+    bs_sec = secs.get(SEC_BS_CRC)
+    if bs_sec:
+        # V3: fill the bitstream's own CRC and the stamp in the NGAX block
+        a_addr, a_off, a_size, a_typ = secs.get(SEC_AX, (0, 0, 0, 0))
+        if a_addr != APP_BASE + AX_OFFSET or a_size != AX_LEN or a_typ == SHT_NOBITS:
+            raise FwImageError("BadElf", f"{SEC_BS_CRC} needs a {SEC_AX} section of {AX_LEN} bytes at "
+                                         f"{APP_BASE + AX_OFFSET:#x}")
+        b_addr, b_off, b_size, b_typ = bs_sec
+        bits = flash_plane_bytes(elf_load_segments(elf), PLANE1_BASE)
+        if b_typ == SHT_NOBITS or b_size != TRAILER_LEN or bits is None or b_addr + TRAILER_LEN - PLANE1_BASE != len(bits):
+            raise FwImageError("BadElf", f"{SEC_BS_CRC} must be the last {TRAILER_LEN} bytes of the plane-1 content")
+        bits, stamp = stamp_bitstream(bits)
+        app = patch_stamp(app, stamp)
+        out[b_off:b_off + TRAILER_LEN] = bits[-TRAILER_LEN:]
+        out[a_off:a_off + AX_LEN] = app[AX_OFFSET:AX_OFFSET + AX_LEN]
+    sealed = seal_payload(app)
     out[d_off:d_off + DESC_LEN] = sealed[DESC_OFFSET:DESC_OFFSET + DESC_LEN]
     out[c_off:c_off + TRAILER_LEN] = sealed[n - TRAILER_LEN:]
     return bytes(out)
+
+
+# --- the resident ------------------------------------------------------------
+
+
+def seal_resident(elf, target="2e", distribution=False):
+    """Resident ELF -> the 8192 bytes of lock region 0, unused bytes 0xFF, with
+    the CRC-32 of the first 8188 bytes in the last four (the CRC word of the
+    information block). Checks, in order: nothing loaded outside region 0 (a
+    resident is not allowed to touch the app or plane 1), vector table (the
+    app's rule with dest 0x80000 and length 0x2000; `target` defaults to the
+    smaller 2E SRAM, so a pass fits both parts), information block (magic, gen
+    == IFACE_GEN, layout 0x2000). `distribution` also demands a release build:
+    not DEV, self-locking, no WDT_MR write."""
+    segs = elf_load_segments(elf)
+    for addr, data in segs:
+        end = addr + len(data)
+        if addr >= SRAM0_BASE:
+            continue
+        if addr < PLANE0_BASE or end > RESIDENT_BASE + RESIDENT_LEN:
+            raise FwImageError("BadDest", f"resident load segment {addr:#x}..{end:#x} is outside "
+                                          f"{RESIDENT_BASE:#x}..{RESIDENT_BASE + RESIDENT_LEN:#x}")
+    body = flash_plane_bytes(segs, RESIDENT_BASE, RESIDENT_BASE + RESIDENT_LEN)
+    if body is None or len(body) < 16:
+        raise FwImageError("BadElf", "no loadable bytes in the resident region")
+    if len(body) > RESIDENT_LEN:
+        raise FwImageError("BadLength", f"resident is {len(body)} bytes")
+    region = bytearray(body + b"\xff" * (RESIDENT_LEN - len(body)))
+    check_vectors(struct.unpack_from("<4I", region), RESIDENT_BASE, RESIDENT_LEN, target)
+    info = parse_info(region[INFO_OFFSET:INFO_OFFSET + INFO_LEN])
+    if info is None:
+        raise FwImageError("BadResident", f"no NGRS information block at {RESIDENT_BASE + INFO_OFFSET:#x}")
+    if info.gen != IFACE_GEN:
+        raise FwImageError("BadResident", f"interface generation {info.gen}, this tool knows {IFACE_GEN}")
+    if info.layout != LAYOUT:
+        raise FwImageError("BadResident", f"layout {info.layout:#x}, expected {LAYOUT:#x}")
+    if distribution:
+        if info.flags & INFO_F_DEV:
+            raise FwImageError("BadResident", "a development resident (flag DEV) is not for distribution")
+        if not info.flags & INFO_F_SELF_LOCK:
+            raise FwImageError("BadResident", "a distribution resident must lock itself (flag SELF_LOCK)")
+        if info.flags & INFO_F_WDT_MR:
+            raise FwImageError("BadResident", "a distribution resident must not write WDT_MR (flag WDT_MR)")
+    struct.pack_into("<I", region, RESIDENT_LEN - TRAILER_LEN, crc32(bytes(region[:RESIDENT_LEN - TRAILER_LEN])))
+    return bytes(region)
+
+
+def inspect_resident(region, target=None):
+    """Checks of a resident binary; returns the Info."""
+    check_region(region)
+    info = parse_info(region[INFO_OFFSET:INFO_OFFSET + INFO_LEN])
+    if info is None or info.gen != IFACE_GEN or info.layout != LAYOUT:
+        raise FwImageError("BadResident", "information block")
+    if info.crc != struct.unpack_from("<I", region, RESIDENT_LEN - TRAILER_LEN)[0]:
+        raise FwImageError("BadResident", "information block CRC word differs from the region trailer")
+    check_vectors(struct.unpack_from("<4I", region), RESIDENT_BASE, RESIDENT_LEN, target or "2e")
+    return info
+
+
+def is_resident_binary(data):
+    return len(data) == RESIDENT_LEN and data[INFO_OFFSET:INFO_OFFSET + 4] == INFO_MAGIC
 
 
 # --- CLI --------------------------------------------------------------------
@@ -503,6 +771,40 @@ def cmd_seal(args):
           f"descriptor crc {struct.unpack_from('<I', d, 28)[0]:#010x}")
 
 
+def cmd_seal_resident(args):
+    with open(args.elf, "rb") as f:
+        elf = f.read()
+    region = seal_resident(elf, args.target, args.distribution)
+    with open(args.output, "wb") as f:
+        f.write(region)
+    print(f"{args.output}: {len(region)} bytes")
+    describe_resident(region)
+
+
+def describe_resident(region):
+    info = parse_info(region[INFO_OFFSET:INFO_OFFSET + INFO_LEN])
+    names = [n for bit, n in ((INFO_F_DEV, "DEV"), (INFO_F_SELF_LOCK, "SELF_LOCK"), (INFO_F_BUTTON, "BUTTON"),
+                              (INFO_F_LED, "LED"), (INFO_F_WDT_MR, "WDT_MR")) if info.flags & bit]
+    v = info.version
+    print(f"  resident: gen={info.gen} flags={info.flags:#04x} ({'|'.join(names) or '-'}) "
+          f"version={v >> 16}.{(v >> 8) & 0xFF}.{v & 0xFF} crc={info.crc:#010x}")
+    if info.flags & INFO_F_DEV:
+        print("  warning: development resident (no self-lock, accepts unsealed apps); not for distribution",
+              file=sys.stderr)
+
+
+def describe_ax(images):
+    for i in images:
+        if i.header.kind == KIND_CODE and i.header.format == FORMAT_3:
+            blk = ax_of(i.payload)
+            if blk is not None:
+                n, min_gen, stamp, iface = parse_ax(blk)
+                print(f"  NGAX: len={n} min_gen={min_gen} bs_stamp={stamp:#010x} bs_iface={iface:#010x}")
+            if blk is not None and parse_ax(blk)[2] and not any(j.header.kind == KIND_BITSTREAM for j in images):
+                print("  note: bs_stamp is set but the file has no bitstream image; the board's stored bitstream "
+                      "must be the one with this stamp")
+
+
 def describe(images):
     for n, i in enumerate(images):
         h = i.header
@@ -519,8 +821,14 @@ def describe(images):
 def cmd_inspect(args):
     with open(args.file, "rb") as f:
         data = f.read()
+    if is_resident_binary(data):
+        info = inspect_resident(data, args.target)
+        describe_resident(data)
+        print(f"  OK: region CRC, information block and vector table pass ({info.layout:#x} bytes layout)")
+        return
     images = list(iter_images(data))
     describe(images)
+    describe_ax(images)
     guess = {part_from_cidr(i.header.target_cidr) for i in images}
     targets = [args.target] if args.target else sorted(k for k in guess if k)
     if not targets:
@@ -548,7 +856,14 @@ def main(argv=None):
     s.add_argument("elf")
     s.add_argument("-o", "--output", required=True)
     s.set_defaults(fn=cmd_seal)
-    i = sub.add_parser("inspect", help="parse and check an .ogfw (format 2 or 3)")
+    r = sub.add_parser("seal-resident", help="resident ELF -> the 8192-byte region image, with the info block checked and its CRC filled")
+    r.add_argument("elf")
+    r.add_argument("-o", "--output", required=True)
+    r.add_argument("--target", choices=sorted(PARTS), default="2e",
+                   help="SRAM size the stack pointer is checked against (default 2e: the smaller, so it fits both)")
+    r.add_argument("--distribution", action="store_true", help="refuse a development resident")
+    r.set_defaults(fn=cmd_seal_resident)
+    i = sub.add_parser("inspect", help="parse and check an .ogfw (format 2 or 3) or a resident binary")
     i.add_argument("file")
     i.add_argument("--target", choices=sorted(PARTS), help="check against this part (default: the one the image names)")
     i.set_defaults(fn=cmd_inspect)

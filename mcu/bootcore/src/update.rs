@@ -30,7 +30,10 @@ use crate::fat::{BlockRead, DirEnt, FatError, FileReader, Volume};
 use crate::fcr::{FcrCmd, Plane};
 use crate::flash::{locate, Flash, FlashError, FLASH_BASE, PAGE, PLANE1_BASE, PLANE_LEN};
 use crate::ogfw::{check_header, parse_header, Header, ImageError, ImageStream, Reject, KIND_APP};
-use crate::part::Part;
+use crate::boot::{
+    RESULT_CRC, RESULT_HEADER, RESULT_LOCKED, RESULT_NO_FILE, RESULT_READ, RESULT_VERIFY, RESULT_WRITE,
+};
+use crate::part::{Part, FWS_RUN, FWS_WRITE};
 use crate::rd32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,6 +67,49 @@ struct Plan {
     app_idx: u8,
     /// The trailing CRC of the application, as in the file.
     trailer: u32,
+}
+
+impl RecoverError {
+    /// The `result` of the boot report and the LED count for this failure
+    /// (design 3-2, 6-2): 3 no file (also a card without a FAT32 volume we
+    /// can read), 4 read error, damaged chain, or a file that changed between
+    /// passes, 5 header, target, layout or descriptor refused, 6 application
+    /// region locked, 7 flash command failed, 8 CRC mismatch or truncated
+    /// payload, 9 verification after writing failed. "No card" (2) is decided
+    /// before `sd_recover` runs, by the caller. Exhaustive on purpose: a new
+    /// error must get a code.
+    pub fn result_code(&self) -> u8 {
+        match self {
+            RecoverError::Fat(e) => match e {
+                FatError::Read | FatError::BadChain | FatError::Loop | FatError::Truncated => RESULT_READ,
+                FatError::NoSignature
+                | FatError::Gpt
+                | FatError::NotFat32
+                | FatError::BadBpb
+                | FatError::NotFound
+                | FatError::Empty => RESULT_NO_FILE,
+            },
+            RecoverError::NoFile => RESULT_NO_FILE,
+            RecoverError::Header(_) | RecoverError::NoApp => RESULT_HEADER,
+            RecoverError::Image(e) => match e {
+                ImageError::BadDescriptor | ImageError::Unsealed | ImageError::BadVector => RESULT_HEADER,
+                ImageError::Truncated | ImageError::CrcMismatch | ImageError::BadTrailer => RESULT_CRC,
+            },
+            RecoverError::Changed => RESULT_READ,
+            RecoverError::Locked => RESULT_LOCKED,
+            RecoverError::Flash(_) => RESULT_WRITE,
+            RecoverError::Verify => RESULT_VERIFY,
+        }
+    }
+}
+
+/// A recovery that ran to the end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Recovered {
+    /// Length of the application now in flash.
+    pub len: u32,
+    /// Flash was written (false: the application in it was already the file's).
+    pub wrote: bool,
 }
 
 fn fe(e: FlashError) -> RecoverError {
@@ -178,7 +224,11 @@ fn check_locks<F: Flash>(f: &mut F, plan: &Plan) -> Result<(), RecoverError> {
 fn ewp_page<F: Flash>(f: &mut F, part: Part, addr: u32, data: &[u8; PAGE]) -> Result<(), RecoverError> {
     let (plane, page) = locate(addr).ok_or(RecoverError::Flash(FlashError::Refused))?;
     let cmd = FcrCmd::ewp(part, plane, page).ok_or(RecoverError::Flash(FlashError::Refused))?;
-    f.ewp(cmd, data).map_err(fe)
+    // FWS = 6 for the command only; nothing is read from flash in between.
+    f.set_fws(FWS_WRITE);
+    let r = f.ewp(cmd, data);
+    f.set_fws(FWS_RUN);
+    r.map_err(fe)
 }
 
 /// EWP one page, then read it back and compare.
@@ -331,6 +381,17 @@ pub fn sd_recover<D: BlockRead, F: Flash>(
     buf: &mut [u8; 512],
     name: &[u8; 11],
 ) -> Result<u32, RecoverError> {
+    sd_recover_ex(dev, flash, part, buf, name).map(|r| r.len)
+}
+
+/// [`sd_recover`] that also says whether it wrote (the report's `WROTE`).
+pub fn sd_recover_ex<D: BlockRead, F: Flash>(
+    dev: &mut D,
+    flash: &mut F,
+    part: Part,
+    buf: &mut [u8; 512],
+    name: &[u8; 11],
+) -> Result<Recovered, RecoverError> {
     let vol = Volume::mount(dev, buf).map_err(RecoverError::Fat)?;
     let ent = match vol.find(dev, buf, name) {
         Ok(e) => e,
@@ -342,7 +403,7 @@ pub fn sd_recover<D: BlockRead, F: Flash>(
     let plan = validate(&vol, dev, &ent, part, buf)?;
     // already there: write nothing
     if already_installed(flash, part, &plan) {
-        return Ok(plan.app.len);
+        return Ok(Recovered { len: plan.app.len, wrote: false });
     }
     check_locks(flash, &plan)?;
 
@@ -360,7 +421,7 @@ pub fn sd_recover<D: BlockRead, F: Flash>(
     // 4. the first chunk, last
     write_head(&vol, dev, flash, &ent, &plan, part, buf)?;
     match verify_flash_app(flash, part, false) {
-        Ok(len) if len == plan.app.len => Ok(len),
+        Ok(len) if len == plan.app.len => Ok(Recovered { len, wrote: true }),
         _ => {
             // Do not leave something that looks half valid.
             let _ = erase_head(flash, part);

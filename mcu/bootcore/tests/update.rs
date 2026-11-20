@@ -3,7 +3,10 @@
 mod common;
 
 use bootcore::app::{verify_flash_app, APP_BASE};
-use bootcore::fat::{FatError, NAME_APP, NAME_BITSTREAM};
+use bootcore::fat::{FatError, NAME_APP};
+
+/// Another name on the card (the resident no longer knows `NETGD.BIT`).
+const NAME_OTHER: [u8; 11] = *b"NETGD   BIT";
 use bootcore::flash::{FlashError, PLANE1_BASE};
 use bootcore::ogfw::{ImageError, Reject};
 use bootcore::part::Part;
@@ -129,13 +132,13 @@ fn name_decides_which_file_is_read() {
     let part = Part::Sam3u2e;
     let app = app_image(part, 1024, 4);
     let mut f = Fat::new(8192 * 2, 1);
-    f.add_file(&NAME_BITSTREAM, &image(0, part, &app), Layout::Contig, false);
+    f.add_file(&NAME_OTHER, &image(0, part, &app), Layout::Contig, false);
     let mut card = Card::new(with_mbr(&f.img, 0x0C));
     let mut m = Model::new(part);
     assert_eq!(recover(&mut m, part, &mut card), Err(RecoverError::NoFile));
     assert_eq!(m.ops, 0);
     let mut buf = [0u8; 512];
-    assert_eq!(sd_recover(&mut card, &mut m, part, &mut buf, &NAME_BITSTREAM), Ok(1024));
+    assert_eq!(sd_recover(&mut card, &mut m, part, &mut buf, &NAME_OTHER), Ok(1024));
 }
 
 fn refused(part: Part, file: Vec<u8>, want: RecoverError) {
@@ -296,6 +299,12 @@ fn flocke_midway_is_reported_and_leaves_the_app_invalid() {
                 self.0.lock[0] |= 1 << 2;
             }
             self.0.ewp(c, d)
+        }
+        fn set_fws(&mut self, f: u8) {
+            self.0.set_fws(f)
+        }
+        fn slb(&mut self, c: bootcore::fcr::FcrCmd) -> Result<(), FlashError> {
+            self.0.slb(c)
         }
         fn lock_bits(&mut self, p: bootcore::fcr::Plane) -> u32 {
             self.0.lock_bits(p)
