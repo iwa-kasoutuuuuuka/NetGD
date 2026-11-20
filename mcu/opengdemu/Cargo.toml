@@ -16,6 +16,9 @@ gamecfg = { path = "../../common/gamecfg", features = ["defmt"] }
 lzma = { path = "../../common/lzma" }
 psload = { path = "../../common/psload", features = ["defmt"] }
 discimg = { path = "../../common/discimg", features = ["defmt"] }
+# Pure logic for the sd-multiblock / sd-highspeed features. Optional, so the
+# default build does not even see it.
+sdfast = { path = "../../common/sdfast", optional = true }
 
 embassy-atsam3 = { path = "../embassy-atsam3", features = ["rt", "time-driver"] }
 embassy-time = "0.5"
@@ -73,6 +76,29 @@ sam3u2e = ["embassy-atsam3/sam3u2e"]
 #   DEFMT_LOG=off cargo build --release --no-default-features --features board-v60,resident
 # Seal for flashing with `python tools/fwimage/fwimage.py seal <elf> -o <elf>`.
 resident = ["embassy-atsam3/resident"]
+
+# SD read-path speed-ups for G3-4 (docs/research/g3-read-path.md). All are off
+# by default and neither has run on hardware: the default image is byte for
+# byte the one built without them. They are separate so a regression can be
+# bisected on the board. `sd-fast` turns on all three.
+#
+# sd-multiblock: sequential read-ahead. After a CD_READ that continues the
+#   previous one (a streaming host), the next sectors are fetched with CMD18
+#   into the idle CD_READ_BUF, so the next request's first chunk is a cache
+#   hit and carries no card latency. No extra RAM.
+# sd-highspeed: SD High-Speed mode. At init, CMD6 to switch the card, then
+#   HSMCI HSMODE and a 48 MHz clock (24 MHz otherwise), verified by reading
+#   real data back; any failure backs out to 24 MHz.
+sd-multiblock = ["dep:sdfast"]
+sd-highspeed = ["dep:sdfast"]
+#
+# fast-complete: complete a DMA CD_READ as soon as the host has been seen to
+#   drain the FIFO, instead of after a fixed 100 ms floor (ide.rs,
+#   `stream_from_sd`). Not an SD feature, but the largest per-request latency
+#   in the read path. The floor exists because an empty FIFO can also mean the
+#   host has not started; see the comment there for what that cost.
+fast-complete = []
+sd-fast = ["sd-multiblock", "sd-highspeed", "fast-complete"]
 
 # SD throughput benchmark at boot. Off by default: it takes ~6 s, which
 # delays the IDE task spawn past the point the DC starts issuing ATAPI

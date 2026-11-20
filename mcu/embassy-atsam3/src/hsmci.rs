@@ -1005,3 +1005,121 @@ pub unsafe fn read_block_dma(
     read_block_dma_arm(block_address, dst)?;
     read_block_dma_finish()
 }
+
+// ---- High-Speed support ---------------------------------------------
+//
+// Not used by default. `opengdemu`'s `sd-highspeed` feature calls these from
+// `sdcard::init` to run the SD bus above the 25 MHz default-speed ceiling.
+// Unreferenced they are dropped at link time, so the default image does not
+// change.
+
+/// Set or clear HSMCI_CFG.HSMODE. With it set the controller changes the
+/// command and data lines on the rising edge of the card clock, which is what
+/// a card in High-Speed mode (after a successful CMD6 switch) expects; with
+/// it clear they change on the falling edge, as in Default Speed. Must match
+/// the mode the card is in, or reads come back as CRC errors.
+pub unsafe fn set_high_speed_mode(on: bool) {
+    let h = unsafe { &*pac::HSMCI::ptr() };
+    h.cfg.modify(|_, w| if on { w.hsmode().set_bit() } else { w.hsmode().clear_bit() });
+}
+
+/// Issue a command that answers with R1 and then one data block of
+/// `dst.len()` bytes, and read the block by polling. This is `read_block`
+/// generalised to any command number and block length; CMD6 (64-byte switch
+/// status) is the user. `dst.len()` must be a non-zero multiple of 4, at most
+/// 512.
+pub unsafe fn read_short_block(
+    cmd_num: u8,
+    arg: u32,
+    dst: &mut [u8],
+) -> Result<(), CmdError> {
+    let h = unsafe { &*pac::HSMCI::ptr() };
+    if dst.is_empty() || dst.len() % 4 != 0 || dst.len() > 512 {
+        return Err(CmdError::BadResponse);
+    }
+
+    let mut wait = 0u32;
+    while h.sr.read().notbusy().bit_is_clear() {
+        wait = wait.wrapping_add(1);
+        if wait == 10_000_000 {
+            reset();
+            return Err(CmdError::ResponseTimeout);
+        }
+    }
+
+    h.dma.write(|w| unsafe { w.bits(0) });
+    h.blkr
+        .write(|w| unsafe { w.bcnt().bits(1).blklen().bits(dst.len() as u16) });
+    h.argr.write(|w| unsafe { w.bits(arg) });
+    h.cmdr.write_with_zero(|w| unsafe {
+        w.cmdnb().bits(cmd_num)
+            .rsptyp()._48_bit()
+            .maxlat().set_bit()
+            .opdcmd().pushpull()
+            .trcmd().start_data()
+            .trdir().read()
+            .trtyp().single()
+    });
+
+    let mut wait = 0u32;
+    loop {
+        let sr = h.sr.read();
+        if sr.cmdrdy().bit_is_set() {
+            if sr.rtoe().bit_is_set() {
+                reset();
+                return Err(CmdError::ResponseTimeout);
+            }
+            if sr.rcrce().bit_is_set() {
+                reset();
+                return Err(CmdError::CrcError);
+            }
+            if sr.rinde().bit_is_set() || sr.rdire().bit_is_set() || sr.rende().bit_is_set() {
+                reset();
+                return Err(CmdError::BadResponse);
+            }
+            break;
+        }
+        wait = wait.wrapping_add(1);
+        if wait == 10_000_000 {
+            reset();
+            return Err(CmdError::ResponseTimeout);
+        }
+    }
+
+    for chunk in dst.chunks_exact_mut(4) {
+        let mut wait = 0u32;
+        loop {
+            let sr = h.sr.read();
+            if sr.rxrdy().bit_is_set() {
+                break;
+            }
+            // UNRE / OVRE / DTOE / DCRCE, as in `read_block`. A card that
+            // does not implement the command never starts the data phase
+            // and ends here with DTOE after the data timeout.
+            if sr.bits() & ((1 << 21) | (1 << 22) | (1 << 30) | (1 << 31)) != 0 {
+                reset();
+                return Err(CmdError::CrcError);
+            }
+            wait = wait.wrapping_add(1);
+            if wait == 10_000_000 {
+                reset();
+                return Err(CmdError::ResponseTimeout);
+            }
+        }
+        let w = h.rdr.read().bits();
+        chunk[0] = w as u8;
+        chunk[1] = (w >> 8) as u8;
+        chunk[2] = (w >> 16) as u8;
+        chunk[3] = (w >> 24) as u8;
+    }
+
+    let mut wait = 0u32;
+    while h.sr.read().xfrdone().bit_is_clear() {
+        wait = wait.wrapping_add(1);
+        if wait == 10_000_000 {
+            reset();
+            return Err(CmdError::ResponseTimeout);
+        }
+    }
+    Ok(())
+}

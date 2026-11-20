@@ -1,0 +1,7 @@
+[package]
+name = "sdfast"
+description = "Pure logic for the SD read-path speed-ups (sequential read-ahead, CMD6 switch-status parsing), shared by the firmware and the host tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]

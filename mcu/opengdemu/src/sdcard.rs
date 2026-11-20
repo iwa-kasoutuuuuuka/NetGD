@@ -171,6 +171,10 @@ pub async fn init() -> Result<CardInfo, InitError> {
             // done the CMD6 high-speed switch that would allow 50.
             let hz = unsafe { hsmci::set_clock_hz(24_000_000) };
             info!("SD link: 4-bit @ {} Hz", hz);
+            // Optional: CMD6 to High-Speed and a 48 MHz clock. Failing leaves
+            // the card exactly as it was, at the 24 MHz above.
+            #[cfg(feature = "sd-highspeed")]
+            enable_high_speed().await;
         }
         Err(e) => {
             // Not fatal — a card that refuses ACMD6 still works at 1-bit,
@@ -182,6 +186,101 @@ pub async fn init() -> Result<CardInfo, InitError> {
     let size_blocks = csd_size_blocks(&csd, capacity);
 
     Ok(CardInfo { capacity, rca, csd, size_blocks })
+}
+
+/// Bus clock asked for in High-Speed mode. The SD spec allows 50 MHz; with
+/// MCK = 96 MHz the divider lands at 48 MHz.
+#[cfg(feature = "sd-highspeed")]
+const HS_CLOCK_HZ: u32 = 50_000_000;
+
+/// Settle time after a CMD6 switch before the clock or timing changes. The
+/// spec has the function take effect within 8 clocks of the end of the status
+/// block; this is generous.
+#[cfg(feature = "sd-highspeed")]
+const HS_SETTLE: Duration = Duration::from_millis(2);
+
+/// Try to move a card that is already in 4-bit transfer state from Default
+/// Speed (24 MHz here) to High-Speed (48 MHz): CMD6 check, CMD6 switch, flip
+/// HSMCI to HSMODE and the faster clock, then prove the link by reading real
+/// data at the new speed and comparing it with what Default Speed returned.
+///
+/// Every failure backs out to Default Speed (CMD6 to function 0, HSMODE off,
+/// 24 MHz) and returns `false`; the card is left usable either way. Nothing
+/// here has run on hardware, which is why it is behind `sd-highspeed`: the
+/// board's SD wiring at 48 MHz is the unknown, not the protocol.
+///
+/// Uses `ide::loader_scratch()` (CD_READ_BUF) as the compare buffer, so it
+/// must run before the IDE task is serving anything.
+#[cfg(feature = "sd-highspeed")]
+async fn enable_high_speed() -> bool {
+    use sdfast::cmd6;
+
+    let mut st = [0u8; cmd6::STATUS_LEN];
+    // Check mode first: a card that is not SD 1.1+ rejects CMD6 here, with
+    // nothing switched yet.
+    if let Err(e) = unsafe { hsmci::read_short_block(6, cmd6::ARG_CHECK_HS, &mut st) } {
+        info!("SD high-speed: CMD6 check failed ({:?}), staying at 24 MHz", e);
+        return false;
+    }
+    if !cmd6::hs_supported(&st) {
+        info!("SD high-speed: card does not offer it, staying at 24 MHz");
+        return false;
+    }
+
+    // Reference data from Default Speed.
+    const REF_BLOCKS: usize = 8;
+    let scratch = crate::ide::loader_scratch();
+    if scratch.len() < (REF_BLOCKS + 20) * 512 {
+        return false;
+    }
+    let (reference, rest) = scratch.split_at_mut(REF_BLOCKS * 512);
+    let probe = &mut rest[..20 * 512];
+    if unsafe { hsmci::read_blocks_dma(0, reference) }.is_err() {
+        info!("SD high-speed: reference read failed, staying at 24 MHz");
+        return false;
+    }
+
+    let switched = match unsafe { hsmci::read_short_block(6, cmd6::ARG_SWITCH_HS, &mut st) } {
+        Ok(()) => cmd6::switched_to_hs(&st),
+        Err(_) => false,
+    };
+    if !switched {
+        // Refused or busy: the card did not change mode, so neither do we.
+        info!("SD high-speed: switch refused (group 1 = {}), staying at 24 MHz",
+              cmd6::group1_selected(&st));
+        return false;
+    }
+    Timer::after(HS_SETTLE).await;
+    unsafe { hsmci::set_high_speed_mode(true) };
+    let hz = unsafe { hsmci::set_clock_hz(HS_CLOCK_HZ) };
+
+    // 20 blocks is 10 KB: the size of a raw-sector staging round, so this
+    // exercises the run length the read path actually uses. Repeated, since a
+    // marginal link fails intermittently.
+    let mut good = true;
+    for _ in 0..16 {
+        if unsafe { hsmci::read_blocks_dma(0, probe) }.is_err()
+            || probe[..REF_BLOCKS * 512] != reference[..]
+        {
+            good = false;
+            break;
+        }
+    }
+    if good {
+        info!("SD link: High-Speed @ {} Hz, verified", hz);
+        return true;
+    }
+
+    warn!("SD high-speed: read-back failed at {} Hz, backing out to 24 MHz", hz);
+    unsafe {
+        hsmci::set_clock_hz(24_000_000);
+        // The card is still in High-Speed mode, so the switch back is sent
+        // with HSMODE still on (the card's timing) but at the slow clock.
+        let _ = hsmci::read_short_block(6, cmd6::ARG_SWITCH_DEFAULT, &mut st);
+    }
+    Timer::after(HS_SETTLE).await;
+    unsafe { hsmci::set_high_speed_mode(false) };
+    false
 }
 
 /// ACMD6 SET_BUS_WIDTH with arg=2 (4-bit). Must be preceded by CMD55 carrying

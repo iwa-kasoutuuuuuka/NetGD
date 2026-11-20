@@ -63,7 +63,7 @@ jobs:
         run: cargo build --release --no-default-features --features board-v60,resident
 
   host-tests:
-    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, fwupdater)
+    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fwupdater)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -74,6 +74,7 @@ jobs:
           - crate: common/discimg
           - crate: common/psload
           - crate: mcu/bootcore
+          - crate: common/sdfast
           # .cargo/config.toml defaults to thumbv7m-none-eabi, so the host
           # target has to be named explicitly.
           - crate: mcu/fwupdater

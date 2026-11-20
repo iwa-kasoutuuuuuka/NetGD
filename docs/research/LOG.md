@@ -904,6 +904,20 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   Flycast のトラックの FAD は `start_lba + pregap`、NetGD は `data_lba + 150`。特殊なプリギャップの CDI でだけ差が出る（未変更、要確認）。
 - 信頼度：ホストテストとビルドで確認済み。実機では未検証。
 
+### R72 G3-4 SD 読み込み経路の調査と高速化（Sonnet、`docs/research/g3-read-path.md`）
+- 主な発見：**CMD18・DMA・4 ビット・24 MHz は既定のビルドですでに使われている**（`ide.rs:1858` `fill_cd_read_buf_raw` → `hsmci.rs:891` `read_blocks_dma`、7 セクタ（2048 B）または 5 セクタ（2352 B）ごとに CMD18＋CMD12、`sdcard.rs:167-173`）。High-Speed（CMD6）は未使用。
+  エクステントの表が無いトラックは `embedded_sdmmc` 経由で 512 B ごとに CMD17、チャンクごとにファイルを開き直す（1 セクタあたり 4〜5 回、未対処）。`CD_READ_BUF` は SRAM1 の 14 KB で残り 2 KB、2 つ目のバッファは置けない。FPGA の読み出し FIFO は 4096 語。
+- 時間の内訳（コードからの推定、未測定）：**DMA の CD_READ は、最後の書き込みの時点で FIFO が空でない限り最低 100 ms 待ってから完了する**（`ide.rs:2561-2571`）。ほぼ毎回、約 2 ms の転送に約 100 ms が加わる。
+  SD 読み取りと FIFO への書き込みは直列で、持続 約 5.5 MB/s（2352 B なら 約 4.8 MB/s）。各要求の最初のチャンクで 1.1〜1.7 ms。
+- 実装（すべて既定ではオフ、`sd-fast` で3つとも）：`fast-complete`（FIFO が空になったのを見たら 100 ms の下限を免除、ホストが読み始めなければ従来どおり待つ。リスク中：完了のタイミングは実機で壊れた前歴あり）、
+  `sd-multiblock`（連続する CD_READ の後、次の範囲を空いたバッファに先読み、完了と INTRQ の後に実行。リスク低）、`sd-highspeed`（CMD6 で 48 MHz、20 ブロック×16 回を 24 MHz の基準と比較、失敗したら 24 MHz に戻る。リスク中：48 MHz での配線が未知）。
+  新しいクレート `common/sdfast`（先読みの予測と CMD6 の解析、テスト 14 件）。CI の `host-tests` に追加（Opus）。
+- 既定のビルドは不変：HEAD と機能オフのビルドで 2E・v60（ログなし）は SHA-256 が一致、4E（defmt あり）はサイズ同じで defmt のログ ID の並びだけ差。`sd-fast` で +1.4〜2.2 KB、RAM +56 B。`resident,sd-fast` もビルド成功。
+- 未実装：SD 読み取りと FIFO 書き込みの重ね合わせ（約 +50 %、設計は文書の §8）。RAM、`cdda_task` との HSMCI/DMAC の排他、FIFO のタイミングの実測が先。
+- 実機で測る順番：(1) 100 ms の下限（既定と `fast-complete` の CD_READ の所要時間、IP.BIN と 1ST_READ.BIN で起動できること）、(2) `sd-bench` を 24 MHz と `sd-highspeed` で、(3) 1ST_READ.BIN 572 セクタの読み込み時間、(4) 先読みの当たり、(5) FIFO の水位でどちらが律速か。
+- 次：`fast-complete` と `enable_high_speed` は書き込む前にレビューが必要 → Fable にレビューを依頼。
+- 信頼度：構造はコードで確認済み、時間は推定。実機では未検証。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -928,3 +942,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | SLB 0 と CLB 0 が1ビット違いである危険は受け入れる。常駐部はロックの後に GLB で読み直し、外れていれば次の起動で再ロックする | SLB の引数はどちらの読み方でも領域0を指す 0 しか安全でない。CLB 0 はロックが外れるだけで壊れない（R61） | Opus |
 | 2026-11-20 | `netgd-recv` のホストテストは quick を既定、CI は full。作業フォルダはシステムの一時フォルダ | USB HDD 上での実行が遅さの原因だった。CI は `CI=true` で自動的に full（R62） | Fable 提案、Opus 承認 |
 | 2026-11-20 | 常駐部の FAT リーダーは、有効な FAT の指定（BPB 0x28）と MBR の4項目すべてに対応する | ロック後は SWD でしか直せない。実在しうるカードを拒否する理由が無く、数行で済む（R67） | Opus |
+| 2026-11-20 | G3-4 の高速化（`fast-complete`・`sd-multiblock`・`sd-highspeed`）は既定ではオフの feature にする | 実機で測るまで既定の動作を変えない。完了のタイミングは実機で壊れた前歴がある（R72） | Opus |

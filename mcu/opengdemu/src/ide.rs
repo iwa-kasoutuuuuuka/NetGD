@@ -1737,6 +1737,59 @@ async fn handle_cd_read(
         return;
     }
     stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await;
+    #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
+    read_ahead(dev, gdi, lba, count as u32);
+}
+
+/// Streaming history for [`read_ahead`].
+#[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
+static mut READ_AHEAD: sdfast::readahead::ReadAhead = sdfast::readahead::ReadAhead::new();
+
+/// Feature `sd-multiblock`: fetch the sectors a streaming host will ask for
+/// next into the idle CD_READ_BUF, once this request has been completed.
+///
+/// Runs after `stream_from_sd` returns, i.e. after the completion status and
+/// INTRQ are already posted, so it adds nothing to this command's latency; it
+/// can only delay the *next* command's pickup by one CMD18 (~1-2 ms), which a
+/// miss would have cost anyway. Only done when the request continued the
+/// previous one (`sdfast::readahead`), and only for mapped tracks: the
+/// filesystem fallback is far too slow to run speculatively.
+///
+/// The result is an ordinary cache entry (`CD_READ_BUF_LBA`/`_LEN`), which
+/// `stage_chunk` already honours, so a wrong guess costs one wasted read and
+/// nothing else.
+#[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
+fn read_ahead(dev: &IdeDevice, gdi: &'static crate::gdi::Gdi, lba: u32, count: u32) {
+    let ra = unsafe { &mut *core::ptr::addr_of_mut!(READ_AHEAD) };
+    let Some(cand) = ra.record(lba, count, stage_sectors_for(gdi, lba)) else {
+        return;
+    };
+    // The host has already moved on, or is resetting the bus: its next
+    // command is the priority, not a guess about it.
+    if dev.command_pending() || dev.reset_seen() {
+        return;
+    }
+    let Some(track) = gdi.track_for_lba(cand.lba) else { return };
+    if track.ext_len == 0 {
+        return;
+    }
+    let remaining = track
+        .sector_count
+        .saturating_sub(cand.lba.saturating_sub(track.start_lba));
+    let Some(p) = cand.clamped(stage_sectors_for(gdi, cand.lba), remaining) else {
+        return;
+    };
+    let want = p.count as usize * 2048;
+    if unsafe { CD_READ_BUF_LBA == p.lba && CD_READ_BUF_LEN >= want } {
+        return;
+    }
+    invalidate_cd_read_cache();
+    if let Some(len) = fill_cd_read_buf_raw(track, p.lba, p.count) {
+        unsafe {
+            CD_READ_BUF_LBA = p.lba;
+            CD_READ_BUF_LEN = len;
+        }
+    }
 }
 
 /// Maximum CD_READ payload we hold in RAM up-front. Sized to fit the
@@ -2513,9 +2566,29 @@ async fn stream_from_sd(
     // stall here means the host abandoned the DMA, not that it paused.
     let mut last_lvl = u16::MAX;
     let mut stalled_ms = 0u32;
+    // Feature `fast-complete`: the floor above guards against an empty FIFO
+    // meaning "the host has not started yet". A FIFO seen *falling* to empty
+    // does not mean that -- the host demonstrably pulled everything -- so the
+    // floor is waived once the level has been observed to drop. The floor is
+    // otherwise paid on every DMA CD_READ whose tail was still in the FIFO
+    // when the last push returned, i.e. nearly all of them.
+    #[cfg(feature = "fast-complete")]
+    let (mut peak, mut pulled) = (0u16, false);
     for i in 0..200u32 {
         let lvl = dev.read_fifo_level();
-        if i >= min_wait_ms && lvl == 0 { break; }
+        #[cfg(feature = "fast-complete")]
+        {
+            if lvl > peak {
+                peak = lvl;
+            } else if lvl < peak {
+                pulled = true;
+            }
+        }
+        #[cfg(feature = "fast-complete")]
+        let floor_waived = pulled;
+        #[cfg(not(feature = "fast-complete"))]
+        let floor_waived = false;
+        if (i >= min_wait_ms || floor_waived) && lvl == 0 { break; }
         if lvl != last_lvl {
             if stalled_ms >= 20 {
                 info!("  drain: resumed after {} ms stall (lvl={})", stalled_ms, lvl);
