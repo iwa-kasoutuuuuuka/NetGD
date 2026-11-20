@@ -50,12 +50,19 @@ jobs:
           if-no-files-found: error
 
   host-tests:
-    name: Host tests (lzma, gamecfg, discimg)
+    name: Host tests (lzma, gamecfg, discimg, fwupdater)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        crate: [common/lzma, common/gamecfg, common/discimg]
+        include:
+          - crate: common/lzma
+          - crate: common/gamecfg
+          - crate: common/discimg
+          # .cargo/config.toml defaults to thumbv7m-none-eabi, so the host
+          # target has to be named explicitly.
+          - crate: mcu/fwupdater
+            args: --lib --target x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,7 +71,7 @@ jobs:
           workspaces: ${{ matrix.crate }}
       - name: cargo test
         working-directory: ${{ matrix.crate }}
-        run: cargo test
+        run: cargo test ${{ matrix.args }}
 
   gdprobe-host:
     name: gdprobe host tests (C + compare.py)
@@ -80,6 +87,51 @@ jobs:
       - name: Run host tests
         working-directory: tools/gdprobe
         run: sh tests/run_tests.sh
+
+  tools-host:
+    name: Tools host tests (${{ matrix.tool }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Read only by tools/fwbackup: runs its tests without a real probe.
+      FWBACKUP_TEST_WRAPPER: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Standard library only. mksdcard's tests do not call cargo (only
+          # verify.py does), so no Rust toolchain is needed here.
+          - tool: mksdcard
+            dir: tools/mksdcard
+            cmd: python tests/test_mksdcard.py
+          - tool: netgd-send
+            dir: tools/netgd-send
+            cmd: python -m unittest discover -s tests -v
+          # About 150 s.
+          - tool: fwbackup
+            dir: tools/fwbackup
+            cmd: python -m unittest discover -s tests -p "test_*.py"
+          # The real-ELF cases skip unless FWIMAGE_ELF_4E / FWIMAGE_ELF_2E are set.
+          - tool: fwimage
+            dir: .
+            cmd: python -m unittest discover -s tools/fwimage -v
+          # Needs gcc (preinstalled on ubuntu-latest), about 6.5 min.
+          - tool: netgd-recv
+            dir: .
+            cmd: python tools/netgd-recv/test/run_tests.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # netgd-recv's tests are skipped until tools/netgd-recv/test exists in
+      # the checkout; every other entry always runs.
+      - name: Run tests
+        if: ${{ matrix.tool != 'netgd-recv' || hashFiles('tools/netgd-recv/test/run_tests.py') != '' }}
+        working-directory: ${{ matrix.dir }}
+        run: ${{ matrix.cmd }}
 
   fpga-sim:
     name: FPGA simulation and Verilog check
