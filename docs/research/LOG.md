@@ -473,6 +473,13 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 吸い出しツール `tools/fwbackup`（Sonnet、R33）も並行して実行中。
 - 判断：#3 で v5.5 の Verilog を変えないのは、この PC に Quartus が無く、コミット済みの Cyclone II のビットストリームを作り直せないため。
 
+### R35 KOS ビルドの CI が初回で成功（Sonnet 作成、Opus が push して結果を確認）
+- `.github/workflows/kos.yaml`・`tools/ci/kos-build.sh`：KallistiOS プロジェクトの CI が公開する `pcercuei/dreamcast-toolchain:13.4.0`（ダイジェスト固定）と、
+  ユーザーの KOS 2.3.0 フォーク（コミット `c957c5ab` に固定）で、`tools/*/Makefile` のうち KOS のものをすべてビルド。KOS 本体はキャッシュ。
+- **初回の実行（run 44679084287）が成功**：`gdprobe.elf` がコンパイラの警告なしでリンクまで通った（Opus がログで確認）。成果物 `dreamcast-elfs`（約 1 MB）。
+  → **プローブの KOS 部分が初めて実際にコンパイルされた**（それまでは構文チェックだけ）。
+- 注意：CI 版の ELF は PC 側の保存先が `/pc/ci` に固定 → dc-tool-ip を動かすドライブの `\ci\` に `gdprobe.cfg` を置く。実機作業ガイド（Artifact 版8）に追記。
+
 ---
 
 ## 判断の記録（Decisions）
