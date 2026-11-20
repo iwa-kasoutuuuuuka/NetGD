@@ -1,0 +1,62 @@
+name: KallistiOS (Dreamcast) build
+
+# Compile-checks the Dreamcast-side programs under tools/ (gdprobe, netgd-recv, ...)
+# against KallistiOS 2.3.0 so no local DreamSDK is needed.
+#
+# Toolchain: prebuilt sh-elf GCC 13.4.0 image published by the KallistiOS project's CI
+#   (docker hub pcercuei/dreamcast-toolchain, built from KallistiOS/utils/kos-chain).
+#   The image holds only the compilers (/opt/toolchains/dc); KOS itself is checked out
+#   from the owner's 2.3.0 fork, pinned by commit, and built once, then cached.
+on:
+  push:
+    paths: ['tools/**', '.github/workflows/kos.yaml']
+  pull_request:
+    paths: ['tools/**', '.github/workflows/kos.yaml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # pcercuei/dreamcast-toolchain:13.4.0 (amd64, pushed 2026-09-10)
+  TOOLCHAIN_IMAGE: pcercuei/dreamcast-toolchain@sha256:07944f51fef616c9e9ed191cc955d07bbcf86159fab649f84d34010420a899d0
+  # iwa-kasoutuuuuuka/KallistiOS-VisualNovel, branch vn-engine (KOS 2.3.0)
+  KOS_REPO: iwa-kasoutuuuuuka/KallistiOS-VisualNovel
+  KOS_REF: c957c5ab18395bbb7272caabf36d6ac9de6921df
+
+jobs:
+  kos:
+    name: gdprobe / netgd-recv (KOS 2.3.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KOS_REPO }}
+          ref: ${{ env.KOS_REF }}
+          path: kos
+
+      # Built KOS tree (libs + utils), keyed on the KOS commit and the image digest.
+      - name: Cache built KallistiOS
+        uses: actions/cache@v4
+        with:
+          path: kos
+          key: kos-${{ env.KOS_REF }}-${{ env.TOOLCHAIN_IMAGE }}
+
+      - name: Build tools/*/ in the toolchain container
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE/kos:/kos" \
+            -v "$GITHUB_WORKSPACE:/work" \
+            "$TOOLCHAIN_IMAGE" \
+            sh /work/tools/ci/kos-build.sh
+
+      - name: Upload ELFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: dreamcast-elfs
+          path: out/*.elf
+          if-no-files-found: error

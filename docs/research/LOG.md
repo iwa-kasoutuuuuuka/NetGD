@@ -449,6 +449,30 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   `clocks.rs:95`「PCK0 drives the FPGA's CLK_48_MHz pin」、Quartus では FPGA の PIN_91）。→ 実機作業ガイドの導通確認に PA21（102 番）と PA28（45 番）を追加した（Artifact 版6）。
 - 未レビュー：2E の単一フラッシュプレーンでの `fwupdate` / `fwupdater` の動作。
 
+### R33 純正ファームの吸い出しツール `tools/fwbackup` の方針（Opus 設計、Sonnet 実装中）
+- **ユーザーの希望**：吸い出せるならバックアップとして保存したい。
+- **設計**：PC 側の Python スクリプト。probe-rs（Pico の debugprobe 経由の SWD）を使う。
+  `check`（CHIPID・EXID を読み、ロックなし 2E／ロックなし別型番／ロックまたはアクセス不可／応答なし に分類）、
+  `dump`（ロックなしのときだけ、フラッシュ 128 KB = 0x80000〜0x9FFFF を2回読んで一致を確認し、`.bin`・SHA-256・JSON を保存。上書きしない）、
+  `inspect`（ベクタテーブルの妥当性、空領域、文字列の数など）。
+- **安全**：probe-rs のサブコマンドは `list`・`info`・`read` だけを許可するラッパーを通す（`download`・`erase`・`reset`・`--connect-under-reset` などは拒否、テストで確認）。
+  `probe-rs read` がコアを止めるかどうかを実装前に一次資料で確認する。
+- **法的な扱い**：吸い出したファームは元のメーカーの著作物。個人のバックアップとして非公開で保管し、コミットもアップロードもしない（`.gitignore` で除外）。NetGD はその中身を使わない。
+- 実装後に Fable が安全面をレビューする。
+
+### R34 実機なしで進める作業の並列割り当て（Opus、ユーザーの指示「全部、各モデルに役割を与えて並列で」）
+| # | モデル | 作業 | 担当ファイル |
+|---|---|---|---|
+| 1 | Sonnet | KOS のビルドを GitHub Actions で（プローブと `netgd-recv` のコンパイル確認） | `.github/workflows/kos.yaml` |
+| 2 | Sonnet | G2-3：Dreamcast 側の受信アプリ `netgd-recv`（FatFs、チェックポイント、電源断のホストテスト） | `tools/netgd-recv/` |
+| 3 | Fable | G1：FIFO をブロック RAM に乗る形に。**v5.5 の Verilog はバイト一致を保ち**、AG16K 向けは `--target ag16k` で別に生成 | `fpga/amaranth/` |
+| 4 | Sonnet | CDI の pregap の修正（R28）。D-1（セッション2）は純正データ待ちなので触らない | `common/discimg` の CDI、ファームの `cdi.rs`・`gdi.rs` の CDI 部分 |
+| 5 | Sonnet | G2 推奨 F6〜F8（書き込みセッション、MBR 保護、書き込みデータの FNV-1a）と F13 の機能ビット | `ide.rs`・`sdcard.rs`・`common/discimg` の新モジュール |
+| 6 | Fable | 2E での自己更新（`0xF9`）の安全性レビュー（読むだけ） | なし |
+| 7 | Haiku | クレート名 `opengdemu` → `netgd` の改名、古いコメントの修正 | **ほかの作業の後**（ほぼ全ファイルに触るため） |
+- 吸い出しツール `tools/fwbackup`（Sonnet、R33）も並行して実行中。
+- 判断：#3 で v5.5 の Verilog を変えないのは、この PC に Quartus が無く、コミット済みの Cyclone II のビットストリームを作り直せないため。
+
 ---
 
 ## 判断の記録（Decisions）
