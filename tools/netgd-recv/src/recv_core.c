@@ -323,7 +323,9 @@ ng_err_t ng_put(const ng_sink_t *sk, const char *tag, const ng_manifest_t *m, co
             action = pr.has_final ? A_COMPLETE : A_INPLACE;
         } else if (pr.ckp == CKP_TRANSFER || pr.ckp == CKP_COMPLETE) {
             int ok = pr.ck.files_done <= n && (pr.ck.offset % 512) == 0 &&
-                     (pr.ck.files_done == n ? pr.ck.offset == 0 : pr.ck.offset < m->files[pr.ck.files_done].size);
+                     (pr.ck.files_done == n ? pr.ck.offset == 0 :
+                      (pr.ck.offset < m->files[pr.ck.files_done].size ||
+                       (pr.ck.offset == 0 && m->files[pr.ck.files_done].size == 0)));   /* next file may be empty (R89 C8) */
             action = A_CONTINUE;
             for (int i = 0; ok && i < n; i++) {
                 uint32_t sz;

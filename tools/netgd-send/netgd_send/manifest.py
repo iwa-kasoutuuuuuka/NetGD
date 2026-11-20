@@ -5,7 +5,7 @@ import zlib
 MANIFEST_MAGIC = "NETGD-MANIFEST"
 MANIFEST_VERSION = 1
 MAX_FILES = 128
-MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024 - 1  # FAT32: < 4 GiB
+MAX_FILE_SIZE = 0xFFFFFFFE  # same bound as the app's manifest.c (R89 C6): FAT32 holds up to 4 GiB - 1, the app takes one less
 MAX_NAME_BYTES = 127
 MAX_PATH_PARTS = 3  # firmware gdi.rs MAX_PATH_PARTS
 MAX_PATH_BYTES = 96  # gamecfg::MAX_NEXT
@@ -92,7 +92,7 @@ class Manifest(object):
         for f in self.files:
             validate_name(f.name, "file name")
             if f.size < 0 or f.size > MAX_FILE_SIZE:
-                raise ManifestError("file %s: size %d is outside 0..4GiB-1" % (f.name, f.size))
+                raise ManifestError("file %s: size %d is outside 0..%d" % (f.name, f.size, MAX_FILE_SIZE))
             if not 0 <= f.crc <= 0xFFFFFFFF:
                 raise ManifestError("file %s: bad CRC" % f.name)
             key = f.name.lower()

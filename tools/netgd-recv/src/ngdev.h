@@ -18,6 +18,7 @@ void ngdev_watch_end(void);
 
 /* ngblk.c */
 #define NGBLK_MAX_RETRY 3
+#define NGBLK_WRITE_MAX 128     /* sectors per ATA write command (one STATUS compare each) */
 #define NGBLK_READ_TRIES 4      /* single-sector reads: attempts to get two identical reads */
 typedef struct {
     uint32_t writes, sectors_written;

@@ -58,9 +58,23 @@ def to_pc_path(path):
     return "/pc" + p
 
 
+def _drive_of(path):
+    """Drive letter (or UNC share) of an absolute path, case folded; '' on POSIX."""
+    return os.path.splitdrive(os.path.abspath(path))[0].lower()
+
+
+def _require_same_drive(src, dst):
+    """/pc/ paths carry no drive letter: a source on another drive would name a different file (R89 C4)."""
+    if _drive_of(src) != _drive_of(dst):
+        raise JobError("%s is on another drive than the job folder (%s); /pc/ paths have no drive letter, so the "
+                       "Dreamcast would read a different file.  Use --placement copy, or put the job folder on the "
+                       "image's drive" % (src, _drive_of(dst) or "?"))
+
+
 def _place(src, dst, placement):
     """Put `src` at `dst` in the job folder.  Returns the path the Dreamcast should read."""
     if placement == "direct":
+        _require_same_drive(src, dst)
         return src
     if os.path.lexists(dst):
         try:
@@ -76,7 +90,8 @@ def _place(src, dst, placement):
         except OSError as e:
             if placement == "link":
                 raise JobError("cannot hard-link %s (different drive?): %s" % (src, e))
-            # auto: fall back to the original path when it is /pc/-safe
+            # auto: fall back to the original path when it is /pc/-safe and on the job drive
+            _require_same_drive(src, dst)
             try:
                 to_pc_path(src)
             except JobError:
@@ -133,6 +148,15 @@ def write_job(jobdir, job):
 
 
 # ---------------------------------------------------------------- prepare
+
+def _read_result(jobdir):
+    """The previous result.ngr parsed, or None (absent / unreadable)."""
+    try:
+        with open(os.path.join(jobdir, RESULT_FILE), "rb") as f:
+            return parse_result(f.read().decode("utf-8", "replace"))
+    except OSError:
+        return None
+
 
 class PrepareResult(object):
     def __init__(self, number, folder, manifest, files, mode, warnings):
@@ -229,8 +253,20 @@ def prepare(image_path, jobdir, slot=None, name=None, chunk_mib=8, mode="new", m
     with open(os.path.join(edir, "src.txt"), "wb") as f:
         f.write(("\n".join(srcs) + "\n").encode("ascii"))
 
-    # 4. job.ngj: keep other entries, set this one
+    # 4. job.ngj: keep other entries, set this one.  Entries the previous run finished with DONE ok are dropped
+    #    (R89 C1): run again they would be sent again (overwrite: the old image is erased and rewritten, new: EEXIST,
+    #    resume: a full read-back).  Failed / unfinished / unreached entries stay, so a resume still finds them.
     job = read_job(jobdir) if os.path.isfile(os.path.join(jobdir, JOB_FILE)) else Job(others=["statfs"] if statfs else [])
+    prev_res = _read_result(jobdir)
+    if prev_res is not None:
+        kept = []
+        for p in job.puts:
+            st = prev_res.puts.get(p[0])
+            if p[0] != num and st is not None and st.done and not st.error:
+                warnings.append("entry %s was sent successfully by the previous run: dropped from job.ngj" % p[0])
+            else:
+                kept.append(p)
+        job.puts = kept
     for p in job.puts:
         if p[0] == num:
             p[1] = mode
@@ -248,9 +284,14 @@ def prepare(image_path, jobdir, slot=None, name=None, chunk_mib=8, mode="new", m
         if os.path.exists(prev):
             os.remove(prev)
         os.replace(res, prev)
-    cancel = os.path.join(jobdir, "cancel.req")
-    if os.path.isfile(cancel):
-        os.remove(cancel)
+    # stale request files from an earlier run would change this one (R89 C2): cancel.req / reload.req stop it at
+    # once, force.req / fragok.req silently lift protections.  Create force.req / fragok.req AFTER `prepare`.
+    for req in ("cancel.req", "reload.req", "force.req", "fragok.req"):
+        path = os.path.join(jobdir, req)
+        if os.path.isfile(path):
+            os.remove(path)
+            if req != "cancel.req":
+                warnings.append("removed stale %s from the job folder (create it again after `prepare` if you want it)" % req)
 
     return PrepareResult(num, folder, manifest, list(zip([e.name for e in entries], srcs)), mode, warnings)
 

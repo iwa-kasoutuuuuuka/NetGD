@@ -760,6 +760,101 @@ class TestHardening(Base):
         run = self.run_app(img, "dj")
         self.assertTrue(run.has('NGD:DELETE "GAMES/X" ok'), run.text)
 
+    # --- R89 fixes
+    def test_r89_force_req_is_consumed_by_a_finished_run(self):                    # C2
+        img = self.mkimage()
+        self.prepare(self.make_gdi("s1", seed=1), "j1", "01", mode="new")
+        self.assertEqual(self.run_app(img, "j1").rc, 0)
+        self.prepare(self.make_gdi("s2", seed=2), "j2", "01", mode="overwrite")
+        fr = os.path.join(self.jobdir("j2"), "force.req")
+        open(fr, "w").close()
+        self.assertEqual(self.run_app(img, "j2").rc, 0)
+        self.assertFalse(os.path.exists(fr), "force.req must not outlive the run")
+        run = self.run_app(img, "j2")                      # protection is back for the next run
+        self.assertTrue(run.has("NGD:ERROR 0001 code=EPROTECTED"), run.text)
+
+    def test_r89_force_req_survives_a_stopped_run(self):                           # C2
+        img = self.mkimage()
+        self.prepare(self.make_gdi("s1", seed=1), "j1", "01", mode="new")
+        self.assertEqual(self.run_app(img, "j1").rc, 0)
+        gdi = self.make_gdi("s2", sizes=(300 * 2352, 61 * 2352, 130 * 2048), seed=2)
+        self.prepare(gdi, "j2", "01", mode="overwrite")
+        fr = os.path.join(self.jobdir("j2"), "force.req")
+        open(fr, "w").close()
+        run = self.run_app(img, "j2", "--pollms", "0", "--stopafter", "2")
+        self.assertEqual(run.rc, 2, run.text)
+        self.assertTrue(os.path.exists(fr), "a stopped run keeps force.req for the resume")
+
+    def test_r89_gdemu_cfg_read_beyond_the_first_511_bytes(self):                  # C11
+        img = self.card_with("GAMEB", seed=1)
+        cfg = os.path.join(self.work, "GDEMU.CFG")
+        with open(cfg, "wb") as f:
+            f.write(b"".join(b"# comment line %03d %s\r\n" % (i, b"x" * 40) for i in range(30)))   # ~1.9 KB
+            f.write(b"image = GAMEB\r\n")
+        r = run_child([EXE, "addfile", img, str(SECTORS), "/GDEMU.CFG", cfg])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        g = self.make_gdi("sn", seed=7)
+        self.prepare(g, "jo", "GAMEB", mode="overwrite")
+        run = self.run_app(img, "jo")
+        self.assertTrue(run.has("NGD:ERROR 0001 code=EPROTECTED"), run.text)
+
+    def test_r89_names_over_127_chars_are_deleted(self):                           # C12
+        img = self.card_with("LN1", seed=1)
+        long_name = "L" * 200 + ".dat"
+        local = os.path.join(self.work, "long.dat")
+        with open(local, "wb") as f:
+            f.write(b"x" * 100)
+        r = run_child([EXE, "addfile", img, str(SECTORS), "/LN1/" + long_name, local])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn(long_name, self.fs(img).folder_files("/LN1"))
+        self.write_job("dj", "NETGD-JOB 1\ndelete LN1\nfinish none\n")
+        run = self.run_app(img, "dj")
+        self.assertTrue(run.has('NGD:DELETE "LN1" ok'), run.text)
+        self.assertEqual(self.fs(img).folder_files("/LN1"), {})
+
+    def test_r89_write_commands_are_capped_at_128_sectors(self):                   # C-A
+        img = self.mkimage()
+        r = run_child([EXE, "wr256", img, str(SECTORS), "x"])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("WR256 rc=0 cmds=2 fnvbad=0", r.stdout)
+
+    def test_r89_resume_when_the_next_file_is_empty(self):                         # C8
+        from netgd_send.manifest import FileEntry, Manifest
+        from netgd_send import manifest as mfmod
+        gdi = self.make_gdi("s", sizes=(20 * 2352, 4 * 2352, 5 * 2048), seed=3)
+        r = self.prepare(gdi, "j", "EMP1", mode="resume")
+        edir = os.path.join(self.jobdir("j"), r.number)
+        with open(os.path.join(edir, "manifest.ngm"), "rb") as f:
+            man = mfmod.parse_manifest(f.read().decode())
+        open(os.path.join(edir, "empty.bin"), "wb").close()
+        files = list(man.files)
+        files.insert(2, FileEntry(0, 0, "empty.bin"))              # disc.gdi, track01, empty, ...
+        man2 = Manifest(man.image, man.type, files, man.descriptor)
+        with open(os.path.join(edir, "manifest.ngm"), "wb") as f:
+            f.write(man2.render().encode())
+        with open(os.path.join(edir, "src.txt"), "rb") as f:
+            srcs = f.read().decode().split("\n")[:-1]
+        srcs.insert(2, jobmod.to_pc_path(os.path.join(edir, "empty.bin")))
+        with open(os.path.join(edir, "src.txt"), "wb") as f:
+            f.write(("\n".join(srcs) + "\n").encode())
+        exp = {}
+        for fe in files:
+            with open(os.path.join(edir, fe.name), "rb") as f:
+                exp[fe.name.lower()] = f.read()
+        ref = self.run_app(self.mkimage("c0.img"), "j", "--ckp", "4096", "--readback", "0")
+        self.assertEqual(ref.rc, 0, ref.text)
+        done = ref.phase["file_done"]
+        # power goes right after the checkpoint "file 2 done, next is the empty file 3" was written
+        img = self.mkimage("c1.img")
+        run = self.run_app(img, "j", "--ckp", "4096", "--cut", str(done[1]))
+        self.assertNotEqual(run.rc, 0, run.text)
+        run = self.run_app(img, "j", "--ckp", "4096")
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertTrue(run.has("NGD:RESUME 0001 file=3 offset=0"), "must continue, not start over:\n" + run.text)
+        fc = self.fs(img)
+        self.assertEqual((fc.errors, fc.lost_clusters()), ([], 0))
+        self.assert_image(fc, "EMP1", exp)
+
     # --- 4. read-side bit flips
     def test_read_bit_flips_single_sector(self):
         gdi = self.make_gdi("s", sizes=(60 * 2352, 20 * 2352, 30 * 2048))

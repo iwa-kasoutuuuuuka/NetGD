@@ -225,34 +225,54 @@ int ngfs_mkdir_p(const char *dir)
     return FR_OK;
 }
 
+/* One GDEMU.CFG line (modified in place).  -1 not an image= line, 0 image= with no value, 1 value copied. */
+static int cfg_line(char *line, char *out, size_t n)
+{
+    char *eq, *k, *v, *e;
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line == '#' || !*line) return -1;
+    eq = strchr(line, '=');
+    if (!eq) return -1;
+    *eq = 0;
+    k = line;
+    v = eq + 1;
+    for (e = k + strlen(k); e > k && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r'); e--) e[-1] = 0;
+    if (!ieq(k, "image")) return -1;
+    while (*v == ' ' || *v == '\t') v++;
+    for (e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r'); e--) e[-1] = 0;
+    if (!*v) return 0;
+    snprintf(out, n, "%s", v);
+    return 1;
+}
+
+/* The whole file is read (bounded: 64 KiB), line by line across 512-byte reads, so an image= line after
+   a long comment still counts (R89 C11).  A line longer than the line buffer is cut (only a comment or
+   garbage is that long; image= values are at most NG_PATH_MAX). */
 int ngfs_default_image(char *out, size_t n)
 {
     FIL fp;
-    char buf[512];
+    char buf[512], line[NG_PATH_BUF + 32];
     UINT got = 0;
-    char *line, *nl;
+    size_t ll = 0;
+    uint32_t total = 0;
+    int r;
     if (f_open(&fp, "0:/GDEMU.CFG", FA_READ) != FR_OK) return 0;
-    f_read(&fp, buf, sizeof buf - 1, &got);
+    while (total < 65536 && f_read(&fp, buf, sizeof buf, &got) == FR_OK && got) {
+        total += got;
+        for (UINT i = 0; i < got; i++) {
+            if (buf[i] != '\n') {
+                if (ll + 1 < sizeof line) line[ll++] = buf[i];
+                continue;
+            }
+            line[ll] = 0;
+            ll = 0;
+            if ((r = cfg_line(line, out, n)) >= 0) { f_close(&fp); return r; }
+        }
+    }
     f_close(&fp);
-    buf[got] = 0;
-    for (line = buf; line && *line; line = nl ? nl + 1 : NULL) {
-        char *eq, *k, *v, *e;
-        nl = strchr(line, '\n');
-        if (nl) *nl = 0;
-        while (*line == ' ' || *line == '\t') line++;
-        if (*line == '#' || !*line) continue;
-        eq = strchr(line, '=');
-        if (!eq) continue;
-        *eq = 0;
-        k = line;
-        v = eq + 1;
-        for (e = k + strlen(k); e > k && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r'); e--) e[-1] = 0;
-        if (!ieq(k, "image")) continue;
-        while (*v == ' ' || *v == '\t') v++;
-        for (e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r'); e--) e[-1] = 0;
-        if (!*v) return 0;
-        snprintf(out, n, "%s", v);
-        return 1;
+    if (ll) {
+        line[ll] = 0;
+        if ((r = cfg_line(line, out, n)) >= 0) return r;
     }
     return 0;
 }
@@ -526,13 +546,13 @@ static int find_entry(const char *dir, int which, char *name, size_t n)
 ng_err_t ngfs_delete_contents(const char *dir)
 {
     static const int order[] = { F_DESC, F_OTHER, F_CKP, F_MF };
-    char name[NG_NAME_MAX + 1], path[NG_PATH_BUF];
+    char name[NG_FNAME_BUF], path[NG_PATH_BUF];
     int rc;
     if (find_entry(dir, F_DIR, name, sizeof name) == 1) return NG_E_EXIST;   /* design 5.3: sub-folders -> fail */
     for (unsigned i = 0; i < sizeof order / sizeof order[0]; i++) {
         while ((rc = find_entry(dir, order[i], name, sizeof name)) == 1) {
             FRESULT r;
-            snprintf(path, sizeof path, "%s/%s", dir, name);
+            if (snprintf(path, sizeof path, "%s/%s", dir, name) >= (int)sizeof path) return NG_E_IO;   /* never a cut-off path */
             note_overwrite(path);
             r = f_unlink(path);
             if (r != FR_OK) return ngfs_map(r);
@@ -601,7 +621,7 @@ static ng_err_t list_rec(const char *rel, int depth, ng_list_cb cb, void *ctx)
     /* Sub-folders are taken LIST_BATCH at a time (the FatFs window and the stack are small; recursion
        would reuse the window anyway): re-open the directory and skip what was already reported. */
     for (int skip = 0;; skip += LIST_BATCH) {
-        char list[LIST_BATCH][NG_NAME_MAX + 1];
+        char list[LIST_BATCH][NG_FNAME_BUF];
         DIR d;
         FILINFO fno;
         int n = 0, seen = 0;
@@ -612,8 +632,9 @@ static ng_err_t list_rec(const char *rel, int depth, ng_list_cb cb, void *ctx)
         for (int i = 0; i < n; i++) {
             const char *st;
             char cdir[NG_PATH_BUF];
-            if (rel[0] && strcmp(rel, "/")) snprintf(child, sizeof child, "%s/%s", rel, list[i]);
-            else snprintf(child, sizeof child, "%s", list[i]);
+            int need = (rel[0] && strcmp(rel, "/")) ? snprintf(child, sizeof child, "%s/%s", rel, list[i])
+                                                    : snprintf(child, sizeof child, "%s", list[i]);
+            if (need < 0 || (size_t)need >= sizeof child) return NG_E_IO;   /* never report a cut-off name */
             ngfs_dirpath(child, cdir, sizeof cdir);
             st = ngfs_classify(cdir);
             cb(ctx, st, child);
@@ -737,15 +758,20 @@ ng_err_t ngfs_alloc_file(const char *path, uint32_t size, int allow_frag, int *f
         if (f == 1) {
             g_fs.last_clst = at;                           /* f_expand starts its search here */
             r = f_expand(&fp, size, 1);
-            if (r != FR_OK) g_fs.last_clst = hint;
-        } else if (f == 0) {
-            r = FR_DENIED;                                 /* no run on the card: what f_expand would say, after minutes */
+            if (r != FR_OK) {
+                g_fs.last_clst = hint;
+                runs_add(at, need);                        /* the claim did not happen: give the run back (R89 C10) */
+            }
         } else {
-            r = f_expand(&fp, size, 1);                    /* the table gave out: FatFs's own search */
+            /* f == 0: no run on the card.  f == -2: the table gave out.  FatFs's own unhinted f_expand search
+               is never used (it walks the whole FAT for minutes, and R0.15b can return a wrong run count after
+               a wrap, R89 C13): both are "no contiguous area". */
+            r = FR_DENIED;
         }
         if (r == FR_DENIED) {
             if (!allow_frag) { f_close(&fp); return NG_E_FRAG; }
             r = f_lseek(&fp, size);                         /* chain by chain: fragmented */
+            runs_stale();                                   /* it took clusters the table may still list */
             if (r == FR_OK && f_tell(&fp) != size) { f_close(&fp); return NG_E_NOSPC; }
             if (r == FR_OK) r = f_lseek(&fp, 0);
             *fragmented = 1;
@@ -808,7 +834,7 @@ ng_err_t ngfs_wfile_open(ng_wfile_t *w, const char *path, uint32_t size, int con
     if (contig) {
         if (size) {
             w->base_lba = clst2lba(w->fp.obj.sclust);
-            if ((uint64_t)w->base_lba + (size + 511) / 512 > ngdev_sectors()) { f_close(&w->fp); return NG_E_IO; }
+            if ((uint64_t)w->base_lba + ((uint64_t)size + 511) / 512 > ngdev_sectors()) { f_close(&w->fp); return NG_E_IO; }
         }
         f_close(&w->fp);
     } else {

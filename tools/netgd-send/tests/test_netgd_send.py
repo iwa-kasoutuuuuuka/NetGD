@@ -54,7 +54,7 @@ class Tmp(unittest.TestCase):
             lines.append("%d %d %d %d %s 0" % (num, lba, ctrl, sec, q))
         return self.write("%s/disc.gdi" % subdir, (nl.join(lines) + nl).encode("ascii"))
 
-    def make_cdi(self, version=0x80000004, offset=None, size=4096):
+    def make_cdi(self, version=0x80000005, offset=None, size=4096):
         data = bytearray(pattern(size, 9))
         off = size - 100 if offset is None else offset
         data[-8:] = version.to_bytes(4, "little") + off.to_bytes(4, "little")
@@ -203,9 +203,50 @@ class TestImages(Tmp):
         self.assertEqual(names, {1: "track01.bin", 2: "track02.raw", 3: "track03.bin"})
         self.assertEqual(text, "3\r\n1 0 4 2352 track01.bin 0\r\n2 150 0 2352 track02.raw 0\r\n3 45000 4 2048 track03.bin 0\r\n")
 
+    def test_cdi_v2_is_refused_and_v3_accepted(self):
+        self.assertEqual(imgmod.check_cdi(self.make_cdi()).version, "3")
+        self.assertEqual(imgmod.check_cdi(self.make_cdi(version=0x80000006, offset=300)).version, "3.5")
+        with self.assertRaises(imgmod.ImageError) as cm:           # R89 C3
+            imgmod.check_cdi(self.make_cdi(version=0x80000004))
+        self.assertIn("v2", str(cm.exception))
+
+    def test_c5_non_ascii_track_names(self):
+        # U+5165 is E5 85 A5 in UTF-8: the 0x85 used to be read as NEL and split the line
+        for nl in ("\r\n", "\n"):
+            d = "u8" + ("c" if nl == "\r\n" else "n")
+            names = ("入.bin", "入 2.raw", "t3.bin")
+            self.write("%s/%s" % (d, names[0]), pattern(4 * 2352, 1))
+            self.write("%s/%s" % (d, names[1]), pattern(3 * 2352, 2))
+            self.write("%s/%s" % (d, names[2]), pattern(5 * 2048, 3))
+            text = nl.join(["3", "1 0 4 2352 %s 0" % names[0], '2 150 0 2352 "%s" 0' % names[1],
+                            "3 45000 4 2048 %s 0" % names[2]]) + nl
+            p = self.write("%s/disc.gdi" % d, text.encode("utf-8"))
+            g = imgmod.check_gdi(p)
+            self.assertEqual([os.path.basename(t.path) for t in g.tracks], list(names))
+            by, out = imgmod.plan_gdi_names(g)
+            self.assertEqual(by, {1: "track01.bin", 2: "track02.raw", 3: "t3.bin"})
+            self.assertEqual(out.count(nl), 4)
+
+    def test_c5_ansi_fallback(self):
+        real = imgmod._ansi_encoding
+        imgmod._ansi_encoding = lambda: "cp1252"
+        try:
+            # a lone 0x85 is not UTF-8; cp1252 reads it as U+2026, and that file exists
+            self.write("an/…x.bin", pattern(2048, 1))
+            p = self.write("an/disc.gdi", b"1\n1 0 4 2048 \x85x.bin 0\n")
+            self.assertEqual(os.path.basename(imgmod.check_gdi(p).tracks[0].path), "…x.bin")
+        finally:
+            imgmod._ansi_encoding = real
+
+    def test_c6_size_bound_matches_the_app(self):
+        self.assertEqual(mf.MAX_FILE_SIZE, 0xFFFFFFFE)
+        mf.Manifest("01", "cdi", [mf.FileEntry(0xFFFFFFFE, 0, "disc.cdi")], "disc.cdi").render()
+        with self.assertRaises(mf.ManifestError):
+            mf.Manifest("01", "cdi", [mf.FileEntry(0xFFFFFFFF, 0, "disc.cdi")], "disc.cdi").render()
+
     def test_cdi(self):
         c = imgmod.check_cdi(self.make_cdi())
-        self.assertEqual(c.version, "2")
+        self.assertEqual(c.version, "3")
         imgmod.check_cdi(self.make_cdi(version=0x80000006, offset=300))
         for kw in (dict(version=0x12345678), dict(offset=0), dict(offset=4096), dict(size=8, offset=1)):
             with self.assertRaises(imgmod.ImageError, msg=str(kw)):
@@ -319,6 +360,65 @@ class TestPrepare(Tmp):
         self.assertTrue(os.path.exists(self.path("job", "result.prev.ngr")))
         self.assertFalse(os.path.exists(self.path("job", "cancel.req")))
 
+    # --- R89 C1: finished entries are not sent again
+    RES_OK = "NGD:HELLO app=x\nNGD:DONE %s ok\nNGD:END ok=1\n"
+
+    def test_c1_done_entries_are_dropped_from_the_next_job(self):
+        self.prep(self.make_gdi(), slot=2, mode="overwrite")
+        self.write("job/result.ngr", (self.RES_OK % "0001").encode())
+        r2 = self.prep(self.make_cdi(), slot=3, mode="overwrite")
+        self.assertEqual(r2.number, "0002")
+        self.assertEqual(jobmod.read_job(self.path("job")).puts, [["0002", "overwrite"]])
+        self.assertTrue(any("0001" in w for w in r2.warnings), r2.warnings)
+
+    def test_c1_failed_or_unfinished_entries_are_kept(self):
+        self.prep(self.make_gdi(), slot=2, mode="resume")
+        self.prep(self.make_cdi(), slot=3, mode="resume")
+        self.write("job/result.ngr", b"NGD:ERROR 0001 code=ENOSPC\nNGD:PUT 0002 file=1/1 bytes=5/10 rate=1\nNGD:END ok=0\n")
+        self.prep(self.make_cdi(), slot=4, mode="resume")
+        self.assertEqual(jobmod.read_job(self.path("job")).puts, [["0001", "resume"], ["0002", "resume"], ["0003", "resume"]])
+
+    def test_c1_reprepare_of_the_same_folder_keeps_its_entry(self):
+        self.prep(self.make_cdi(), slot=3, mode="new")
+        self.write("job/result.ngr", (self.RES_OK % "0001").encode())
+        r = self.prep(self.make_cdi(), slot=3, mode="overwrite")
+        self.assertEqual(jobmod.read_job(self.path("job")).puts, [["0001", "overwrite"]])
+        self.assertEqual(r.number, "0001")
+
+    # --- R89 C2: stale request files
+    def test_c2_stale_request_files_are_removed(self):
+        self.prep(self.make_cdi(), slot=2)
+        for n in ("force.req", "fragok.req", "reload.req", "cancel.req"):
+            self.write("job/" + n, b"")
+        r = self.prep(self.make_cdi(), slot=2, mode="resume")
+        for n in ("force.req", "fragok.req", "reload.req", "cancel.req"):
+            self.assertFalse(os.path.exists(self.path("job", n)), n)
+        for n in ("force.req", "fragok.req", "reload.req"):
+            self.assertTrue(any(n in w for w in r.warnings), (n, r.warnings))
+
+    # --- R89 C4: other drive
+    def test_c4_other_drive_is_refused_for_direct_and_auto_fallback(self):
+        gdi = self.make_gdi(subdir="srcdrv")
+        real = jobmod._drive_of
+        jobmod._drive_of = lambda p: "d:" if "srcdrv" in p else "c:"
+        real_link = os.link
+        try:
+            with self.assertRaises(jobmod.JobError) as cm:
+                self.prep(gdi, slot=2, placement="direct")
+            self.assertIn("--placement copy", str(cm.exception))
+
+            def no_link(*a, **k):
+                raise OSError("cross-device")
+            os.link = no_link
+            with self.assertRaises(jobmod.JobError) as cm:
+                self.prep(gdi, job="job2", slot=2, placement="auto")
+            self.assertIn("--placement copy", str(cm.exception))
+            self.prep(gdi, job="job3", slot=2, placement="copy")      # copy never needs the drive
+        finally:
+            os.link = real_link
+            jobmod._drive_of = real
+        self.prep(gdi, job="job4", slot=2, placement="direct")        # same drive: fine
+
     def test_rejects_bad_input_without_writing(self):
         gdi = self.make_gdi()
         with self.assertRaises((imgmod.ImageError, mf.ManifestError)):
@@ -352,7 +452,7 @@ class TestCollect(Tmp):
     @staticmethod
     def cdi_bytes(size):
         d = bytearray(pattern(size, 5))
-        d[-8:] = (0x80000004).to_bytes(4, "little") + (size - 50).to_bytes(4, "little")
+        d[-8:] = (0x80000005).to_bytes(4, "little") + (size - 50).to_bytes(4, "little")
         return bytes(d)
 
     def put_result(self, text):

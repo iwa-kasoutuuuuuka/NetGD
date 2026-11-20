@@ -7,6 +7,7 @@
 
 #define NG_MAX_FILES 128
 #define NG_NAME_MAX 127
+#define NG_FNAME_BUF 256        /* a name FatFs returns (LFN up to 255) + NUL: never cut */
 #define NG_PATH_MAX 96          /* gamecfg::MAX_NEXT */
 #define NG_PATH_PARTS 3         /* firmware MAX_PATH_PARTS */
 

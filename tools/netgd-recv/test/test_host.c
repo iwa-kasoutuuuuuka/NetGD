@@ -220,6 +220,23 @@ static int addfile(const char *img, uint32_t sectors, const char *fspath, const 
     return 0;
 }
 
+/* wr256 <img> <sectors>: one 256-sector ngblk_write with the firmware check on.  The KOS driver may split
+   such a write (255 + 1) and the firmware STATUS only describes the last command, so the app must issue
+   128-sector commands itself (R89 C-A): two commands, no FNV mismatch. */
+static int wr256(const char *img, uint32_t sectors)
+{
+    static uint8_t buf[256 * 512];
+    int rc;
+    if (sim_open(img, sectors)) return 1;
+    for (size_t i = 0; i < sizeof buf; i++) buf[i] = (uint8_t)(i * 7 + 3);
+    ngblk_check_fnv = 1;
+    sim_session = 1;
+    rc = ngblk_write(4000, 256, buf);
+    printf("WR256 rc=%d cmds=%llu fnvbad=%u\n", rc, (unsigned long long)sim_cmd_writes, (unsigned)ngblk_stats.fnv_mismatches);
+    sim_close();
+    return rc ? 1 : 0;
+}
+
 /* mkdirs <img> <sectors> <prefix> <count>: folders <prefix>000 .. */
 static int mkdirs(const char *img, uint32_t sectors, const char *prefix, int count)
 {
@@ -267,6 +284,7 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "fragment")) return fragment(argv[2], sectors, (uint32_t)strtoul(argv[4], NULL, 10));
     if (!strcmp(argv[1], "addfile") && argc >= 6) return addfile(argv[2], sectors, argv[4], argv[5]);
     if (!strcmp(argv[1], "mkdirs") && argc >= 6) return mkdirs(argv[2], sectors, argv[4], atoi(argv[5]));
+    if (!strcmp(argv[1], "wr256")) return wr256(argv[2], sectors);
     if (!strcmp(argv[1], "dump")) return dump(argv[2], sectors, argv[4]);
     if (strcmp(argv[1], "run") || argc < 6) return 2;
     snprintf(sim_pc_root, sizeof sim_pc_root, "%s", argv[4]);

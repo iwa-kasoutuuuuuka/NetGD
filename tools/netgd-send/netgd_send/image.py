@@ -1,5 +1,6 @@
 """GDI / CDI inspection, 8.3 renaming of track files and rewriting of the .gdi (design 5.1, 5.2)."""
 
+import locale
 import os
 import re
 
@@ -11,7 +12,8 @@ DESCRIPTOR_BASE = "disc"  # NetGD folder rule: main image is disc.gdi / disc.cdi
 
 _SFN_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'()-@^_`{}~")
 
-CDI_VERSIONS = {0x80000004: "2", 0x80000005: "3", 0x80000006: "3.5"}
+CDI_VERSIONS = {0x80000005: "3", 0x80000006: "3.5"}   # what the firmware's cdi.rs mounts (R89 C3)
+CDI_V2 = 0x80000004                                    # recognised only to say why it is refused
 
 
 class ImageError(ValueError):
@@ -116,7 +118,9 @@ def parse_gdi(text):
     if text.startswith("ï»¿"):  # UTF-8 BOM, read as latin-1
         text = text[3:]
     newline = "\r\n" if "\r\n" in text else "\n"
-    lines = [l for l in text.splitlines() if l.strip()]
+    # split on \n only: str.splitlines() also breaks at U+0085 / U+2028 etc. (R89 C5), and a name may contain them
+    text = text.lstrip("﻿")
+    lines = [l.rstrip("\r") for l in text.split("\n") if l.strip()]
     if not lines:
         raise ImageError("empty .gdi")
     try:
@@ -133,14 +137,50 @@ def parse_gdi(text):
     return count, rows, newline
 
 
-def check_gdi(gdi_path):
-    """Parse and validate a .gdi against the files next to it. Returns GdiImage."""
+def _ansi_encoding():
+    if os.name == "nt":
+        return "mbcs"
+    return locale.getpreferredencoding(False) or "latin-1"
+
+
+def _decode_candidates():
+    seen = []
+    for enc in ("utf-8", _ansi_encoding(), "latin-1"):
+        if enc.lower() not in seen:
+            seen.append(enc.lower())
+            yield enc
+
+
+def _read_gdi(gdi_path):
+    """Decode the .gdi with UTF-8, then the ANSI code page, then latin-1: the first reading whose track
+    files all exist on disk wins (R89 C5); if none does, the first one that decodes (the error then names
+    the missing file).  Returns (count, rows, newline)."""
     try:
         with open(gdi_path, "rb") as f:
-            text = f.read().decode("latin-1")
+            raw = f.read()
     except OSError as e:
         raise ImageError("cannot read %s: %s" % (gdi_path, e))
-    count, rows, newline = parse_gdi(text)
+    base = os.path.dirname(os.path.abspath(gdi_path))
+    first, err = None, None
+    for enc in _decode_candidates():
+        try:
+            parsed = parse_gdi(raw.decode(enc))
+        except (UnicodeDecodeError, LookupError):
+            continue
+        except ImageError as e:
+            err = err or e
+            continue
+        first = first or parsed
+        if all(os.path.isfile(os.path.normpath(os.path.join(base, r[4].replace("\\", os.sep)))) for r in parsed[1]):
+            return parsed
+    if first:
+        return first
+    raise err or ImageError("cannot decode %s" % gdi_path)
+
+
+def check_gdi(gdi_path):
+    """Parse and validate a .gdi against the files next to it. Returns GdiImage."""
+    count, rows, newline = _read_gdi(gdi_path)
     if not 1 <= len(rows) <= MAX_TRACKS:
         raise ImageError(".gdi has %d track lines (1..%d allowed)" % (len(rows), MAX_TRACKS))
     if count != len(rows):
@@ -172,7 +212,7 @@ def check_gdi(gdi_path):
         if size % sector:
             raise ImageError("track %d: %s is %d bytes, not a multiple of the sector size %d" % (num, fname, size, sector))
         if size > MAX_FILE_SIZE:
-            raise ImageError("track %d: %s is 4 GiB or larger (FAT32 limit)" % (num, fname))
+            raise ImageError("track %d: %s is larger than %d bytes (FAT32 limit)" % (num, fname, MAX_FILE_SIZE))
         tracks.append(Track(num, lba, ctrl, sector, fname, off, path, size))
     return GdiImage(gdi_path, tracks, newline)
 
@@ -218,15 +258,18 @@ def check_cdi(path):
     if size < 16:
         raise ImageError("%s is too small to be a CDI" % path)
     if size > MAX_FILE_SIZE:
-        raise ImageError("%s is 4 GiB or larger (FAT32 limit)" % path)
+        raise ImageError("%s is larger than %d bytes (FAT32 limit)" % (path, MAX_FILE_SIZE))
     with open(path, "rb") as f:
         f.seek(-8, os.SEEK_END)
         tail = f.read(8)
     version = int.from_bytes(tail[:4], "little")
     off = int.from_bytes(tail[4:], "little")
+    if version == CDI_V2:
+        raise ImageError("%s: DiscJuggler v2 CDI images (trailer 0x80000004) are not supported by the "
+                         "firmware; convert the image to v3 or v3.5" % path)
     if version not in CDI_VERSIONS:
         raise ImageError("%s: trailer version 0x%08X is not a known CDI version" % (path, version))
-    # v3.5 counts the header offset from the end of the file, v2/v3 from the start
+    # v3.5 counts the header offset from the end of the file, v3 from the start
     if version == 0x80000006:
         ok = 0 < off <= size
     else:

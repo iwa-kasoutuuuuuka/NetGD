@@ -41,7 +41,10 @@ int ngblk_read_twice(uint32_t lba, uint32_t n, void *buf)
     return -1;
 }
 
-int ngblk_write(uint32_t lba, uint32_t n, const void *buf)
+/* One ATA write command, verified.  Never more than NGBLK_WRITE_MAX sectors: KOS may split a larger PIO
+   write (e.g. 255 + 1), and the firmware STATUS only describes the LAST command, so the FNV compare
+   would then fail for ever (R89 C-A). */
+static int write_cmd(uint32_t lba, uint32_t n, const void *buf)
 {
     uint32_t fnv = 0;
     int bus_error = 0;
@@ -67,4 +70,15 @@ int ngblk_write(uint32_t lba, uint32_t n, const void *buf)
         bus_error = 1;
     }
     return bus_error ? -2 : -1;
+}
+
+int ngblk_write(uint32_t lba, uint32_t n, const void *buf)
+{
+    while (n) {
+        uint32_t c = n > NGBLK_WRITE_MAX ? NGBLK_WRITE_MAX : n;
+        int r = write_cmd(lba, c, buf);
+        if (r) return r;
+        lba += c; n -= c; buf = (const uint8_t *)buf + (size_t)c * 512;
+    }
+    return 0;
 }

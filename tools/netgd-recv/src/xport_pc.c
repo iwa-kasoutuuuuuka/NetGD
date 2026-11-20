@@ -27,6 +27,12 @@ static int pc_exists(const char *path)
     return 1;
 }
 
+static void pc_remove(const char *path)
+{
+    char buf[256];
+    remove(ng_plat_pcpath(path, buf, sizeof buf));
+}
+
 /* read a whole small file; returns length or -1.  Caller frees. */
 static long pc_slurp(const char *path, char **out, long cap)
 {
@@ -244,7 +250,7 @@ int ng_pc_run(const char *jobdir, void (*ui)(const ng_ui_t *))
     static pc_t pc;
     ng_sink_t sk;
     op_t ops[MAX_OPS];
-    int nops = 0, failed = 0, stopped = 0, halted = 0;
+    int nops = 0, failed = 0, stopped = 0, halted = 0, had_force = 0;
     char path[240], finish[130], *jtext = NULL;
     long jl;
     ng_err_t e;
@@ -263,7 +269,7 @@ int ng_pc_run(const char *jobdir, void (*ui)(const ng_ui_t *))
     }
     ng_cfg_defaults();
     snprintf(path, sizeof path, "%s/force.req", jobdir);
-    if (pc_exists(path)) ng_cfg.force = 1;
+    if (pc_exists(path)) { ng_cfg.force = 1; had_force = 1; }
     snprintf(path, sizeof path, "%s/fragok.req", jobdir);
     if (pc_exists(path)) ng_cfg.allow_frag = 1;
     if (ng_pc_cfg_hook) ng_pc_cfg_hook();
@@ -312,6 +318,13 @@ int ng_pc_run(const char *jobdir, void (*ui)(const ng_ui_t *))
         ng_emitf(&sk, 0, "NGD:END ok=%d", failed ? 0 : 1);
     }
     if (pc.res) fclose(pc.res);
+    /* force.req is for ONE run (R89 C2): consumed once the run is over, so it cannot linger and switch the
+       protection of the default image off for good.  A run that was stopped (reload.req / cancel.req / B)
+       keeps it: the resume that follows needs the same permission. */
+    if (had_force && !stopped) {
+        snprintf(path, sizeof path, "%s/force.req", jobdir);
+        pc_remove(path);
+    }
     return stopped ? 2 : (failed ? 1 : 0);
 }
 
