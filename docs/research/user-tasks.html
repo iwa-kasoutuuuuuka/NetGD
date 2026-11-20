@@ -205,7 +205,8 @@ switch=off           # 1回目は切替なし（dcload-ip のディスクだけ�
 
     <div class="note danger" role="note">
       <strong>電源を切った状態でだけ測る</strong>
-      <span>GDEMU を Dreamcast から外し、電源が入っていない状態で測ってください。ERASE につながるパッドが見つかっても、<b>そこに電圧をかけない</b>でください（純正ファームが消えます）。</span>
+      <span>GDEMU を Dreamcast から外し、<b>SD カードも抜いて</b>、電源が入っていない状態で測ってください。ERASE につながるパッドが見つかっても、<b>そこに電圧をかけない</b>でください（純正ファームが消えます）。</span>
+      <span>テスターを当てるだけなら安全です。ERASE（137 番）は内部で 15 kΩ のプルダウンがあり、電源が入った状態で 220 ms 以上 High にしないと動きません（データシート）。ただし隣の <b>136 番（SHDN）と 138 番（TST）</b>にはプローブの先を滑らせないでください。TST が電源投入時に High だと、書き込みモードに入ります。</span>
     </div>
 
     <h3>MCU のピン番号の数え方</h3>
@@ -220,6 +221,9 @@ switch=off           # 1回目は切替なし（dcload-ip のディスクだけ�
         <tr><td class="num">9</td><td>TCK / SWCLK</td><td>H1 の 5 番</td><td>SWD の場所</td></tr>
         <tr><td class="num">11</td><td>NRST</td><td>H1 の 6 番</td><td>リセット線</td></tr>
         <tr><td class="num">1 / 4</td><td>TDI / TDO</td><td>H1 の 2 / 3 番</td><td>JTAG ヘッダかどうか</td></tr>
+        <tr><td class="num">142</td><td>JTAGSEL</td><td>—</td><td>SWD がつながらないときの原因（High だと JTAG 専用）</td></tr>
+        <tr><td class="num">46 / 48</td><td>PA29 / PA31</td><td>H2 の 2 / 3 番</td><td>v5.5 の H2 に当たるヘッダか</td></tr>
+        <tr><td class="num">69〜72</td><td>PC28〜PC31</td><td>H3 の 2〜5 番</td><td>v5.5 の H3 に当たるヘッダか</td></tr>
         <tr><td class="num">133</td><td>PA11（UART 受信）</td><td>H4 の 1 番</td><td>ログの出口</td></tr>
         <tr><td class="num">134</td><td>PA12（UART 送信）</td><td>H4 の 2 番</td><td>ログの出口</td></tr>
         <tr><td class="num">137</td><td>ERASE</td><td>テストパッド</td><td>消去パッドの場所（<b>測るだけ</b>）</td></tr>
@@ -233,7 +237,7 @@ switch=off           # 1回目は切替なし（dcload-ip のディスクだけ�
     </table></div>
 
     <ol class="steps">
-      <li><input type="checkbox" id="t2-1"><div><label for="t2-1">GDEMU を Dreamcast から外し、電源が入っていないことを確かめる</label></div></li>
+      <li><input type="checkbox" id="t2-1"><div><label for="t2-1">GDEMU を Dreamcast から外し、SD カードを抜き、電源が入っていないことを確かめる</label><span class="sub">v5.5 では H1（7 ピン SWD）・H2（3 ピン）・H3（5 ピン）・H4（3 ピン UART）でした。6.0 の 5 / 3 / 8 / 2 ピンも、これらに対応している可能性があります。<b>まず各ヘッダの全ピンから SWDIO（7 番）を探し</b>、見つかったヘッダで SWCLK（9 番）と NRST（11 番）を確かめると早く進みます。</span></div></li>
       <li><input type="checkbox" id="t2-2"><div><label for="t2-2">U1 の 1 番ピンの位置を確かめる（ルーペで丸いくぼみを探す）</label></div></li>
       <li><input type="checkbox" id="t2-3"><div><label for="t2-3">各ヘッダの各ピンについて、上の表のどの MCU ピンとつながるかをブザーで調べ、下の表に書く</label><span class="sub">ヘッダの 1 番は、写真 <code>top.jpg</code> の向き（「GDEMU 6.0」の文字が右）で、横に並ぶものは左端、縦に並ぶものは上端とします。どれにもつながらなければ「なし」と書いてください。</span></div></li>
       <li><input type="checkbox" id="t2-4"><div><label for="t2-4">ERASE（137 番）とつながるパッドを両面から探し、場所を書く（電圧はかけない）</label></div></li>
@@ -252,6 +256,7 @@ switch=off           # 1回目は切替なし（dcload-ip のディスクだけ�
         <tr><td>ERASE（137）のパッドの場所</td><td><input type="text" id="r-erase" placeholder="例：U1 の左下、表面の丸いパッド"></td></tr>
         <tr><td>PA23 / PA24 / PA25 / PB1 / PB2 のつながり</td><td><input type="text" id="r-fpga" placeholder="例：5本とも U2 の方へビアで潜る / 未接続に見える"></td></tr>
         <tr><td>PA20（ボタン）・PB18（LED）</td><td><input type="text" id="r-misc" placeholder="例：101 番がボタンにつながる"></td></tr>
+        <tr><td>JTAGSEL（142）のつながり</td><td><input type="text" id="r-jtagsel" placeholder="例：GND につながっている"></td></tr>
         <tr><td>その他、気づいたこと</td><td><input type="text" id="r-note" placeholder="例：8ピンの列は SD スロットにつながっている"></td></tr>
       </tbody>
     </table></div>
@@ -274,10 +279,20 @@ switch=off           # 1回目は切替なし（dcload-ip のディスクだけ�
 
     <ol class="steps">
       <li><input type="checkbox" id="t3-1"><div><label for="t3-1">Raspberry Pi Pico（または Pico 2、公式 Debug Probe）とメス‐メスのジャンパー線を用意する</label></div></li>
-      <li><input type="checkbox" id="t3-2"><div><label for="t3-2">Pico に debugprobe のファームを書き込む（2.2.0 以降）</label><span class="sub"><a href="https://github.com/raspberrypi/debugprobe/releases" target="_blank" rel="noopener">raspberrypi/debugprobe のリリース</a>から <code>debugprobe_on_pico.uf2</code>（Pico 2 は <code>_on_pico2</code>）を取得 → BOOTSEL を押しながら USB を挿す → 出てきたドライブにコピー。古い <code>picoprobe.uf2</code> は使えません。</span></div></li>
-      <li><input type="checkbox" id="t3-3"><div><label for="t3-3">PC に probe-rs を入れて、プローブが見えるか確かめる</label><span class="sub"><a href="https://github.com/probe-rs/probe-rs/releases" target="_blank" rel="noopener">probe-rs のリリース</a>から Windows 用の <code>probe-rs-tools</code> を取得して PATH に置きます。</span><pre><code>probe-rs list</code></pre></div></li>
+      <li><input type="checkbox" id="t3-2"><div><label for="t3-2">Pico に debugprobe のファームを書き込む（2.2.3 以降を推奨）</label><span class="sub"><a href="https://github.com/raspberrypi/debugprobe/releases" target="_blank" rel="noopener">raspberrypi/debugprobe のリリース</a>から <code>debugprobe_on_pico.uf2</code>（Pico 2 は <code>_on_pico2</code>）を取得 → BOOTSEL を押しながら USB を挿す → 出てきたドライブにコピー。古い <code>picoprobe.uf2</code> は使えません。</span></div></li>
+      <li><input type="checkbox" id="t3-3"><div><label for="t3-3">PC に probe-rs を入れて、プローブが見えるか確かめる</label><span class="sub"><a href="https://github.com/probe-rs/probe-rs/releases" target="_blank" rel="noopener">probe-rs のリリース</a>から Windows 用の <code>probe-rs-tools</code> を取得して PATH に置きます。debugprobe は CMSIS-DAP v2 なので、Windows でもドライバは不要です。<code>probe-rs list</code> に何も出ないときだけ、ドライバ（Zadig など）を疑ってください。</span><pre><code>probe-rs list</code></pre></div></li>
       <li><input type="checkbox" id="t3-4"><div><label for="t3-4">（2 で SWD の場所が分かったら）SWDIO・SWCLK・GND の3本をつなぐ</label><span class="sub">Pico の GP3 = SWDIO、GP2 = SWCLK、GND。<b>3.3 V はつながない</b>（基板の電源は Dreamcast から取る。INSTALL.md §4）。</span></div></li>
-      <li><input type="checkbox" id="t3-5"><div><label for="t3-5">Dreamcast の電源を入れ、CHIPID を読んでみる（読み取りだけ）</label><pre><code>probe-rs read --chip ATSAM3U4E --protocol swd b32 0x400e0740 1</code></pre><span class="sub"><b>どちらの結果でも分かることがあります。</b>ID（<code>0x281…</code>）が返れば、純正はフラッシュをロックしていません。「locked / not responding」なら、純正はロックしており、書き込みには ERASE が必要です。結果をそのまま Claude に貼ってください。</span></div></li>
+      <li><input type="checkbox" id="t3-5"><div><label for="t3-5">Dreamcast の電源を入れ、CHIPID を読んでみる（読み取りだけ）</label><pre><code>probe-rs read --chip ATSAM3U2E --protocol swd b32 0x400e0740 1
+probe-rs info --verbose</code></pre><span class="sub">6.0 の MCU は 2E なので <code>--chip ATSAM3U2E</code> です（INSTALL.md の <code>ATSAM3U4E</code> は v5.5 用）。<code>--connect-under-reset</code> などのリセットを伴うオプションは付けないでください。<b>どの結果でも分かることがあります。出力は全文を Claude に貼ってください。</b></span>
+        <div class="tbl"><table>
+          <thead><tr><th>結果</th><th>意味</th></tr></thead>
+          <tbody>
+            <tr><td><code>281a0761</code></td><td>SAM3U2E で、<b>純正はフラッシュをロックしていない</b>（ERASE なしで書き込める可能性）</td></tr>
+            <tr><td><code>28100961</code> など <code>2810…</code></td><td>4E が載っている（写真と矛盾。刻印を見直す）</td></tr>
+            <tr><td>読み出しは失敗、<code>info --verbose</code> でデバッグポート（DP）は見える</td><td><b>純正がロックしている</b>可能性が高い。書き込みには ERASE が必要</td></tr>
+            <tr><td>DP も見えない</td><td>配線・電源（Dreamcast の電源が入っているか）・JTAGSEL（142 番）を疑う</td></tr>
+          </tbody>
+        </table></div></div></li>
     </ol>
   </section>
 
@@ -379,7 +394,7 @@ switch=off           # 1回目は切替なし（dcload-ip のディスクだけ�
       }
       lines.push("- " + h.name + "：" + vals.join(", "));
     });
-    [["r-erase", "ERASE パッド"], ["r-fpga", "FPGA 起動用ピン"], ["r-misc", "ボタン・LED"], ["r-note", "その他"]].forEach(function (r) {
+    [["r-erase", "ERASE パッド"], ["r-fpga", "FPGA 起動用ピン"], ["r-misc", "ボタン・LED"], ["r-jtagsel", "JTAGSEL"], ["r-note", "その他"]].forEach(function (r) {
       lines.push("- " + r[1] + "：" + (document.getElementById(r[0]).value.trim() || "未記入"));
     });
     return lines.join("\n");

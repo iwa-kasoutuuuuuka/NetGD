@@ -331,6 +331,39 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   作業3（SWD プローブの準備と、読み取りだけの CHIPID 確認）。チェックと記入はブラウザに保存され、「結果をコピー」で Claude に渡せる。
 - ユーザーの依頼で、これらの作業に関する事前の web 調査を Sonnet に依頼中（結果は `docs/research/web-prep-user-tasks.md` と次の項目に記録する）。
 
+### R23 並列作業の割り当て（Opus、ユーザーの指示「今できることを各モデルに役割を与えて並列で」）
+- 実機なしでできる作業を、担当ファイルが重ならないように分けて同時に進める：
+  | モデル | 作業 | 担当ファイル |
+  |---|---|---|
+  | Sonnet | 調査用 SD の生成ツール `tools/mksdcard`（`03`〜`06` の GDI/CDI を生成、照合用マニフェスト、`compare.py --manifest`） | `tools/mksdcard/`、`tools/gdprobe/compare.py`・`probes.c`、`common/discimg/examples/`、`stock-gdemu-flow.md` |
+  | Sonnet | 実機作業の事前 web 調査 | `docs/research/web-prep-user-tasks.md` |
+  | Fable | G1：AG16K への移植設計（判断の分岐、ツールフロー、資源見積もり、2E のフラッシュ） | `docs/design/g1-ag16k-port.md` |
+  | Fable | `tools/gdprobe` の KOS 部分の静的レビュー（読むだけ） | なし |
+  | Sonnet | G3：`GDEMU.ini` への対応 | `gdi.rs`・`ide.rs`・`button.rs`・`common/gamecfg`・INSTALL.md §9 |
+  | Sonnet | G2-4：PC 側の送信ツール `netgd-send`（T1） | `tools/netgd-send/` |
+  | Haiku | FPGA の古い docstring の修正（生成 Verilog が変わらないことを確認） | `fpga/amaranth/hw/*.py` |
+- 成果は届いた順に Opus がレビューし、この LOG に記録してからコミットする。
+
+### R24 実機作業の事前 web 調査（Sonnet、Opus が数値をデータシートで確認）
+- **詳細**：`docs/research/web-prep-user-tasks.md`（項目 A〜E、ページへの反映点 20、未解決 10）。
+- **要点**：
+  - probe-rs の `SAM3U.yaml` に **ATSAM3U2E** がある（一次資料）→ 6.0 では `--chip ATSAM3U2E`（INSTALL.md の `ATSAM3U4E` は v5.5 用）。
+  - **CHIPID**：アドレス 0x400E0740。**SAM3U2E = 0x281A0761、SAM3U4E = 0x28100961**（Opus がデータシートの抽出テキストの 20824〜20826 行・49213〜49214 行で確認）。
+  - ロック時に probe-rs が何を表示するかの一次資料は無い。データシートでは ICE からのアクセスはすべて遮断される → `probe-rs info --verbose` で DP が見えるかどうかで、ロックか配線不良かを見分ける。
+  - debugprobe は CMSIS-DAP v2（WinUSB）なので Windows でドライバ不要。2.2.3 以降を推奨（SWCLK の分周の修正）。
+  - **ERASE**：15 kΩ のプルダウン、100 ms 未満の High は無視、220 ms を超えて High で消去（Opus がデータシート 1359 行・13935 行で確認）→ 電源を切った基板への導通確認は安全。
+    隣の 136（SHDN）・138（TST。電源投入時に High だと書き込みモード）にプローブを滑らせない。SD カードも抜く。
+  - ヘッダの仮説：v5.5 は H1 = SWD 7 ピン、H2 = 3 ピン（GND、PA29、PA31）、H3 = 5 ピン（3.3V、PC28〜31）、H4 = UART 3 ピン。
+    調べるピンに JTAGSEL 142、PA29 46、PA31 48、PC28〜31 69〜72 を追加。まず全ヘッダから SWDIO（7）を探す。
+  - **CD_READ の CDB バイト1**：Flycast（一次資料）では 0x20・0x24・0x28 が 2048 バイト、0x10 が 2352 バイト、0xE6 が 2340 バイト。
+    Linux の `gdrom.c` は 0x20 → gdprobe の既定 0x24 は妥当。同じ FAD を 0x20/0x24/0x28/0x10 で読み比べる試験の追加を提案（後で検討）。
+  - **KOS の落とし穴**：`fs_iso9660` の vblank ハンドラが、ディスクの交換を検知すると `cdrom_reinit` を呼ぶ → `52 82` の直後に KOS 自身が GD-ROM にコマンドを出し、
+    プローブの直接アクセスとぶつかる恐れ。gdprobe を静的レビュー中の Fable に確認を依頼した。
+  - 6.0 クローンの分解記事・ピン配置・ロックの報告は見つからない。Dreamcast-Talk の t=19395・14980・13021 と GBAtemp のスレッドは 403 で読めず。
+    公開されている別のオープン実装は上流の OpenGDEMU と iceGDROM（iCE40）だけ。
+- **反映**：実機作業ガイド（Artifact 版3、`docs/research/user-tasks.html`）に、`--chip ATSAM3U2E`、CHIPID の期待値と結果の読み方の表、
+  `probe-rs info --verbose`、`--connect-under-reset` を使わないこと、導通確認の安全手順（SD を抜く、136・138 に触れない）、追加のピン、JTAGSEL の記入欄を加えた。
+
 ---
 
 ## 判断の記録（Decisions）
