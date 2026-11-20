@@ -12,12 +12,19 @@ pub const WORD49_DMA: u16 = 0x0100;
 /// IDENTIFY word 63: multiword DMA modes 0-2 supported (bits 2:0), mode 2
 /// selected (bit 10). KOS's `g1ata` only uses DMA when bit 2 is set.
 pub const WORD63_MWDMA2: u16 = 0x0407;
+/// IDENTIFY words 65 and 66: minimum / manufacturer-recommended multiword DMA
+/// cycle time in nanoseconds. 120 ns is MWDMA mode 2's cycle time.
+pub const MWDMA_CYCLE_NS: u16 = 0x0078;
 
 /// Advertise DMA in an IDENTIFY DEVICE buffer: word 49 gains the DMA bit
-/// (other bits are kept) and word 63 becomes [`WORD63_MWDMA2`].
+/// (other bits are kept), word 63 becomes [`WORD63_MWDMA2`] and words 65/66
+/// (cycle times) become [`MWDMA_CYCLE_NS`]; a host that reads them as 0 may
+/// take them for "no timing given" and refuse DMA.
 pub fn advertise_mwdma(words: &mut [u16; 256]) {
     words[49] |= WORD49_DMA;
     words[63] = WORD63_MWDMA2;
+    words[65] = MWDMA_CYCLE_NS;
+    words[66] = MWDMA_CYCLE_NS;
 }
 
 /// The consecutive `(first_lba, sector_count)` runs that cover `count`

@@ -54,14 +54,21 @@ pub struct Nearest {
     dir: Step,
     beyond: Option<u16>,
     wrap: Option<u16>,
+    offered: u16,
 }
 
 impl Nearest {
     pub fn new(current: Option<u16>, dir: Step) -> Self {
-        Nearest { current, dir, beyond: None, wrap: None }
+        Nearest { current, dir, beyond: None, wrap: None, offered: 0 }
+    }
+
+    /// How many numbers have been offered (duplicates count).
+    pub fn offered(&self) -> u16 {
+        self.offered
     }
 
     pub fn offer(&mut self, n: u16) {
+        self.offered = self.offered.saturating_add(1);
         match self.dir {
             Step::Next => {
                 if self.wrap.map_or(true, |w| n < w) {
@@ -86,5 +93,49 @@ impl Nearest {
 
     pub fn result(&self) -> Option<u16> {
         self.beyond.or(self.wrap)
+    }
+}
+
+/// [`Nearest`] with a veto: the slot one step from `current` that `accept`
+/// agrees to, skipping the ones it rejects like gaps in the numbering.
+///
+/// `scan` is called once per round with a fresh [`Nearest`] and must offer
+/// every slot number present. A rejected pick becomes the new `current`, so
+/// the next round steps on from it (wrapping, like a plain step). The loop is
+/// bounded by the number of slots the first round saw, so a card where
+/// nothing is acceptable ends in `None` rather than going round forever. The
+/// cost is one `scan` per round plus one `accept` per pick: with `k` rejected
+/// slots, `k + 1` scans of the card.
+///
+/// When `current` is the only acceptable slot the result is `current` itself
+/// (the wrap lands back on it), exactly as a plain step does.
+pub fn step_accepted<S, A>(
+    current: Option<u16>,
+    dir: Step,
+    mut scan: S,
+    mut accept: A,
+) -> Option<u16>
+where
+    S: FnMut(&mut Nearest),
+    A: FnMut(u16) -> bool,
+{
+    let mut from = current;
+    let mut limit = 0u16;
+    let mut tries = 0u16;
+    loop {
+        let mut n = Nearest::new(from, dir);
+        scan(&mut n);
+        if tries == 0 {
+            limit = n.offered();
+        }
+        let pick = n.result()?;
+        if accept(pick) {
+            return Some(pick);
+        }
+        tries += 1;
+        if tries >= limit {
+            return None;
+        }
+        from = Some(pick);
     }
 }

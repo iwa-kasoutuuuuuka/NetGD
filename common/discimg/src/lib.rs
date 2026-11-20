@@ -14,6 +14,7 @@
 pub mod ata;
 pub mod atapi;
 pub mod cdi;
+pub mod gdemu;
 pub mod gdi;
 pub mod slot;
 

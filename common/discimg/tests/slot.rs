@@ -1,4 +1,4 @@
-use discimg::slot::{number_of, Nearest, Step};
+use discimg::slot::{number_of, step_accepted, Nearest, Step};
 
 #[test]
 fn number_of_accepts_two_to_four_digits() {
@@ -81,4 +81,57 @@ fn duplicates_and_empty() {
     assert_eq!(pick(Some(1), Step::Next, &[2, 2, 1, 1]), Some(2));
     assert_eq!(pick(None, Step::Next, &[]), None);
     assert_eq!(pick(Some(3), Step::Prev, &[]), None);
+}
+
+fn step_ok(current: Option<u16>, dir: Step, present: &[u16], ok: &[u16]) -> Option<u16> {
+    step_accepted(
+        current,
+        dir,
+        |n| present.iter().for_each(|&p| n.offer(p)),
+        |p| ok.contains(&p),
+    )
+}
+
+#[test]
+fn step_accepted_skips_rejected_like_gaps() {
+    let all = [1, 2, 3, 5];
+    // 2 and 3 have no image: from 1, Next lands on 5.
+    assert_eq!(step_ok(Some(1), Step::Next, &all, &[1, 5]), Some(5));
+    // Prev from 5 skips back over them to 1.
+    assert_eq!(step_ok(Some(5), Step::Prev, &all, &[1, 5]), Some(1));
+    // Wrapping: from 5, Next goes past the end, skips 2/3 and lands on 1.
+    assert_eq!(step_ok(Some(5), Step::Next, &all, &[1, 5]), Some(1));
+    // Everything acceptable behaves like a plain step.
+    assert_eq!(step_ok(Some(1), Step::Next, &all, &all), Some(2));
+}
+
+#[test]
+fn step_accepted_current_alone_returns_itself() {
+    assert_eq!(step_ok(Some(3), Step::Next, &[1, 3, 5], &[3]), Some(3));
+    assert_eq!(step_ok(Some(3), Step::Prev, &[1, 3, 5], &[3]), Some(3));
+}
+
+#[test]
+fn step_accepted_nothing_acceptable_is_none_and_bounded() {
+    let mut scans = 0;
+    let r = step_accepted(
+        Some(2),
+        Step::Next,
+        |n| {
+            scans += 1;
+            for p in [1u16, 2, 3, 4] {
+                n.offer(p);
+            }
+        },
+        |_| false,
+    );
+    assert_eq!(r, None);
+    assert_eq!(scans, 4, "one scan per slot, then give up");
+}
+
+#[test]
+fn step_accepted_no_slots_or_no_current() {
+    assert_eq!(step_ok(Some(1), Step::Next, &[], &[]), None);
+    assert_eq!(step_ok(None, Step::Next, &[4, 2, 9], &[9]), Some(9));
+    assert_eq!(step_ok(None, Step::Prev, &[4, 2, 9], &[2, 4]), Some(4));
 }

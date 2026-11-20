@@ -1,4 +1,4 @@
-use discimg::ata::{advertise_mwdma, runs, WORD49_DMA, WORD49_LBA, WORD63_MWDMA2};
+use discimg::ata::{advertise_mwdma, runs, MWDMA_CYCLE_NS, WORD49_DMA, WORD49_LBA, WORD63_MWDMA2};
 
 fn collect(lba: u32, count: u32, max: u32) -> Vec<(u32, u32)> {
     runs(lba, count, max).collect()
@@ -72,4 +72,8 @@ fn identify_dma_words() {
     assert_eq!(WORD63_MWDMA2 & 0x4, 0x4, "KOS tests bit 2");
     assert_eq!(w[0], 0x0040, "other words untouched");
     assert_eq!(w[64], 0);
+    assert_eq!(MWDMA_CYCLE_NS, 120);
+    assert_eq!(w[65], 0x0078, "min MWDMA cycle time");
+    assert_eq!(w[66], 0x0078, "recommended MWDMA cycle time");
+    assert_eq!(w[67], 0);
 }

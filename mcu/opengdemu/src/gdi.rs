@@ -25,6 +25,8 @@ use heapless::{String, Vec};
 
 use crate::blockdev::{BlockError, HsmciBlockDevice};
 
+type RootDir<'a> = Directory<'a, HsmciBlockDevice, crate::blockdev::DummyClock, 4, 4, 1>;
+
 /// Maximum tracks we ever expect. Red Book technically caps at 99 but
 /// Red Book's limit, and the real one.
 ///
@@ -554,13 +556,95 @@ pub fn mounted_number() -> Option<u16> {
 /// a second fetches its name. Probing number by number instead would walk
 /// the card once per gap -- a folder called `2024` next to `01` would cost
 /// two thousand directory scans inside one ATAPI command.
+///
+/// Folders without a mountable image are skipped like gaps
+/// ([`folder_has_image`]): stepping onto one would empty the drive for
+/// nothing. A rejected pick is stepped on from, via
+/// [`discimg::slot::step_accepted`], at most once per numbered folder. Cost:
+/// each round is one root scan plus one name lookup (another scan) plus one
+/// folder check, so `k` image-less folders in the way cost `k + 1` rounds --
+/// the common card, where every numbered folder has an image, pays the single
+/// round it always did plus the folder check.
 pub fn step_folder(
     num_blocks: u32,
     dir: discimg::slot::Step,
 ) -> Option<String<MAX_NAME_CHARS>> {
-    let mut pick = discimg::slot::Nearest::new(mounted_number(), dir);
-    for_each_slot(num_blocks, |num, _| pick.offer(num));
-    folder_for_number(num_blocks, pick.result()?)
+    let mut found: Option<String<MAX_NAME_CHARS>> = None;
+    discimg::slot::step_accepted(
+        mounted_number(),
+        dir,
+        |pick| for_each_slot(num_blocks, |num, _| pick.offer(num)),
+        |n| match folder_for_number(num_blocks, n) {
+            Some(name) if folder_has_image(num_blocks, name.as_str()) => {
+                found = Some(name);
+                true
+            }
+            _ => false,
+        },
+    )?;
+    found
+}
+
+/// Whether the folder called `name` (as `load_by_name` takes it) holds a
+/// mountable image: a GDI or a CDI descriptor file.
+///
+/// Presence only -- nothing is parsed and no static is touched, so it is safe
+/// to ask about a folder that is not about to be mounted. Mounting a folder
+/// that fails this check empties the drive (see `mount_named`), which is
+/// what callers use it to avoid.
+pub fn folder_has_image(num_blocks: u32, name: &str) -> bool {
+    let dev = HsmciBlockDevice::new();
+    dev.set_num_blocks(num_blocks);
+    let mgr = VolumeManager::new(dev, crate::blockdev::DummyClock);
+    let Ok(volume) = mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) else { return false };
+    let Ok(mut d) = volume.open_root_dir() else { return false };
+    let mut path = ImagePath::new();
+    walk_to(&mut d, name, &mut path).is_ok() && locate_image(&d).is_some()
+}
+
+/// Resolve `want` (components split by `/`) from `d`, one level at a time
+/// against the long names, leaving `d` in the folder and the 8.3 path in
+/// `path`. Shared by `load_by_name` and `folder_has_image`.
+#[inline(never)]
+fn walk_to(d: &mut RootDir<'_>, want: &str, path: &mut ImagePath) -> Result<(), GdiError> {
+    for part in want.split('/').filter(|p| !p.is_empty()) {
+        let mut lfn =
+            embedded_sdmmc::LfnBuffer::new(unsafe { &mut *core::ptr::addr_of_mut!(LFN_STORE) });
+        let mut hit: Option<ShortFileName> = None;
+        let _ = d.iterate_dir_lfn(&mut lfn, |entry, long| {
+            if hit.is_some()
+                || !entry.attributes.is_directory()
+                || entry.name.base_name() == b"."
+                || entry.name.base_name() == b".."
+            {
+                return;
+            }
+            let name = entry_name(entry, long);
+            if gamecfg::resolve(core::iter::once(name.as_str()), part).is_some() {
+                hit = Some(entry.name.clone());
+            }
+        });
+        let Some(short) = hit else {
+            return Err(GdiError::NoGdiFile);
+        };
+        if path.push(short.clone()).is_err() {
+            warn!("gdi: '{}' is deeper than {} levels", want, MAX_PATH_PARTS);
+            return Err(GdiError::NoGdiFile);
+        }
+        d.change_dir(short).map_err(|_| GdiError::OpenImageDir)?;
+    }
+    if path.is_empty() {
+        return Err(GdiError::NoGdiFile);
+    }
+    Ok(())
+}
+
+/// The descriptor file in `d`, and whether it is a CDI (a GDI wins).
+fn locate_image(d: &RootDir<'_>) -> Option<(ShortFileName, bool)> {
+    match find_gdi(d) {
+        Ok(n) => Some((n, false)),
+        Err(_) => crate::cdi::find_cdi(d).ok().map(|n| (n, true)),
+    }
 }
 
 
@@ -603,45 +687,13 @@ pub fn load_by_name(num_blocks: u32, want: &str) -> Result<Gdi, GdiError> {
         .map_err(|_| GdiError::OpenVolume)?;
     let mut d = volume.open_root_dir().map_err(|_| GdiError::OpenRoot)?;
 
-    // Resolve the path one component at a time, matching each against the
-    // long names in the directory above it. A name with no separator walks
-    // exactly one level, which is what a card without shelves has.
+    // Resolve the path one component at a time (see `walk_to`). A name with no
+    // separator walks exactly one level, which is what a card without shelves
+    // has.
     let mut path = ImagePath::new();
-    for part in want.split('/').filter(|p| !p.is_empty()) {
-        let mut lfn =
-            embedded_sdmmc::LfnBuffer::new(unsafe { &mut *core::ptr::addr_of_mut!(LFN_STORE) });
-        let mut hit: Option<ShortFileName> = None;
-        let _ = d.iterate_dir_lfn(&mut lfn, |entry, long| {
-            if hit.is_some()
-                || !entry.attributes.is_directory()
-                || entry.name.base_name() == b"."
-                || entry.name.base_name() == b".."
-            {
-                return;
-            }
-            let name = entry_name(entry, long);
-            if gamecfg::resolve(core::iter::once(name.as_str()), part).is_some() {
-                hit = Some(entry.name.clone());
-            }
-        });
-        let Some(short) = hit else {
-            return Err(GdiError::NoGdiFile);
-        };
-        if path.push(short.clone()).is_err() {
-            warn!("gdi: '{}' is deeper than {} levels", want, MAX_PATH_PARTS);
-            return Err(GdiError::NoGdiFile);
-        }
-        d.change_dir(short).map_err(|_| GdiError::OpenImageDir)?;
-    }
-    if path.is_empty() {
-        return Err(GdiError::NoGdiFile);
-    }
+    walk_to(&mut d, want, &mut path)?;
 
-    let found = match find_gdi(&d) {
-        Ok(n) => Some((n, false)),
-        Err(_) => crate::cdi::find_cdi(&d).ok().map(|n| (n, true)),
-    };
-    let Some((file, is_cdi)) = found else {
+    let Some((file, is_cdi)) = locate_image(&d) else {
         return Err(GdiError::NoGdiFile);
     };
     let mut name: String<MAX_NAME_CHARS> = String::new();

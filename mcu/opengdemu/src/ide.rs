@@ -627,7 +627,7 @@ static RSTN_FALLS_SEEN: core::sync::atomic::AtomicU8 = core::sync::atomic::Atomi
 /// power cycle.
 ///
 /// The hard reset is told from SRST by the RSTn falling-edge counter: SRST,
-/// which KOS's `g1_ata_init` issues to both devices, never moves it, and
+/// which a host may issue to either device, never moves it, and
 /// remounting then would re-mount the GD image under a write app that has
 /// just initialised the disk. The counter is a free-running 8-bit count, so
 /// a reset cannot be missed between two looks (only 256 of them could).
@@ -1007,6 +1007,9 @@ async fn load_media(state: &mut DeviceState) -> bool {
     crate::cdda::stop();
     let ok = rescan_media().await;
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
+    // The format nibble follows the mounted image (GDI -> GD-ROM, CDI -> CD-ROM
+    // XA); without this a swap between the two shows the old one until reset.
+    IdeDevice::primary().reassert_disc_format();
     state.unit_attention = true;
     state.pending_sense_key = 0x06;
     ok
@@ -1089,6 +1092,8 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
         }
     };
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
+    // Same as `load_media`: the format nibble must follow the new image.
+    IdeDevice::primary().reassert_disc_format();
     state.unit_attention = true;
     state.pending_sense_key = 0x06;
     info!("{}: mounted '{}' ({})", label, name, ok);
@@ -1138,7 +1143,8 @@ const SEGA_GET_SCD: u8 = 0x40;
 ///                               configured default if packet[2] = 0xFF or no
 ///                               name is staged. Swaps immediately, no
 ///                               eject/load needed; UNIT ATTENTION follows.
-///   packet[1] = 3  VERSION   -> "OGDM", u8 protocol, 3 reserved bytes (zero),
+///   packet[1] = 3  VERSION   -> "OGDM", u8 protocol, feature byte
+///                               (`OGDM_FEATURES`), 3 reserved bytes (zero),
 ///                               24-byte firmware string.
 ///   packet[1] = 5  MOUNT_NAME-> packet[2] = chunk index, packet[3..12] = up
 ///                               to nine bytes of the folder name. Chunk 0
@@ -1378,6 +1384,18 @@ async fn handle_packet(
             dev.set_status_intrq(STATUS_IDLE);
         }
         SEGA_CD_PLAY => {
+            // Ejected, GDI is still set but the host may be writing the card:
+            // cdda's SD reads would cut into an open CMD25. NOT READY /
+            // MEDIUM NOT PRESENT, as TEST UNIT READY and CD_READ say.
+            // (CD_SEEK only pauses or stops, which reads nothing.)
+            if !media_present() {
+                info!("{}: CD_PLAY while ejected", label);
+                state.pending_sense_key = 0x02;
+                dev.set_irr(0x03);
+                dev.set_error(0x20);
+                dev.set_status_intrq(STATUS_IDLE_ERR);
+                return;
+            }
             // [1] parameter type, [2..5] start, [6] repeat count (low
             // nibble, 15 = forever), [8..11] end. Type 1 = FAD (24-bit BE),
             // 2 = MSF, 3 = resume from pause. Layout per iceGDROM cdda.c.
@@ -1953,8 +1971,10 @@ async fn handle_image_ctl(
 ///   52 81 44     previous image
 ///   52 00        data-in, 8 bytes: two little-endian u32, bootloader then
 ///                firmware version, each packed `major << 24 | minor << 16 |
-///                patch << 8` (`00 00 09 01` is 1.9.0). Cut by the CDB's
-///                allocation length like the 0xE0 version reply.
+///                patch << 8` with every part in BCD (`00 00 09 01` is 1.9.0,
+///                `00 00 14 05` is 5.14.0, per openMenu's `gdemu_sdk.c`; the
+///                firmware's 5.20.0 is `00 00 20 05`, not 0x14). Cut by the
+///                CDB's allocation length like the 0xE0 version reply.
 ///
 /// Anything else is ILLEGAL REQUEST. Images are numbered folders in the root
 /// of the card (`discimg::slot`).
@@ -1966,7 +1986,8 @@ const GDEMU_STEP_PREV: u8 = 0x44;
 const GDEMU_VERSION: u8 = 0x00;
 
 /// The GDEMU protocol level NetGD emulates, as (major, minor, patch).
-/// Reported as the firmware version of `52 00`; the bootloader reports 0.0.0.
+/// Reported as the firmware version of `52 00`, BCD-encoded
+/// (`discimg::gdemu::version_word`); the bootloader reports 0.0.0.
 const GDEMU_COMPAT_VERSION: (u8, u8, u8) = (5, 20, 0);
 
 /// Resolve a GDEMU target folder -- number `n`, or one step from the mounted
@@ -1982,6 +2003,12 @@ fn stage_folder(n: Option<u16>, dir: Option<discimg::slot::Step>) -> bool {
         (None, None) => None,
     };
     let Some(found) = found else { return false };
+    // A folder with nothing to mount would empty the drive and leave the
+    // button dead (F1: it is off while no medium is mounted). `step_folder`
+    // already vets its pick; a number named outright is vetted here.
+    if n.is_some() && !crate::gdi::folder_has_image(blocks, found.as_str()) {
+        return false;
+    }
     let name = unsafe { &mut *core::ptr::addr_of_mut!(MOUNT_NAME) };
     name.clear();
     let _ = name.push_str(found.as_str());
@@ -2003,10 +2030,10 @@ async fn handle_gdemu_cmd(
                 finish_ok(dev);
                 return;
             }
-            // Resolve first: an unknown number must not disturb what is
-            // mounted.
+            // Resolve first: an unknown number, or a folder with no image in
+            // it, must not disturb what is mounted.
             if !stage_folder(Some(n), None) {
-                warn!("{}: GDEMU mount: no folder numbered {}", label, n);
+                warn!("{}: GDEMU mount: no mountable folder numbered {}", label, n);
                 finish_illegal(dev, state);
                 return;
             }
@@ -2027,7 +2054,7 @@ async fn handle_gdemu_cmd(
                 }
             };
             if !stage_folder(None, Some(dir)) {
-                warn!("{}: GDEMU step: no numbered folder", label);
+                warn!("{}: GDEMU step: no numbered folder with an image", label);
                 finish_illegal(dev, state);
                 return;
             }
@@ -2040,7 +2067,7 @@ async fn handle_gdemu_cmd(
         }
         GDEMU_VERSION => {
             let (ma, mi, pa) = GDEMU_COMPAT_VERSION;
-            let fw = (ma as u32) << 24 | (mi as u32) << 16 | (pa as u32) << 8;
+            let fw = discimg::gdemu::version_word(ma, mi, pa);
             let mut out = [0u8; 8];
             // Bootloader 0.0.0 in the first word, firmware in the second.
             out[4..].copy_from_slice(&fw.to_le_bytes());
@@ -3058,6 +3085,10 @@ async fn handle_disk_write(
     const WRITE_RUN: u32 = 32768;
     let mut block = [0u8; 512];
     let mut ok = true;
+    // Set when a host reset ended the wait: the FPGA holds the post-reset
+    // state, so nothing is completed (as `send_data_in` does), but the CMD25
+    // is still closed.
+    let mut reset = false;
     let mut done = 0u32; // sectors completed before the current run
     for (run_lba, run_n) in discimg::ata::runs(lba, count, WRITE_RUN) {
         let mut mw = match unsafe { embassy_atsam3::hsmci::write_multi_begin(run_lba, run_n) } {
@@ -3083,6 +3114,9 @@ async fn handle_disk_write(
             }
 
             if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
+                if why == Stall::Reset {
+                    reset = true;
+                }
                 if why == Stall::Timeout {
                     // Sample what the FPGA holds while the host is polling. If
                     // this shows 0x58 while the DC reads 0xd8 off the bus, the
@@ -3142,6 +3176,11 @@ async fn handle_disk_write(
         dev.set_dma_mode(DmaMode::Off);
     } else {
         dev.set_pio_flow_control(false, false);
+    }
+    if reset {
+        // A completion write now would overwrite status/INTRQ inside the
+        // post-reset BSY window.
+        return;
     }
     dev.complete(if ok { 0 } else { ERR_ABRT }, if ok { STATUS_IDLE } else { STATUS_IDLE_ERR });
     if ok {

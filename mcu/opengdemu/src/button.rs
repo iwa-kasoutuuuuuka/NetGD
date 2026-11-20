@@ -10,7 +10,7 @@
 //! so sampling costs nothing, and it keeps a bouncing mechanical contact off
 //! the same interrupt path as the FPGA's command line.
 
-use defmt::info;
+use defmt::{info, warn};
 use embassy_time::{Duration, Timer};
 
 /// SAM3U pin the button is wired to.
@@ -72,9 +72,15 @@ fn on_press() {
     // of opening the card belongs.
     let blocks = crate::ide::disk_sectors();
     if let Some(name) = crate::gdi::next_of_mounted(blocks) {
-        info!("button: following link to '{}'", name.as_str());
-        swap_to(name.as_str());
-        return;
+        // Check the link before acting on it: a swap to a folder with no
+        // image would empty the drive, and with no medium the button is off
+        // (F1), so nothing short of the host could bring a disc back.
+        if crate::gdi::folder_has_image(blocks, name.as_str()) {
+            info!("button: following link to '{}'", name.as_str());
+            swap_to(name.as_str());
+            return;
+        }
+        warn!("button: link to '{}' has no image, ignoring it", name.as_str());
     }
     // No link. A numbered folder steps to the next numbered one, as the
     // original GDEMU's button does; anything else does nothing, because
