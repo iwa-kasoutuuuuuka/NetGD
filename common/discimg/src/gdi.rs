@@ -41,6 +41,7 @@ pub fn parse<S: TrackSink>(data: &[u8], sink: &mut S) -> Result<(), Error<S::Err
             sector_count: 0,
             filename,
             file_offset: 0,
+            session: 0,
         };
         sink.push(&t).map_err(Error::Sink)?;
     }

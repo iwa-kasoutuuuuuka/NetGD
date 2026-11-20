@@ -97,12 +97,16 @@ where
     let mut number: u8 = 1;
     let mut count = 0usize;
     let mut boot_track: u8 = 1;
+    let mut session_no: u8 = 0;
 
     for _ in 0..session_count {
         let mut sh = [0u8; SESSION_HDR_LEN as usize];
         rd(cursor, &mut sh)?;
         let track_count = rd_u16(&sh, 1);
         cursor = cursor.wrapping_add(SESSION_HDR_LEN);
+        if track_count > 0 {
+            session_no = session_no.wrapping_add(1);
+        }
 
         for ti in 0..track_count {
             if ti == 0 {
@@ -173,6 +177,7 @@ where
                 sector_count,
                 filename: String::new(),
                 file_offset,
+                session: session_no,
             };
             sink.push(&t).map_err(Error::Sink)?;
             count += 1;

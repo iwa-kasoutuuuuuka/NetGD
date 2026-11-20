@@ -201,10 +201,12 @@ pub fn put_msf(out: &mut [u8], blk: u32) {
 ///   byte 0 = 0x01 (ready), byte 1 = 0, byte 2 = track, bytes 3..6 = FAD BE
 ///   session 0: session count + lead-out FAD
 ///   session 1: GDI: first track below `boot_area_lba`; CDI: the first track
-///   session 2 (CDI with `sessions >= 2` only): first track at/above
-///     `boot_area_lba` (= the first track of the last session, see
-///     [`cdi_boot_area_lba`]); with 3+ sessions the middle ones are not
-///     distinguished
+///   session n >= 2 (CDI): the first track of session n when the tracks know
+///     their session ([`TrackInfo::session`] != 0, so any number of sessions);
+///     otherwise (firmware track type without it) only session 2 and only
+///     when `sessions >= 2`: first track at/above `boot_area_lba` (= the
+///     first track of the last session, see [`cdi_boot_area_lba`]), which is
+///     right for boot but not for the middle session of a 3+ session CDI
 ///   anything else, or no such track: `None` (caller aborts)
 pub fn req_ses_reply<T: TrackInfo>(
     tracks: &[T],
@@ -224,6 +226,13 @@ pub fn req_ses_reply<T: TrackInfo>(
             } else {
                 tracks.iter().find(|t| t.start_lba() < boot_area_lba)?
             };
+            (t.number(), t.start_lba().wrapping_add(150))
+        }
+        // CDI whose tracks carry their session number: session n's own first
+        // track (also 3+ sessions). Session 1 above is already the first
+        // track of the disc, which is session 1's.
+        n if is_cdi && n >= 2 && tracks.iter().any(|t| t.session() != 0) => {
+            let t = tracks.iter().find(|t| t.session() == n)?;
             (t.number(), t.start_lba().wrapping_add(150))
         }
         2 if is_cdi && sessions >= 2 => {

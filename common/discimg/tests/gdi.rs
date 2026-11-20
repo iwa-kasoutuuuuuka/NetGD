@@ -16,6 +16,7 @@ fn tr(number: u8, start_lba: u32, ctrl: u8, sector_size: u16, name: &str) -> Tra
         sector_count: 0,
         filename: name.try_into().unwrap(),
         file_offset: 0,
+        session: 0,
     }
 }
 

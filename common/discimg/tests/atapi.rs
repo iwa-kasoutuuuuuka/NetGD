@@ -16,6 +16,7 @@ fn t(number: u8, start_lba: u32, ctrl: u8, sector_count: u32) -> TrackDesc {
         sector_count,
         filename: Default::default(),
         file_offset: 0,
+        session: 0,
     }
 }
 

@@ -968,6 +968,23 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   `netgd-fwupd` の機種名の確認（`fwcore.c:318`）は `OPENGDEMU` と `NETGD` の両方を受け付け、テスト済み（古いファームの基板も更新できる）。
 - 確認：`mcu/netgd` で 4E・2E・v60 のビルド成功、fwupdater 13 件（Windows 向け）、fwimage 33 件、netgd-recv（CI=true）、netgd-fwupd 984 項目すべて通過。Linux 向けの fwupdater は CI で確認する。
 
+### R77 今すぐ進められるソフトの課題の並列割り当て（Opus）
+- ユーザーの指示「今すぐ進められるソフトの課題を並列処理して進めて」により割り当て（2026-11-20 夜）。
+  - Sonnet：ファームの長いファイル名（LFN）のトラックへの対応と、エクステントの表が無いトラックの遅い経路（R65・R72）。`mcu/netgd` のファイルシステム層。
+  - Sonnet：`netgd-recv` の `f_expand` を、まとめ読みで連続した空き領域を探す方式に（R68）。
+  - Sonnet：2E のフラッシュの使い道の調査と削減案（`docs/research/flash-budget-2e.md`、コードは変えない）。
+  - Fable：常駐部とアプリの引き渡しの取り決め（ウォッチドッグ、クロック、GPBR、4E のビットストリームの CRC、版の番号など。R59・R60・R61・R75）。
+  - Sonnet：CDI のセッション3つ以上とプリギャップの扱い（R71、`common/discimg` だけ）。
+- 後回し：使われていないコードの削除（R74、ファームの作業と同じファイル）。
+
+### R78 CDI のセッション3つ以上とプリギャップ（Sonnet、R71 の残り）
+- 結論：(1) `TrackDesc` に `session: u8`（1 から、GDI は 0）を追加し、`parse_info` が記述子の順に設定。トラックにセッション番号があれば、CDI の REQ_SES(n) は n ≥ 2 でセッション n 自身の最初のトラックと FAD を返す（起動領域は従来どおり最後のセッションの最初のトラック）。
+  `req_ses_reply` の形は不変。全トラックがセッション 0 なら従来の動作（ファームの `Track` はまだ `session()` を実装していないので、**ファームは従来の動作のまま**）。
+  (2) **R71 の FAD の疑いは問題なし**：075b3b30 で `parse_info`（`src/cdi.rs:137-166`）が最初のデータの LBA を `start_lba + pregap - 150` と計算しているので、`data_lba + 150` = `start_lba + pregap` で Flycast の `StartFAD` と同じ（Flycast `core/imgread/cdi.cpp` の `cdi_parse`、一次資料・抜粋）。
+  (3) `mcu/netgd/src/gdi.rs:894` の `read_ip_header` は**使われていない**（定義だけ）。起動は `prefetch_ip_bin`（`ide.rs:2392`）が `boot_area_lba` を使い、CDI は `cdi_boot_area_lba` 経由で正しい。
+- テスト：`cdi_sessions.rs` に4件（3セッションの中間、中間セッションに複数トラック、セッション番号なしの代替動作、変わったプリギャップ 150/0/300 での LBA・REQ_SES・TOC の FAD）。`discimg` 全通過、netgd-expect 10 件（1 skip）。
+- 残り：ファームの `Track` に `session` を足して `session()` を実装する（1 トラック 1 バイト、99 トラックの領域の RAM を確認してから。ファームのファイルシステムの作業の後で）。
+
 ---
 
 ## 判断の記録（Decisions）

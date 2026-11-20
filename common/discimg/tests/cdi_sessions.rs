@@ -136,10 +136,79 @@ fn gdi_boot_area_keeps_track_3_and_the_45000_fallback() {
         sector_count: 1,
         filename: Default::default(),
         file_offset: 0,
+        session: 0,
     };
     assert_eq!(gdi_boot_area_lba(&[mk(1, 0), mk(2, 450), mk(3, 45000)]), 45000);
     // Non-standard HDA start is honoured.
     assert_eq!(gdi_boot_area_lba(&[mk(1, 0), mk(2, 450), mk(3, 50000)]), 50000);
     // Two-track GDI (no HDA): unchanged fallback.
     assert_eq!(gdi_boot_area_lba(&[mk(1, 0), mk(2, 450)]), 45000);
+}
+
+// ---- 3+ sessions: REQ_SES(n) is session n's own first track -------------
+
+#[test]
+fn three_sessions_middle_session_is_its_own_first_track() {
+    // s1: audio (data LBA 0). s2: data, descriptor start 11700 (pregap 150).
+    // s3: data, descriptor start 40000 (pregap 150) = the boot session.
+    let d3: T = (150, 5000, 40000, 5150, 1, 4);
+    let (n, bt, boot, t) = load(&[vec![AUDIO], vec![DATA2], vec![d3]]);
+    assert_eq!((n, bt, boot), (3, 3, 40000));
+    assert_eq!(t.iter().map(|x| x.session).collect::<Vec<_>>(), [1, 2, 3]);
+    assert_eq!(req_ses_reply(&t, true, boot, n, 1), Some([1, 0, 1, 0x00, 0x00, 0x96]));
+    // session 2 = track 2 at FAD 11850 (0x2E4A), NOT the boot track
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 2, 0x00, 0x2E, 0x4A]));
+    // session 3 = track 3 at FAD 40150 = 0x9CD6
+    assert_eq!(req_ses_reply(&t, true, boot, n, 3), Some([1, 0, 3, 0x00, 0x9C, 0xD6]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 4), None);
+    // the boot area is still the first track of the last session
+    assert_eq!(boot, t[2].start_lba);
+}
+
+#[test]
+fn middle_session_with_several_tracks_reports_its_first() {
+    let a: T = (150, 1000, 11700, 1150, 2, 0);
+    let b: T = (150, 1000, 12850, 1150, 2, 0);
+    let c: T = (150, 3000, 30000, 3150, 1, 4);
+    let (n, bt, boot, t) = load(&[vec![AUDIO], vec![a, b], vec![c]]);
+    assert_eq!((n, bt), (3, 4));
+    assert_eq!(t.iter().map(|x| x.session).collect::<Vec<_>>(), [1, 2, 2, 3]);
+    // session 2 = track 2 (not track 3 and not the boot track 4), FAD 11850
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 2, 0x00, 0x2E, 0x4A]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 3), Some([1, 0, 4, 0x00, 0x75, 0xC6])); // 30000+150
+}
+
+#[test]
+fn tracks_without_session_numbers_keep_the_boot_fallback() {
+    // A firmware track type that does not implement `session()` (default 0).
+    let d3: T = (150, 5000, 40000, 5150, 1, 4);
+    let (n, _, boot, mut t) = load(&[vec![AUDIO], vec![DATA2], vec![d3]]);
+    for x in t.iter_mut() {
+        x.session = 0;
+    }
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 3, 0x00, 0x9C, 0xD6]));
+}
+
+// ---- Track FAD = descriptor start + pregap (Flycast `StartFAD`) ----------
+
+#[test]
+fn track_fad_is_start_plus_pregap_with_odd_pregaps() {
+    // Track 1: pregap 150, data 0..1000. Track 2: pregap 0 (DiscJuggler
+    // style), descriptor start 1150: Flycast StartFAD = 1150 + 0 = 1150, so
+    // LBA 1000 (right after track 1's data). Track 3 in session 2: pregap 300,
+    // descriptor start 5000: StartFAD = 5300 -> LBA 5150.
+    let t1: T = (150, 1000, 0, 1150, 2, 0);
+    let t2: T = (0, 500, 1150, 500, 2, 0);
+    let t3: T = (300, 2000, 5000, 2300, 1, 4);
+    let (n, bt, boot, t) = load(&[vec![t1, t2], vec![t3]]);
+    assert_eq!((n, bt), (2, 3));
+    assert_eq!([t[0].start_lba, t[1].start_lba, t[2].start_lba], [0, 1000, 5150]);
+    assert_eq!(boot, 5150);
+    // Reported FADs are Flycast's StartFAD values.
+    assert_eq!(req_ses_reply(&t, true, boot, n, 1), Some([1, 0, 1, 0x00, 0x00, 0x96]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 3, 0x00, 0x14, 0xB4])); // 5300
+    let mut toc = [0u8; 408];
+    build_toc(&t[..], true, boot, 0, &mut toc);
+    assert_eq!(&toc[4..8], &[0x01, 0x00, 0x04, 0x7E]); // track 2: FAD 1150
+    assert_eq!(&toc[8..12], &[0x41, 0x00, 0x14, 0xB4]); // track 3: FAD 5300
 }

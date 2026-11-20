@@ -40,6 +40,10 @@ pub struct TrackDesc {
     pub filename: String<32>,
     /// Byte offset of the track's first sector within its file.
     pub file_offset: u32,
+    /// CDI: 1-based number of the (non-empty) session the track belongs to,
+    /// in descriptor order. GDI: 0 (not tracked; REQ_SES uses the fixed
+    /// GD-ROM layout there).
+    pub session: u8,
 }
 
 /// What the reply builders need to know about a track.
@@ -48,6 +52,13 @@ pub trait TrackInfo {
     fn start_lba(&self) -> u32;
     fn ctrl(&self) -> u8;
     fn sector_count(&self) -> u32;
+    /// CDI session number of the track (1-based), or 0 if the implementor
+    /// does not track it (the default). With 0 everywhere,
+    /// [`atapi::req_ses_reply`] falls back to "session 2 = first track of the
+    /// last session" (`boot_area_lba`).
+    fn session(&self) -> u8 {
+        0
+    }
 }
 
 impl TrackInfo for TrackDesc {
@@ -62,6 +73,9 @@ impl TrackInfo for TrackDesc {
     }
     fn sector_count(&self) -> u32 {
         self.sector_count
+    }
+    fn session(&self) -> u8 {
+        self.session
     }
 }
 
