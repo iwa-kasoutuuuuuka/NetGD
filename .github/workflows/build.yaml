@@ -1,0 +1,103 @@
+name: Build and Test
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  firmware:
+    name: Firmware (thumbv7m-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # mcu/opengdemu/rust-toolchain.toml selects stable + thumbv7m-none-eabi;
+      # installing it explicitly here keeps the first cargo call from doing it.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+
+      # build.rs shells out to `xz` to LZMA-pack the FPGA bitstream.
+      - name: Ensure xz
+        run: command -v xz || (sudo apt-get update && sudo apt-get install -y xz-utils)
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mcu/opengdemu
+            mcu/fwupdater
+
+      # build.rs builds fwupdater itself into OUT_DIR; the standalone build
+      # below catches an updater breakage with a clearer error.
+      - name: Build fwupdater
+        working-directory: mcu/fwupdater
+        run: cargo build --release
+
+      - name: Build opengdemu
+        working-directory: mcu/opengdemu
+        run: cargo build --release
+
+      - name: Upload firmware ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: opengdemu-elf
+          path: mcu/opengdemu/target/thumbv7m-none-eabi/release/opengdemu
+          if-no-files-found: error
+
+  host-tests:
+    name: Host tests (lzma, gamecfg, discimg)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [common/lzma, common/gamecfg, common/discimg]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+      - name: cargo test
+        working-directory: ${{ matrix.crate }}
+        run: cargo test
+
+  fpga-sim:
+    name: FPGA simulation and Verilog check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fpga/amaranth
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Keep in sync with fpga/amaranth/Containerfile: both versions decide the
+      # generated Verilog (the yosys version is stamped into its banner).
+      - name: Install Amaranth
+        run: pip install "amaranth==0.5.8" "amaranth-yosys==0.50.0.0.post123"
+
+      - name: Simulations
+        env:
+          AMARANTH_USE_YOSYS: builtin
+        run: |
+          python test.py
+          python test_cdda.py
+          python test_timing.py
+          python test_top.py
+
+      # The generated Verilog is committed and fed to Quartus, so it must
+      # match what main.py produces from the sources.
+      - name: Regenerate Verilog and check it is committed
+        env:
+          AMARANTH_USE_YOSYS: builtin
+        run: |
+          python main.py
+          git diff --exit-code -- out/OpenGDEMUCore.v
