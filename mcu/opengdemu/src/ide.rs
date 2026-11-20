@@ -1738,10 +1738,22 @@ async fn handle_cd_read(
         dev.set_status_intrq(STATUS_IDLE_ERR);
         return;
     }
-    stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await;
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
-    read_ahead(dev, gdi, lba, count as u32);
+    unsafe { STREAM_OK = false };
+    stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await;
+    // Only after a transfer that went all the way through (see `STREAM_OK`).
+    #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
+    if unsafe { STREAM_OK } {
+        read_ahead(dev, gdi, lba, count as u32);
+    }
 }
+
+/// Set by `stream_from_sd` / `stream_pio_from_sd` when, and only when, the
+/// request was staged in full, the host took every byte and the completion
+/// was posted. Cleared before each request. Read-ahead is gated on it so it
+/// never runs after a failed SD read, an abandoned or reset transfer.
+#[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
+static mut STREAM_OK: bool = false;
 
 /// Streaming history for [`read_ahead`].
 #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
@@ -1767,8 +1779,15 @@ fn read_ahead(dev: &IdeDevice, gdi: &'static crate::gdi::Gdi, lba: u32, count: u
         return;
     };
     // The host has already moved on, or is resetting the bus: its next
-    // command is the priority, not a guess about it.
-    if dev.command_pending() || dev.reset_seen() {
+    // command is the priority, not a guess about it. "Its" includes the other
+    // device on the bus: the read below cannot be interrupted, and a command
+    // waiting for the secondary would sit behind it just the same.
+    if dev.command_pending() || dev.peer().command_pending() || dev.reset_seen() {
+        return;
+    }
+    // CDDA is fed from the same SD card by `cdda_task`, and the one thing
+    // that must not stall behind a speculative read is its ring.
+    if crate::cdda::snapshot().status == crate::cdda::Status::Playing {
         return;
     }
     let Some(track) = gdi.track_for_lba(cand.lba) else { return };
@@ -2574,8 +2593,18 @@ async fn stream_from_sd(
     // floor is waived once the level has been observed to drop. The floor is
     // otherwise paid on every DMA CD_READ whose tail was still in the FIFO
     // when the last push returned, i.e. nearly all of them.
+    //
+    // Two guards, because a wrong "empty" here completes the command while
+    // the host's DMA is still reading (a short or corrupt transfer):
+    //  * `peak` starts at the level after the prime, not 0. The host can drain
+    //    the primed bytes before the first sample, and a peak that starts at 0
+    //    would then never see a drop.
+    //  * The level is read by the SMC asynchronously to the FPGA's counter, so
+    //    a single read can be torn at a power-of-two boundary (0x400 -> 0x3FF
+    //    reading as 0). The waiver therefore needs two zero reads in a row, a
+    //    millisecond apart.
     #[cfg(feature = "fast-complete")]
-    let (mut peak, mut pulled) = (0u16, false);
+    let (mut peak, mut pulled, mut zeros) = (level_after_prime, false, 0u8);
     for i in 0..200u32 {
         let lvl = dev.read_fifo_level();
         #[cfg(feature = "fast-complete")]
@@ -2585,12 +2614,13 @@ async fn stream_from_sd(
             } else if lvl < peak {
                 pulled = true;
             }
+            zeros = if lvl == 0 { zeros.saturating_add(1) } else { 0 };
         }
         #[cfg(feature = "fast-complete")]
-        let floor_waived = pulled;
+        let waived_done = pulled && zeros >= 2;
         #[cfg(not(feature = "fast-complete"))]
-        let floor_waived = false;
-        if (i >= min_wait_ms || floor_waived) && lvl == 0 { break; }
+        let waived_done = false;
+        if (i >= min_wait_ms && lvl == 0) || waived_done { break; }
         if lvl != last_lvl {
             if stalled_ms >= 20 {
                 info!("  drain: resumed after {} ms stall (lvl={})", stalled_ms, lvl);
@@ -2633,6 +2663,10 @@ async fn stream_from_sd(
     dev.set_atapi_byte_count((delivered.min(0xFFFE) & !1) as u16);
     dev.set_irr(0x03);
     dev.complete(0, STATUS_IDLE);
+    #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
+    {
+        unsafe { STREAM_OK = pushed_all && sectors_done == count };
+    }
     info!("CD_READ complete ({} bytes)", delivered);
 }
 
@@ -2761,6 +2795,10 @@ async fn stream_pio_from_sd(
     dev.set_irr(0x03);
     if ok {
         dev.complete(0, STATUS_IDLE);
+        #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
+        {
+            unsafe { STREAM_OK = true };
+        }
     } else {
         dev.complete(ERR_ABRT, STATUS_IDLE_ERR);
     }
@@ -3370,6 +3408,12 @@ async fn handle_disk_write(
         return;
     }
     info!("{}: disk write LBA={} count={} dma={}", label, lba, count, dma);
+
+    // The card is about to change underneath the CD read cache, which may hold
+    // a range of this very volume. Invalidate now, not only on success: a write
+    // that fails half way, or is cut off by a host reset (both return before
+    // the end of this function), has already altered blocks.
+    invalidate_cd_read_cache();
 
     // DRQ up means "send me a sector". Unlike the read direction there is
     // nothing to stage first: the host is the producer here.

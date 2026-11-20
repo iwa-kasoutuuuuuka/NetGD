@@ -12,6 +12,10 @@ pub const ARG_SWITCH_HS: u32 = 0x80FF_FFF1;
 /// Switch mode, group 1 = Default Speed. Used to back out.
 pub const ARG_SWITCH_DEFAULT: u32 = 0x80FF_FFF0;
 
+/// Check mode, "no change" in every group. The group 1 result field of the
+/// reply is the function the card has selected now (0 = Default Speed).
+pub const ARG_CHECK_CURRENT: u32 = 0x00FF_FFFF;
+
 /// Size of the CMD6 status block.
 pub const STATUS_LEN: usize = 64;
 
@@ -39,6 +43,21 @@ pub fn hs_busy(st: &[u8; STATUS_LEN]) -> bool {
     let busy = ((st[28] as u16) << 8) | st[29] as u16;
     busy & (1 << 1) != 0
 }
+
+/// True when a check-mode CMD6 for High-Speed says it can be selected: the
+/// support bit is set *and* the function result field of the request is 1
+/// (0xF there means "cannot be switched", whatever the support bit says).
+pub fn hs_selectable(st: &[u8; STATUS_LEN]) -> bool {
+    hs_supported(st) && group1_selected(st) == 1
+}
+
+/// Card state field of an R1 response (CMD13), bits 12..9. 4 = tran.
+pub fn card_state(r1: u32) -> u8 {
+    ((r1 >> 9) & 0xF) as u8
+}
+
+/// Card state "transfer": selected and ready for data commands.
+pub const STATE_TRAN: u8 = 4;
 
 /// True when a switch-mode CMD6 to High-Speed took effect.
 pub fn switched_to_hs(st: &[u8; STATUS_LEN]) -> bool {
@@ -83,6 +102,34 @@ mod tests {
         assert_eq!(group1_selected(&st), 1);
         st[16] = 0x1F;
         assert_eq!(group1_selected(&st), 0xF);
+    }
+
+    #[test]
+    fn check_mode_needs_result_nibble_1() {
+        let mut st = blank();
+        st[13] = 0x02;
+        st[16] = 0x01;
+        assert!(hs_selectable(&st));
+        st[16] = 0x0F; // supported on paper, but the request would fail
+        assert!(!hs_selectable(&st));
+        st[16] = 0x00;
+        assert!(!hs_selectable(&st));
+        st[13] = 0x01;
+        st[16] = 0x01;
+        assert!(!hs_selectable(&st)); // result 1 without the support bit
+    }
+
+    #[test]
+    fn current_function_query_argument_changes_nothing() {
+        assert_eq!(ARG_CHECK_CURRENT >> 31, 0);
+        assert_eq!(ARG_CHECK_CURRENT & 0x00FF_FFFF, 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn card_state_is_r1_bits_12_to_9() {
+        assert_eq!(card_state(0x0000_0900), STATE_TRAN); // tran + READY_FOR_DATA
+        assert_eq!(card_state(0x0000_0B00), 5); // data
+        assert_eq!(card_state(0xFFFF_E1FF), 0); // other bits do not leak in
     }
 
     #[test]

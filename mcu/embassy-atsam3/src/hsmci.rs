@@ -8,7 +8,8 @@
 //! all on peripheral A.
 
 use crate::pac;
-use defmt::debug;
+use core::sync::atomic::{AtomicU32, Ordering};
+use defmt::{debug, warn};
 
 /// Pins on PIOA used by HSMCI (MCCK + MCCDA + MCDA0..3, peripheral A).
 const PIOA_HSMCI_MASK: u32 =
@@ -23,6 +24,56 @@ pub enum CmdError {
     CrcError,
     /// Response had a wrong index, direction, or end-bit.
     BadResponse,
+}
+
+// ---- HSMCI_SR error bits -------------------------------------------------
+//
+// SAM3U datasheet, HSMCI Status Register (HSMCI_SR), which of these clear when:
+//   DCRCE (21), DTOE (22), CSTOE (23), BLKOVRE (24): "Cleared by reading in
+//     the HSMCI_SR register" -- so any poll that looks at SR and throws the
+//     value away also throws the error away.
+//   OVRE (30), UNRE (31): cleared on a new data command, or, with
+//     CFG.FERRCTRL = 1 (which `init` sets), "becomes reset after read".
+//   RINDE (16), RDIRE (17), RCRCE (18), RENDE (19), RTOE (20): "Cleared when
+//     writing in the HSMCI_CMDR" -- sticky until the next command, so they
+//     are still there at the end of the data phase, but a CMD12 written
+//     before they are looked at erases them.
+// Hence every polling loop ORs what it reads into an accumulator and the
+// verdict is taken from the accumulator, never from one last read.
+
+/// DCRCE | DTOE | OVRE | UNRE.
+const SR_DATA_ERR: u32 = (1 << 21) | (1 << 22) | (1 << 30) | (1 << 31);
+/// RINDE | RDIRE | RCRCE | RENDE | RTOE.
+const SR_RESP_ERR: u32 = (1 << 16) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20);
+const SR_RCRCE: u32 = 1 << 18;
+const SR_RTOE: u32 = 1 << 20;
+const SR_DTOE: u32 = 1 << 22;
+/// XFRDONE, NOTBUSY, BLKE.
+const XFRDONE: u32 = 1 << 27;
+const NOTBUSY: u32 = 1 << 5;
+const BLKE: u32 = 1 << 3;
+
+/// The error a response-stage status word stands for, if any.
+fn resp_error(acc: u32) -> Option<CmdError> {
+    if acc & SR_RTOE != 0 {
+        Some(CmdError::ResponseTimeout)
+    } else if acc & SR_RCRCE != 0 {
+        Some(CmdError::CrcError)
+    } else if acc & SR_RESP_ERR != 0 {
+        Some(CmdError::BadResponse)
+    } else {
+        None
+    }
+}
+
+/// The error a data-phase status word stands for, if any. Data errors keep
+/// being reported as `CrcError`, as the per-word checks always did.
+fn data_error(acc: u32) -> Option<CmdError> {
+    if acc & SR_DATA_ERR != 0 {
+        Some(CmdError::CrcError)
+    } else {
+        None
+    }
 }
 
 /// Response width — selects how the CMDR programs the response state machine.
@@ -258,6 +309,13 @@ pub unsafe fn set_bus_width_4() {
 /// command: returning while the card is still busy makes the next command
 /// time out for reasons that look unrelated.
 pub unsafe fn write_block(block_address: u32, src: &[u8; 512]) -> Result<(), CmdError> {
+    let hs = unsafe { lower_clock_for_write() };
+    let r = unsafe { write_block_at_current_clock(block_address, src) };
+    unsafe { raise_clock_after_write(hs) };
+    r
+}
+
+unsafe fn write_block_at_current_clock(block_address: u32, src: &[u8; 512]) -> Result<(), CmdError> {
     let h = unsafe { &*pac::HSMCI::ptr() };
 
     let mut wait = 0u32;
@@ -284,9 +342,12 @@ pub unsafe fn write_block(block_address: u32, src: &[u8; 512]) -> Result<(), Cmd
             .trtyp().single()
     });
 
+    // See the note on SR at the top: accumulate, do not just look.
+    let mut acc = 0u32;
     let mut wait = 0u32;
     loop {
         let sr = h.sr.read();
+        acc |= sr.bits();
         if sr.cmdrdy().bit_is_set() {
             if sr.rtoe().bit_is_set() {
                 reset();
@@ -315,6 +376,7 @@ pub unsafe fn write_block(block_address: u32, src: &[u8; 512]) -> Result<(), Cmd
         let mut wait = 0u32;
         loop {
             let sr = h.sr.read();
+            acc |= sr.bits();
             if sr.txrdy().bit_is_set() {
                 break;
             }
@@ -340,30 +402,41 @@ pub unsafe fn write_block(block_address: u32, src: &[u8; 512]) -> Result<(), Cmd
 
     // Data sent; wait for the block to be flushed and then for the card to
     // finish programming it.
+    // BLKE ("must be used only for write operations") is cleared by reading
+    // SR, so it is looked at in the same read that is accumulated.
     let mut wait = 0u32;
-    while h.sr.read().blke().bit_is_clear() {
+    loop {
+        let bits = h.sr.read().bits();
+        acc |= bits;
+        if bits & BLKE != 0 {
+            break;
+        }
         wait = wait.wrapping_add(1);
         if wait == 10_000_000 {
-            debug!("write_block: blke timeout, sr={:#010x}", h.sr.read().bits());
+            debug!("write_block: blke timeout, sr={:#010x}", acc);
             reset();
             return Err(CmdError::ResponseTimeout);
         }
     }
     let mut wait = 0u32;
-    while h.sr.read().notbusy().bit_is_clear() {
+    loop {
+        let bits = h.sr.read().bits();
+        acc |= bits;
+        if bits & NOTBUSY != 0 {
+            break;
+        }
         wait = wait.wrapping_add(1);
         if wait == 50_000_000 {
-            debug!("write_block: card busy after program, sr={:#010x}", h.sr.read().bits());
+            debug!("write_block: card busy after program, sr={:#010x}", acc);
             reset();
             return Err(CmdError::ResponseTimeout);
         }
     }
 
-    let bits = h.sr.read().bits();
-    if bits & ((1 << 21) | (1 << 22) | (1 << 30) | (1 << 31)) != 0 {
-        debug!("write_block: data error at end, sr={:#010x}", bits);
+    if let Some(e) = data_error(acc) {
+        debug!("write_block: data error at end, sr={:#010x}", acc);
         reset();
-        return Err(CmdError::CrcError);
+        return Err(e);
     }
     Ok(())
 }
@@ -388,12 +461,34 @@ pub struct MultiWrite {
     /// `abandon` already ran: the controller was reset and the card
     /// stopped, so `end` has nothing left to do.
     aborted: bool,
+    /// High-Speed clock to go back to once the write is over (0: none); the
+    /// write itself runs at 24 MHz.
+    hs_restore: u32,
+    /// Every SR read since CMD25, ORed (see the note on SR at the top).
+    acc: u32,
 }
 
 /// Open a CMD25 write of `count` blocks starting at `block_address` (card
 /// native units, like `write_block`). Nothing is sent to the card yet beyond
 /// the command itself.
 pub unsafe fn write_multi_begin(block_address: u32, count: u32) -> Result<MultiWrite, CmdError> {
+    let hs = unsafe { lower_clock_for_write() };
+    match unsafe { write_multi_begin_at_current_clock(block_address, count) } {
+        Ok(mut mw) => {
+            mw.hs_restore = hs;
+            Ok(mw)
+        }
+        Err(e) => {
+            unsafe { raise_clock_after_write(hs) };
+            Err(e)
+        }
+    }
+}
+
+unsafe fn write_multi_begin_at_current_clock(
+    block_address: u32,
+    count: u32,
+) -> Result<MultiWrite, CmdError> {
     let h = unsafe { &*pac::HSMCI::ptr() };
     if count == 0 || count > 0xFFFF {
         return Err(CmdError::BadResponse);
@@ -448,7 +543,7 @@ pub unsafe fn write_multi_begin(block_address: u32, count: u32) -> Result<MultiW
             return Err(CmdError::ResponseTimeout);
         }
     }
-    Ok(MultiWrite { remaining: count, fed: 0, aborted: false })
+    Ok(MultiWrite { remaining: count, fed: 0, aborted: false, hs_restore: 0, acc: 0 })
 }
 
 impl MultiWrite {
@@ -465,11 +560,12 @@ impl MultiWrite {
             let mut wait = 0u32;
             loop {
                 let sr = h.sr.read();
+                self.acc |= sr.bits();
                 if sr.txrdy().bit_is_set() {
                     break;
                 }
                 let bits = sr.bits();
-                if bits & ((1 << 21) | (1 << 22) | (1 << 30) | (1 << 31)) != 0 {
+                if self.acc & SR_DATA_ERR != 0 {
                     debug!("write_multi: data error at block {} word {}, sr={:#010x}",
                            self.fed, i, bits);
                     self.abandon();
@@ -491,6 +587,13 @@ impl MultiWrite {
                 | ((chunk[3] as u32) << 24);
             h.tdr.write_with_zero(|wr| unsafe { wr.bits(w) });
         }
+        // An error flagged in the very read that showed TXRDY, or in an
+        // earlier read that only looked at the flags, is caught here.
+        if self.acc & SR_DATA_ERR != 0 {
+            debug!("write_multi: data error after block {}, sr={:#010x}", self.fed, self.acc);
+            self.abandon();
+            return Err(CmdError::CrcError);
+        }
         self.remaining -= 1;
         self.fed += 1;
         Ok(())
@@ -501,6 +604,17 @@ impl MultiWrite {
     /// `feed`s -- short transfers (host gave up) are stopped the same way,
     /// the card just programs what it got.
     pub unsafe fn end(mut self) -> Result<(), CmdError> {
+        let r = unsafe { self.end_at_current_clock() };
+        self.restore_clock();
+        r
+    }
+
+    fn restore_clock(&mut self) {
+        let hs = core::mem::take(&mut self.hs_restore);
+        unsafe { raise_clock_after_write(hs) };
+    }
+
+    unsafe fn end_at_current_clock(&mut self) -> Result<(), CmdError> {
         let h = unsafe { &*pac::HSMCI::ptr() };
         if self.aborted {
             return Err(CmdError::CrcError);
@@ -514,11 +628,16 @@ impl MultiWrite {
         // send, and CMD12 with STOP_DATA is what ends that.
         if complete {
             let mut wait = 0u32;
-            while h.sr.read().xfrdone().bit_is_clear() {
+            loop {
+                let bits = h.sr.read().bits();
+                self.acc |= bits;
+                if bits & XFRDONE != 0 {
+                    break;
+                }
                 wait = wait.wrapping_add(1);
                 if wait == 50_000_000 {
                     debug!("write_multi: xfrdone timeout after {} blocks, sr={:#010x}",
-                           self.fed, h.sr.read().bits());
+                           self.fed, bits);
                     reset();
                     return Err(CmdError::ResponseTimeout);
                 }
@@ -533,35 +652,44 @@ impl MultiWrite {
                 .trcmd().stop_data()
         });
         let mut wait = 0u32;
-        while h.sr.read().cmdrdy().bit_is_clear() {
+        loop {
+            let bits = h.sr.read().bits();
+            self.acc |= bits;
+            if bits & 1 != 0 {
+                break;
+            }
             wait = wait.wrapping_add(1);
             if wait == 10_000_000 {
-                debug!("write_multi: CMD12 cmdrdy timeout, sr={:#010x}", h.sr.read().bits());
+                debug!("write_multi: CMD12 cmdrdy timeout, sr={:#010x}", bits);
                 reset();
                 return Err(CmdError::ResponseTimeout);
             }
         }
         // R1b: the card holds DAT0 low while it programs the final block.
         let mut wait = 0u32;
-        while h.sr.read().notbusy().bit_is_clear() {
+        loop {
+            let bits = h.sr.read().bits();
+            self.acc |= bits;
+            if bits & NOTBUSY != 0 {
+                break;
+            }
             wait = wait.wrapping_add(1);
             if wait == 50_000_000 {
-                debug!("write_multi: card busy after CMD12, sr={:#010x}", h.sr.read().bits());
+                debug!("write_multi: card busy after CMD12, sr={:#010x}", bits);
                 reset();
                 return Err(CmdError::ResponseTimeout);
             }
         }
 
-        let bits = h.sr.read().bits();
         if !complete {
             // We stopped early on purpose; the controller's unfinished-block
             // bookkeeping is not an error of the card's.
             return Ok(());
         }
-        if bits & ((1 << 21) | (1 << 22) | (1 << 30) | (1 << 31)) != 0 {
-            debug!("write_multi: data error at end, sr={:#010x}", bits);
+        if let Some(e) = data_error(self.acc) {
+            debug!("write_multi: data error at end, sr={:#010x}", self.acc);
             reset();
-            return Err(CmdError::CrcError);
+            return Err(e);
         }
         Ok(())
     }
@@ -600,6 +728,7 @@ impl MultiWrite {
             }
         }
         unsafe { reset() };
+        self.restore_clock();
     }
 }
 
@@ -608,12 +737,14 @@ impl Drop for MultiWrite {
         if self.remaining != 0 {
             self.abandon();
         }
+        self.restore_clock();
     }
 }
 
 /// Issue a CMD17 read of one 512-byte block. `block_address` is in the card's
 /// native units — block index for SDHC/SDXC, byte address for SDSC.
-pub unsafe fn read_block(block_address: u32, dst: &mut [u8; 512]) -> Result<(), CmdError> {
+#[inline(never)]
+pub unsafe fn read_block_raw(block_address: u32, dst: &mut [u8; 512]) -> Result<(), CmdError> {
     let h = unsafe { &*pac::HSMCI::ptr() };
 
     // Wait for NOTBUSY first — the card may still be holding DAT0 low
@@ -656,9 +787,14 @@ pub unsafe fn read_block(block_address: u32, dst: &mut [u8; 512]) -> Result<(), 
     // Wait for command response. Bound the spin so a hang doesn't lock us up
     // forever — at 400 kHz, the response is ~64 SD clocks = ~160 µs; many
     // millions of MCU cycles is plenty of headroom.
+    //
+    // `acc` collects every SR read from here to the end of the data phase:
+    // DCRCE/DTOE (and OVRE/UNRE) clear when read.
+    let mut acc = 0u32;
     let mut wait = 0u32;
     loop {
         let sr = h.sr.read();
+        acc |= sr.bits();
         if sr.cmdrdy().bit_is_set() {
             if sr.rtoe().bit_is_set() {
                 reset();
@@ -687,6 +823,7 @@ pub unsafe fn read_block(block_address: u32, dst: &mut [u8; 512]) -> Result<(), 
         let mut wait = 0u32;
         loop {
             let sr = h.sr.read();
+            acc |= sr.bits();
             if sr.rxrdy().bit_is_set() {
                 break;
             }
@@ -712,17 +849,41 @@ pub unsafe fn read_block(block_address: u32, dst: &mut [u8; 512]) -> Result<(), 
         chunk[3] = (w >> 24) as u8;
     }
 
+    // The block's CRC16 is checked after the last word, so DCRCE shows up
+    // here, in a read this loop would otherwise discard.
     let mut wait = 0u32;
-    while h.sr.read().xfrdone().bit_is_clear() {
+    loop {
+        let bits = h.sr.read().bits();
+        acc |= bits;
+        if bits & XFRDONE != 0 {
+            break;
+        }
         wait = wait.wrapping_add(1);
         if wait == 10_000_000 {
-            debug!("read_block: xfrdone timeout, sr={:#010x}", h.sr.read().bits());
+            debug!("read_block: xfrdone timeout, sr={:#010x}", bits);
             reset();
             return Err(CmdError::ResponseTimeout);
         }
     }
 
+    if let Some(e) = data_error(acc) {
+        debug!("read_block: data error, sr={:#010x}", acc);
+        reset();
+        return Err(e);
+    }
     Ok(())
+}
+
+/// `read_block_raw` with the same one retry and High-Speed fallback as
+/// `read_blocks_dma`.
+pub unsafe fn read_block(block_address: u32, dst: &mut [u8; 512]) -> Result<(), CmdError> {
+    match unsafe { read_block_raw(block_address, dst) } {
+        Err(CmdError::CrcError) => {
+            unsafe { drop_high_speed_clock() };
+            unsafe { read_block_raw(block_address, dst) }
+        }
+        r => r,
+    }
 }
 
 // ---- DMA-mode read --------------------------------------------------
@@ -837,39 +998,59 @@ pub unsafe fn read_block_dma_finish() -> Result<(), CmdError> {
     let h = unsafe { &*pac::HSMCI::ptr() };
     let dmac = unsafe { &*pac::DMAC::ptr() };
 
-    // Wait for DMAC done.
+    // Wait for DMAC done. SR is read here too, and kept: DCRCE/DTOE clear on
+    // read. A response timeout (CMD17 never answered) or a data timeout means
+    // the DMAC will never finish, so stop waiting for it.
+    let mut acc = 0u32;
     let mut wait = 0u32;
     while dmac.chsr.read().ena1().bit_is_set() {
+        acc |= h.sr.read().bits();
         wait = wait.wrapping_add(1);
-        if wait == 10_000_000 {
-            reset();
-            h.dma.write(|w| unsafe { w.bits(0) });
-            return Err(CmdError::ResponseTimeout);
+        if wait == 10_000_000 || acc & (SR_RTOE | SR_DTOE) != 0 {
+            abort_dma();
+            return Err(if acc & SR_RTOE == 0 && acc & SR_DTOE != 0 {
+                CmdError::CrcError
+            } else {
+                CmdError::ResponseTimeout
+            });
         }
     }
 
     // Wait for HSMCI to confirm the data phase is complete.
     let mut wait = 0u32;
-    while h.sr.read().xfrdone().bit_is_clear() {
+    loop {
+        let bits = h.sr.read().bits();
+        acc |= bits;
+        if bits & XFRDONE != 0 {
+            break;
+        }
         wait = wait.wrapping_add(1);
         if wait == 10_000_000 {
-            reset();
-            h.dma.write(|w| unsafe { w.bits(0) });
+            abort_dma();
             return Err(CmdError::ResponseTimeout);
         }
     }
 
-    // Check for data-path errors flagged in HSMCI.SR (UNRE / OVRE /
-    // DTOE / DCRCE bits 21/22/30/31).
-    let bits = h.sr.read().bits();
     h.dma.write(|w| unsafe { w.bits(0) });
-    if bits & ((1 << 21) | (1 << 22) | (1 << 30) | (1 << 31)) != 0 {
-        debug!("read_block_dma: data error sr={:#010x}", bits);
+    // CMD17's response errors are sticky until the next CMDR write.
+    if let Some(e) = resp_error(acc).or_else(|| data_error(acc)) {
+        debug!("read_block_dma: error sr={:#010x}", acc);
         reset();
-        return Err(CmdError::CrcError);
+        return Err(e);
     }
 
     Ok(())
+}
+
+/// Error exit for the DMA reads: stop DMAC channel 1 (or the next read waits
+/// on it forever), switch HSMCI's DMA mode off and reset the controller.
+#[inline(never)]
+unsafe fn abort_dma() {
+    let h = unsafe { &*pac::HSMCI::ptr() };
+    let dmac = unsafe { &*pac::DMAC::ptr() };
+    dmac.chdr.write_with_zero(|w| unsafe { w.bits(1 << 1) });
+    h.dma.write(|w| unsafe { w.bits(0) });
+    unsafe { reset() };
 }
 
 /// Largest multi-block read we accept in one call.
@@ -888,7 +1069,8 @@ pub const MAX_BLOCKS_PER_READ: usize = 128;
 /// `dst.len()` must be a non-zero multiple of 512 and at most
 /// `MAX_BLOCKS_PER_READ` blocks. Ends with CMD12 STOP_TRANSMISSION, which the
 /// card requires to leave the multiple-read state.
-pub unsafe fn read_blocks_dma(block_address: u32, dst: &mut [u8]) -> Result<(), CmdError> {
+#[inline(never)]
+pub unsafe fn read_blocks_dma_raw(block_address: u32, dst: &mut [u8]) -> Result<(), CmdError> {
     let h = unsafe { &*pac::HSMCI::ptr() };
     let dmac = unsafe { &*pac::DMAC::ptr() };
 
@@ -944,54 +1126,120 @@ pub unsafe fn read_blocks_dma(block_address: u32, dst: &mut [u8]) -> Result<(), 
             .trtyp().multiple()
     });
 
+    // Collect everything SR says from here on (see the note at the top).
+    let mut acc = 0u32;
+    let mut err: Option<CmdError> = None;
+
+    // The DMAC finishes when the last word has left the FIFO. A response
+    // timeout (CMD18 never answered) or a data timeout means it never will.
     let mut wait = 0u32;
     while dmac.chsr.read().ena1().bit_is_set() {
+        acc |= h.sr.read().bits();
         wait = wait.wrapping_add(1);
-        if wait == 50_000_000 {
-            reset();
-            h.dma.write(|w| unsafe { w.bits(0) });
-            return Err(CmdError::ResponseTimeout);
+        if wait == 50_000_000 || acc & (SR_RTOE | SR_DTOE) != 0 {
+            err = Some(if acc & SR_RTOE == 0 && acc & SR_DTOE != 0 {
+                CmdError::CrcError
+            } else {
+                CmdError::ResponseTimeout
+            });
+            break;
         }
     }
 
-    let mut wait = 0u32;
-    while h.sr.read().xfrdone().bit_is_clear() {
-        wait = wait.wrapping_add(1);
-        if wait == 50_000_000 {
-            reset();
-            h.dma.write(|w| unsafe { w.bits(0) });
-            return Err(CmdError::ResponseTimeout);
+    if err.is_none() {
+        let mut wait = 0u32;
+        loop {
+            let bits = h.sr.read().bits();
+            acc |= bits;
+            if bits & XFRDONE != 0 {
+                break;
+            }
+            wait = wait.wrapping_add(1);
+            if wait == 50_000_000 {
+                err = Some(CmdError::ResponseTimeout);
+                break;
+            }
         }
     }
 
-    // CMD12 STOP_TRANSMISSION — the card stays in read-multiple state until
-    // it sees this, and the next command would collide with streaming data.
+    // CMD18's response errors (RTOE/RCRCE/...) stay set until the next CMDR
+    // write, and the CMD12 below is one: look now.
+    if err.is_none() {
+        err = resp_error(acc);
+    }
+
+    // The card streams until CMD12 whatever happened above, so CMD12 is sent
+    // on every path. If the transfer did not finish cleanly the controller
+    // may be stuck mid-data (and its CMDR write-protected), so it is stopped
+    // and reset first and the CMD12 goes out as a plain command.
+    let clean = err.is_none();
+    if !clean {
+        abort_dma();
+    }
     h.cmdr.write_with_zero(|w| unsafe {
-        w.cmdnb().bits(12)
+        let w = w.cmdnb().bits(12)
             .rsptyp().r1b()
             .maxlat().set_bit()
-            .opdcmd().pushpull()
-            .trcmd().stop_data()
+            .opdcmd().pushpull();
+        if clean { w.trcmd().stop_data() } else { w.trcmd().no_data() }
     });
     let mut wait = 0u32;
-    while h.sr.read().cmdrdy().bit_is_clear() {
+    let mut stop_sr = 0u32;
+    loop {
+        let bits = h.sr.read().bits();
+        stop_sr |= bits;
+        if bits & 1 != 0 {
+            break;
+        }
         wait = wait.wrapping_add(1);
         if wait == 10_000_000 {
-            reset();
-            h.dma.write(|w| unsafe { w.bits(0) });
-            return Err(CmdError::ResponseTimeout);
+            stop_sr |= SR_RTOE;
+            break;
         }
     }
-
-    let bits = h.sr.read().bits();
+    acc |= stop_sr & SR_DATA_ERR;
     h.dma.write(|w| unsafe { w.bits(0) });
-    if bits & ((1 << 21) | (1 << 22) | (1 << 30) | (1 << 31)) != 0 {
-        debug!("read_blocks_dma: data error sr={:#010x}", bits);
-        reset();
-        return Err(CmdError::CrcError);
+
+    if err.is_none() && stop_sr & SR_RTOE != 0 {
+        // No answer to CMD12: the card may still be sending.
+        err = Some(CmdError::ResponseTimeout);
+    }
+    if err.is_none() {
+        err = data_error(acc);
+    }
+    if let Some(e) = err {
+        debug!("read_blocks_dma: error {:?}, sr={:#010x}", e, acc);
+        if !clean {
+            // R1b: let the card release DAT0 before the next command.
+            let mut wait = 0u32;
+            while h.sr.read().notbusy().bit_is_clear() {
+                wait = wait.wrapping_add(1);
+                if wait == 5_000_000 {
+                    break;
+                }
+            }
+        }
+        unsafe { reset() };
+        return Err(e);
     }
 
     Ok(())
+}
+
+/// `read_blocks_dma_raw` with one retry on a data/CRC error, and the High-Speed
+/// clock fallback: if the bus is running at the clock `set_high_speed_clock`
+/// armed and a read fails with `CrcError`, the clock drops to 24 MHz for good
+/// (the card stays in High-Speed mode and HSMODE stays on, which is a valid
+/// combination at any clock up to 50 MHz) and the read is repeated. Timeouts
+/// are not retried: nothing answered, and another attempt only waits again.
+pub unsafe fn read_blocks_dma(block_address: u32, dst: &mut [u8]) -> Result<(), CmdError> {
+    match unsafe { read_blocks_dma_raw(block_address, dst) } {
+        Err(CmdError::CrcError) => {
+            unsafe { drop_high_speed_clock() };
+            unsafe { read_blocks_dma_raw(block_address, dst) }
+        }
+        r => r,
+    }
 }
 
 /// Convenience: arm + finish back-to-back. Equivalent throughput to the
@@ -1008,10 +1256,10 @@ pub unsafe fn read_block_dma(
 
 // ---- High-Speed support ---------------------------------------------
 //
-// Not used by default. `opengdemu`'s `sd-highspeed` feature calls these from
-// `sdcard::init` to run the SD bus above the 25 MHz default-speed ceiling.
-// Unreferenced they are dropped at link time, so the default image does not
-// change.
+// `opengdemu`'s `sd-highspeed` feature calls these from `sdcard::init` to run
+// the SD bus above the 25 MHz default-speed ceiling. Unreferenced they are
+// dropped at link time. The clock bookkeeping at the end of the file is
+// always compiled in: with nothing armed it is a load and a compare.
 
 /// Set or clear HSMCI_CFG.HSMODE. With it set the controller changes the
 /// command and data lines on the rising edge of the card clock, which is what
@@ -1061,9 +1309,11 @@ pub unsafe fn read_short_block(
             .trtyp().single()
     });
 
+    let mut acc = 0u32;
     let mut wait = 0u32;
     loop {
         let sr = h.sr.read();
+        acc |= sr.bits();
         if sr.cmdrdy().bit_is_set() {
             if sr.rtoe().bit_is_set() {
                 reset();
@@ -1090,6 +1340,7 @@ pub unsafe fn read_short_block(
         let mut wait = 0u32;
         loop {
             let sr = h.sr.read();
+            acc |= sr.bits();
             if sr.rxrdy().bit_is_set() {
                 break;
             }
@@ -1114,12 +1365,79 @@ pub unsafe fn read_short_block(
     }
 
     let mut wait = 0u32;
-    while h.sr.read().xfrdone().bit_is_clear() {
+    loop {
+        let bits = h.sr.read().bits();
+        acc |= bits;
+        if bits & XFRDONE != 0 {
+            break;
+        }
         wait = wait.wrapping_add(1);
         if wait == 10_000_000 {
             reset();
             return Err(CmdError::ResponseTimeout);
         }
     }
+    // DCRCE is raised after the last word; see the note on SR at the top.
+    if let Some(e) = data_error(acc) {
+        reset();
+        return Err(e);
+    }
     Ok(())
+}
+
+// ---- High-Speed clock bookkeeping -------------------------------------------
+
+/// The clock the bus is meant to run at after a verified High-Speed switch;
+/// 0 while the bus is at (or has fallen back to) the Default Speed clock.
+static HS_CLOCK_HZ: AtomicU32 = AtomicU32::new(0);
+
+/// Clock of the Default Speed fallback and of writes while High-Speed is on.
+const SLOW_CLOCK_HZ: u32 = 24_000_000;
+
+/// Record that the bus now runs at the High-Speed clock `hz` after a verified
+/// switch, so a data error can fall back and writes can step down. Call it
+/// after `set_clock_hz`, not before.
+pub fn set_high_speed_clock(hz: u32) {
+    HS_CLOCK_HZ.store(hz, Ordering::Relaxed);
+}
+
+/// Run-time fallback after a data CRC error: if the bus is at the High-Speed
+/// clock, drop to 24 MHz for good. HSMODE and the card's mode stay as they
+/// are -- High-Speed mode at 24 MHz is legal and needs no CMD6 on a link that
+/// has just misbehaved -- and the caller repeats the read.
+unsafe fn drop_high_speed_clock() {
+    if HS_CLOCK_HZ.swap(0, Ordering::Relaxed) != 0 {
+        let hz = unsafe { set_clock_hz(SLOW_CLOCK_HZ) };
+        warn!("SD: data error at the High-Speed clock, falling back to {} Hz", hz);
+    }
+}
+
+/// Writes are not covered by the High-Speed verification (HSMODE moves the
+/// host's output edges), so they run at 24 MHz. Returns the High-Speed clock
+/// to restore with `raise_clock_after_write` (0: nothing to restore).
+unsafe fn lower_clock_for_write() -> u32 {
+    let hz = HS_CLOCK_HZ.load(Ordering::Relaxed);
+    if hz != 0 {
+        unsafe { set_clock_hz(SLOW_CLOCK_HZ) };
+    }
+    hz
+}
+
+unsafe fn raise_clock_after_write(hz: u32) {
+    // Only if the fallback has not cleared it meanwhile.
+    if hz != 0 && HS_CLOCK_HZ.load(Ordering::Relaxed) == hz {
+        unsafe { set_clock_hz(hz) };
+    }
+}
+
+/// Put the controller back in card-identification state (1-bit bus, 400 kHz,
+/// HSMODE off), for a full re-initialisation after a failed High-Speed
+/// back-out. The card is reset by CMD0 afterwards.
+pub unsafe fn restore_identification_mode() {
+    let h = unsafe { &*pac::HSMCI::ptr() };
+    HS_CLOCK_HZ.store(0, Ordering::Relaxed);
+    unsafe { reset() };
+    unsafe { set_high_speed_mode(false) };
+    h.sdcr.write(|w| w.sdcsel().slota().sdcbus()._1());
+    unsafe { set_clock_hz(400_000) };
 }

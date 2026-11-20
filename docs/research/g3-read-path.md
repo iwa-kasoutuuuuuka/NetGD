@@ -150,7 +150,7 @@ HSMCI は GD-ROM の読み出し（`handle_cd_read`）以外に、**`cdda_task`�
 
 ### 6.1 `fast-complete`（`mcu/opengdemu/src/ide.rs` `stream_from_sd` の完了待ち）
 
-完了待ちのループで FIFO の最大レベルを覚え、それより下がったら `pulled = true`。`(i >= min_wait_ms || pulled) && lvl == 0` で抜ける。ホストが動かない場合（FIFO のレベルが動かない）は従来どおり下限まで待ち、200 ms で打ち切る。feature なしのコードは元のまま。
+完了待ちのループで FIFO の最大レベルを覚え、それより下がったら `pulled = true`。`(i >= min_wait_ms && lvl == 0) || (pulled && 0 を2回続けて読んだ)` で抜ける（R73 S1・S2 の修正：最大レベルは `level_after_prime` から始める。SMC が FPGA のカウンタを非同期に読むので 1 回の読みは裂けうる、2 回目は 1 ms 後なのでほぼ確実に直る）。ホストが動かない場合（FIFO のレベルが動かない）は従来どおり下限まで待ち、200 ms で打ち切る。feature なしのコードは元のまま。
 
 注意点：
 - タイマ刻み（1 ms）はそのまま。完了は FIFO が空になってから最大 1 ms 遅れる。
@@ -163,22 +163,24 @@ HSMCI は GD-ROM の読み出し（`handle_cd_read`）以外に、**`cdda_task`�
 - 判定は `ReadAhead::record(lba, count, first_chunk_max)`：前のリクエストの終端と今回の開始が一致したときだけ、「終端から、直前のリクエストの先頭チャンクと同じ長さ」を返す。シーク（不一致）では何もしない。長さは `stage_sectors_for`（次のトラックなら次のトラックの値）とトラックの残りで切る（`Prefetch::clamped`）。
 - 読むのは `fill_cd_read_buf_raw`（CMD18 の経路）だけ。マップされないトラックは、遅い経路を投機で走らせないので対象外。
 - 結果は通常のキャッシュ（`CD_READ_BUF_LBA`/`_LEN`）として入る。`stage_chunk` が LBA と長さを検査するので、外れても余計な 1 回の読み出しだけ。
-- ホストが既に次のコマンドを書いた（`command_pending`）か、バスリセット中（`reset_seen`）のときはやらない。
+- ホストが既に次のコマンドを書いた（`command_pending`）か、相手のデバイスにコマンドが来ている（`peer().command_pending()`）か、バスリセット中（`reset_seen`）か、CDDA 再生中のときはやらない。さらに `stream_from_sd`/`stream_pio_from_sd` が全セクタをステージして、ホストが全部引き取り、完了を出したときだけ（`STREAM_OK`、R73 S5）。
 - `dma-pattern` feature のときは無効（パターンがバッファを上書きするため）。
 - 副作用：先読みの CMD18（約 1〜2 ms）の間は `ide_task` が止まるので、ホストが直後に次のコマンドを書くと、受付がそのぶん遅れる。ミスしたときは同じ読み出しを後から行うことになるので、損は先読みが外れたときの 1 回ぶんだけ。
 - 実機で見る点：連続読み出しの 2 回目以降に `cache hit` が出ること、`CD_READ` から DMARQ までの時間が縮むこと、外れたときの悪化がないこと。
 
 ### 6.3 `sd-highspeed`（`sdcard.rs` `enable_high_speed`、`hsmci.rs` `read_short_block`/`set_high_speed_mode`、`common/sdfast/src/cmd6.rs`）
 
-手順：4 ビット・24 MHz にした直後に、
-1. CMD6 の確認モード（`0x00FFFFF1`）で 64 バイトのステータスを読み、グループ 1 の機能 1（High-Speed）の対応ビット（ビット 401）を見る。CMD6 に対応しないカード（SD 1.0）はここで失敗して 24 MHz のまま。
-2. 24 MHz で 8 ブロック（LBA 0 から）を基準として読む（`ide::loader_scratch()` を使う。IDE タスクが動く前）。
-3. CMD6 の切替モード（`0x80FFFFF1`）。ステータスのグループ 1 の選択（ビット 379〜376）が 1 で、ビジーでなければ成功。
+手順（R73 の指摘で作り直した版）：4 ビット・24 MHz にした直後に、
+1. CMD6 の確認モード（`0x00FFFFF1`）で 64 バイトのステータスを読み、対応ビット（ビット 401）が立ち、かつ要求の結果の欄（グループ 1、ビット 379〜376）が 1 であること（`cmd6::hs_selectable`）。CMD6 に対応しないカード（SD 1.0）はここで失敗して 24 MHz のまま。
+2. 24 MHz で、カード全体に散らした最大 48 か所から 14 ブロックの窓を読み、**情報量の多いデータ**（ブロックあたりの異なるバイト値が 160 以上のブロックが 12/14 以上）の窓を最大 4 つ選ぶ（`sdfast::verify`）。同じ窓を 2 回読んで同じハッシュになることも要求。**見つからなければ 24 MHz のまま**（ゼロだらけのカードでは配線の不良を検出できないため）。基準はブロックごとの 32 ビットハッシュで持つ（RAM に載せない）。`ide::loader_scratch()` を使う。IDE タスクが動く前。
+3. CMD6 の切替モード（`0x80FFFFF1`）。ステータスのグループ 1 の選択が 1 で、ビジーでなければ成功。
 4. 2 ms 待ち、`HSMCI_CFG.HSMODE`（ビット 8）を立て、クロックを 50 MHz 以下の最大（MCK 96 MHz なら 48 MHz）に。
-5. 同じ範囲を含む 20 ブロックを 16 回読み、先頭 8 ブロックが基準と一致し、HSMCI のデータエラーが無いことを確認。
-6. どれかが失敗したら、24 MHz に戻し、CMD6 でデフォルトスピード（`0x80FFFFF0`）へ戻し、HSMODE を落とす。カードは使える状態のまま。
+5. 4 つの窓を各 48 回、リトライなしの生の読み出し（`read_blocks_dma_raw`）で読み、**全ブロック**を基準のハッシュと比べる（約 1.3 MB）。HSMCI のデータエラーは `hsmci.rs` が累積した SR で見る（M1）。
+6. 失敗したら取り消す（`sdcard.rs` `back_out`）：24 MHz にして（HSMODE は残す。カードはまだ HS）、CMD12（エラー無視）、CMD13 で tran になるまで（最大 10 回）、CMD6 でデフォルトスピード（`0x80FFFFF0`）に切り替えてステータスが 0・非ビジー、HSMODE を落とし、CMD6 の「変更なし」（`0x00FFFFFF`）で選択が 0 と答えること、基準の窓を 24 MHz で読み直して一致。**どれか 1 つでも駄目なら** `init` がカードを 400 kHz・1 ビットに戻して**ハイスピードなしで初期化し直す**。
+7. 検証に通った後は `hsmci::set_high_speed_clock` で記録し、**実行中の読み出し（`read_block`・`read_blocks_dma`）でデータの CRC エラーが出たら 24 MHz に落として（HSMODE とカードは HS のまま、これは有効な組み合わせ）読み直す**。以後は 24 MHz。ハイスピードでなくても、CRC エラーは 1 回リトライする。
+8. **書き込みは 24 MHz**（`write_block`・`write_multi_begin` ～ `end`/`Drop` の間だけクロックを下げ、終わったら戻す）。HSMODE は書き込みの出力エッジも変えるので 48 MHz の書き込みは検証していない。24 MHz で HSMODE が入った書き込みは、カードが HS モードなので正しい組み合わせだが、これも実機では未検証。
 
-追加した HSMCI の関数は既定のビルドからは参照されないのでリンク時に消える。`read_block` など既存の関数は変えていない。
+追加した HSMCI の関数（`read_short_block`・`set_high_speed_mode`・`restore_identification_mode` など）は既定のビルドからは参照されないのでリンク時に消える。`read_block`・`read_blocks_dma`・書き込みは M1（SR の累積）で変わっており、既定のバイナリも変わる。
 
 注意：
 - `sdcard::init` は起動時に 1 回しか呼ばれない（`main.rs:156`）。ホットスワップの再初期化は現状もクロックを 400 kHz に戻さない。入れるときは HSMODE も落とす必要がある。
@@ -188,9 +190,10 @@ HSMCI は GD-ROM の読み出し（`handle_cd_read`）以外に、**`cdda_task`�
 
 ### 6.4 ホストテスト
 
-`common/sdfast`（新規、`no_std`、依存なし）：`cargo test` で 14 件。
+`common/sdfast`（新規、`no_std`、依存なし）：`cargo test` で 22 件（`verify` 5 件と `cmd6` 3 件は R73 の修正で追加）。
 - `readahead`：最初のリクエストは先読みしない／連続なら終端から先読み／シークで連続が切れる／隙間・重なりは連続ではない／長さは先頭チャンクで頭打ち／0 セクタ／アドレスのオーバーフロー／リセット／`clamped`
-- `cmd6`：引数の符号化、対応ビット 401、選択ビット 379〜376、ビジービット 273、切替の成否
+- `cmd6`：引数の符号化、対応ビット 401、選択ビット 379〜376、ビジービット 273、切替の成否、確認モードの結果欄、R1 のカード状態
+- `verify`：ブロックの情報量の判定（ゼロ・テキスト・乱数）、ハッシュが 1 ビットの反転・データ線の固定・ワード順の入れ替えを検出
 
 ## 7. 実機で測るべきもの（優先順）
 
@@ -235,7 +238,7 @@ HSMCI は GD-ROM の読み出し（`handle_cd_read`）以外に、**`cdda_task`�
 - **既定ビルドが変わっていないことの確認**：HEAD（`9dfa6ce2`）のワークツリーと、そこへ今回の変更を載せたものを、feature なしで同じ設定でビルドして `llvm-objcopy -O binary` の出力を比較した。2E（`off`）と v60（`off`）は **SHA-256 が一致（バイト単位で同一）**。4E（`DEFMT_LOG=info`）は同じサイズで 51 バイトだけ違う。defmt のログ ID（文字列の位置に依存する）が入れ替わっただけで、コードの差ではない。
 - ホストテスト：`common/sdfast` で `cargo test` 14 件成功。
 
-CI（`.github/workflows/build.yaml` の `host-tests`）には `common/sdfast` をまだ足していない（依頼で触らない範囲だったため）。足すなら matrix に `- crate: common/sdfast` を 1 行。
+CI（`.github/workflows/build.yaml` の `host-tests`）の matrix には `common/sdfast` が入っている（77 行目、後のコミットで追加済み。この節の最初の版は「まだ足していない」と書いていたが、古い）。
 
 ## 10. 関連ファイル
 
