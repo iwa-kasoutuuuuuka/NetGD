@@ -69,6 +69,9 @@ pub struct Track {
     /// the pool, read through `fat::lazy_locate`). Use `is_mapped`.
     pub ext_start: u16,
     pub ext_len: u16,
+    /// CDI: 1-based session number (`discimg::TrackDesc::session`), for
+    /// REQ_SES(n); 0 for a GDI. Fits in the struct's tail padding.
+    pub session: u8,
 }
 
 /// Block-run map of every mapped track file, filled by `load_image`.
@@ -1117,6 +1120,7 @@ fn parse(data: &[u8], path: &ImagePath, work: &mut [u8]) -> Result<Gdi, GdiError
     // a failed parse cannot leave the previous image's tail behind this one's.
     discimg::gdi::parse(data, &mut PoolSink::gdi(path, work)).map_err(|e| match e {
         discimg::Error::Sink(e) => e,
+        discimg::Error::NameTooLong => GdiError::BadFilename,
         _ => GdiError::Parse,
     })?;
     let tracks = tracks_mut();
@@ -1235,6 +1239,7 @@ impl discimg::TrackSink for PoolSink<'_> {
                 file_offset: t.file_offset,
                 ext_start: 0,
                 ext_len: 0,
+                session: t.session,
             })
             .map_err(|_| if is_cdi { GdiError::BadCdi } else { GdiError::TooManyTracks })?;
         if is_cdi {
@@ -1252,6 +1257,7 @@ impl discimg::TrackInfo for Track {
     fn start_lba(&self) -> u32 { self.start_lba }
     fn ctrl(&self) -> u8 { self.ctrl }
     fn sector_count(&self) -> u32 { self.sector_count }
+    fn session(&self) -> u8 { self.session }
 }
 
 /// Format a short filename as `BASE.EXT` into a fixed-size buffer

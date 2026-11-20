@@ -86,7 +86,7 @@ pub fn utf16_from_str(s: &str, out: &mut [u16]) -> Option<usize> {
 /// char above U+00FF cannot have come from a byte, so such a string is taken
 /// as-is.
 pub fn utf16_from_gdi_name(widened: &str, out: &mut [u16]) -> Option<usize> {
-    let mut bytes = [0u8; 64];
+    let mut bytes = [0u8; 128];
     let mut n = 0;
     for ch in widened.chars() {
         match (ch as u32 <= 0xFF, bytes.get_mut(n)) {
@@ -120,7 +120,7 @@ pub enum Feed {
 /// Recognises one particular long name in a stream of directory entries.
 ///
 /// `N` is the capacity of the name being sought in UTF-16 code units. The
-/// firmware uses 32 (the GDI parser's own limit); the tests use 255.
+/// firmware uses 128 (the GDI parser's own limit); the tests use 255.
 pub struct LfnMatcher<const N: usize> {
     target: [u16; N],
     tlen: usize,

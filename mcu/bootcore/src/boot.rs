@@ -218,12 +218,14 @@ impl Report {
 /// recovery? Not when this very run began as the recovery it asked for
 /// (`REQ`): otherwise an application whose problem a recovery cannot fix
 /// (an FPGA that does not start) would reset forever. With no report (no
-/// resident, a probe start) the answer is yes.
+/// resident, a probe start, an older resident) the answer is no as well:
+/// nothing would answer the request, and the reset would start the same
+/// application again, for ever.
 #[inline]
 pub fn request_allowed(r: Option<Report>) -> bool {
     match r {
         Some(r) => !r.trigger.request,
-        None => true,
+        None => false,
     }
 }
 

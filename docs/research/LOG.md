@@ -1068,6 +1068,14 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - CI に 2E `resident,sd-fast`（`DEFMT_LOG=off`）のビルドを追加（R81 の推奨。いちばん余裕の無い組み合わせを最初に検出する）。
 - 注：2E `resident,sd-fast` の text は 122,112 で、イメージ（512 B 丸め・CRC 込み）の空きはごくわずか。次に機能を足すときは R81 の `opt-level="z"` などが要る。
 
+### R86 小さな残り3つ（Sonnet）：GDI の名前の上限、ファームのトラックのセッション番号、`request_allowed(None)`
+- (1) GDI の名前の上限を 32 → **128 バイト**（`discimg::MAX_NAME`）。255 にしなかったのは、ファームが長い名前の照合中に名前を約5回持つため（128 で約 650 B、255 だと約 1.3 KB のスタック。2E の SRAM0 は約 8 KB 空き）。
+  超えたら新しい `discimg::Error::NameTooLong`（ファームでは `BadFilename`）。`Track::filename` は 8.3 の別名のままで、99 トラックの領域 `TRACKS` は 0xC64 B で不変。Redump 形式の長い名前のテスト、128/129 の境界、255 文字の VFAT 名の照合を追加。
+- (2) ファームの `Track` に `session: u8`（構造体の末尾の詰め物に入り RAM 増加 0）と `TrackInfo::session()` → セッション3つ以上の CDI の REQ_SES(n) がファームでも有効（R78 の残り）。
+- (3) `bootcore::boot::request_allowed(None)` を **false** に（常駐部が無いと復旧の要求でループするため。R84 の指摘）。FORMAT.md の X6、`resident-app-contract.md` §3-2、`resident.rs` を更新。
+- 確認：discimg・fatmap・bootcore・fwimage（2 skip）・netgd-expect（1 skip）すべて通過。ファーム text：4E 120,360、2E 120,372、v60 66,796、**2E resident,sd-fast 122,120（512 B 丸めと CRC を入れて残り約 244 B）**。
+- 注：`link/*.x` の「スタックは約 2 KB」のコメントが古い（実際は約 8 KB 空き）。
+
 ---
 
 ## 判断の記録（Decisions）

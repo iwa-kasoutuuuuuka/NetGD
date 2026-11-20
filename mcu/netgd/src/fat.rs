@@ -187,9 +187,9 @@ fn name_matches(raw: &[u8], name: &ShortFileName) -> bool {
 }
 
 /// Longest long name the lookup accepts, in UTF-16 code units. The GDI
-/// parser keeps file names to 32 bytes (`discimg::TrackDesc::filename`), so
-/// nothing longer is ever asked for.
-pub const MAX_LOOKUP_CHARS: usize = 32;
+/// parser keeps file names to `discimg::MAX_NAME` bytes
+/// (`discimg::TrackDesc::filename`), so nothing longer is ever asked for.
+pub const MAX_LOOKUP_CHARS: usize = discimg::MAX_NAME;
 
 /// What to look for in a directory.
 pub enum Key<'a> {

@@ -134,8 +134,8 @@ fn a_cold_gpbr_is_not_a_report_unless_it_looks_like_one() {
 fn request_allowed_rule_x6() {
     let none = Trigger::default();
     let rep = |t: Trigger, res: u8| Some(Report::parse(report(t, false, true, false, false, res)).unwrap());
-    // no report (probe start, older resident): allowed
-    assert!(request_allowed(None));
+    // no report (probe start, older resident): nothing would answer, so not allowed
+    assert!(!request_allowed(None));
     // a normal boot, a button boot, an invalid-app boot: allowed
     assert!(request_allowed(rep(none, RESULT_NONE)));
     assert!(request_allowed(rep(Trigger { button: true, request: false }, RESULT_RECOVERED)));

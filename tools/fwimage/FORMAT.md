@@ -232,8 +232,10 @@ with an app that is still valid.
 
 **Rule X6 (`request_allowed`).** The app must not ask for recovery again when
 the report says `REQ`: a recovery that did not help (an FPGA that never starts)
-would otherwise reset for ever. With no report, or one without `REQ` (a button
-boot, a plain boot, a power-on), it may ask once.
+would otherwise reset for ever. With no report (a probe start, no resident, an
+older resident) it must not ask at all: nothing would answer, and the reset
+would start the same app again. With a report without `REQ` (a button boot, a
+plain boot), it may ask once.
 
 ### Boot procedure the resident follows (reference: `mcu/bootcore/tests/common/sim.rs`)
 

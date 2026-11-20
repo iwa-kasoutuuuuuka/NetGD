@@ -117,8 +117,29 @@ fn unterminated_and_empty_quoted_names() {
 
 #[test]
 fn quoted_name_over_the_length_limit_fails() {
-    let long = format!("1\n1 0 4 2352 \"{} x\" 0\n", "a".repeat(31));
-    assert_eq!(parse_vec(long.as_bytes()), Err(Error::Parse));
+    let long = format!("1\n1 0 4 2352 \"{} x\" 0\n", "a".repeat(discimg::MAX_NAME - 1));
+    assert_eq!(parse_vec(long.as_bytes()), Err(Error::NameTooLong));
+    // Exactly at the limit is fine.
+    let ok = format!("1\n1 0 4 2352 \"{}\" 0\n", "a".repeat(discimg::MAX_NAME));
+    assert_eq!(parse_vec(ok.as_bytes()).unwrap()[0].filename.len(), discimg::MAX_NAME);
+    // A byte above 0x7F is widened to a two-byte char: 65 of them do not fit.
+    let mut raw = b"1\n1 0 4 2352 \"".to_vec();
+    raw.extend(std::iter::repeat(0xE9u8).take(65));
+    raw.extend_from_slice(b"\" 0\n");
+    assert_eq!(parse_vec(&raw), Err(Error::NameTooLong));
+}
+
+#[test]
+fn redump_style_long_names_parse() {
+    let gdi = "3\n\
+        1 0 4 2352 \"Crazy Taxi (Europe) (En,Fr,De,Es) (Track 01).bin\" 0\n\
+        2 600 0 2352 \"Crazy Taxi (Europe) (En,Fr,De,Es) (Track 02).raw\" 0\n\
+        3 45000 4 2352 \"Crazy Taxi (Europe) (En,Fr,De,Es) (Track 03).bin\" 0\n";
+    let t = parse_vec(gdi.as_bytes()).unwrap();
+    assert_eq!(t.len(), 3);
+    assert_eq!(t[0].filename.as_str(), "Crazy Taxi (Europe) (En,Fr,De,Es) (Track 01).bin");
+    assert_eq!(t[1].filename.as_str(), "Crazy Taxi (Europe) (En,Fr,De,Es) (Track 02).raw");
+    assert!(t[0].filename.len() > 32);
 }
 
 #[test]
@@ -166,24 +187,33 @@ fn errors() {
 
 #[test]
 fn filename_length_limit_counts_utf8_bytes_of_widened_bytes() {
-    let name32 = "a".repeat(32);
-    let name33 = "a".repeat(33);
-    let ok = format!("1\n1 0 4 2352 {} 0\n", name32);
-    let bad = format!("1\n1 0 4 2352 {} 0\n", name33);
-    assert_eq!(parse_vec(ok.as_bytes()).unwrap()[0].filename.len(), 32);
-    assert_eq!(parse_vec(bad.as_bytes()), Err(Error::Parse));
-    // Quotes do not count towards the 32.
-    let quoted = format!("1\n1 0 4 2352 \"{}\" 0\n", name32);
-    assert_eq!(parse_vec(quoted.as_bytes()).unwrap()[0].filename.len(), 32);
-    // A byte >= 0x80 is widened to a char and so takes two bytes: 16 fit, 17 do not.
-    let mut b16 = b"1\n1 0 4 2352 ".to_vec();
-    b16.extend(core::iter::repeat(0xE9u8).take(16));
-    b16.extend_from_slice(b" 0\n");
-    assert_eq!(parse_vec(&b16).unwrap()[0].filename.len(), 32);
-    let mut b17 = b"1\n1 0 4 2352 ".to_vec();
-    b17.extend(core::iter::repeat(0xE9u8).take(17));
-    b17.extend_from_slice(b" 0\n");
-    assert_eq!(parse_vec(&b17), Err(Error::Parse));
+    let max = discimg::MAX_NAME;
+    let ok = format!("1
+1 0 4 2352 {} 0
+", "a".repeat(max));
+    let bad = format!("1
+1 0 4 2352 {} 0
+", "a".repeat(max + 1));
+    assert_eq!(parse_vec(ok.as_bytes()).unwrap()[0].filename.len(), max);
+    assert_eq!(parse_vec(bad.as_bytes()), Err(Error::NameTooLong));
+    // Quotes do not count towards the limit.
+    let quoted = format!("1
+1 0 4 2352 \"{}\" 0
+", "a".repeat(max));
+    assert_eq!(parse_vec(quoted.as_bytes()).unwrap()[0].filename.len(), max);
+    // A byte >= 0x80 is widened to a char and so takes two bytes: half fit, one more does not.
+    let mut b16 = b"1
+1 0 4 2352 ".to_vec();
+    b16.extend(core::iter::repeat(0xE9u8).take(max / 2));
+    b16.extend_from_slice(b" 0
+");
+    assert_eq!(parse_vec(&b16).unwrap()[0].filename.len(), max);
+    let mut b17 = b"1
+1 0 4 2352 ".to_vec();
+    b17.extend(core::iter::repeat(0xE9u8).take(max / 2 + 1));
+    b17.extend_from_slice(b" 0
+");
+    assert_eq!(parse_vec(&b17), Err(Error::NameTooLong));
 }
 
 #[test]
@@ -240,7 +270,7 @@ fn agrees_with_the_original_parser_on_a_corpus() {
         b"1\n",
         b"1\r\n1 0 4 2352 \"a.bin\" 0\r\n",
         b"2\n  1 0 4 2352 a.bin\n\t2 5 0 2336 b.bin 0 x\n",
-        b"1\n1 0 4 2352 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0\n",
+        b"1\n1 0 4 2352 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0\n",
         b"1\n1 99999999999 4 2352 a.bin 0\n",
         b"1\n1 0 4 2352\n",
         b"abc\n",
@@ -260,6 +290,7 @@ fn agrees_with_the_original_parser_on_a_corpus() {
                 }
             }
             (Err(Error::Parse), Err(oracle::GdiError::Parse)) => {}
+            (Err(Error::NameTooLong), Err(oracle::GdiError::Parse)) => {}
             (Err(Error::Sink(Full)), Err(oracle::GdiError::TooManyTracks)) => {}
             (n, o) => panic!("mismatch on {:?}: {:?} vs {:?}", String::from_utf8_lossy(c), n, o),
         }

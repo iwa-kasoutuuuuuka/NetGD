@@ -24,6 +24,15 @@ pub use heapless::{String, Vec};
 /// Maximum tracks a disc may carry (Red Book's real limit).
 pub const MAX_TRACKS: usize = 99;
 
+/// Longest GDI track file name accepted, in bytes (a byte >= 0x80 costs two,
+/// see `gdi::strip_quotes`). VFAT allows 255 UTF-16 units; the firmware
+/// holds the name on its stack several times over while it looks the file up
+/// by its long name (the descriptor, the widened copy, the UTF-16 target of
+/// the matcher: about 5 bytes per name byte), and 128 covers every Redump
+/// name (`... (Track 01).bin` is under 70) at about 650 bytes. A longer name
+/// is [`Error::NameTooLong`], not a silent truncation.
+pub const MAX_NAME: usize = 128;
+
 /// One track as parsed from a descriptor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -37,7 +46,7 @@ pub struct TrackDesc {
     pub sector_count: u32,
     /// GDI: the file name with any `"` removed. CDI: empty (the whole image
     /// is one file, which the caller already knows).
-    pub filename: String<32>,
+    pub filename: String<MAX_NAME>,
     /// Byte offset of the track's first sector within its file.
     pub file_offset: u32,
     /// CDI: 1-based number of the (non-empty) session the track belongs to,
@@ -129,6 +138,8 @@ pub enum Error<E> {
     BadCdi,
     /// The caller's reader failed or hit EOF.
     Read,
+    /// A GDI track file name is longer than [`MAX_NAME`] bytes.
+    NameTooLong,
     /// The sink refused a track.
     Sink(E),
 }

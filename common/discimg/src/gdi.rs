@@ -1,7 +1,7 @@
 //! GDI text parser. Behaviour is that of the original firmware parser,
 //! quirks included (see the tests).
 
-use crate::{Error, Full, String, TrackDesc, TrackSink, Vec, VecSink, MAX_TRACKS};
+use crate::{Error, Full, String, TrackDesc, TrackSink, Vec, VecSink, MAX_NAME, MAX_TRACKS};
 
 /// Parse `data` (the whole `.gdi` text) into `sink`.
 ///
@@ -32,7 +32,7 @@ pub fn parse<S: TrackSink>(data: &[u8], sink: &mut S) -> Result<(), Error<S::Err
         let filename_raw = fields.next_name().ok_or(Error::Parse)?;
         let _ = fields.next(); // pregap, ignored
 
-        let filename = strip_quotes(filename_raw).ok_or(Error::Parse)?;
+        let filename = strip_quotes(filename_raw).ok_or(Error::NameTooLong)?;
         let t = TrackDesc {
             number,
             start_lba,
@@ -60,9 +60,9 @@ pub fn parse_vec(data: &[u8]) -> Result<Vec<TrackDesc, MAX_TRACKS>, Error<Full>>
 }
 
 /// Copy of the name with every `"` dropped. Each byte is widened to a char,
-/// so a byte >= 0x80 costs two bytes of the 32 -- `None` if it overflows.
-fn strip_quotes(raw: &[u8]) -> Option<String<32>> {
-    let mut buf: String<32> = String::new();
+/// so a byte >= 0x80 costs two bytes of [`MAX_NAME`] -- `None` if it overflows.
+fn strip_quotes(raw: &[u8]) -> Option<String<MAX_NAME>> {
+    let mut buf: String<MAX_NAME> = String::new();
     for &b in raw {
         if b == b'"' {
             continue;

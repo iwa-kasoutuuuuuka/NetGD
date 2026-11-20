@@ -386,6 +386,28 @@ fn gdi_names_arrive_as_widened_utf8() {
 }
 
 #[test]
+fn long_redump_names_are_matched() {
+    let name = "Crazy Taxi (Europe) (En,Fr,De,Es) (Track 01).bin";
+    assert!(name.len() > 32);
+    let dir = file(name, &alias("CRAZYT~1", "BIN"));
+    let mut m = LfnMatcher::<128>::from_gdi_name(name).unwrap();
+    assert_eq!(run(&mut m, &dir), vec![true]);
+    // One char different in the middle: no match.
+    let mut m = LfnMatcher::<128>::from_gdi_name("Crazy Taxi (Europe) (En,Fr,De,Es) (Track 02).bin").unwrap();
+    assert_eq!(run(&mut m, &dir), vec![false]);
+    // Widened UTF-8 in a long name (decoded through the 128-byte scratch).
+    let long = format!("{} Caf\u{e9}.bin", "x".repeat(90));
+    let widened: String = long.bytes().map(|b| b as char).collect();
+    let dir = file(&long, &alias("XXXXXX~1", "BIN"));
+    let mut m = LfnMatcher::<128>::from_gdi_name(&widened).unwrap();
+    assert_eq!(run(&mut m, &dir), vec![true]);
+    // The longest legal VFAT name (255 units) still matches with N = 255.
+    let max = "m".repeat(255);
+    let dir = file(&max, &alias("MMMMMM~1", "BIN"));
+    assert_eq!(run(&mut LfnMatcher::<255>::from_str(&max).unwrap(), &dir), vec![true]);
+}
+
+#[test]
 fn padding_with_zero_is_tolerated() {
     let a = alias("TRACK0~1", "BIN");
     let mut dir = file("Track 1.bin", &a); // 11 chars: terminator, then 1 pad

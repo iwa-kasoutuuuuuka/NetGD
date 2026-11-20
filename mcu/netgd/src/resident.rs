@@ -76,11 +76,9 @@ pub fn boot_report() -> Option<Report> {
 /// resident to answer (no report: the request would reset the chip into the
 /// same application, forever), and not when this boot already is the result
 /// of such a request (a recovery that did not fix the problem would loop).
-///
-/// `bootcore::boot::request_allowed` alone says yes to "no report", for the
-/// resident-side documentation's sake; the application needs both.
+/// Both are `bootcore::boot::request_allowed`.
 pub fn request_allowed(report: Option<Report>) -> bool {
-    report.is_some() && boot::request_allowed(report)
+    boot::request_allowed(report)
 }
 
 /// Why [`request_recovery`] returned.
