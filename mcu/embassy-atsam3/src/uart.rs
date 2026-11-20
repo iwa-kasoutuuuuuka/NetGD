@@ -10,7 +10,7 @@
 
 use core::fmt::{self, Write};
 
-use crate::pac::{self, PIOA, UART};
+use crate::pac::{self, UART};
 
 const PMC_UART0_PID: u8 = 8;
 

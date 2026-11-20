@@ -1,8 +1,7 @@
 
 use defmt::debug;
-use pac::pwm::clk;
 
-use crate::{pac::PMC, config::{self, ClockConfig}};
+use crate::{pac::PMC, config::ClockConfig};
 use crate::pac;
 
 #[inline]

@@ -26,6 +26,8 @@ lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 
 [features]
 rt = ["atsam3u4e-pac/rt"]
+# Adds defmt::Format impls for the peripheral singletons (see lib.rs).
+defmt = []
 time-driver = [
     "embassy-time/tick-hz-1_000",
     "embassy-time-driver/tick-hz-1_000",

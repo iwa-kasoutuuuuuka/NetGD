@@ -7,10 +7,9 @@
 #[cfg(feature = "rt")]
 use crate::pac::interrupt;
 // use embedded_hal_async::digital::Wait;
-use embedded_hal::digital::v2::{InputPin, PinState, OutputPin, toggleable, StatefulOutputPin};
-use crate::pac::{pioa, PIOA, PIOB, PIOC};
+use embedded_hal::digital::v2::toggleable;
+use crate::pac::{PIOA, PIOB, PIOC};
 use crate::{peripherals, Peri};
-use defmt::debug;
 
 use crate::pac::pioa::RegisterBlock;
 
@@ -204,41 +203,41 @@ unsafe fn ID_PIOA() {
 #[cfg(feature = "rt")]
 #[interrupt]
 unsafe fn ID_PIOB() {
-    debug!("PIOB IRQ");
+    defmt::debug!("PIOB IRQ");
 }
 
 #[cfg(feature = "rt")]
 #[interrupt]
 unsafe fn ID_PIOC() {
-    debug!("PIOC IRQ");
+    defmt::debug!("PIOC IRQ");
 }
 
 pub struct PeripheralA<'d, T: PeripheralType> {
-    pin: Flex<'d, T>,
+    _pin: Flex<'d, T>,
 }
 impl<'d, T: Pin> PeripheralA<'d, T> {
     pub fn new(pin: Peri<'d, T>) -> Self {
         let mut pin = Flex::new(pin);
         pin.set_perip_a();
         pin.disable_pio();
-        Self { pin }
+        Self { _pin: pin }
     }
 }
 pub struct PeripheralB<'d, T: PeripheralType> {
-    pin: Flex<'d, T>,
+    _pin: Flex<'d, T>,
 }
 impl<'d, T: Pin> PeripheralB<'d, T> {
     pub fn new(pin: Peri<'d, T>) -> Self {
         let mut pin = Flex::new(pin);
         pin.set_perip_b();
         pin.disable_pio();
-        Self { pin }
+        Self { _pin: pin }
     }
 }
 
 /// Type-erased GPIO pin
 pub struct AnyPin {
-    pin_port: u8,
+    _pin_port: u8,
 }
 
 pub trait Pin: PeripheralType + Into<AnyPin> + sealed::Pin + Sized + 'static {
@@ -260,7 +259,7 @@ pub trait Pin: PeripheralType + Into<AnyPin> + sealed::Pin + Sized + 'static {
     #[inline]
     fn degrade(self) -> AnyPin {
         AnyPin {
-            pin_port: self.pin_port(),
+            _pin_port: self.pin_port(),
         }
     }
 }
@@ -401,8 +400,6 @@ impl<'d, T: Pin> Flex<'d, T> {
         Self { pin }
     }
 
-    #[inline]
-    fn regs(&self) -> &'static RegisterBlock { self.pin.block() }
     #[inline]
     fn bitmask(&self) -> u32 { 1u32 << self.pin.pin() }
 

@@ -1,15 +1,17 @@
+//! Hand-written HAL for the ATSAM3U4E, used by the OpenGDEMU firmware.
+//!
+//! Cargo features:
+//! - `rt`: interrupt handlers and the PAC's vector table (enables `atsam3u4e-pac/rt`).
+//! - `time-driver`: embassy-time driver on SysTick, ticking at 1 kHz.
+//! - `defmt`: `defmt::Format` impls for the peripheral singletons.
+//!
+//! [`init`] sets up the clocks, SMC, DMAC, HSMCI and UART, and returns the user pins.
 #![no_std]
 
 pub use atsam3u4e_pac as pac;
 pub use embassy_hal_internal::{Peri, PeripheralType};
 
 use clocks::PowerManagementController;
-use cortex_m::peripheral::syst::{SystClkSource, self};
-use cortex_m::peripheral::{NVIC, SYST};
-use pac::{WDT, PMC};
-use defmt::debug;
-
-use crate::gpio::Pin;
 
 pub mod config;
 
@@ -88,8 +90,6 @@ embassy_hal_internal::interrupt_mod!(
     ID_UDPHS,
 );
 
-use pac::HSMCI as LED;
-
 // Holds peripherial for each pin in Ports A, B, & C
 embassy_hal_internal::peripherals! {
     PA0, PA1, PA2, PA3, PA4, PA5, PA6, PA7, PA8, PA9, PA10, PA11, PA12, PA13, PA14, PA15, PA16, PA17, PA18, PA19, PA20, PA21, PA22, PA23, PA24, PA25, PA26, PA27, PA28, PA29, PA30, PA31,
@@ -117,7 +117,7 @@ pub struct UserPeripherals {
 pub fn init(config: config::Config) -> UserPeripherals {
     // Do this first, so that it panics if user is calling `init` a second time
     // before doing anything important.
-    let mut core_p = cortex_m::Peripherals::take().unwrap();
+    let _core_peri = cortex_m::Peripherals::take().unwrap();
     let pac_p = atsam3u4e_pac::Peripherals::take().unwrap();
 
     let p = Peripherals::take();

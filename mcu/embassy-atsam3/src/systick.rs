@@ -1,13 +1,14 @@
 
 
+#[cfg(feature = "time-driver")]
 use crate::{pac, config::SystickConfig};
+#[cfg(feature = "time-driver")]
 use cortex_m::peripheral::syst::SystClkSource;
 use cortex_m_rt::exception;
 use core::cell::Cell;
 
 use critical_section::Mutex;
-use portable_atomic::{AtomicU8, AtomicUsize, Ordering, AtomicU32};
-use defmt::debug;
+use portable_atomic::{AtomicUsize, Ordering};
 
 /// Milliseconds since boot.
 ///
@@ -30,8 +31,9 @@ pub fn set_tick_hook(f: fn()) {
     TICK_HOOK.store(f as usize, Ordering::Release);
 }
 
+#[cfg(feature = "time-driver")]
 pub(crate) unsafe fn init(config : SystickConfig) {
-    debug!("Using {} for 1ms systick", config.div);
+    defmt::debug!("Using {} for 1ms systick", config.div);
 
     // TODO: probably don't do this?
     let s = &mut pac::CorePeripherals::steal().SYST;
