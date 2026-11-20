@@ -1211,6 +1211,20 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：あり（フックの呼び出し箇所を逆アセンブルし、MD5 を照合した）。
 - 関連：R92、R93、R94、`docs/research/supra-static-analysis.md`。
 
+### R96 Drive の成果物を c821d0c5 に更新（Opus）
+
+- 担当：Opus。ユーザーの指示：「検証はこれで良しとします。GoogleDriveにupして」。
+- 問い：e9df6141（R91）から変わった成果物を Drive に反映する。
+- 結論：
+  - e9df6141 から変わったのは `docs/research/LOG.md` と `docs/research/supra-static-analysis.md`（新規）だけで、ファームウェアなどは変わっていない（`git log e9df6141..HEAD --stat`）。
+  - Drive の `docs/` に、新しい `LOG.md`（218,057 B、R95 まで）と `supra-static-analysis.md`（16,102 B）を上げた。
+  - 古い `LOG.md` は新しく作ったフォルダ `old-e9df6141/` に移した。
+  - Supra の実行ファイルや zip は上げていない（再配布にあたるため）。
+- 根拠：Drive が返した大きさが手元の `wc -c` と一致した。フォルダは https://drive.google.com/drive/folders/1u4Rmb1VWBFqc2f2mUeHfYpwxwod3c65H 。
+- 信頼度：確認済み。
+- Opus による検証：該当なし（Opus 自身の作業）。
+- 関連：R91、R95。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
