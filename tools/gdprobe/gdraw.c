@@ -1,0 +1,224 @@
+/* gdprobe: raw G1 ATAPI access. KOS 2.3.0 APIs used (checked against the fork):
+ *   g1_ata_mutex_lock/unlock   include/dc/g1ata.h  (cdrom.c serialises on the same
+ *                              _g1_ata_sem; unlock re-selects the master device)
+ *   timer_us_gettime64         include/kos/timer.h
+ *   thd_sleep                  include/kos/thread.h
+ * Register addresses are the ones g1ata.c and the openMenu gdemu_sdk.c use.
+ * Only the primary (GD-ROM) device is ever addressed: DEVICE_SELECT is never
+ * written here. */
+#include <kos.h>
+#include <dc/g1ata.h>
+#include <kos/timer.h>
+#include <stdio.h>
+#include <string.h>
+#include "gdraw.h"
+
+#define GD_ALTSTATUS    0xA05F7018u /* read */
+#define GD_DATA         0xA05F7080u
+#define GD_ERROR        0xA05F7084u /* read */
+#define GD_FEATURES     0xA05F7084u /* write */
+#define GD_IRQ_REASON   0xA05F7088u /* read */
+#define GD_LBA_MID      0xA05F7090u /* byte count low  */
+#define GD_LBA_HIGH     0xA05F7094u /* byte count high */
+#define GD_STATUS       0xA05F709Cu /* read; reading clears the interrupt */
+#define GD_COMMAND      0xA05F709Cu /* write */
+#define GD_EXT_INT_STAT 0xA05F6904u /* bit 0 = GD-ROM interrupt */
+
+#define SR_ERR  0x01
+#define SR_DRQ  0x08
+#define SR_BSY  0x80
+
+#define ATAPI_PACKET        0xA0
+#define ATA_IDENTIFY_PACKET 0xA1
+
+/* PIO byte-count limit written before PACKET: one sector per DRQ block, like
+ * a real GD-ROM. The data loop handles any block size the drive really uses. */
+#define BYTE_LIMIT 0x0800
+#define MAX_TOTAL  (8u * 1024 * 1024)   /* a drive that streams more than this is broken */
+
+#define OUT8(a, v)  (*(volatile uint8_t *)(a) = (v))
+#define IN8(a)      (*(volatile uint8_t *)(a))
+#define IN16(a)     (*(volatile uint16_t *)(a))
+#define IN32(a)     (*(volatile uint32_t *)(a))
+#define OUT16(a, v) (*(volatile uint16_t *)(a) = (v))
+
+static uint64_t now_us(void) { return timer_us_gettime64(); }
+
+/* Wait until (ALTSTATUS & mask) == 0. 1 = ok, 0 = timed out. */
+static int wait_clear(uint8_t mask, uint64_t deadline)
+{
+    for (;;) {
+        if (!(IN8(GD_ALTSTATUS) & mask))
+            return 1;
+        if (now_us() >= deadline)
+            return 0;
+    }
+}
+
+/* Wait for DRQ (1), or ERR (-1), or timeout (0). */
+static int wait_drq(uint64_t deadline)
+{
+    for (;;) {
+        uint8_t s = IN8(GD_ALTSTATUS);
+        if (!(s & SR_BSY)) {
+            if (s & SR_DRQ) return 1;
+            if (s & SR_ERR) return -1;
+        }
+        if (now_us() >= deadline)
+            return 0;
+    }
+}
+
+static int wait_irq(uint64_t deadline)
+{
+    for (;;) {
+        if (IN32(GD_EXT_INT_STAT) & 1)
+            return 1;
+        if (now_us() >= deadline)
+            return 0;
+    }
+}
+
+static void settle(void)
+{
+    /* ATA: wait ~400 ns after a command write before trusting the status. */
+    int i;
+    for (i = 0; i < 4; i++)
+        (void)IN8(GD_ALTSTATUS);
+}
+
+static int gd_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap,
+                     uint32_t timeout_ms, gd_result *r)
+{
+    uint64_t t0, deadline;
+    uint8_t st = 0;
+    uint32_t total = 0;
+    int i, d;
+    (void)ctx;
+    memset(r, 0, sizeof(*r));
+    if (g1_ata_mutex_lock()) {
+        r->rc = GD_BUSY;
+        return r->rc;
+    }
+    t0 = now_us();
+    deadline = t0 + (uint64_t)timeout_ms * 1000u;
+
+    if (!wait_clear(SR_BSY | SR_DRQ, deadline)) {
+        r->rc = GD_BUSY;
+        r->status = IN8(GD_ALTSTATUS);
+        goto done;
+    }
+    (void)IN32(GD_STATUS);          /* clear a stale interrupt */
+    OUT8(GD_FEATURES, 0);           /* PIO */
+    OUT8(GD_LBA_MID, BYTE_LIMIT & 0xFF);
+    OUT8(GD_LBA_HIGH, BYTE_LIMIT >> 8);
+    OUT8(GD_COMMAND, ATAPI_PACKET);
+    settle();
+
+    d = wait_drq(deadline);
+    if (d == 0) { r->rc = GD_TIMEOUT; r->status = IN8(GD_ALTSTATUS); goto done; }
+    if (d < 0)  { r->status = IN8(GD_STATUS); r->error = IN8(GD_ERROR); r->rc = GD_CHECK; goto done; }
+
+    (void)IN32(GD_STATUS);
+    for (i = 0; i < 6; i++)
+        OUT16(GD_DATA, (uint16_t)(cdb[2 * i] | (cdb[2 * i + 1] << 8)));
+
+    for (;;) {
+        if (!wait_irq(deadline) || !wait_clear(SR_BSY, deadline)) {
+            r->rc = GD_TIMEOUT;
+            r->status = IN8(GD_ALTSTATUS);
+            goto done;
+        }
+        st = IN8(GD_STATUS);        /* also clears the interrupt */
+        if (st & SR_ERR) {
+            r->error = IN8(GD_ERROR);
+            r->rc = GD_CHECK;
+            break;
+        }
+        if (st & SR_DRQ) {
+            uint32_t n = IN8(GD_LBA_MID) | ((uint32_t)IN8(GD_LBA_HIGH) << 8);
+            uint32_t words = (n + 1) / 2, w;
+            if (n == 0 || total + n > MAX_TOTAL) {
+                r->rc = GD_PROTO;
+                break;
+            }
+            for (w = 0; w < words; w++) {
+                uint16_t v = IN16(GD_DATA);
+                uint32_t off = total + 2 * w;
+                if (off < cap) buf[off] = (uint8_t)v;
+                if (off + 1 < cap) buf[off + 1] = (uint8_t)(v >> 8);
+            }
+            total += n;
+            continue;
+        }
+        break;                      /* no DRQ, no ERR: command complete */
+    }
+    r->status = st;
+done:
+    r->irr = IN8(GD_IRQ_REASON);
+    r->total = total;
+    r->stored = total < cap ? total : cap;
+    r->us = now_us() - t0;
+    g1_ata_mutex_unlock();
+    return r->rc;
+}
+
+/* ATA IDENTIFY PACKET DEVICE (0xA1): 512 bytes of identify data. Standard,
+ * read-only; still opt-in (config identify=on) because it is not something
+ * the BIOS is known to send to a GDEMU. */
+static int gd_identify(void *ctx, uint8_t *buf, uint32_t timeout_ms, gd_result *r)
+{
+    uint64_t t0, deadline;
+    int d, w;
+    (void)ctx;
+    memset(r, 0, sizeof(*r));
+    if (g1_ata_mutex_lock()) {
+        r->rc = GD_BUSY;
+        return r->rc;
+    }
+    t0 = now_us();
+    deadline = t0 + (uint64_t)timeout_ms * 1000u;
+    if (!wait_clear(SR_BSY | SR_DRQ, deadline)) {
+        r->rc = GD_BUSY;
+        goto done;
+    }
+    (void)IN32(GD_STATUS);
+    OUT8(GD_COMMAND, ATA_IDENTIFY_PACKET);
+    settle();
+    d = wait_drq(deadline);
+    if (d == 0) {
+        r->rc = GD_TIMEOUT;
+    } else if (d < 0) {
+        r->error = IN8(GD_ERROR);
+        r->status = IN8(GD_STATUS);
+        r->rc = GD_CHECK;
+    } else {
+        for (w = 0; w < 256; w++) {
+            uint16_t v = IN16(GD_DATA);
+            buf[2 * w] = (uint8_t)v;
+            buf[2 * w + 1] = (uint8_t)(v >> 8);
+        }
+        r->total = r->stored = 512;
+        r->status = IN8(GD_STATUS);
+        r->rc = GD_OK;
+    }
+done:
+    r->irr = IN8(GD_IRQ_REASON);
+    r->us = now_us() - t0;
+    g1_ata_mutex_unlock();
+    return r->rc;
+}
+
+static uint64_t op_now(void *ctx) { (void)ctx; return now_us(); }
+static void op_sleep(void *ctx, uint32_t ms) { (void)ctx; thd_sleep((int)ms); }
+static void op_progress(void *ctx, const char *m) { (void)ctx; printf("[gdprobe] %s\n", m); }
+
+void gdraw_get_ops(gd_ops *ops)
+{
+    ops->ctx = NULL;
+    ops->packet = gd_packet;
+    ops->identify = gd_identify;
+    ops->now_us = op_now;
+    ops->sleep_ms = op_sleep;
+    ops->progress = op_progress;
+}

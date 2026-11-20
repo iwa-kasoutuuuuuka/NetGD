@@ -1,0 +1,25 @@
+# gdprobe run configuration. Copy to <host folder>/gdprobe.cfg (build.ps1 does it).
+# Lines are key=value; '#' starts a comment. See README_ja.md.
+
+# Which device is plugged in: used in the record file name. stock | netgd
+label=stock
+
+# --- image switching (off = probe only the image that is mounted now) ---
+# ON sends `52 82 n` (the command openMenu uses to start a game). Read-only for
+# the drive's firmware, but it is the only non-passive thing this tool does.
+switch=off
+# Folder numbers to visit in order. Folder 07 is intentionally empty in the
+# stock-GDEMU workflow: the failed switch is recorded, the run continues.
+images=3,4,5,6,7
+# Switch back to this folder at the end (2 = the dcload-ip disc). 0 = do not.
+return_to=2
+switch_timeout_ms=15000
+
+# --- what to run per image ---
+throughput=on
+tp_batches=64
+tp_sectors=16
+seek=on
+seek_n=16
+# identify=on also sends ATA IDENTIFY PACKET DEVICE (0xA1) once. Off by default.
+identify=off

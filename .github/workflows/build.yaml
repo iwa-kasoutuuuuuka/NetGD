@@ -66,6 +66,21 @@ jobs:
         working-directory: ${{ matrix.crate }}
         run: cargo test
 
+  gdprobe-host:
+    name: gdprobe host tests (C + compare.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The KOS parts (main.c, gdraw.c) need DreamSDK and are not built here;
+      # this covers the record format, whitelist, chunked /pc/ writer, runner
+      # and the PC-side compare script.
+      - name: Run host tests
+        working-directory: tools/gdprobe
+        run: sh tests/run_tests.sh
+
   fpga-sim:
     name: FPGA simulation and Verilog check
     runs-on: ubuntu-latest
