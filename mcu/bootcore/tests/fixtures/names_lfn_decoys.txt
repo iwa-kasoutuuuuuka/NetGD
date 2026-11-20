@@ -1,0 +1,4 @@
+desc=mixed-case long name NetGD.Ogf (LFN + 8.3 entry); decoys NETGD.OGFX, NETGD-OLD.OGF, netgd.ogf.bak, NETGD.OG; a deleted NETGD.OGF before
+mount=ok
+file=NETGD   OGF:7:6000:ok
+file=NETGD   BIT:9:3000:ok

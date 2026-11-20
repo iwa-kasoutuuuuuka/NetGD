@@ -1,0 +1,4 @@
+desc=lower-case netgd.ogf / netgd.bit: 8.3 entries carrying the NT lower-case flag (no LFN)
+mount=ok
+file=NETGD   OGF:7:6000:ok
+file=NETGD   BIT:9:3000:ok

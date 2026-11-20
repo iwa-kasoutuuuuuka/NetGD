@@ -1,0 +1,4 @@
+desc=NETGD.OGF only inside a subdirectory (not found by the root lookup); NETGD.BIT in the root
+mount=ok
+file=NETGD   OGF:7:6000:NotFound
+file=NETGD   BIT:9:3000:ok

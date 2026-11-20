@@ -1,0 +1,4 @@
+desc=same card contents, 512-byte clusters, superfloppy: the root directory spans many clusters
+mount=ok
+file=NETGD   OGF:7:70000:ok
+file=NETGD   BIT:9:5000:ok

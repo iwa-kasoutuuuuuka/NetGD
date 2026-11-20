@@ -1,0 +1,4 @@
+desc=BPB 0x28 = 0x0080: mirroring off, active FAT 0
+mount=ok
+file=NETGD   OGF:7:6000:ok
+file=NETGD   BIT:9:3000:ok

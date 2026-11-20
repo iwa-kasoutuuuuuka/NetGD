@@ -1,0 +1,4 @@
+desc=mksdcard --small folders 01..07 + manifest, 60 long-named files, System Volume Information, then NETGD.BIT and NETGD.OGF (70000 B) last; 4 KiB clusters, MBR 0x0C at 8192
+mount=ok
+file=NETGD   OGF:7:70000:ok
+file=NETGD   BIT:9:5000:ok

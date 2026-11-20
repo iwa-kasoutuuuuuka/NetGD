@@ -1,0 +1,6 @@
+desc=the FAT32 volume (0x0C) is MBR entry 1; entry 0 is a small type-0x83 partition
+mount=NotFat32
+file=NETGD   OGF:7:6000:ok
+file=NETGD   BIT:9:3000:ok
+ideal=ok
+note=mount only looks at MBR entry 0 (src/fat.rs Volume::mount)

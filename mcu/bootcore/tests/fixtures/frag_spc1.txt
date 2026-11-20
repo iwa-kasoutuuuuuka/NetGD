@@ -1,0 +1,4 @@
+desc=target written into the holes left by deleted fillers (mcopy/mdel), 512-byte clusters
+mount=ok
+file=NETGD   OGF:7:20000:ok
+file=NETGD   BIT:9:3000:ok

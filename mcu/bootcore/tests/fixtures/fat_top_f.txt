@@ -1,0 +1,4 @@
+desc=every non-free FAT entry (EOC marks too) has its top 4 bits set to 0xF, in both FATs; fragmented target
+mount=ok
+file=NETGD   OGF:7:20000:ok
+file=NETGD   BIT:9:3000:ok

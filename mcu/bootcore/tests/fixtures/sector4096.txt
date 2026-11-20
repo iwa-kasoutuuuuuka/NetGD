@@ -1,0 +1,2 @@
+desc=mkfs.fat -S 4096 (4Kn logical sectors, never on an SD card): must be refused, not misread
+mount=REFUSE

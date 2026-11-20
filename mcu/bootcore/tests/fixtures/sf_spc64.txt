@@ -1,0 +1,4 @@
+desc=mkfs.fat -F 32 -s 64, no partition table (LBA 0 is the BPB), 32768-byte clusters
+mount=ok
+file=NETGD   OGF:7:6000:ok
+file=NETGD   BIT:9:3000:ok
