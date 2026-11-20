@@ -44,10 +44,15 @@ class IDEDevice(Elaboratable):
     - **IDE bus** (driven by the Dreamcast G1 connector): address-decoded
       via `IDEAddressDecode`. Reads drive `ide_data_out` combinationally;
       writes are level-triggered against `ide_wr` on the FPGA core clock.
-    - **MCU bus** (driven by the SAM3U SMC): a flat window of 16-bit words.
-      Layout matches the prior design's `docs/AddressMapMCU.md` so the eventual
-      Rust driver doesn't have to relearn it. FIFO entries (addr 9..11) are
-      stubbed for now; phase 3 will add the data FIFOs.
+      The Data register reads the read FIFO (MCU to host). Unmapped
+      addresses read as 0xFFFF.
+    - **MCU bus** (driven by the SAM3U SMC): a window of 16-bit slots,
+      addressed by `mcu_addr`, the 7-bit slot index (the top level uses
+      MCU_ADDR[7] to pick the device). The slot map is in
+      docs/AddressMapMCU.md. Slots 9-11 are the data FIFOs: slot 9 pops the
+      host-to-MCU FIFO on read and pushes the MCU-to-host FIFO on write, and
+      slots 10 and 11 report their levels. Slots 29-31 are the CDDA block,
+      which only the primary device forwards.
 
     Phase 2 scope: two devices share the IDE bus, master/slave selection
     via the DEV bit (bit 4 of the Device register). The Device register
@@ -55,8 +60,7 @@ class IDEDevice(Elaboratable):
     agree on who is currently selected. Every other IDE write and every
     IDE read is gated on `device_selected`. The instance only drives the
     IDE bus while it is selected; `ide_data_out_en` lets the top-level
-    pick the right output. Data register reads return 0xFFFF (FIFOs are
-    phase 3).
+    pick the right output.
     """
 
     def __init__(self, *, primary: bool = True, post_reset_count_bits: int = 24,

@@ -15,10 +15,11 @@ class OpenGDEMUCore(Elaboratable):
     Phase 2: two `IDEDevice` instances (primary GD-ROM, secondary HDD) share
     the IDE bus. The DEV bit (Device register bit 4) selects which one drives
     `io_IDE_DATA_OUT` and `io_IDE_INTRQ` on the IDE side. Each device gets
-    its own 128-byte MCU window:
+    its own MCU window of 128 16-bit slots (256 bytes; slot n is at byte
+    0x6300_0000 + 2n). See docs/AddressMapMCU.md for the slot map:
 
-      0x6300_0000..0x6300_007F   primary device (MCU_ADDR[7]=0)
-      0x6300_0080..0x6300_00FF   secondary device (MCU_ADDR[7]=1)
+      0x6300_0000..0x6300_00FF   primary device (MCU_ADDR[7]=0), slots 0x00-0x7F
+      0x6300_0100..0x6300_01FF   secondary device (MCU_ADDR[7]=1), slots 0x80-0xFF
 
     CDDA: `CDDAOutput` serialises MCU-supplied PCM onto SCK/SDAT/LRCK in the
     `audio` clock domain (CLK_11_2896_MHz, fed in on `io_AUDIO_CLK`). Its

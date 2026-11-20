@@ -364,6 +364,13 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **反映**：実機作業ガイド（Artifact 版3、`docs/research/user-tasks.html`）に、`--chip ATSAM3U2E`、CHIPID の期待値と結果の読み方の表、
   `probe-rs info --verbose`、`--connect-under-reset` を使わないこと、導通確認の安全手順（SD を抜く、136・138 に触れない）、追加のピン、JTAGSEL の記入欄を加えた。
 
+### R25 FPGA の古い docstring の修正（Haiku、Opus が確認）
+- `fpga/amaranth/hw/OpenGDEMU.py`：MCU 窓の説明を、byte `0x6300_0000〜00FF`（プライマリ）／`0x6300_0100〜01FF`（セカンダリ）、各 128 個の 16 ビットスロットに修正
+  （根拠：Quartus の qsf で MCU_ADDR[8:1] = SAM3U A[8:1]、`ide.rs` のセカンダリは +0x80 ワード、`main.rs` の `fpga.add(0x80 + 12)`）。R2 の食い違い1を解消。
+- `fpga/amaranth/hw/ide_device.py`：`IDEDevice` の docstring を実装に合わせた（Data レジスタは読み出し FIFO、スロット 9〜11 は FIFO と水位、29〜31 は CDDA）。R2 の食い違い2を解消。
+- **確認（Opus）**：差分は docstring のみ。シミュ 30/3/5/5 件パス（Haiku 実行）、生成 Verilog はコミット済みのものと一致（Opus が `git diff --exit-code` で確認）。
+- 残り（未修正）：`ide_device.py` 845 行付近の「Layout」コメントがスロット 0〜12 しか挙げず、スロット 12 を「Debug test reads 0xC0DE」としている。`ide.rs` の `read_fifo_depth` のコメント（256 と 1024）。
+
 ---
 
 ## 判断の記録（Decisions）
