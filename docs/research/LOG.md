@@ -1149,6 +1149,19 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 確認：Drive が返したファイルサイズがローカルと一致。2E の .bin は Drive の判定で種類が別の表示になる（R87 と同じ、内容はそのまま）。
 - 以後：新しい版を置くときは同じやり方（旧版を `old-<コミット>/` に移す）。
 
+### R92 Supra 2026.03（Windows 版）の静的解析（Opus、詳細は `docs/research/supra-static-analysis.md`）
+- 問い：出所のはっきりしない Supra の実行ファイルを、動かさずにどこまで確かめられるか。ユーザーがダウンロードを許可（「ダウンロード許可します。解析して」）。VirusTotal へのハッシュの照会は返事が無かったので、していない。
+- 結論：**静的に見る限り、マルウェアらしい兆候は無い。** ただし AGM 製の主な実行ファイル（`Supra.exe`・`af.exe`・`Downloader.exe`・`yosys.exe`）は署名が無く、取得したのは Internet Archive の写しで公式の配布物との一致は未確認。「バックドアが無い」とは言えない。
+- 根拠：
+  - zip は 171,183,087 B、SHA-256 `81819687…5e2c4`、MD5・SHA-1 は Internet Archive のメタデータと一致。危ないパスなし、CRC 正常。
+  - インポート表：socket・NETAPI32 などは同梱の Tcl と同じ組み合わせ（`yosys.exe` も同じ）。`GetAdaptersInfo` はノードロック型ライセンスの MAC とみられる。`CheckRemoteDebuggerPresent` あり。注入の API（`WriteProcessMemory` など）は無し。
+  - 文字列：埋め込みの通信先 URL・IP は無し（Qt・XML・論文・CRL だけ、ドメインの一覧は Qt の公開サフィックスの表）。パッカーの跡なし（エントロピー 6.0〜6.4）。`.bat` は PATH を通して呼ぶだけ。
+  - ESET `ecls.exe /clean-mode=none`：ファイル 1,827・オブジェクト 72,736、検出 0（定義 20261120）。Defender はこの PC では停止中。
+- 注意：`urjtag/inpout32.dll` は `CreateService` でカーネルドライバ（`inpoutx64.sys`）を入れる（悪用の知られた古いドライバ）。urjtag は使わない。`zadig` は USB ドライバを差し替える。正式版のライセンスを要求すると、PC の識別情報が AGM に渡るとみられる。
+- **R69 の訂正**：Supra 2026.03 の Yosys 0.61 に **`synth_agm` は無い**（上流の `synth_*` だけ）。AGM 向けの写像は `etc/af_map.tcl`（`yosys -import`）と `etc/arch/alta-*.ar`。`etc/AG16KDDF256.pinmap` はある。
+- 勧め：動かすならネットワークを切った VM か別の Windows で、`af.exe`・`yosys.exe` だけを使う。次は小さな設計を通して通信が出ないかを見てから、NetGD の AG16K 版でビットストリームの実サイズを測る（実行はユーザーの判断）。
+- 信頼度：ハッシュ・署名・インポート・文字列・ESET の結果は確認済み。用途の解釈（Tcl・ライセンス・Qt）は推測。Opus 単独で、Fable の検証なし。ファイルはスクラッチパッドにあり、リポジトリには入れていない（再配布にあたりうるため）。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -1184,3 +1197,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | CD_READ の SD 失敗は Error 0x34（MEDIUM ERROR）、既定のマウントの失敗は ILLEGAL REQUEST、副への 0x08・0xA0 は ABRT | 仕様に合わせる。実機で BIOS・メニューの反応を確認する（R90） | Fable 提案、Opus 承認 |
 | 2026-11-20 | 取り決めに GPBR0 の「復旧中」の値・`LOCK_UNKNOWN`・書き直しの上限3回を追加し、`IFACE_GEN` は 1 のまま | 常駐部もロック済みの基板もまだ無い（R90、契約 §10） | Fable 提案、Opus 承認 |
 | 2026-11-20 | `ack_command` の取りこぼし（A-c の残り）は FPGA の変更が要るので保留 | スロット 0 の書き込みで後から来たコマンドも消える（R90） | Opus |
+| 2026-11-20 | Supra は実行せず静的解析だけ。動かすなら隔離した環境で `af.exe`・`yosys.exe` だけ、urjtag（`inpout32` のカーネルドライバ）は使わない | 署名が無く公式の配布物との一致も未確認（R92） | Opus |
