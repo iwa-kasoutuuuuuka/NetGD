@@ -98,6 +98,40 @@ static void test_whitelist(void)
     c[1] = 0x24; c[5] = 1; CHECK(!wl_check(c, 0));    /* reserved byte */
     c[5] = 0; c[11] = 1; CHECK(!wl_check(c, 0));
 
+    /* CD_READ byte 1: exactly the CDREAD_FLAGS probe values (+ the configured one), FAD mode only */
+    {
+        static const uint8_t okf[4] = { 0x20, 0x24, 0x28, 0x10 };
+        int f;
+        memset(c, 0, 12); c[0] = 0x30; c[3] = 0xB0; c[4] = 0x5E; c[10] = 1;
+        for (i = 0; i < 4; i++) {
+            c[1] = okf[i]; c[10] = 1;  CHECK(wl_check(c, 0) && wl_check(c, 1));
+            c[10] = 64; CHECK(wl_check(c, 0));
+            c[10] = 65; CHECK(!wl_check(c, 0));
+            c[10] = 0;  CHECK(!wl_check(c, 0));
+            c[10] = 1; c[1] = (uint8_t)(okf[i] | 1); CHECK(!wl_check(c, 0));    /* MSF variant of each */
+        }
+        c[10] = 1;
+        c[1] = 0x30; CHECK(!wl_check(c, 0));
+        c[1] = 0x11; CHECK(!wl_check(c, 0));
+        c[1] = 0xE6; CHECK(!wl_check(c, 0));
+        c[1] = 0xF0; CHECK(!wl_check(c, 0));
+        c[1] = 0x00; CHECK(!wl_check(c, 0));
+        c[1] = 0x2C; CHECK(!wl_check(c, 0));
+        /* the configured value is allowed in addition, still FAD only */
+        c[1] = 0x30; CHECK(wl_check_cfg(c, 0, 0x30));
+        c[1] = 0xE6; CHECK(!wl_check_cfg(c, 0, 0x30));
+        c[1] = 0x20; CHECK(wl_check_cfg(c, 0, 0x30));
+        c[1] = 0x31; CHECK(!wl_check_cfg(c, 0, 0x31));
+        /* sweep all 256 values: accepted set is exactly the probe values (+ the cfg one) */
+        for (f = 0; f < 256; f++) {
+            int exp = (f == 0x20 || f == 0x24 || f == 0x28 || f == 0x10);
+            c[1] = (uint8_t)f;
+            CHECK((wl_check(c, 0) != NULL) == exp);
+            CHECK((wl_check_cfg(c, 0, 0x44) != NULL) == (exp || f == 0x44));
+            CHECK((wl_check_cfg(c, 1, 0x44) != NULL) == (exp || f == 0x44));
+        }
+    }
+
     /* 0x52: version always, mount only when switching is enabled */
     memset(c, 0, 12); c[0] = 0x52;
     CHECK(wl_check(c, 0));
@@ -180,6 +214,14 @@ static void test_cfg(void)
     CHECK(c.seek_n == 2);               /* clamped */
     CHECK(c.cdread_flags == 0x24);      /* bit 0 (MSF) forced off */
     CHECK(c.unknown_keys == 2);
+    gp_config_defaults(&c);
+    CHECK(c.do_cdread_flags == 1);
+    gp_config_parse(&c, "cdread_flags_test=off\n");
+    CHECK(c.do_cdread_flags == 0 && c.unknown_keys == 0);
+    gp_config_parse(&c, "cdread_flags_test=on\n");
+    CHECK(c.do_cdread_flags == 1);
+    gp_config_parse(&c, "cdread_flags_test=maybe\n");
+    CHECK(c.do_cdread_flags == 1 && c.unknown_keys == 1);
     gp_config_defaults(&c);
     gp_config_parse(&c, "label=a/b c;d\nimages=0,1000,x\n");
     CHECK(!strcmp(c.label, "abcd"));
@@ -265,7 +307,23 @@ typedef struct {
     int ua_sense;
     int ses_fail;            /* REQ_SES(2) returns CHECK */
     uint32_t toc_fad;        /* FAD of track 3 in the HD-area TOC (0 = 45150) */
+    int cd_typecheck;        /* CD_READ 0x28 (expected type = Mode 2 Form 1) on a Mode 1 image: CHECK 5/64/00 */
+    int cd_no_raw;           /* CD_READ with bit 4 ("Other", 2352 bytes) is refused: CHECK 5/24/00 */
+    int cd_no_flags;         /* every CD_READ flags value but 0x24 is refused (a drive that ignores the new ones) */
+    uint8_t cdflags;         /* cfg->cdread_flags, for the whitelist check */
+    int pend_sk, pend_asc, pend_ascq;   /* sense for the next REQ_ERROR */
+    int cd_reads[256];       /* CD_READ commands seen per CDB byte 1 */
 } fake;
+
+/* The raw 2352-byte Mode 1 sector the fake returns for flags 0x10: sync, header, mode 1, user data, zeroed EDC/ECC */
+static void raw_sector(uint32_t fad, uint8_t out[2352])
+{
+    uint32_t i, lba = fad - 150;
+    memset(out, 0, 2352);
+    memset(out + 1, 0xFF, 10);
+    out[12] = (uint8_t)(lba / 4500); out[13] = (uint8_t)((lba / 75) % 60); out[14] = (uint8_t)(lba % 75); out[15] = 1;
+    for (i = 0; i < 2048; i++) out[16 + i] = (uint8_t)(fad * 131u + i * 7u + 3u);
+}
 
 static uint8_t pat(uint32_t fad, uint32_t i) { return (uint8_t)(fad * 131u + i * 7u + 3u); }
 
@@ -276,7 +334,7 @@ static int f_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap
     uint32_t len = 0, i;
     memset(r, 0, sizeof(*r));
     f->cmds++;
-    if (!wl_check(cdb, f->sw_enabled)) f->sent_bad++;
+    if (!wl_check_cfg(cdb, f->sw_enabled, f->cdflags)) f->sent_bad++;
     if (f->stuck) {
         f->now += (uint64_t)timeout_ms * 1000u;
         r->rc = GD_TIMEOUT; r->us = (uint64_t)timeout_ms * 1000u; r->status = 0x80;
@@ -298,6 +356,7 @@ static int f_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap
         len = 10; d[0] = 0xF0;
         if (f->not_ready_forever || f->now < f->ready_at) { d[2] = 2; d[8] = f->not_ready_forever ? 0x3A : 0x04; d[9] = f->not_ready_forever ? 0 : 1; }
         else if (f->ua_sense) { d[2] = 6; d[8] = 0x29; f->ua_sense = 0; }
+        else if (f->pend_sk) { d[2] = (uint8_t)f->pend_sk; d[8] = (uint8_t)f->pend_asc; d[9] = (uint8_t)f->pend_ascq; f->pend_sk = 0; }
         goto data;
     }
     if (f->not_ready_forever || f->now < f->ready_at) {
@@ -334,14 +393,25 @@ static int f_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap
     case 0x30: {
         uint32_t fad = ((uint32_t)cdb[2] << 16) | ((uint32_t)cdb[3] << 8) | cdb[4];
         uint32_t cnt = ((uint32_t)cdb[8] << 16) | ((uint32_t)cdb[9] << 8) | cdb[10], s, b;
+        uint32_t ssz = (cdb[1] & 0x10) ? 2352 : 2048;
+        f->cd_reads[cdb[1]]++;
         f->now += 20000 + (uint64_t)cnt * 1000;
         r->us = 21500 + (uint64_t)cnt * 1000;
-        for (s = 0; s < cnt; s++)
-            for (b = 0; b < 2048; b++) {
-                uint32_t o = s * 2048 + b;
-                if (o < cap) buf[o] = pat(fad + s, b);
+        if ((cdb[1] == 0x28 && f->cd_typecheck) || (cdb[1] == 0x10 && f->cd_no_raw) ||
+            (cdb[1] != 0x24 && f->cd_no_flags)) {
+            r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50;
+            f->pend_sk = 5; f->pend_asc = (cdb[1] == 0x28) ? 0x64 : 0x24; f->pend_ascq = 0;
+            return r->rc;
+        }
+        for (s = 0; s < cnt; s++) {
+            uint8_t raw[2352];
+            if (ssz == 2352) raw_sector(fad + s, raw);
+            for (b = 0; b < ssz; b++) {
+                uint32_t o = s * ssz + b;
+                if (o < cap) buf[o] = (ssz == 2352) ? raw[b] : pat(fad + s, b);
             }
-        r->total = cnt * 2048; r->stored = r->total < cap ? r->total : cap;
+        }
+        r->total = cnt * ssz; r->stored = r->total < cap ? r->total : cap;
         return r->rc;
     }
     default: f->refused_seen++; r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50; return r->rc;
@@ -384,6 +454,7 @@ static int run_fake(fake *f, const gp_config *cfg)
     gp_sink sink = { NULL, s_line, s_sync };
     g_rec_len = 0; g_rec[0] = 0; g_syncs = 0; g_hash_lines = 0;
     f->sw_enabled = cfg->do_switch;
+    f->cdflags = cfg->cdread_flags;
     return gp_run(&ops, cfg, &sink);
 }
 
@@ -435,6 +506,81 @@ static void test_runner_plain(void)
     CHECK(find_line("probe=END abort=0"));
     /* seek positions alternate far / near and stay inside the span */
     CHECK(find_line("probe=SEEK_00 fad=45150") && find_line("probe=SEEK_01 fad=95150"));
+}
+
+static void test_runner_cdread_flags(void)
+{
+    static fake f;
+    gp_config c;
+    uint8_t raw[2352], sec[2048];
+    char expect[200];
+    uint32_t i;
+    gp_config_defaults(&c);
+    c.tp_batches = 2; c.seek_n = 4;
+
+    /* a drive that accepts all four: 2048 / 2048 / 2048 / 2352 */
+    memset(&f, 0, sizeof(f)); f.mounted = 2;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0);
+    CHECK(count_of("probe=CDREAD_FLAGS flags=") == 4);
+    for (i = 0; i < 2048; i++) sec[i] = pat(45150, i);
+    raw_sector(45150, raw);
+    snprintf(expect, sizeof(expect), "probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048 crc=%08x sense=none cdb=302000b05e00000000000100 rc=ok", crc32_calc(sec, 2048));
+    CHECK(find_line(expect));
+    snprintf(expect, sizeof(expect), "probe=CDREAD_FLAGS flags=0x24 fad=45150 count=1 ssz=2048 crc=%08x sense=none", crc32_calc(sec, 2048));
+    CHECK(find_line(expect));
+    snprintf(expect, sizeof(expect), "probe=CDREAD_FLAGS flags=0x28 fad=45150 count=1 ssz=2048 crc=%08x sense=none", crc32_calc(sec, 2048));
+    CHECK(find_line(expect));
+    snprintf(expect, sizeof(expect), "probe=CDREAD_FLAGS flags=0x10 fad=45150 count=1 ssz=2352 crc=%08x sense=none cdb=301000b05e00000000000100", crc32_calc(raw, 2352));
+    CHECK(find_line(expect));
+    CHECK(f.cd_reads[0x20] == 1 && f.cd_reads[0x28] == 1 && f.cd_reads[0x10] == 1);
+    CHECK(f.cd_reads[0x24] > 1);                       /* IP_READ, CDREAD_FLAGS 0x24, throughput, seek */
+    CHECK(find_line("img=0 probe=CDREAD_FLAGS flags=0x20") < find_line("probe=TP_000"));   /* before throughput */
+    CHECK(g_hash_lines == 7 + 2 * 16 + 4);              /* the battery writes no HASH lines */
+
+    /* a type-checking drive: 0x28 on a Mode 1 image = CHECK with sense; the battery goes on to 0x10 */
+    memset(&f, 0, sizeof(f)); f.mounted = 2; f.cd_typecheck = 1;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0);
+    CHECK(find_line("probe=CDREAD_FLAGS flags=0x28 fad=45150 count=1 ssz=- crc=- sense=5/64/00 cdb=302800b05e00000000000100 rc=check"));
+    CHECK(find_line("probe=CDREAD_FLAGS flags=0x10 fad=45150 count=1 ssz=2352"));
+    CHECK(find_line("probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048"));
+    CHECK(find_line("probe=TP_SUMMARY ok=2") && find_line("probe=END abort=0"));
+
+    /* no raw reads, and a drive that rejects every flags value but 0x24 */
+    memset(&f, 0, sizeof(f)); f.mounted = 2; f.cd_no_raw = 1;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(find_line("probe=CDREAD_FLAGS flags=0x10 fad=45150 count=1 ssz=- crc=- sense=5/24/00"));
+    memset(&f, 0, sizeof(f)); f.mounted = 2; f.cd_no_flags = 1;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(count_of("probe=CDREAD_FLAGS flags=") == 4 && count_of("rc=check") == 3);
+    CHECK(find_line("flags=0x24 fad=45150 count=1 ssz=2048"));
+
+    /* a configured cdread_flags outside the four is still sent (and the four still run) */
+    memset(&f, 0, sizeof(f)); f.mounted = 2;
+    gp_config_parse(&c, "cdread_flags=0x30\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.cd_reads[0x30] > 0 && count_of("probe=CDREAD_FLAGS flags=") == 4);
+    CHECK(find_line("probe=IP_READ fad=45150 count=7 cdb=303000b05e"));
+    gp_config_defaults(&c);
+    c.tp_batches = 2; c.seek_n = 4;
+
+    /* opt-out */
+    memset(&f, 0, sizeof(f)); f.mounted = 2;
+    gp_config_parse(&c, "cdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(!find_line("probe=CDREAD_FLAGS") && f.cd_reads[0x20] == 0 && f.cd_reads[0x28] == 0 && f.cd_reads[0x10] == 0);
+    CHECK(find_line("probe=IP_READ") && find_line("probe=TP_SUMMARY"));
+    gp_config_defaults(&c);
+
+    /* with image switching: every ready image gets its battery, the empty folder and img=0 do not */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7;
+    gp_config_parse(&c, "switch=on\nimages=3,7,4\nreturn_to=2\ntp_batches=1\nseek_n=2\nswitch_timeout_ms=2000\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0);
+    CHECK(find_line("img=3 probe=CDREAD_FLAGS flags=0x10") && find_line("img=4 probe=CDREAD_FLAGS flags=0x28"));
+    CHECK(!find_line("img=7 probe=CDREAD_FLAGS") && !find_line("img=0 probe=CDREAD_FLAGS"));
+    CHECK(count_of("probe=CDREAD_FLAGS flags=") == 8);
 }
 
 static void test_runner_switch(void)
@@ -531,6 +677,7 @@ int main(void)
     test_cfg();
     test_pcout();
     test_runner_plain();
+    test_runner_cdread_flags();
     test_runner_switch();
     test_runner_no_switch_when_off();
     test_runner_ip_fallback();

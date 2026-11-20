@@ -60,10 +60,9 @@ static void sync_out(runner *r)
 
 /* Send one CDB through the whitelist, record it, return the result. The reply
  * data stays in r->buf. `data_in_record` = show the reply bytes in the line. */
-static int do_cmd(runner *r, const char *name, const char *extra, const uint8_t cdb[12],
-                  uint32_t cap, uint32_t timeout_ms, int data_in_record, gd_result *res)
+/* The sending half of do_cmd (whitelist, drive, timeout accounting); writes no record line. */
+static int send_cmd(runner *r, const uint8_t cdb[12], uint32_t cap, uint32_t timeout_ms, gd_result *res)
 {
-    rec_probe p;
     memset(res, 0, sizeof(*res));
     if (r->abort) {
         res->rc = GD_REFUSED;
@@ -71,7 +70,7 @@ static int do_cmd(runner *r, const char *name, const char *extra, const uint8_t 
     }
     if (cap > BUFSZ)
         cap = BUFSZ;
-    if (!wl_check(cdb, r->cfg->do_switch)) {
+    if (!wl_check_cfg(cdb, r->cfg->do_switch, r->cfg->cdread_flags)) {
         res->rc = GD_REFUSED;
     } else {
         r->ops->packet(r->ops->ctx, cdb, r->buf, cap, timeout_ms, res);
@@ -83,6 +82,19 @@ static int do_cmd(runner *r, const char *name, const char *extra, const uint8_t 
             r->consec_timeouts = 0;
         }
     }
+    return res->rc;
+}
+
+static int do_cmd(runner *r, const char *name, const char *extra, const uint8_t cdb[12],
+                  uint32_t cap, uint32_t timeout_ms, int data_in_record, gd_result *res)
+{
+    rec_probe p;
+    if (r->abort) {
+        memset(res, 0, sizeof(*res));
+        res->rc = GD_REFUSED;
+        return GD_REFUSED;
+    }
+    send_cmd(r, cdb, cap, timeout_ms, res);
     p.img = r->img;
     p.name = name;
     p.extra = extra;
@@ -160,6 +172,50 @@ static void hash_sectors(runner *r, uint32_t fad, uint32_t count, const gd_resul
 }
 
 static uint32_t read_timeout(runner *r) { return r->cfg->timeout_ms + 2000; }
+
+/* ---- CDREAD_FLAGS --------------------------------------------------------- */
+
+/* The same single sector (the IP-read FAD) read with CD_READ byte 1 = 0x20, 0x24,
+ * 0x28, 0x10 in turn (FAD addressing). One line each:
+ *   probe=CDREAD_FLAGS flags=0x28 fad=N count=1 ssz=2048|- crc=xxxxxxxx|- sense=none|sk/asc/ascq cdb=.. rc=..
+ * ssz = bytes returned, crc = CRC-32 of them (both "-" unless rc=ok), sense from
+ * REQ_ERROR (0x13) after a CHECK. A CHECK does not stop the battery. */
+static void battery_cdread_flags(runner *r, uint32_t ip)
+{
+    static const uint8_t flags[4] = { 0x20, 0x24, 0x28, 0x10 };
+    uint8_t c[12];
+    gd_result res;
+    char ex[120], sn[24], ssz[16], crc[16];
+    int i;
+    for (i = 0; i < 4 && !r->abort; i++) {
+        rec_probe p;
+        cdb_read(c, flags[i], ip, 1);
+        send_cmd(r, c, BUFSZ, read_timeout(r), &res);
+        strcpy(ssz, "-");
+        strcpy(crc, "-");
+        strcpy(sn, "none");
+        if (res.rc == GD_OK && res.total && res.stored >= res.total) {
+            snprintf(ssz, sizeof(ssz), "%lu", (unsigned long)res.total);
+            snprintf(crc, sizeof(crc), "%08lx", (unsigned long)crc32_calc(r->buf, res.total));
+        } else if (res.rc == GD_CHECK && !r->abort) {
+            uint8_t sc[12];
+            gd_result sr;
+            cdb_simple(sc, 0x13, 0, 0, 10);
+            send_cmd(r, sc, 10, r->cfg->timeout_ms, &sr);
+            if (sr.rc == GD_OK && sr.stored >= 10)
+                snprintf(sn, sizeof(sn), "%d/%02x/%02x", r->buf[2] & 0x0F, r->buf[8], r->buf[9]);
+        }
+        snprintf(ex, sizeof(ex), "flags=0x%02x fad=%lu count=1 ssz=%s crc=%s sense=%s", flags[i],
+                 (unsigned long)ip, ssz, crc, sn);
+        p.img = r->img; p.name = "CDREAD_FLAGS"; p.extra = ex; p.cdb = c; p.res = &res; p.data = NULL;
+        out_line(r, rec_probe_line(r->line, sizeof(r->line), &p), 0);
+        if (r->abort && res.rc != GD_REFUSED) {
+            event(r, "ABORT", "reason=drive-not-answering");
+            say(r, "drive stopped answering: giving up");
+        }
+    }
+    sync_out(r);
+}
 
 /* ---- the battery ------------------------------------------------------- */
 
@@ -264,6 +320,11 @@ static void battery_reads(runner *r)
     do_cmd(r, "IP_READ", ex, c, BUFSZ, read_timeout(r), 1, &res);
     hash_sectors(r, ip, 7, &res);
     sync_out(r);
+
+    if (r->cfg->do_cdread_flags && !r->abort) {
+        say(r, "cd_read flags...");
+        battery_cdread_flags(r, ip);
+    }
 
     /* Throughput: tp_batches x tp_sectors sequential sectors, timed per batch. */
     if (r->cfg->do_throughput && !r->abort) {
@@ -376,7 +437,7 @@ static int switch_to(runner *r, int n, int tag)
          * records, so run it through a temporary silent path. */
         {
             memset(&tr, 0, sizeof(tr));
-            if (!wl_check(c, r->cfg->do_switch)) {
+            if (!wl_check_cfg(c, r->cfg->do_switch, r->cfg->cdread_flags)) {
                 tr.rc = GD_REFUSED;
             } else {
                 r->ops->packet(r->ops->ctx, c, r->buf, 0, r->cfg->timeout_ms, &tr);
@@ -392,7 +453,7 @@ static int switch_to(runner *r, int n, int tag)
                 gd_result sr;
                 cdb_simple(sc, 0x13, 0, 0, 10);
                 memset(&sr, 0, sizeof(sr));
-                if (wl_check(sc, r->cfg->do_switch))
+                if (wl_check_cfg(sc, r->cfg->do_switch, r->cfg->cdread_flags))
                     r->ops->packet(r->ops->ctx, sc, r->buf, 10, r->cfg->timeout_ms, &sr);
                 if (sr.rc == GD_OK && sr.stored >= 10) {
                     /* REQ_ERROR (SPI spec): byte 2 low nibble = sense key, 8 = ASC, 9 = ASCQ */

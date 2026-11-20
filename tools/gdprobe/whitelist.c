@@ -31,7 +31,7 @@ const wl_entry wl_table[] = {
     { "GET_SCD", 0x40, B(0) | B(1) | B(3) | B(4), 0,
       "Sega: reads the sub-code Q (format 0: 100 bytes, 1: 14 bytes) at the current position" },
     { "CD_READ", 0x30, B(0) | B(1) | B(2) | B(3) | B(4) | B(8) | B(9) | B(10), 0,
-      "Sega: reads data sectors (FAD addressing, at most 64 sectors); read-only" },
+      "Sega: reads data sectors (FAD addressing, at most 64 sectors; byte 1 only 0x20/0x24/0x28/0x10 or the configured cdread_flags); read-only" },
     { "GDEMU_VERSION", 0x52, B(0), 0,
       "GDEMU: `52 00` returns the 8-byte bootloader/firmware version (read-only; used by GDmenu tools)" },
     { "GDEMU_MOUNT", 0x52, B(0) | B(1) | B(2) | B(3), 1,
@@ -41,7 +41,12 @@ const int wl_count = (int)(sizeof(wl_table) / sizeof(wl_table[0]));
 
 static unsigned be16(const uint8_t *p) { return ((unsigned)p[0] << 8) | p[1]; }
 
-static int args_ok(const wl_entry *e, const uint8_t *c)
+int wl_cdread_flags_probe_ok(uint8_t b)
+{
+    return b == 0x20 || b == 0x24 || b == 0x28 || b == 0x10;
+}
+
+static int args_ok(const wl_entry *e, const uint8_t *c, uint8_t cdread_flags)
 {
     switch (c[0]) {
     case 0x10: return c[4] <= 10;
@@ -52,7 +57,8 @@ static int args_ok(const wl_entry *e, const uint8_t *c)
     case 0x40: return c[1] <= 1 && be16(c + 3) <= 100;
     case 0x30: {
         unsigned n = ((unsigned)c[8] << 16) | ((unsigned)c[9] << 8) | c[10];
-        return (c[1] & 1) == 0 && n >= 1 && n <= 64;
+        return (c[1] & 1) == 0 && n >= 1 && n <= 64 &&
+               (wl_cdread_flags_probe_ok(c[1]) || c[1] == (uint8_t)(cdread_flags & 0xFE));
     }
     case 0x52:
         if (e->opcode == 0x52 && e->mask == (B(0))) /* version */
@@ -67,6 +73,11 @@ static int args_ok(const wl_entry *e, const uint8_t *c)
 
 const wl_entry *wl_check(const uint8_t cdb[12], int switch_enabled)
 {
+    return wl_check_cfg(cdb, switch_enabled, WL_CDREAD_FLAGS_DEFAULT);
+}
+
+const wl_entry *wl_check_cfg(const uint8_t cdb[12], int switch_enabled, uint8_t cdread_flags)
+{
     int i, k;
     for (i = 0; i < wl_count; i++) {
         const wl_entry *e = &wl_table[i];
@@ -79,7 +90,7 @@ const wl_entry *wl_check(const uint8_t cdb[12], int switch_enabled)
                 break;
         if (k != 12)
             continue;
-        if (!args_ok(e, cdb))
+        if (!args_ok(e, cdb, cdread_flags))
             continue;
         return e;
     }

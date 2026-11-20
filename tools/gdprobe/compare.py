@@ -16,6 +16,9 @@ Exit status: 0 = no significant difference / all hashes match, 1 = differences /
 Record format (see README_ja.md): one line per probe,
     img=3 probe=REQ_SES_2 [extra k=v ...] cdb=... rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 data=... us=1234
     img=3 probe=HASH fad=45150 ssz=2048 crc=0badf00d
+    img=3 probe=CDREAD_FLAGS flags=0x28 fad=45150 count=1 ssz=2048|- crc=0badf00d|- sense=none|5/64/00 cdb=... rc=ok|check ...
+        (the CD_READ byte-1 battery; compared per (img, flags). With --image/--manifest the lines that returned
+        data are checked like HASH lines, including ssz 2352 = the whole raw sector if the image can provide it.)
 Lines starting with '#' are header/trailer comments and are ignored.
 
 Image assumptions (the `--image` check):
@@ -70,11 +73,14 @@ def parse_record(text):
 
 
 def index_entries(entries):
-    """Key every entry: (img, probe, n) with n the occurrence number; HASH is keyed by (img, 'HASH', fad)."""
+    """Key every entry: (img, probe, n) with n the occurrence number; HASH is keyed by (img, 'HASH', fad),
+    CDREAD_FLAGS by (img, 'CDREAD_FLAGS', flags) so a run without one variant does not shift the others."""
     idx, count = {}, {}
     for e in entries:
         if e['probe'] == 'HASH':
             key = (e['img'], 'HASH', e.get('fad', '?'))
+        elif e['probe'] == 'CDREAD_FLAGS':
+            key = (e['img'], 'CDREAD_FLAGS', e.get('flags', '?'))
         else:
             k0 = (e['img'], e['probe'])
             n = count.get(k0, 0)
@@ -88,11 +94,15 @@ def key_name(key):
     img, probe, extra = key
     if probe == 'HASH':
         return 'img=%d HASH fad=%s' % (img, extra)
+    if probe == 'CDREAD_FLAGS':
+        return 'img=%d CDREAD_FLAGS flags=%s' % (img, extra)
     return 'img=%d %s%s' % (img, probe, '' if extra == 0 else '#%d' % extra)
 
 
 def sort_key(key):
     img, probe, extra = key
+    if probe == 'CDREAD_FLAGS':
+        return (img, False, probe, to_int(extra, 0))
     return (img, probe == 'HASH', probe, int(extra) if str(extra).isdigit() else 0)
 
 
@@ -266,28 +276,39 @@ def read_sector(path, offset, file_ssz, want_ssz):
     return None, 'cannot make %d-byte sectors from a %d-byte image' % (want_ssz, file_ssz)
 
 
-def check_hashes(entries, getter, img=None):
-    ok = bad = skipped = 0
-    problems = []
+def checkable(entries, img=None):
+    """The record lines whose sector data can be checked against an image: every HASH line, and every
+    CDREAD_FLAGS line that returned data (rc=ok, ssz and crc present; a CHECK line has ssz=- crc=-).
+    Yields (entry, fad, ssz, crc, tag); tag = '' or ' flags=0x..' for messages."""
     for e in entries:
-        if e['probe'] != 'HASH':
+        if e['probe'] not in ('HASH', 'CDREAD_FLAGS'):
             continue
         if img is not None and e['img'] != img:
             continue
-        fad, ssz, crc = to_int(e.get('fad')), to_int(e.get('ssz')), e.get('crc')
-        if fad is None or ssz is None or crc is None:
+        if e['probe'] == 'CDREAD_FLAGS' and e.get('rc') != 'ok':
             continue
+        fad, ssz, crc = to_int(e.get('fad')), to_int(e.get('ssz')), e.get('crc')
+        if fad is None or ssz is None or crc is None or crc == '-':
+            continue
+        tag = ' flags=%s' % e.get('flags', '?') if e['probe'] == 'CDREAD_FLAGS' else ''
+        yield e, fad, ssz, crc, tag
+
+
+def check_hashes(entries, getter, img=None):
+    ok = bad = skipped = 0
+    problems = []
+    for e, fad, ssz, crc, tag in checkable(entries, img):
         data, why = getter(fad - 150, ssz)
         if data is None:
             skipped += 1
-            problems.append('img=%d fad=%d: not checked (%s)' % (e['img'], fad, why))
+            problems.append('img=%d fad=%d%s: not checked (%s)' % (e['img'], fad, tag, why))
             continue
         want = '%08x' % (zlib.crc32(data) & 0xFFFFFFFF)
         if want == crc.lower():
             ok += 1
         else:
             bad += 1
-            problems.append('img=%d fad=%d: MISMATCH record crc=%s image crc=%s (ssz %d)' % (e['img'], fad, crc, want, ssz))
+            problems.append('img=%d fad=%d%s: MISMATCH record crc=%s image crc=%s (ssz %d)' % (e['img'], fad, tag, crc, want, ssz))
     return ok, bad, skipped, problems
 
 
@@ -308,7 +329,7 @@ def cmd_image(args):
 
         def getter(lba, want):
             return image_sector(tracks, lba, want)
-    imgs = sorted({e['img'] for e in entries if e['probe'] == 'HASH'})
+    imgs = sorted({e['img'] for e, _, _, _, _ in checkable(entries)})
     if args.img is None and len(imgs) > 1:
         print('note: the record has hashes for images %s; checking all of them against this one image.'
               ' Use --img N to check only one.' % imgs)
@@ -340,36 +361,34 @@ def cmd_manifest(args):
     _, entries = parse_record(read_text(args.record))
     ok = bad = skipped = 0
     problems = []
-    for e in entries:
-        if e['probe'] != 'HASH' or (args.img is not None and e['img'] != args.img):
-            continue
-        fad, ssz, crc = to_int(e.get('fad')), to_int(e.get('ssz')), e.get('crc')
-        if fad is None or ssz is None or crc is None:
-            continue
+    # HASH lines and CDREAD_FLAGS lines with data. mksdcard.sector_for rebuilds the raw 2352-byte form
+    # (sync + header + user data + EDC/ECC) for gd_mode1_2352 and XA Form 1 tracks, so the 0x10 variant is
+    # verified too; a size it cannot build (e.g. 2336 from a drive) is reported as "not checked".
+    for e, fad, ssz, crc, tag in checkable(entries, args.img):
         name = '%02d' % e['img']
         img = man['images'].get(name)
         if img is None:
             skipped += 1
-            problems.append('img=%d fad=%d: not checked (folder %s has no generated image)' % (e['img'], fad, name))
+            problems.append('img=%d fad=%d%s: not checked (folder %s has no generated image)' % (e['img'], fad, tag, name))
             continue
         lba = fad - 150
         tr = find_track(img['tracks'], lba)
         if tr is None:
             skipped += 1
-            problems.append('img=%d fad=%d: not checked (lba %d is in no track of image %s)' % (e['img'], fad, lba, name))
+            problems.append('img=%d fad=%d%s: not checked (lba %d is in no track of image %s)' % (e['img'], fad, tag, lba, name))
             continue
         data, why = mksdcard.sector_for(tr, lba, ssz)
         if data is None:
             skipped += 1
-            problems.append('img=%d fad=%d: not checked (%s)' % (e['img'], fad, why))
+            problems.append('img=%d fad=%d%s: not checked (%s)' % (e['img'], fad, tag, why))
             continue
         want = '%08x' % (zlib.crc32(data) & 0xFFFFFFFF)
         if want == crc.lower():
             ok += 1
         else:
             bad += 1
-            problems.append('img=%d fad=%d lba=%d track %d: MISMATCH record crc=%s expected crc=%s (ssz %d)' %
-                            (e['img'], fad, lba, tr['number'], crc, want, ssz))
+            problems.append('img=%d fad=%d%s lba=%d track %d: MISMATCH record crc=%s expected crc=%s (ssz %d)' %
+                            (e['img'], fad, tag, lba, tr['number'], crc, want, ssz))
     for p in problems[:args.max_report]:
         print('  ' + p)
     if len(problems) > args.max_report:

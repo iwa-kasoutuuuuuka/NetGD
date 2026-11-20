@@ -17,6 +17,7 @@
  *   seek_n=16              samples (2..64)
  *   seek_span=50000        sectors from the IP.BIN area to spread the samples over
  *   ip_fad=0               0 = auto (REQ_SES 2, else 45150)
+ *   cdread_flags_test=on   CDREAD_FLAGS battery: one sector read with CDB byte 1 = 0x20,0x24,0x28,0x10
  *   cdread_flags=0x24      CD_READ CDB byte 1 (bit 0 must stay 0 = FAD)
  *   timeout_ms=3000        per-command timeout
  */
@@ -38,6 +39,7 @@ typedef struct {
     int do_throughput;
     int tp_batches;
     int tp_sectors;
+    int do_cdread_flags;  /* CDREAD_FLAGS battery (default on) */
     int do_seek;
     int seek_n;
     uint32_t seek_span;

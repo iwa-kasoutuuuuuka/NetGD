@@ -11,6 +11,7 @@ void gp_config_defaults(gp_config *c)
     c->do_throughput = 1;
     c->tp_batches = 64;
     c->tp_sectors = 16;
+    c->do_cdread_flags = 1;
     c->do_seek = 1;
     c->seek_n = 16;
     c->seek_span = 50000;
@@ -93,6 +94,7 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "seek_n")) { n = parse_num(v, &ok); if (ok) c->seek_n = clampi(n, 2, 64);
     } else if (!strcmp(k, "seek_span")) { n = parse_num(v, &ok); if (ok) c->seek_span = (uint32_t)clampi(n, 16, 1000000);
     } else if (!strcmp(k, "ip_fad")) { n = parse_num(v, &ok); if (ok) c->ip_fad = (uint32_t)clampi(n, 0, 0xFFFFFF);
+    } else if (!strcmp(k, "cdread_flags_test")) { if (parse_bool(v, &b)) c->do_cdread_flags = b; else ok = 0;
     } else if (!strcmp(k, "cdread_flags")) { n = parse_num(v, &ok); if (ok) c->cdread_flags = (uint8_t)(n & 0xFE);
     } else if (!strcmp(k, "timeout_ms")) { n = parse_num(v, &ok); if (ok) c->timeout_ms = (uint32_t)clampi(n, 100, 30000);
     } else ok = 0;

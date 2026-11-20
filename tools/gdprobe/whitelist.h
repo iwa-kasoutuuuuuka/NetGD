@@ -22,4 +22,14 @@ extern const int wl_count;
  * 64 sectors, no MSF addressing). */
 const wl_entry *wl_check(const uint8_t cdb[12], int switch_enabled);
 
+/* CD_READ byte 1 (the Sega flags: bit7 Header, 6 Subheader, 5 Data, 4 Other =
+ * whole 2352-byte sector, bits 3-1 expected data type, bit 0 = MSF) is only
+ * accepted for these values (FAD mode, bit 0 clear): 0x20 0x24 0x28 0x10 -- the
+ * CDREAD_FLAGS probe -- plus the one value the config's cdread_flags names.
+ * Anything else (0x30, 0xE6, 0xF0 ...) is refused. wl_check() uses the config
+ * default (0x24); the runner calls wl_check_cfg() with the configured value. */
+#define WL_CDREAD_FLAGS_DEFAULT 0x24
+const wl_entry *wl_check_cfg(const uint8_t cdb[12], int switch_enabled, uint8_t cdread_flags);
+int wl_cdread_flags_probe_ok(uint8_t byte1);   /* byte1 in {0x20,0x24,0x28,0x10} */
+
 #endif

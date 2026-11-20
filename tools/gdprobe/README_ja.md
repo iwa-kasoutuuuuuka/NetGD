@@ -26,7 +26,7 @@ Dreamcast（KallistiOS 2.3.0）上で動き、GD-ROM ドライブ（= **純正�
   | GET_TOC | 0x14 | TOC を読む（SD 領域・HD 領域の両方） |
   | REQ_SES | 0x15 | セッション 0〜3 の開始位置を読む |
   | GET_SCD | 0x40 | サブコード Q（形式 0・1）を読む |
-  | CD_READ | 0x30 | データセクタを読む（FAD 指定、1 回 64 セクタまで） |
+  | CD_READ | 0x30 | データセクタを読む（FAD 指定、1 回 64 セクタまで）。バイト1 は `0x20` / `0x24` / `0x28` / `0x10` と設定の `cdread_flags` の値だけ許可（`0x30`・`0xE6`・`0xF0`、MSF 指定の `0x11` などは拒否） |
   | GDEMU バージョン | `52 00` | 8 バイトのバージョンを読む |
   | **GDEMU 切替（オプトイン）** | `52 82 n` | フォルダ n のイメージをマウントする。openMenu がゲームを起動するときと同じ。設定で `switch=on` のときだけ許可 |
   | IDENTIFY PACKET DEVICE（オプトイン） | ATA 0xA1 | 機器の識別文字列（GD-ROM は 80 バイトを返す）。設定で `identify=on` のときだけ |
@@ -103,7 +103,8 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 | `tp_batches` / `tp_sectors` | 64 / 16 | バッチ数 / 1 回のセクタ数（1〜16）。既定は 64 × 16 = 1024 セクタ（2 MB） |
 | `seek` / `seek_n` / `seek_span` | `on` / 16 / 50000 | シーク試験：IP.BIN 領域から `seek_span` セクタの範囲に `seek_n` 点（遠・近を交互に） |
 | `ip_fad` | 0 | 読み始めの FAD。0 = 自動（REQ_SES(2) の値、取れなければ 45150） |
-| `cdread_flags` | `0x24` | CD_READ の CDB バイト1（bit 0 = MSF は常に 0 に強制） |
+| `cdread_flags` | `0x24` | CD_READ の CDB バイト1（bit 0 = MSF は常に 0 に強制）。許可リストは `0x20` `0x24` `0x28` `0x10` に加えてこの値だけ通す |
+| `cdread_flags_test` | `on` | `CDREAD_FLAGS` 試験（下記）。`off` で省略 |
 | `timeout_ms` | 3000 | コマンド 1 つのタイムアウト（読み出しは +2000 ms） |
 
 ### 実行の流れ
@@ -122,7 +123,37 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 
 `TUR_W*` / `REQ_ERROR_W*`（UNIT ATTENTION を抜けるまで最大 8 回）→ `TUR`、`REQ_STAT`、`REQ_MODE_0_10`・`_18_8`・`_0_32`、
 `REQ_ERROR`、`GET_TOC_0`・`_1`（408 バイト）、`REQ_SES_0〜3`、`GET_SCD_0`・`_1`、`GDEMU_VERSION`（`52 00`）、
-`IP_READ`（IP.BIN の 7 セクタ）、`TP_000〜`（スループット）、`TP_SUMMARY`、`SEEK_00〜`。
+`IP_READ`（IP.BIN の 7 セクタ）、`CDREAD_FLAGS`（4 行。下記）、`TP_000〜`（スループット）、`TP_SUMMARY`、`SEEK_00〜`。
+
+### CD_READ フラグ試験（`CDREAD_FLAGS`）
+
+イメージごとに、`IP_READ` と同じ 1 セクタ（IP.BIN の先頭の FAD。`ip_fad` / REQ_SES(2) / TOC の自動判定と同じ値）を、
+CD_READ の CDB バイト1 を **`0x20`、`0x24`、`0x28`、`0x10`** の順に変えて 1 セクタずつ読む（FAD 指定、件数 1）。
+CHECK になっても止めずに次のバリアントへ進む。`cdread_flags_test=off` で省略できる。
+
+バイト1 の意味（SPI 仕様）：bit 7 = Header、bit 6 = Subheader、bit 5 = Data、bit 4 = Other（セクタ全体 2352 バイト）、
+bit 3〜1 = 期待セクタ種別、bit 0 = 0 で FAD / 1 で MSF。Flycast では `0x20` / `0x24` / `0x28` が 2048 バイト、`0x10` が 2352 バイト。
+
+```
+img=3 probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048 crc=0badf00d sense=none cdb=302000b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=...
+img=4 probe=CDREAD_FLAGS flags=0x28 fad=11852 count=1 ssz=- crc=- sense=5/64/00 cdb=302800... rc=check status=0x51 err=0x50 irr=0x03 bytes=0 us=...
+img=3 probe=CDREAD_FLAGS flags=0x10 fad=45150 count=1 ssz=2352 crc=... sense=none cdb=301000... rc=ok ... bytes=2352 us=...
+```
+
+- `ssz` = ドライブが返したバイト数（1 セクタなので `bytes` と同じ）、`crc` = そのデータの CRC-32。`rc=ok` 以外は両方 `-`。
+- `sense` = CHECK のとき REQ_ERROR（0x13）で読んだ `センスキー/ASC/ASCQ`（`none` = CHECK ではない）。
+- `HASH` 行は書かない（`IP_READ` の `HASH` と FAD が重なるため）。代わりにこの行の `crc` を `compare.py` が直接照合する（下記）。
+
+**見るところ（このイメージの種別ごとに、どのフラグ値を受け付け、何バイト返すか）**
+
+1. `rc=ok` のバリアントの一覧。`0x20`（種別不問）と `0x24`（Mode 1）が通り、`0x28`（Mode 2 Form 1）が `rc=check` で
+   `sense=5/xx/xx`（ILLEGAL REQUEST。種別不一致のはず）なら、そのドライブは**種別を検査している**。GD-ROM（Mode 1）と CDI（Mode 2 Form 1）のイメージで
+   結果が逆になるかを見る（`0x24` が Mode 2 の CDI で CHECK、`0x28` が Mode 1 で CHECK など）。
+2. `ssz`：`0x20` / `0x24` / `0x28` が 2048、`0x10` が 2352 なら Flycast と同じ。`0x10` が 2048 や別の値（2336・2340 など）、
+   または `0x20` 系が 2352 を返すなら**その差が互換性の論点**。純正と NetGD で `ssz` が違えば、`compare.py` が `ssz` の差として出す。
+3. `crc`：同じセクタなので `0x20` / `0x24` / `0x28` は同じ値のはず（違えば、フラグでデータの範囲が変わっている）。
+   `0x10` は同じユーザーデータを含む生セクタ（同期 12 + ヘッダ 4 + ユーザー 2048 + EDC/ECC 288）。
+4. `0x10` が CHECK なら、そのドライブは生セクタ読み出しを持たない（または種別必須）。
 
 ## 記録の形式
 
@@ -157,7 +188,12 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 
 - 終了コード：0 = 差分なし／ハッシュ全一致、1 = 差分あり／不一致、2 = 入力エラー。
 - 時間（`us` `t_ms` `kib_s`）は比が 1.5 倍を超えたときに「TIMING」として注記するだけで、差分には数えない（`--ratio`、`--ignore-timing`）。
-- 同じ名前の行（`SW_POLL` など）は出現順で対応づける。
+- 同じ名前の行（`SW_POLL` など）は出現順で対応づける。`CDREAD_FLAGS` だけは `(img, flags)` で対応づける（片方にバリアントが無くても、他の行がずれない）。
+  `rc` / `ssz` / `crc` / `sense` の違いが差分として出る。
+- `--image` / `--manifest` は `HASH` 行に加えて、データが返った（`rc=ok`）`CDREAD_FLAGS` 行の `crc` も照合する（出力には `flags=0x..` が付く）。
+  **`--manifest`**：`tools/mksdcard` の `sector_for` が GD 用 Mode 1 トラックと CDI（XA Form 1）トラックの**生 2352 バイト**
+  （同期 + ヘッダ + ユーザーデータ + EDC/ECC）を再構成できるので、`0x10` の行（`ssz=2352`）も照合される。作れないサイズ（2340 など）は「not checked」。
+  **`--image`**：2352 バイトのイメージ（GDI の生トラック）なら全体を照合する。2048 バイトのイメージからは 2352 を作れないので「not checked」になる。
 - **イメージ照合の前提**：CD_READ の番地は FAD、イメージ側の LBA = FAD − 150。GDI の各トラックの開始 LBA・セクタサイズ・ファイル・オフセットで
   `offset + (LBA − 開始LBA) × セクタサイズ` を読む。`ssz=2048` は、2048 バイトのイメージならそのまま、2352 バイトの生セクタなら
   オフセット 16（Mode 1）または 24（Mode 2 Form 1。15 バイト目のモードで判定）から 2048 バイト。`ssz=2352` は生セクタ全体。
@@ -203,7 +239,7 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 4. **CD_READ の CDB**：バイト1 = `0x24` は SPI 仕様で確認済み（bit 5 = Data、bit 3〜1 = 期待セクタ種別 `010` = Mode 1、bit 0 = FAD 指定）。
    `0x20` = データ・種別を問わない、`0x28` = Mode 2 Form 1（CDI / MIL-CD）。`switch=off` のときの dcload-ip の CDI は Mode 2 Form 1 なので、
    種別を検査するドライブでは `0x24` が `rc=check` を返しうる。その実行では `cdread_flags=0x20` を指定する。`cdread_flags` で変えられる。
-   `IP_READ` が `rc=check` なら別の値を試す。返るバイト数（`bytes=`）が 2048 × 件数か、2352 × 件数かは、**記録を見て決まる**
+   `IP_READ` が `rc=check` なら別の値を試す（`CDREAD_FLAGS` 行を見れば、4 つのフラグ値のうちどれが通るかが 1 回の実行で分かる）。返るバイト数（`bytes=`）が 2048 × 件数か、2352 × 件数かは、**記録を見て決まる**
    （`HASH` の `ssz` に反映される）。
 5. **REQ_MODE の引数**：NetGD の `ide.rs` は (offset 18, len 8) と (0, 10) だけ受け付ける。純正が他の組を返すかを見るため `(0, 32)` も送る。
 6. **IP.BIN の FAD 自動判定**：REQ_SES(2) の返事から取る。使える値が無ければ、GET_TOC の最後の有効な領域の最初のデータトラックの開始 FAD、それも無ければ 45150（tools/mksdcard の CDI 04/05 など GD-ROM 以外の像向け）。純正の GD-ROM では 45150 のはずだが、D-4 / D-1 の調査対象そのものなので、

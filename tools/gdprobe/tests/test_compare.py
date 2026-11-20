@@ -123,6 +123,49 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('sense 2/04/01 vs 2/3a/00', out)
 
+    CDR_A = (
+        'img=3 probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302000b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'
+        'img=3 probe=CDREAD_FLAGS flags=0x24 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302400b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'
+        'img=3 probe=CDREAD_FLAGS flags=0x28 fad=45150 count=1 ssz=- crc=- sense=5/64/00 cdb=302800b05e00000000000100 rc=check status=0x51 err=0x50 irr=0x03 bytes=0 us=1500\n'
+        'img=3 probe=CDREAD_FLAGS flags=0x10 fad=45150 count=1 ssz=2352 crc=22222222 sense=none cdb=301000b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2352 us=21000\n')
+
+    def test_cdread_flags_lines_parse(self):
+        _, ents = compare.parse_record(self.CDR_A)
+        self.assertEqual([e['flags'] for e in ents], ['0x20', '0x24', '0x28', '0x10'])
+        self.assertEqual(ents[3]['ssz'], '2352')
+        self.assertEqual(ents[2]['sense'], '5/64/00')
+        a = self.write('a.txt', self.CDR_A)
+        rc, out, _ = run([a, a])
+        self.assertEqual(rc, 0, out)
+
+    def test_cdread_flags_diff(self):
+        a = self.write('a.txt', self.CDR_A)
+        # the other drive: 0x28 works, 0x10 returns 2048 instead of 2352
+        b_text = self.CDR_A.replace(
+            'flags=0x28 fad=45150 count=1 ssz=- crc=- sense=5/64/00 cdb=302800b05e00000000000100 rc=check status=0x51 err=0x50 irr=0x03 bytes=0',
+            'flags=0x28 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302800b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048'
+        ).replace('ssz=2352 crc=22222222', 'ssz=2048 crc=11111111').replace('bytes=2352', 'bytes=2048')
+        b = self.write('b.txt', b_text)
+        rc, out, _ = run([a, b])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=3 CDREAD_FLAGS flags=0x28: rc check vs ok', out)
+        self.assertIn('ssz - vs 2048', out)
+        self.assertIn('sense 5/64/00 vs none', out)
+        self.assertIn('img=3 CDREAD_FLAGS flags=0x10: ', out)
+        self.assertIn('ssz 2352 vs 2048', out)
+        self.assertNotIn('flags=0x20:', out)
+        self.assertNotIn('flags=0x24:', out)
+
+    def test_cdread_flags_matched_by_flags_not_position(self):
+        a = self.write('a.txt', self.CDR_A)
+        # a run without the 0x24 line: only that variant is "only in A", the others still pair up
+        lines = [l for l in self.CDR_A.splitlines(True) if 'flags=0x24' not in l]
+        b = self.write('b.txt', ''.join(lines))
+        rc, out, _ = run([a, b])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=3 CDREAD_FLAGS flags=0x24: only in A', out)
+        self.assertEqual(out.count('only in'), 1, out)
+
     def test_missing_file(self):
         rc, _, err = run([os.path.join(self.dir, 'nope.txt'), os.path.join(self.dir, 'nope2.txt')])
         self.assertEqual(rc, 2)
@@ -203,6 +246,33 @@ class ImageTests(unittest.TestCase):
         rc, out, _ = run(['--image', self.gdi, '--img', '3', p])
         self.assertEqual(rc, 0, out)
 
+    @staticmethod
+    def cl(img, fad, flags, ssz, data, rc='ok'):
+        if rc != 'ok':
+            return 'img=%d probe=CDREAD_FLAGS flags=%s fad=%d count=1 ssz=- crc=- sense=5/64/00 cdb=00 rc=%s bytes=0 us=1' % (img, flags, fad, rc)
+        return 'img=%d probe=CDREAD_FLAGS flags=%s fad=%d count=1 ssz=%d crc=%08x sense=none cdb=00 rc=ok bytes=%d us=1' % (
+            img, flags, fad, ssz, zlib.crc32(data) & 0xFFFFFFFF, ssz)
+
+    def test_cdread_flags_checked_against_image(self):
+        fad = 45150 + 3
+        lines = [self.cl(3, fad, '0x20', 2048, self.user[3]),
+                 self.cl(3, fad, '0x24', 2048, self.user[3]),
+                 self.cl(3, fad, '0x28', 2048, b'', rc='check'),                  # CHECK: nothing to verify
+                 self.cl(3, fad, '0x10', 2352, self.t3[3 * 2352:4 * 2352])]      # whole raw sector
+        rc, out, _ = run(['--image', self.gdi, self.rec(lines)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('hashes: 3 match, 0 mismatch, 0 not checked', out)
+        bad = bytearray(self.t3[3 * 2352:4 * 2352])
+        bad[2000] ^= 1
+        rc, out, _ = run(['--image', self.gdi, self.rec([self.cl(3, fad, '0x10', 2352, bytes(bad))])])
+        self.assertEqual(rc, 1)
+        self.assertIn('flags=0x10: MISMATCH', out)
+        # a 2048-byte image cannot give the 2352 form: skipped with a reason, not a mismatch
+        rc, out, _ = run(['--image', self.gdi, self.rec([self.cl(3, 150 + 1, '0x10', 2352, b'x' * 2352)])])
+        self.assertEqual(rc, 2)
+        self.assertIn('0 match, 0 mismatch, 1 not checked', out)
+        self.assertIn('cannot make 2352-byte sectors from a 2048-byte image', out)
+
     def test_raw_file(self):
         p = self.rec([self.hl(0, 45150 + 2, 2048, self.user[2])])
         raw = os.path.join(self.dir, 'track 03.bin')
@@ -268,6 +338,39 @@ class ManifestTests(unittest.TestCase):
         self.assertIn('img=4 fad=11853 lba=11703 track 2: MISMATCH', out)
         self.assertIn('1 match, 1 mismatch', out)
 
+    def cdr_line(self, img, fad, flags, ssz, corrupt=False):
+        e = self.man['images']['%02d' % img]
+        lba = fad - 150
+        tr = [t for t in e['tracks'] if t['start_lba'] <= lba < t['start_lba'] + t['sector_count']][0]
+        data, why = self.mk.sector_for(tr, lba, ssz)
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        if corrupt:
+            crc ^= 1
+        return ('img=%d probe=CDREAD_FLAGS flags=%s fad=%d count=1 ssz=%d crc=%08x sense=none cdb=00 rc=ok '
+                'bytes=%d us=1\n' % (img, flags, fad, ssz, crc, ssz))
+
+    def test_cdread_flags_incl_raw_2352(self):
+        # 2048 for 0x20/0x24/0x28 and the rebuilt raw sector (sync+header+user+EDC/ECC) for 0x10
+        text = ''.join([self.cdr_line(3, 45150, '0x20', 2048), self.cdr_line(3, 45150, '0x24', 2048),
+                        self.cdr_line(3, 45150, '0x28', 2048), self.cdr_line(3, 45150, '0x10', 2352),
+                        self.cdr_line(4, 11852, '0x10', 2352),
+                        'img=3 probe=CDREAD_FLAGS flags=0x28 fad=45150 count=1 ssz=- crc=- sense=5/64/00 cdb=00 rc=check bytes=0 us=1\n'])
+        rc, out, _ = run(['--manifest', self.manifest, self.write(text)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('5 match, 0 mismatch, 0 not checked', out)
+
+    def test_cdread_flags_mismatch_and_unknown_size(self):
+        text = self.cdr_line(3, 45150, '0x10', 2352, corrupt=True)
+        rc, out, _ = run(['--manifest', self.manifest, self.write(text)])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=3 fad=45150 flags=0x10 lba=45000 track', out)
+        self.assertIn('MISMATCH', out)
+        # a drive that returned 2340 bytes (not a form we can rebuild): not checked, with the reason
+        text = 'img=3 probe=CDREAD_FLAGS flags=0x10 fad=45150 count=1 ssz=2340 crc=12345678 sense=none cdb=00 rc=ok bytes=2340 us=1\n'
+        rc, out, _ = run(['--manifest', self.manifest, self.write(text)])
+        self.assertEqual(rc, 2)
+        self.assertIn('flags=0x10: not checked (unsupported ssz 2340', out)
+
     def test_not_checked_and_filter(self):
         text = ('img=2 probe=HASH fad=45150 ssz=2048 crc=00000000\n'      # dcload folder: no generated image
                 'img=3 probe=HASH fad=9999999 ssz=2048 crc=00000000\n'    # outside every track
@@ -290,6 +393,9 @@ class SampleFromCTests(unittest.TestCase):
         _, ents = compare.parse_record(compare.read_text(p))
         self.assertTrue(any(e['probe'] == 'SW_RESULT' for e in ents))
         self.assertTrue(any(e['probe'] == 'HASH' for e in ents))
+        cdr = [e for e in ents if e['probe'] == 'CDREAD_FLAGS' and e['img'] == 3]
+        self.assertEqual([e['flags'] for e in cdr], ['0x20', '0x24', '0x28', '0x10'])
+        self.assertEqual([e['ssz'] for e in cdr], ['2048', '2048', '2048', '2352'])
 
 
 if __name__ == '__main__':
