@@ -1,0 +1,5 @@
+build/
+test/_work_*/
+__pycache__/
+*.elf
+*.o

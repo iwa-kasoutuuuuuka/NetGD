@@ -1,0 +1,19 @@
+# Host (gcc) build of the receive core + FatFs + test doubles, for test/run_tests.py.
+#   make -f Makefile.host            -> build/test_host(.exe)
+CC      ?= gcc
+CFLAGS  ?= -O1 -g -Wall -Wno-unused-function
+CFLAGS  += -DNG_HOST -Isrc -Ithird_party/fatfs -Itest
+FATFS    = third_party/fatfs
+SRCS     = src/crc32.c src/manifest.c src/ngblk.c src/ngfs.c src/recv_core.c src/xport_pc.c src/diskio.c \
+           $(FATFS)/ff.c $(FATFS)/ffunicode.c $(FATFS)/ffsystem.c \
+           test/dev_file.c test/fwctl_sim.c test/plat_host.c test/test_host.c
+OUT      = build/test_host
+
+all: $(OUT)
+
+$(OUT): $(SRCS) $(wildcard src/*.h test/*.h)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $(SRCS)
+
+clean:
+	rm -rf build

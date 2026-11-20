@@ -589,6 +589,16 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **残る窓**：転送中（ページ1以降を消してからページ0を書き直すまで）の電源断、ページ0の書き込みの数 ms、中断した転送、強制リセット。解消には対策 B（ロックで守る常駐ブート領域）が必要。
   レジスタを叩く状態遷移そのものにはホストテストが無い。BBA 経由の送信側は未作成（`iter_images()` が将来の送信側の入口）。
 
+### R47 追加の並列割り当て（Opus、ユーザーの指示「他に進められることがあれば役割を与えて」）
+| モデル | 作業 | 担当ファイル |
+|---|---|---|
+| Sonnet | BBA 経由のファーム更新アプリ `netgd-fwupd`（`fwimage` の OGFW を `0xF9` でセカンダリへ送る KOS アプリ、偽デバイスでホストテスト） | `tools/netgd-fwupd/` |
+| Sonnet | プローブに CD_READ の読み比べ試験（CDB バイト1 = 0x20/0x24/0x28/0x10、R24 の提案） | `tools/gdprobe/` |
+| Fable | AG16K のコンフィグ方式（パッシブシリアル）の詳細調査と `cyclone.rs` の変更設計 | `docs/research/ag16k-config.md` |
+| Haiku | CI に Python ツールのテスト（mksdcard・netgd-send・fwbackup・fwimage・netgd-recv）と fwupdater のホストテストを追加 | `.github/workflows/build.yaml` |
+- 並行して：Sonnet = R45 の修正（`ide.rs`・`gdi.rs`・`gamecfg`・`discimg`）、Fable = `netgd-recv` のレビュー、Opus = `netgd-recv` のテストの再実行とコミット。
+- 改名（`opengdemu` → `netgd`）は `mcu/` を触る作業がすべて終わってから。
+
 ---
 
 ## 判断の記録（Decisions）

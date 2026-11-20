@@ -3,11 +3,11 @@
 #   $env:NETGD_IMAGE = 'E:\games\crazytaxi\disc.gdi'     # required: a .gdi or .cdi
 #   $env:NETGD_SLOT  = '2'                                # or NETGD_NAME = 'CRAZYTAXI' (ASCII); default: file name
 #   .\scripts\dc_auto.ps1 -Preset <full path to this file>
-# Copy this file to the BBA tools' profiles\ folder to use the short form `-Preset netgd`.
+# Use it by full path; don't copy it into the BBA tools' profiles\ folder (its paths are relative to this repo).
 #
-# *** NOT USABLE YET: it needs the Dreamcast app netgd-recv (G2-3), which is not written. ***
-# Until dc\netgd-recv\netgd-recv.elf exists, dc_auto stops with "ELF is missing". The PC half
-# (Prepare = netgd_send prepare, PostRun = netgd_send collect) works and is tested without hardware.
+# Needs the Dreamcast app tools\netgd-recv\netgd-recv.elf: build it with tools\netgd-recv\build.ps1,
+# or take it from the KOS build CI artifact `dreamcast-elfs`. Prepare = netgd_send prepare,
+# PostRun = netgd_send collect. Both halves are host-tested; neither has run on hardware yet.
 #
 # Rules this preset relies on (dc-tool-ip /pc/ rules, KNOWHOW_ja.md):
 #   - dc-tool-ip must run with its current directory on the SAME DRIVE as the job folder and the
@@ -29,8 +29,7 @@ $preset_job   = if ($env:NETGD_JOB) { $env:NETGD_JOB } else { Join-Path ([System
 $preset_py    = if ($env:NETGD_PYTHON) { $env:NETGD_PYTHON } else { 'python' }
 $preset_cli   = Join-Path $preset_netgd 'netgd-send.py'
 @{
-    # TODO(G2-3): the console app does not exist yet. Placeholder path.
-    Elf       = Join-Path $preset_repo 'dc\netgd-recv\netgd-recv.elf'
+    Elf       = Join-Path $preset_repo 'tools\netgd-recv\netgd-recv.elf'
 
     # (no Build: the ELF is built separately with KallistiOS)
 

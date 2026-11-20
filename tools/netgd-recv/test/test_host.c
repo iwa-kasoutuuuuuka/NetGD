@@ -1,0 +1,215 @@
+/* Host test driver for netgd-recv's core.  Driven by test/run_tests.py.
+     test_host selftest
+     test_host mkimage <img> <sectors> <cluster_bytes>
+     test_host run <img> <sectors> <pcroot> <jobdir(/pc/...)> [options]
+     test_host dump <img> <sectors> <outdir>
+   options: --cut N --ckp N --read N --readback 0|1 --slow --flip K --caps C --frag --force
+            --stopafter N --pollms N --quiet */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <direct.h>
+#include "ff.h"
+#include "ng.h"
+#include "ngfs.h"
+#include "ngdev.h"
+#include "crc32.h"
+#include "manifest.h"
+#include "xport_pc.h"
+#include "ng_plat.h"
+#include "simdisk.h"
+
+extern void (*ng_pc_cfg_hook)(void);
+extern ngblk_stats_t ngblk_stats;
+
+static struct { long ckp, read; int readback, slow, frag, force; } opt = { -1, -1, -1, 0, 0, 0 };
+
+static void cfg_hook(void)
+{
+    if (opt.ckp > 0) ng_cfg.ckp_bytes = (uint32_t)opt.ckp;
+    if (opt.read > 0) ng_cfg.read_bytes = (uint32_t)opt.read;
+    if (opt.readback >= 0) ng_cfg.readback = opt.readback;
+    if (opt.slow) ng_cfg.force_slow = 1;
+    if (opt.frag) ng_cfg.allow_frag = 1;
+    if (opt.force) ng_cfg.force = 1;
+}
+
+static void phase_hook(const char *p) { printf("PHASE %s %llu\n", p, (unsigned long long)sim_sector_writes); }
+
+static int selftest(void)
+{
+    int bad = 0;
+    ng_manifest_t m;
+    char err[96];
+    static const char good[] =
+        "NETGD-MANIFEST 1\nimage 02\ntype gdi\nfile 10 0000000A disc.gdi\nfile 20 000000FF track01.bin\n"
+        "descriptor disc.gdi\nend\n";
+    if (ng_crc32(0, "123456789", 9) != 0xCBF43926u) { printf("crc32 vector\n"); bad++; }
+    if (ng_crc32(ng_crc32(0, "12345", 5), "6789", 4) != 0xCBF43926u) { printf("crc32 chain\n"); bad++; }
+    if (ng_fnv1a(NG_FNV_INIT, "a", 1) != 0xE40C292Cu) { printf("fnv1a vector\n"); bad++; }
+    if (ng_manifest_parse(good, strlen(good), &m, err, sizeof err) || m.nfiles != 2 || m.descriptor != 0 ||
+        m.total_bytes != 30) { printf("parse good: %s\n", err); bad++; }
+    {
+        const char *rej[] = {
+            "NETGD-MANIFEST 2\nimage 02\ntype gdi\nfile 1 00000000 a.gdi\ndescriptor a.gdi\nend\n",
+            "NETGD-MANIFEST 1\nimage 02\ntype gdi\nfile 1 00000000 a.gdi\ndescriptor a.gdi\n",              /* no end */
+            "NETGD-MANIFEST 1\nimage 02\ntype gdi\nfile 1 00000000 a.gdi\ndescriptor b.gdi\nend\n",
+            "NETGD-MANIFEST 1\nimage 02\ntype gdi\nfile 1 00000000 averylongname.gdi\ndescriptor averylongname.gdi\nend\n",
+            "NETGD-MANIFEST 1\nimage a/b/c/d\ntype gdi\nfile 1 00000000 a.gdi\ndescriptor a.gdi\nend\n",
+            "NETGD-MANIFEST 1\nimage ..\ntype gdi\nfile 1 00000000 a.gdi\ndescriptor a.gdi\nend\n",
+            "NETGD-MANIFEST 1\nimage 02\ntype gdi\nfile 1 00000000 a.gdi\nfile 1 00000000 A.GDI\ndescriptor a.gdi\nend\n",
+            "NETGD-MANIFEST 1\nimage 02\ntype cdi\nfile 1 00000000 a.gdi\ndescriptor a.gdi\nend\n",
+            "NETGD-MANIFEST 1\r\nimage 02\n",
+        };
+        for (unsigned i = 0; i < sizeof rej / sizeof rej[0]; i++)
+            if (!ng_manifest_parse(rej[i], strlen(rej[i]), &m, err, sizeof err)) { printf("reject %u accepted\n", i); bad++; }
+    }
+    printf(bad ? "SELFTEST FAIL\n" : "SELFTEST OK\n");
+    return bad ? 1 : 0;
+}
+
+static int mkimage(const char *img, uint32_t sectors, uint32_t cluster)
+{
+    static BYTE work[FF_MAX_SS * 4];
+    MKFS_PARM p = { FM_FAT32 | FM_SFD, 2, 0, 0, cluster };
+    FRESULT r;
+    uint8_t mbr[512] __attribute__((aligned(32)));
+    remove(img);
+    if (sim_open(img, sectors)) return 1;
+    ngdev_init();
+    sim_part_off = 2048;
+    r = f_mkfs("0:", &p, work, sizeof work);
+    sim_part_off = 0;
+    if (r != FR_OK) { printf("f_mkfs failed %d\n", (int)r); return 1; }
+    memset(mbr, 0, sizeof mbr);
+    mbr[446 + 0] = 0x00; mbr[446 + 1] = 0xFE; mbr[446 + 2] = 0xFF; mbr[446 + 3] = 0xFF; mbr[446 + 4] = 0x0C;
+    mbr[446 + 5] = 0xFE; mbr[446 + 6] = 0xFF; mbr[446 + 7] = 0xFF;
+    {
+        uint32_t st = 2048, sz = sectors - 2048;
+        for (int i = 0; i < 4; i++) { mbr[446 + 8 + i] = (uint8_t)(st >> (8 * i)); mbr[446 + 12 + i] = (uint8_t)(sz >> (8 * i)); }
+    }
+    mbr[510] = 0x55; mbr[511] = 0xAA;
+    if (ngdev_write(0, 1, mbr)) return 1;
+    sim_close();
+    printf("mkimage ok\n");
+    return 0;
+}
+
+static void walk(const char *fsdir, const char *outdir)
+{
+    DIR d;
+    FILINFO fi;
+    if (f_opendir(&d, fsdir) != FR_OK) return;
+    while ((fi.fname[0] = 0, f_readdir(&d, &fi)) == FR_OK && fi.fname[0]) {
+        char fp[400], op[400];
+        snprintf(fp, sizeof fp, "%s%s%s", fsdir, fsdir[strlen(fsdir) - 1] == '/' ? "" : "/", fi.fname);
+        snprintf(op, sizeof op, "%s%s%s", outdir, fsdir[2] ? "" : "", fp + 2);
+        if (fi.fattrib & AM_DIR) {
+            _mkdir(op);
+            printf("DIR %s\n", fp + 2);
+            walk(fp, outdir);
+        } else {
+            FIL f;
+            FILE *o = fopen(op, "wb");
+            static uint8_t buf[65536];
+            UINT got;
+            uint32_t crc = 0;
+            printf("FILE %s %lu\n", fp + 2, (unsigned long)fi.fsize);
+            if (f_open(&f, fp, FA_READ) == FR_OK) {
+                while (f_read(&f, buf, sizeof buf, &got) == FR_OK && got) {
+                    if (o) fwrite(buf, 1, got, o);
+                    crc = ng_crc32(crc, buf, got);
+                }
+                f_close(&f);
+            }
+            printf("CRC %s %08X\n", fp + 2, (unsigned)crc);
+            if (o) fclose(o);
+        }
+    }
+    f_closedir(&d);
+}
+
+/* fill the volume with `fsz`-byte files, then delete every other one: free space only in holes */
+static int fragment(const char *img, uint32_t sectors, uint32_t fsz)
+{
+    static uint8_t buf[65536];
+    char why[96], name[32];
+    int n = 0;
+    if (fsz > sizeof buf) return 1;
+    if (sim_open(img, sectors)) return 1;
+    if (ngfs_mount(why, sizeof why)) { printf("MOUNT FAILED %s\n", why); return 1; }
+    for (;;) {
+        FIL f;
+        UINT bw = 0;
+        FRESULT r;
+        snprintf(name, sizeof name, "0:/F%04d", n);
+        if (f_open(&f, name, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) break;
+        r = f_write(&f, buf, fsz, &bw);
+        f_close(&f);
+        if (r != FR_OK || bw < fsz) { f_unlink(name); break; }
+        n++;
+    }
+    for (int i = 1; i < n; i += 2) {
+        snprintf(name, sizeof name, "0:/F%04d", i);
+        f_unlink(name);
+    }
+    ngfs_unmount();
+    sim_close();
+    printf("fragment ok (%d files)\n", n);
+    return 0;
+}
+
+static int dump(const char *img, uint32_t sectors, const char *outdir)
+{
+    char why[96];
+    if (sim_open(img, sectors)) return 1;
+    if (ngfs_mount(why, sizeof why)) { printf("MOUNT FAILED %s\n", why); return 1; }
+    _mkdir(outdir);
+    walk("0:/", outdir);
+    ngfs_unmount();
+    sim_close();
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    int rc, i;
+    uint32_t sectors;
+    if (argc < 2) return 2;
+    ng_cfg_defaults();
+    if (!strcmp(argv[1], "selftest")) return selftest();
+    if (argc < 5) return 2;
+    sectors = (uint32_t)strtoul(argv[3], NULL, 10);
+    if (!strcmp(argv[1], "mkimage")) return mkimage(argv[2], sectors, (uint32_t)strtoul(argv[4], NULL, 10));
+    if (!strcmp(argv[1], "fragment")) return fragment(argv[2], sectors, (uint32_t)strtoul(argv[4], NULL, 10));
+    if (!strcmp(argv[1], "dump")) return dump(argv[2], sectors, argv[4]);
+    if (strcmp(argv[1], "run") || argc < 6) return 2;
+    snprintf(sim_pc_root, sizeof sim_pc_root, "%s", argv[4]);
+    for (i = 6; i < argc; i++) {
+        if (!strcmp(argv[i], "--cut")) sim_cut_after = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--ckp")) opt.ckp = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--read")) opt.read = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--readback")) opt.readback = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--slow")) opt.slow = 1;
+        else if (!strcmp(argv[i], "--flip")) sim_flip_cmd = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--caps")) sim_caps = (uint8_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--frag")) opt.frag = 1;
+        else if (!strcmp(argv[i], "--force")) opt.force = 1;
+        else if (!strcmp(argv[i], "--stopafter")) sim_stop_after_polls = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pollms")) ng_pc_poll_ms = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--quiet")) sim_quiet = 1;
+    }
+    if (sim_open(argv[2], sectors)) { printf("cannot open image\n"); return 2; }
+    sim_protect_lba = 2048;
+    ng_pc_cfg_hook = cfg_hook;
+    ng_phase_hook = phase_hook;
+    rc = ng_pc_run(argv[5], NULL);
+    printf("SIM rc=%d writes=%llu cmds=%llu violations=%llu unsess=%d fnvbad=%u retries=%u unverified=%u begin=%d end=%d "
+           "endmode=%d endname=%s dead=%d\n",
+           rc, (unsigned long long)sim_sector_writes, (unsigned long long)sim_cmd_writes,
+           (unsigned long long)sim_violations, sim_unsessioned_writes, (unsigned)ngblk_stats.fnv_mismatches,
+           (unsigned)ngblk_stats.io_retries, (unsigned)ngblk_stats.unverified, sim_begin_calls, sim_end_calls,
+           sim_end_mode, sim_end_name, sim_dead);
+    sim_close();
+    return rc;
+}
