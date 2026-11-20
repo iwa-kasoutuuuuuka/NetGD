@@ -119,7 +119,7 @@ impl Guard {
         if c == self.mark {
             return true;
         }
-        self.steps += 1;
+        self.steps = self.steps.wrapping_add(1);
         if self.steps == self.power {
             self.mark = c;
             self.power = self.power.wrapping_shl(1);

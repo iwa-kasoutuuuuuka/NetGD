@@ -1,13 +1,18 @@
 //! The flash as the boot logic sees it.
 //!
 //! A hardware implementation (stage S3/S4) reads flash through its memory
-//! map and builds every `EEFC_FCR` value with [`crate::fcr::fcr_word_for`];
-//! the EWP routine must run from RAM, because the flash cannot be read while
-//! a program command runs (design 1-1). The host model in `tests/common`
-//! enforces exactly that: a `read` while a command is busy is counted as a
-//! violation.
+//! map and gets every command as an [`FcrCmd`] from [`crate::fcr`]. The EWP
+//! is **one blocking method**: the hardware implementation is a single
+//! routine that runs from RAM (the flash cannot be read, and so no
+//! instruction can be fetched from it, while a program command runs on that
+//! plane; design 1-1): fill the latch with 32-bit writes, write FCR, poll
+//! FSR with a timeout, and return the FLOCKE/FCMDE flags of the same FSR read
+//! that saw FRDY (they clear on read). There is no polling loop in this
+//! crate, so no bootcore code runs from flash while a command is busy. The
+//! host model in `tests/common` checks that `read` is never entered while
+//! an `ewp` is in progress and cuts power inside `ewp`.
 
-use crate::fcr::Plane;
+use crate::fcr::{FcrCmd, Plane};
 
 pub const FLASH_BASE: u32 = 0x0008_0000;
 pub const PLANE1_BASE: u32 = 0x0010_0000;
@@ -16,43 +21,29 @@ pub const PAGE: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FlashError {
-    /// `fcr_word` refused the command (page outside what we may write).
+    /// The command was refused (page outside what we may write, FCMDE).
     Refused,
     /// FLOCKE: the page is in a locked region.
     Locked,
     /// The controller or the supply failed.
     Failed,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Poll {
-    Busy,
-    Done(Result<(), FlashError>),
+    /// FRDY did not come up in time. The page content is unknown.
+    Timeout,
 }
 
 pub trait Flash {
-    /// Read flash bytes at an absolute address. Never called while a command
-    /// is busy.
+    /// Read flash bytes at an absolute address. Never called while `ewp`
+    /// is running.
     fn read(&mut self, addr: u32, out: &mut [u8]);
 
-    /// Latch `data` and start EWP for `page` of `plane`. Returns at once.
-    fn ewp_start(&mut self, plane: Plane, page: u32, data: &[u8; PAGE]) -> Result<(), FlashError>;
+    /// Latch `data` into the page `cmd` names (an EWP command) and run it to
+    /// completion, with a timeout (`Err(Timeout)`). FLOCKE gives
+    /// `Err(Locked)`, FCMDE `Err(Refused)`.
+    fn ewp(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError>;
 
-    /// FRDY and, once ready, FLOCKE/FCMDE as a result.
-    fn ewp_poll(&mut self) -> Poll;
-
-    /// GLB: bit n set = lock region n of `plane` is locked.
+    /// GLB: bit n set = lock region n of `plane` is locked. A failure must
+    /// be reported as all ones (everything locked).
     fn lock_bits(&mut self, plane: Plane) -> u32;
-
-    /// Erase and write one page and wait for it.
-    fn ewp(&mut self, plane: Plane, page: u32, data: &[u8; PAGE]) -> Result<(), FlashError> {
-        self.ewp_start(plane, page, data)?;
-        loop {
-            if let Poll::Done(r) = self.ewp_poll() {
-                return r;
-            }
-        }
-    }
 }
 
 /// Plane and page index (relative to the plane, as FARG wants it) of a

@@ -291,14 +291,11 @@ fn flocke_midway_is_reported_and_leaves_the_app_invalid() {
         fn read(&mut self, a: u32, o: &mut [u8]) {
             self.0.read(a, o)
         }
-        fn ewp_start(&mut self, p: bootcore::fcr::Plane, pg: u32, d: &[u8; 256]) -> Result<(), FlashError> {
+        fn ewp(&mut self, c: bootcore::fcr::FcrCmd, d: &[u8; 256]) -> Result<(), FlashError> {
             if self.0.ops == self.1 {
                 self.0.lock[0] |= 1 << 2;
             }
-            self.0.ewp_start(p, pg, d)
-        }
-        fn ewp_poll(&mut self) -> bootcore::flash::Poll {
-            self.0.ewp_poll()
+            self.0.ewp(c, d)
         }
         fn lock_bits(&mut self, p: bootcore::fcr::Plane) -> u32 {
             self.0.lock_bits(p)
@@ -369,4 +366,261 @@ fn sd_read_failures_and_glitches_never_leave_a_wrong_app() {
             assert_eq!(m.violations, 0);
         }
     }
+}
+
+// ------------------------------------------------------------------ boot protocol
+
+/// What a resident does at reset, with the boot decision, GPBR0 and
+/// `sd_recover` wired together as `bootcore::boot` documents.
+#[derive(Debug, PartialEq, Eq)]
+enum Boot {
+    /// Jumped to the application without touching the card.
+    Run,
+    /// Recovered (or found it already installed), then jumped.
+    RecoveredRun(u32),
+    /// Recovery failed, the application is valid: started after the delay.
+    FailedStart,
+    /// Recovery failed, no application: polling the card again.
+    FailedRetry,
+}
+
+fn reset(m: &mut Model, part: Part, img: &std::sync::Arc<Vec<u8>>, gpbr: &mut u32, button: bool) -> Boot {
+    use bootcore::boot::*;
+    m.power_up();
+    let app_valid = verify_flash_app(m, part, false).is_ok();
+    match decide(app_valid, button, *gpbr) {
+        Action::RunApp => Boot::Run,
+        Action::Recover { clear_request } => {
+            if clear_request {
+                *gpbr = 0;
+            }
+            let mut card = Card::shared(img.clone());
+            match recover(m, part, &mut card) {
+                Ok(len) => Boot::RecoveredRun(len),
+                Err(_) => match after_failed_recovery(app_valid) {
+                    Fallback::StartApp => Boot::FailedStart,
+                    Fallback::RetryRecovery => Boot::FailedRetry,
+                },
+            }
+        }
+    }
+}
+
+#[test]
+fn a_held_button_recovers_once_and_never_reflashes() {
+    for part in [Part::Sam3u2e, Part::Sam3u4e] {
+        let app = app_image(part, 8192, 21);
+        let bs = bitstream(0x1000, 21);
+        let mut file = image(0, part, &app);
+        if part.has_plane1() {
+            file.extend(image(1, part, &bs));
+        }
+        let img = std::sync::Arc::new(sd_file(&file, Layout::Contig));
+        let mut m = Model::new(part);
+        let mut gpbr = 0u32;
+        // 1st reset: blank flash, button held
+        assert_eq!(reset(&mut m, part, &img, &mut gpbr, true), Boot::RecoveredRun(8192));
+        assert!(m.ops > 0);
+        let snapshot = m.mem.clone();
+        // every later reset with the button still held: the card is read,
+        // the flash is not written at all
+        for _ in 0..5 {
+            assert_eq!(reset(&mut m, part, &img, &mut gpbr, true), Boot::RecoveredRun(8192));
+            assert_eq!(m.ops, 0, "a held button reflashed the application");
+            assert_eq!(m.mem, snapshot);
+        }
+        // button released: runs
+        assert_eq!(reset(&mut m, part, &img, &mut gpbr, false), Boot::Run);
+    }
+}
+
+#[test]
+fn a_request_in_gpbr0_is_cleared_and_served_once() {
+    use bootcore::boot::GPBR_RECOVER_MAGIC;
+    let part = Part::Sam3u2e;
+    let old = app_image(part, 4096, 1);
+    let new = app_image(part, 8192, 2);
+    let img = std::sync::Arc::new(sd_file(&image(0, part, &new), Layout::Contig));
+    let mut m = Model::new(part);
+    m.poke(APP_BASE, &old);
+    // the application asks for an update: it is written, GPBR0 is cleared
+    let mut gpbr = GPBR_RECOVER_MAGIC;
+    assert_eq!(reset(&mut m, part, &img, &mut gpbr, false), Boot::RecoveredRun(8192));
+    assert_eq!(gpbr, 0);
+    assert_eq!(m.peek(APP_BASE, 8192), &new[..]);
+    // the next reset runs the application; the card is not looked at
+    assert_eq!(reset(&mut m, part, &img, &mut gpbr, false), Boot::Run);
+    // a request that fails (no card file) is also cleared, and the valid
+    // application starts
+    let empty = std::sync::Arc::new(card_with(b"OTHER   TXT", b"x"));
+    let mut gpbr = GPBR_RECOVER_MAGIC;
+    assert_eq!(reset(&mut m, part, &empty, &mut gpbr, false), Boot::FailedStart);
+    assert_eq!(gpbr, 0);
+    assert_eq!(reset(&mut m, part, &empty, &mut gpbr, false), Boot::Run);
+    // no application and no card file: keeps polling
+    let mut m = Model::new(part);
+    assert_eq!(reset(&mut m, part, &empty, &mut 0, false), Boot::FailedRetry);
+}
+
+#[test]
+fn the_same_file_is_skipped_but_any_difference_is_written() {
+    let part = Part::Sam3u4e;
+    let app = app_image(part, 8192, 31);
+    let bs = bitstream(0x1000, 31);
+    let mut file = image(0, part, &app);
+    file.extend(image(1, part, &bs));
+    let img = sd_file(&file, Layout::Contig);
+    let run = |m: &mut Model| {
+        m.power_up();
+        let mut card = Card::new(img.clone());
+        let r = recover(m, part, &mut card);
+        (r, m.ops)
+    };
+    // installed: nothing written
+    let mut m = Model::new(part);
+    assert_eq!(run(&mut m).0, Ok(8192));
+    assert_eq!(run(&mut m), (Ok(8192), 0));
+    // same length, other content (other trailer CRC): written
+    let mut m2 = Model::new(part);
+    m2.poke(APP_BASE, &app_image(part, 8192, 32));
+    m2.poke(PLANE1_BASE, &bs);
+    let (r, ops) = run(&mut m2);
+    assert_eq!(r, Ok(8192));
+    assert!(ops > 0);
+    assert_eq!(m2.peek(APP_BASE, 8192), &app[..]);
+    // other length: written
+    let mut m3 = Model::new(part);
+    m3.poke(APP_BASE, &app_image(part, 4096, 31));
+    m3.poke(PLANE1_BASE, &bs);
+    assert!(run(&mut m3).1 > 0);
+    assert_eq!(m3.peek(APP_BASE, 8192), &app[..]);
+    // the bitstream differs: written (and then installed)
+    let mut m4 = Model::new(part);
+    assert_eq!(run(&mut m4).0, Ok(8192));
+    m4.poke(PLANE1_BASE + 10, &[0x55]);
+    let (r, ops) = run(&mut m4);
+    assert_eq!(r, Ok(8192));
+    assert!(ops > 0);
+    assert_eq!(m4.peek(PLANE1_BASE, bs.len()), &bs[..]);
+    assert_eq!(run(&mut m4), (Ok(8192), 0));
+    // a damaged app body (valid descriptor, CRC off): not installed
+    let mut m5 = Model::new(part);
+    assert_eq!(run(&mut m5).0, Ok(8192));
+    let b = m5.peek(APP_BASE + 5000, 1)[0] ^ 1;
+    m5.poke(APP_BASE + 5000, &[b]);
+    let (r, ops) = run(&mut m5);
+    assert_eq!(r, Ok(8192));
+    assert!(ops > 0);
+    assert_eq!(m5.peek(APP_BASE, 8192), &app[..]);
+}
+
+// ------------------------------------------------------------------ erase and timeout
+
+#[test]
+fn erase_only_needs_the_app_to_become_invalid() {
+    let part = Part::Sam3u2e;
+    let old = app_image(part, 4096, 1);
+    let app = app_image(part, 8192, 2);
+    let file = image(0, part, &app);
+    // A weak cell that does not read back as 0xFF after an erase is no
+    // reason to give up: the application is invalid, the final pages are
+    // written and read back anyway.
+    let mut m = Model::new(part);
+    m.poke(APP_BASE, &old);
+    m.weak_erase = Some(APP_BASE + 0x100);
+    let mut card = Card::new(sd_file(&file, Layout::Contig));
+    assert_eq!(recover(&mut m, part, &mut card), Ok(8192));
+    assert_eq!(m.peek(APP_BASE, 8192), &app[..]);
+    // An erase that did nothing to the descriptor (the old descriptor still
+    // parses after it) stops the recovery before anything else is written.
+    let mut m = Model::new(part);
+    m.poke(APP_BASE, &old);
+    m.ignore = Some(APP_BASE + 0x100);
+    let mut card = Card::new(sd_file(&file, Layout::Contig));
+    assert_eq!(recover(&mut m, part, &mut card), Err(RecoverError::Verify));
+    assert_eq!(m.ops, 2, "nothing beyond the two erases");
+}
+
+#[test]
+fn flash_timeout_is_a_failure_and_leaves_no_wrong_app() {
+    let part = Part::Sam3u2e;
+    let old = app_image(part, 4096, 1);
+    let app = app_image(part, 8192, 2);
+    let img = sd_file(&image(0, part, &app), Layout::Contig);
+    let base = {
+        let mut m = Model::new(part);
+        m.poke(APP_BASE, &old);
+        m
+    };
+    let mut clean = base.clone();
+    recover(&mut clean, part, &mut Card::new(img.clone())).unwrap();
+    let n = clean.ops;
+    let outs = [Outcome::Untouched, Outcome::Erased, Outcome::Garbage, Outcome::Prefix(100), Outcome::Prefix(255), Outcome::ErasePrefix(40)];
+    for op in 0..n {
+        for o in outs {
+            let mut m = base.clone();
+            m.timeout = Some(Cut { op, outcome: o });
+            let r = recover(&mut m, part, &mut Card::new(img.clone()));
+            assert_eq!(r, Err(RecoverError::Flash(FlashError::Timeout)), "op {op} {o:?}");
+            assert_eq!(m.ops, op + 1, "EWPs were issued after a timeout");
+            // what the boot check makes of it: invalid, the old app (op 0
+            // untouched) or, at the very last EWP, a fully written new one
+            match valid(&m, part) {
+                None => {}
+                Some(l) => {
+                    let img = m.peek(APP_BASE, l as usize);
+                    let is_old = (l, img) == (4096, &old[..]);
+                    let is_new = (l, img) == (8192, &app[..]);
+                    assert!(is_old && op == 0 || is_new && op == n - 1, "op {op} {o:?}: valid but wrong ({l} bytes)");
+                }
+            }
+            // and the next run finishes the job
+            m.power_up();
+            assert_eq!(recover(&mut m, part, &mut Card::new(img.clone())), Ok(8192), "op {op} {o:?}");
+            assert_eq!(m.peek(APP_BASE, 8192), &app[..]);
+        }
+    }
+}
+
+// ------------------------------------------------------------------ the file changes between passes
+
+#[test]
+fn a_file_whose_images_change_order_between_passes_is_refused() {
+    let part = Part::Sam3u4e;
+    // an application and a bitstream of 512 bytes each: swapping them keeps
+    // every header and the total size
+    let app = app_image(part, 512, 5);
+    let bs = bitstream(512, 5);
+    let a = [image(0, part, &app), image(1, part, &bs)].concat();
+    let b = [image(1, part, &bs), image(0, part, &app)].concat();
+    assert_eq!(a.len(), b.len());
+    let img = sd_file(&a, Layout::Contig);
+    let off = img.windows(512).position(|w| w == &a[..512]).unwrap();
+    let mut img_b = img.clone();
+    img_b[off..off + b.len()].copy_from_slice(&b);
+    let img_b = std::sync::Arc::new(img_b);
+
+    let mut m = Model::new(part);
+    let mut card = Card::new(img.clone());
+    assert_eq!(recover(&mut m, part, &mut card), Ok(512));
+    let total = card.reads;
+    let mut changed = 0;
+    for n in 0..total {
+        let mut m = Model::new(part);
+        let mut card = Card::new(img.clone());
+        card.swap = Some((n, img_b.clone()));
+        let r = recover(&mut m, part, &mut card);
+        match r {
+            Err(RecoverError::Changed) => changed += 1,
+            Ok(_) => {
+                assert_eq!(m.peek(APP_BASE, 512), &app[..]);
+                assert_eq!(m.peek(PLANE1_BASE, 512), &bs[..]);
+            }
+            Err(_) => {}
+        }
+        if let Some(l) = valid(&m, part) {
+            assert_eq!(m.peek(APP_BASE, l as usize), &app[..], "swap at read {n}");
+        }
+    }
+    assert!(changed > 0, "the swap between pass 1 and pass 2 was not noticed");
 }

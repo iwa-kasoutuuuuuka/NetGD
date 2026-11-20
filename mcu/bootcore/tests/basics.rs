@@ -96,82 +96,196 @@ const SGPB_WORDS: [u32; 3] = [0x5A00_000B, 0x5A00_010B, 0x5A00_020B];
 
 #[test]
 fn fcr_exhaustive_over_every_command_and_argument() {
-    let mut counts = [[0usize; 2]; 2]; // [allow_slb][plane]
-    for (ai, allow) in [false, true].into_iter().enumerate() {
-        for (pi, plane) in [Plane::P0, Plane::P1].into_iter().enumerate() {
-            for cmd in 0..=255u8 {
-                let mut args: Vec<u32> = (0..=0x3FFFu32).collect();
-                args.extend([0xFFFF, 0x1_0000, 0x1_0100, 0x00FF_FFFF, 0x0100_0000, 0x7FFF_FFFF, 0x8000_0000, u32::MAX]);
-                for arg in args {
-                    let Some(w) = fcr_word_raw(plane, cmd, arg, allow) else { continue };
-                    counts[ai][pi] += 1;
-                    // shape
-                    assert_eq!(w >> 24, 0x5A, "key");
-                    assert_eq!(w & 0xFF, cmd as u32);
-                    assert_eq!((w >> 8) & 0xFFFF, arg);
-                    assert!(arg < 0x10000);
-                    // only the allowlist
-                    assert!(matches!(cmd, CMD_EWP | CMD_GLB | CMD_SLB), "cmd {cmd:#x} produced");
-                    // never SGPB 0x0B, CGPB 0x0C, CLB 0x09, EA 0x05, WP* ...
-                    for bad in [0x00u8, 0x01, 0x02, 0x04, 0x05, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F] {
-                        assert_ne!(w & 0xFF, bad as u32);
-                    }
-                    assert!(!SGPB_WORDS.contains(&w));
-                    match cmd {
-                        CMD_EWP if plane == Plane::P0 => assert!((32..512).contains(&arg)),
-                        CMD_EWP => assert!(arg < 512),
-                        CMD_GLB => assert_eq!(arg, 0),
-                        CMD_SLB => {
-                            assert!(allow && plane == Plane::P0 && arg < 32);
+    // [part][allow_slb][plane]
+    let mut counts = [[[0usize; 2]; 2]; 2];
+    for (ti, part) in [Part::Sam3u2e, Part::Sam3u4e].into_iter().enumerate() {
+        for (ai, allow) in [false, true].into_iter().enumerate() {
+            for (pi, plane) in [Plane::P0, Plane::P1].into_iter().enumerate() {
+                for cmd in 0..=255u8 {
+                    let mut args: Vec<u32> = (0..=0x3FFFu32).collect();
+                    args.extend([0xFFFF, 0x1_0000, 0x1_0100, 0x00FF_FFFF, 0x0100_0000, 0x7FFF_FFFF, 0x8000_0000, u32::MAX]);
+                    for arg in args {
+                        let Some(w) = fcr_word_raw(part, plane, cmd, arg, allow) else { continue };
+                        counts[ti][ai][pi] += 1;
+                        // shape
+                        assert_eq!(w >> 24, 0x5A, "key");
+                        assert_eq!(w & 0xFF, cmd as u32);
+                        assert_eq!((w >> 8) & 0xFFFF, arg);
+                        assert!(arg < 0x10000);
+                        // only the allowlist
+                        assert!(matches!(cmd, CMD_EWP | CMD_GLB | CMD_SLB), "cmd {cmd:#x} produced");
+                        // never SGPB 0x0B, CGPB 0x0C, CLB 0x09, EA 0x05, WP* ...
+                        for bad in [0x00u8, 0x01, 0x02, 0x04, 0x05, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F] {
+                            assert_ne!(w & 0xFF, bad as u32);
                         }
-                        _ => unreachable!(),
+                        assert!(!SGPB_WORDS.contains(&w));
+                        // no plane 1 on a part without it
+                        assert!(plane == Plane::P0 || part.has_plane1());
+                        match cmd {
+                            CMD_EWP if plane == Plane::P0 => assert!((32..512).contains(&arg)),
+                            CMD_EWP => assert!(arg < 512),
+                            CMD_GLB => assert_eq!(arg, GLB_FARG),
+                            CMD_SLB => {
+                                assert!(allow && plane == Plane::P0 && arg == 0);
+                            }
+                            _ => unreachable!(),
+                        }
                     }
                 }
             }
         }
     }
-    // exactly the intended set: EWP 480 (P0) / 512 (P1), GLB 1, SLB 32 on P0
-    assert_eq!(counts[0], [480 + 1, 512 + 1]);
-    assert_eq!(counts[1], [480 + 1 + 32, 512 + 1]);
+    // exactly the intended set: EWP 480 (P0) / 512 (P1), GLB 1, SLB 1 on P0
+    assert_eq!(counts[0][0], [480 + 1, 0]);
+    assert_eq!(counts[0][1], [480 + 1 + 1, 0]);
+    assert_eq!(counts[1][0], [480 + 1, 512 + 1]);
+    assert_eq!(counts[1][1], [480 + 1 + 1, 512 + 1]);
 }
 
 #[test]
 fn fcr_public_entry_points() {
-    assert_eq!(fcr_word(Cmd::Ewp, 32), Some(0x5A00_2003));
-    assert_eq!(fcr_word(Cmd::Ewp, 511), Some(0x5A01_FF03));
-    assert_eq!(fcr_word(Cmd::Glb, 0), Some(0x5A00_000A));
-    assert_eq!(fcr_word(Cmd::Slb, 0), Some(0x5A00_0008));
+    let (e, f) = (Part::Sam3u2e, Part::Sam3u4e);
+    let w = |c: Option<FcrCmd>| c.map(|c| c.word());
+    assert_eq!(w(FcrCmd::ewp(e, Plane::P0, 32)), Some(0x5A00_2003));
+    assert_eq!(w(FcrCmd::ewp(e, Plane::P0, 511)), Some(0x5A01_FF03));
+    assert_eq!(w(FcrCmd::glb(e, Plane::P0)), Some(0x5A00_200A));
+    assert_eq!(w(FcrCmd::slb(e, true)), Some(0x5A00_0008));
     for page in 0..32 {
-        assert_eq!(fcr_word(Cmd::Ewp, page), None, "EWP into the resident, page {page}");
-        assert!(fcr_word_for(Plane::P0, Cmd::Ewp, page).is_none());
+        assert!(FcrCmd::ewp(e, Plane::P0, page).is_none(), "EWP into the resident, page {page}");
+        assert!(FcrCmd::ewp(f, Plane::P0, page).is_none());
     }
-    assert_eq!(fcr_word(Cmd::Ewp, 512), None);
-    assert_eq!(fcr_word(Cmd::Glb, 1), None);
-    assert_eq!(fcr_word(Cmd::Slb, 32), None);
-    assert_eq!(fcr_word_with(Plane::P0, Cmd::Slb, 0, false), None, "an updater build may not lock");
-    assert_eq!(fcr_word_for(Plane::P1, Cmd::Slb, 0), None);
-    assert_eq!(fcr_word_for(Plane::P1, Cmd::Ewp, 0), Some(0x5A00_0003));
+    assert!(FcrCmd::ewp(e, Plane::P0, 512).is_none());
+    assert!(FcrCmd::new(e, Plane::P0, Cmd::Glb, 0, false).is_none());
+    assert!(FcrCmd::new(e, Plane::P0, Cmd::Glb, 3, false).is_none());
+    assert!(FcrCmd::new(e, Plane::P0, Cmd::Slb, 1, true).is_none());
+    assert!(FcrCmd::new(e, Plane::P0, Cmd::Slb, 31, true).is_none());
+    assert!(FcrCmd::new(e, Plane::P0, Cmd::Slb, 32, true).is_none());
+    assert!(FcrCmd::slb(e, false).is_none(), "an updater build may not lock");
+    assert!(FcrCmd::slb(f, false).is_none());
+    // no plane 1 command at all on a 2E
+    assert!(FcrCmd::ewp(e, Plane::P1, 0).is_none());
+    assert!(FcrCmd::glb(e, Plane::P1).is_none());
+    assert!(FcrCmd::new(e, Plane::P1, Cmd::Slb, 0, true).is_none());
+    assert!(FcrCmd::new(f, Plane::P1, Cmd::Slb, 0, true).is_none());
+    assert_eq!(w(FcrCmd::ewp(f, Plane::P1, 0)), Some(0x5A00_0003));
+    assert_eq!(w(FcrCmd::glb(f, Plane::P1)), Some(0x5A00_200A));
+    // the register block travels with the word
+    let c0 = FcrCmd::ewp(f, Plane::P0, 40).unwrap();
+    let c1 = FcrCmd::ewp(f, Plane::P1, 40).unwrap();
+    assert_eq!((c0.eefc_base(), c0.fcr_addr(), c0.fsr_addr()), (0x400E_0800, 0x400E_0804, 0x400E_0808));
+    assert_eq!((c1.eefc_base(), c1.fcr_addr(), c1.fsr_addr()), (0x400E_0A00, 0x400E_0A04, 0x400E_0A08));
+    assert_eq!(c0.word(), c1.word());
+    assert_ne!(c0, c1);
+    assert_eq!((c0.page_addr(), c1.page_addr()), (0x0008_0000 + 40 * 256, 0x0010_0000 + 40 * 256));
+    assert_eq!((c0.plane(), c1.plane(), c0.code(), c0.arg()), (Plane::P0, Plane::P1, 3, 40));
+    assert_eq!(FcrCmd::glb(e, Plane::P0).unwrap().eefc_base(), 0x400E_0800);
+    assert_eq!(FcrCmd::slb(e, true).unwrap().eefc_base(), 0x400E_0800);
 }
 
-/// The design's remark (3-4): an EWP word for page >= 32 is far from the
-/// security-bit word, unlike the old "EWP page 0" (one bit apart).
+fn dist(a: u32, b: u32) -> u32 {
+    (a ^ b).count_ones()
+}
+
+/// The design remark (3-4), extended: every word the crate can produce
+/// (EWP of every page of both planes, GLB, SLB) against every word that does
+/// harm (SGPB and CGPB of GPNVM 0..2, EA, WP, CLB with every argument
+/// 0..512). Whatever one flipped bit does to a produced word, it must not be
+/// a dangerous command. The exceptions are named (see the match below).
 #[test]
-fn ewp_words_are_two_bits_from_gpnvm_setting_words() {
-    let dist = |a: u32, b: u32| (a ^ b).count_ones();
-    // The old updater's page-0 write.
-    assert_eq!(dist(0x5A00_0003, SGPB_WORDS[0]), 1);
-    let mut min = 32;
+fn produced_words_are_two_bits_from_dangerous_words() {
+    // dangerous words: (name, word)
+    let mut danger: Vec<(&str, u32)> = vec![];
+    for g in 0..3u32 {
+        danger.push(("SGPB", 0x5A00_000B | (g << 8)));
+        danger.push(("CGPB", 0x5A00_000C | (g << 8)));
+    }
+    for a in 0..512u32 {
+        danger.push(("EA", 0x5A00_0005 | (a << 8)));
+        danger.push(("WP", 0x5A00_0001 | (a << 8)));
+        danger.push(("CLB", 0x5A00_0009 | (a << 8)));
+    }
+    let f = Part::Sam3u4e;
+    // (plane, name, word) of everything producible
+    let mut mine: Vec<(Plane, &str, u32)> = vec![];
     for page in 32..512 {
-        let w = fcr_word(Cmd::Ewp, page).unwrap();
-        for s in SGPB_WORDS {
-            min = min.min(dist(w, s));
+        mine.push((Plane::P0, "EWP", FcrCmd::ewp(f, Plane::P0, page).unwrap().word()));
+    }
+    for page in 0..512 {
+        mine.push((Plane::P1, "EWP", FcrCmd::ewp(f, Plane::P1, page).unwrap().word()));
+    }
+    mine.push((Plane::P0, "GLB", FcrCmd::glb(f, Plane::P0).unwrap().word()));
+    mine.push((Plane::P1, "GLB", FcrCmd::glb(f, Plane::P1).unwrap().word()));
+    mine.push((Plane::P0, "SLB", FcrCmd::slb(f, true).unwrap().word()));
+    assert_eq!(mine.len(), 480 + 512 + 3);
+
+    let mut min_p0 = 32;
+    let mut min_p1 = 32;
+    let mut ones: Vec<String> = vec![];
+    for &(plane, name, w) in &mine {
+        for &(dn, d) in &danger {
+            let k = dist(w, d);
+            if plane == Plane::P0 {
+                min_p0 = min_p0.min(k);
+            } else {
+                min_p1 = min_p1.min(k);
+            }
+            if k >= 2 {
+                continue;
+            }
+            assert_eq!(k, 1, "a produced word equals a dangerous one: {name} {w:#x} = {dn}");
+            // The exceptions that do no harm:
+            let ok = match (plane, name, dn) {
+                // EWP vs WP of the same page: WP writes without erasing the
+                // page the caller means to write anyway (same page, >= 32 on
+                // plane 0, so never the resident); the read-back catches it.
+                (_, "EWP", "WP") => true,
+                // SLB 0 vs CGPB 0: CGPB of GPNVM0 cannot clear the security
+                // bit (only the ERASE pin does, datasheet lines 1729-1731).
+                (Plane::P0, "SLB", "CGPB") => w == 0x5A00_0008 && d == 0x5A00_000C,
+                // SLB 0 vs CLB 0: NOT harmless in principle (CLB 0 unlocks
+                // the resident region) and not removable: argument 0 is the
+                // only one that means region 0 under both readings of FARG.
+                // It takes a one-bit error in the single FCR write of the
+                // lock step; the resident reads GLB afterwards.
+                (Plane::P0, "SLB", "CLB") => w == 0x5A00_0008 && d == 0x5A00_0009,
+                // EEFC1 has no GPNVM bits (datasheet 8.2.3.10): an SGPB or
+                // CGPB that reaches it changes nothing.
+                (Plane::P1, _, "SGPB" | "CGPB") => true,
+                _ => false,
+            };
+            assert!(ok, "distance 1: {name} {w:#x} ({plane:?}) vs {dn} {d:#x}");
+            ones.push(format!("{name} {w:#010x} vs {dn} {d:#010x}"));
         }
     }
-    assert!(min >= 2, "min distance {min}");
-    // Plane 1: page 0 is one bit away again, but EEFC1 has no GPNVM bits
-    // (datasheet 8.2.3.10: "EEFC1 does not feature the GPNVM bits"), so an
-    // SGPB reaching EEFC1 changes nothing.
-    assert_eq!(dist(fcr_word_for(Plane::P1, Cmd::Ewp, 0).unwrap(), SGPB_WORDS[0]), 1);
+    ones.sort();
+    ones.dedup();
+    println!("minimum Hamming distance, plane 0 words vs dangerous words: {min_p0}");
+    println!("minimum Hamming distance, plane 1 words vs dangerous words: {min_p1}");
+    println!("distinct distance-1 pairs ({}), all of the named harmless kinds", ones.len());
+    // Plane 0 includes the exceptions above (EWP/WP, SLB/CGPB 0); everything
+    // else on plane 0 is at least 2 apart. Count them separately:
+    let mut min_p0_strict = 32;
+    for &(plane, name, w) in &mine {
+        if plane != Plane::P0 {
+            continue;
+        }
+        for &(dn, d) in &danger {
+            if name == "EWP" && dn == "WP" || name == "SLB" && (d == 0x5A00_000C || d == 0x5A00_0009) {
+                continue;
+            }
+            min_p0_strict = min_p0_strict.min(dist(w, d));
+        }
+    }
+    println!("minimum distance on plane 0 without the two named exceptions: {min_p0_strict}");
+    assert!(min_p0_strict >= 2);
+    // the one-bit flips of the GLB word, which the resident issues at every boot
+    let glb = FcrCmd::glb(f, Plane::P0).unwrap().word();
+    assert_eq!(glb, 0x5A00_200A);
+    for bit in 0..32 {
+        let flipped = glb ^ (1 << bit);
+        assert!(!SGPB_WORDS.contains(&flipped), "GLB with bit {bit} flipped is SGPB of a real GPNVM bit");
+    }
+    assert_eq!(dist(glb, SGPB_WORDS[0]), 2);
 }
 
 // ------------------------------------------------------------------ descriptor
@@ -387,6 +501,15 @@ fn lock_masks_equal_the_updaters() {
     assert_eq!(lock_mask_at(PLANE1_BASE, 9000), 0x0003);
     assert_eq!(lock_mask_at(PLANE1_BASE + 8192, 512), 0x0002);
     assert_eq!(lock_mask_at(FLASH_BASE, 0), 0);
+    // out of range: no underflow, "everything locked"
+    assert_eq!(lock_mask_at(0, 512), u32::MAX);
+    assert_eq!(lock_mask_at(FLASH_BASE - 1, 512), u32::MAX);
+    assert_eq!(lock_mask_at(0x7_FFFF, 2), u32::MAX);
+    assert_eq!(lock_mask_at(FLASH_BASE + 0x2_0000 - 1, 2), u32::MAX);
+    assert_eq!(lock_mask_at(PLANE1_BASE + 0x2_0000, 512), u32::MAX);
+    assert_eq!(lock_mask_at(FLASH_BASE, u32::MAX), u32::MAX);
+    assert_eq!(lock_mask_at(u32::MAX, u32::MAX), u32::MAX);
+    assert_eq!(lock_mask_at(0, 0), 0);
 }
 
 #[test]
@@ -506,21 +629,39 @@ fn image_stream_checks() {
 // ------------------------------------------------------------------ boot decision
 
 #[test]
-fn boot_decision_truth_table() {
-    for app_valid in [false, true] {
-        for button in [false, true] {
-            for g in [0u32, 0xFFFF_FFFF, GPBR_RECOVER_MAGIC, GPBR_RECOVER_MAGIC ^ 1, 0x1234_5678] {
-                let want = if button || g == GPBR_RECOVER_MAGIC || !app_valid { Action::Recover } else { Action::RunApp };
-                assert_eq!(decide(app_valid, button, g), want);
-            }
-        }
+fn boot_decision_explicit_rows() {
+    const M: u32 = GPBR_RECOVER_MAGIC;
+    use Action::*;
+    let rec = |c: bool| Recover { clear_request: c };
+    // (app_valid, button, gpbr0, expected)
+    let rows: [(bool, bool, u32, Action); 18] = [
+        // D5: no request, valid app -> run, nothing about files on the card
+        (true, false, 0, RunApp),
+        (true, false, 0xFFFF_FFFF, RunApp),
+        (true, false, M ^ 1, RunApp),
+        (true, false, 0x1234_5678, RunApp),
+        // the button
+        (true, true, 0, rec(false)),
+        (true, true, 0xFFFF_FFFF, rec(false)),
+        (true, true, M ^ 1, rec(false)),
+        // the request of the application: recover and clear GPBR0
+        (true, false, M, rec(true)),
+        (true, true, M, rec(true)),
+        // no valid application
+        (false, false, 0, rec(false)),
+        (false, false, 0xFFFF_FFFF, rec(false)),
+        (false, false, M ^ 1, rec(false)),
+        (false, false, 0x1234_5678, rec(false)),
+        (false, true, 0, rec(false)),
+        (false, true, M ^ 1, rec(false)),
+        // an invalid app and a request: the request is still cleared
+        (false, false, M, rec(true)),
+        (false, true, M, rec(true)),
+        (false, true, 0xFFFF_FFFF, rec(false)),
+    ];
+    for (valid, button, g, want) in rows {
+        assert_eq!(decide(valid, button, g), want, "valid={valid} button={button} gpbr={g:#x}");
     }
-    // D5: no request, valid app -> run, nothing about files on the card
-    assert_eq!(decide(true, false, 0), Action::RunApp);
-    assert_eq!(decide(true, false, 0xFFFF_FFFF), Action::RunApp);
-    assert_eq!(decide(false, false, 0), Action::Recover);
-    assert_eq!(decide(true, true, 0), Action::Recover);
-    assert_eq!(decide(true, false, GPBR_RECOVER_MAGIC), Action::Recover);
     assert_ne!(GPBR_RECOVER_MAGIC, 0);
     assert_ne!(GPBR_RECOVER_MAGIC, u32::MAX);
     assert!(button_held([true, true, true]));

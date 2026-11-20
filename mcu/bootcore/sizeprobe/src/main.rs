@@ -9,8 +9,8 @@
 use bootcore::app::{verify_flash_app, APP_BASE};
 use bootcore::boot::{decide, Action};
 use bootcore::fat::{BlockRead, NAME_APP};
-use bootcore::fcr::{fcr_word_for, Cmd, Plane};
-use bootcore::flash::{Flash, FlashError, Poll};
+use bootcore::fcr::{Cmd, FcrCmd, Plane};
+use bootcore::flash::{Flash, FlashError, PAGE};
 use bootcore::part::Part;
 use bootcore::update::sd_recover;
 use core::ptr::{read_volatile, write_volatile};
@@ -20,14 +20,9 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-const EEFC0: usize = 0x400E_0800;
-const EEFC1: usize = 0x400E_0A00;
-
-fn efc(p: Plane) -> *mut u32 {
-    (if p == Plane::P0 { EEFC0 } else { EEFC1 }) as *mut u32
-}
-
-struct Hw;
+/// Hardware flash of one part. The register block and the page address come
+/// out of the `FcrCmd`; only `lock_bits` needs the part to build a GLB.
+struct Hw(Part);
 
 impl Flash for Hw {
     fn read(&mut self, addr: u32, out: &mut [u8]) {
@@ -36,38 +31,48 @@ impl Flash for Hw {
         }
     }
 
-    // On the board this function and `ewp_poll` run from RAM.
-    fn ewp_start(&mut self, plane: Plane, page: u32, data: &[u8; 256]) -> Result<(), FlashError> {
-        let w = fcr_word_for(plane, Cmd::Ewp, page).ok_or(FlashError::Refused)?;
-        let base = (if plane == Plane::P0 { 0x0008_0000usize } else { 0x0010_0000 }) + page as usize * 256;
+    // On the board this whole function is one RAM routine: latch with 32-bit
+    // writes, FCR, poll FSR with a timeout, FLOCKE/FCMDE from the same read
+    // that saw FRDY.
+    fn ewp(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError> {
+        let latch = cmd.page_addr() as *mut u32;
         for (i, c) in data.chunks_exact(4).enumerate() {
             let v = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-            unsafe { write_volatile((base as *mut u32).add(i), v) };
+            unsafe { write_volatile(latch.add(i), v) };
         }
-        unsafe { write_volatile(efc(plane).add(1), w) };
-        Ok(())
-    }
-
-    fn ewp_poll(&mut self, ) -> Poll {
-        // The probe does not know which plane; the board code keeps it.
-        let fsr = unsafe { read_volatile(efc(Plane::P0).add(2)) };
-        if fsr & 1 == 0 {
-            Poll::Busy
-        } else if fsr & 4 != 0 {
-            Poll::Done(Err(FlashError::Locked))
-        } else if fsr & 2 != 0 {
-            Poll::Done(Err(FlashError::Refused))
-        } else {
-            Poll::Done(Ok(()))
+        unsafe { write_volatile(cmd.fcr_addr() as *mut u32, cmd.word()) };
+        let mut n = 0u32;
+        loop {
+            let fsr = unsafe { read_volatile(cmd.fsr_addr() as *const u32) };
+            if fsr & 1 != 0 {
+                return if fsr & 4 != 0 {
+                    Err(FlashError::Locked)
+                } else if fsr & 2 != 0 {
+                    Err(FlashError::Refused)
+                } else {
+                    Ok(())
+                };
+            }
+            n += 1;
+            if n > 4_000_000 {
+                return Err(FlashError::Timeout);
+            }
         }
     }
 
     fn lock_bits(&mut self, plane: Plane) -> u32 {
-        if let Some(w) = fcr_word_for(plane, Cmd::Glb, 0) {
+        if let Some(c) = FcrCmd::glb(self.0, plane) {
             unsafe {
-                write_volatile(efc(plane).add(1), w);
-                while read_volatile(efc(plane).add(2)) & 1 == 0 {}
-                read_volatile(efc(plane).add(3))
+                write_volatile(c.fcr_addr() as *mut u32, c.word());
+                let fsr = c.fsr_addr() as *const u32;
+                let mut n = 0u32;
+                while read_volatile(fsr) & 1 == 0 {
+                    n += 1;
+                    if n > 4_000_000 {
+                        return !0;
+                    }
+                }
+                read_volatile((c.eefc_base() + 0xC) as *const u32)
             }
         } else {
             !0
@@ -112,7 +117,7 @@ fn part_of(p: u32) -> Part {
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn probe_boot(part: u32, allow_unsealed: u32, button: u32, gpbr: u32) -> u32 {
-    let ok = verify_flash_app(&mut Hw, part_of(part), allow_unsealed != 0).is_ok();
+    let ok = verify_flash_app(&mut Hw(part_of(part)), part_of(part), allow_unsealed != 0).is_ok();
     (decide(ok, button != 0, gpbr) == Action::RunApp) as u32
 }
 
@@ -121,7 +126,7 @@ pub extern "C" fn probe_boot(part: u32, allow_unsealed: u32, button: u32, gpbr: 
 #[inline(never)]
 pub extern "C" fn probe_recover(part: u32, buf: *mut [u8; 512]) -> u32 {
     let buf = unsafe { &mut *buf };
-    match sd_recover(&mut Sd, &mut Hw, part_of(part), buf, &NAME_APP) {
+    match sd_recover(&mut Sd, &mut Hw(part_of(part)), part_of(part), buf, &NAME_APP) {
         Ok(l) => l,
         Err(_) => 0,
     }
@@ -135,13 +140,17 @@ pub extern "C" fn probe_crc(p: *const u8, n: usize) -> u32 {
 
 #[no_mangle]
 #[inline(never)]
-pub extern "C" fn probe_fcr(plane: u32, cmd: u32, arg: u32) -> u32 {
+pub extern "C" fn probe_fcr(part: u32, plane: u32, cmd: u32, arg: u32) -> u32 {
     let c = match cmd {
         0 => Cmd::Ewp,
         1 => Cmd::Glb,
         _ => Cmd::Slb,
     };
-    fcr_word_for(if plane == 0 { Plane::P0 } else { Plane::P1 }, c, arg).unwrap_or(0)
+    let p = if plane == 0 { Plane::P0 } else { Plane::P1 };
+    match FcrCmd::new(part_of(part), p, c, arg, true) {
+        Some(c) => c.word() ^ c.fcr_addr(),
+        None => 0,
+    }
 }
 
 #[no_mangle]
@@ -150,7 +159,7 @@ pub extern "C" fn Reset() -> ! {
     let mut x = probe_boot(0, 0, 0, 0);
     x ^= probe_recover(x, &mut buf);
     x ^= probe_crc(buf.as_ptr(), 512);
-    x ^= probe_fcr(x, x, x);
+    x ^= probe_fcr(x, x, x, x);
     let _ = APP_BASE;
     loop {
         unsafe { write_volatile(0x2000_3000 as *mut u32, x) };

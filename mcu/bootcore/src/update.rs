@@ -4,9 +4,14 @@
 //! 1. The whole file is validated first (every header, every payload CRC,
 //!    descriptor, vectors); nothing is erased unless it all passes and none
 //!    of the target lock regions is locked.
-//! 2. The application's first two pages (vector table, descriptor) are
+//! 0. If the application in flash is already valid and is the one of the
+//!    file (same length, same trailer CRC; and the bitstream matches),
+//!    nothing is written: a button that stays pressed, or a repeated
+//!    request, costs no flash endurance.
+//! 2. The first two pages of the application (vector table, descriptor) are
 //!    erased first, descriptor page first. From then on the application is
-//!    invalid: no descriptor, so the next boot goes straight to recovery.
+//!    invalid: no descriptor, so the next boot goes straight to recovery
+//!    (checked: the descriptor must no longer parse, else the recovery stops).
 //! 3. The bitstream (plane 1, SAM3U4E) and the rest of the application are
 //!    written, every page read back and compared right after its EWP.
 //! 4. Only then the first two pages are written, vector page first and the
@@ -19,13 +24,14 @@
 //! written. (Deviation from the design's "two reads"; for a file that starts
 //! with the application image the extra read is 3 sectors plus the FAT.)
 
-use crate::app::{verify_flash_app, APP_BASE, LAYOUT};
+use crate::app::{parse_descriptor, verify_flash_app, APP_BASE, DESC_LEN, DESC_OFF, LAYOUT};
 use crate::crc;
 use crate::fat::{BlockRead, DirEnt, FatError, FileReader, Volume};
-use crate::fcr::Plane;
-use crate::flash::{locate, Flash, FlashError, FLASH_BASE, PAGE, PLANE1_BASE};
+use crate::fcr::{FcrCmd, Plane};
+use crate::flash::{locate, Flash, FlashError, FLASH_BASE, PAGE, PLANE1_BASE, PLANE_LEN};
 use crate::ogfw::{check_header, parse_header, Header, ImageError, ImageStream, Reject, KIND_APP};
 use crate::part::Part;
+use crate::rd32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecoverError {
@@ -52,6 +58,12 @@ pub enum RecoverError {
 struct Plan {
     app: Header,
     bs: Option<Header>,
+    /// Number of images in the file (1 or 2) and the position of the
+    /// application among them: the later passes must see the same.
+    count: u8,
+    app_idx: u8,
+    /// The trailing CRC of the application, as in the file.
+    trailer: u32,
 }
 
 fn fe(e: FlashError) -> RecoverError {
@@ -92,6 +104,9 @@ fn validate<D: BlockRead>(vol: &Volume, dev: &mut D, ent: &DirEnt, part: Part, b
     let mut r = FileReader::new(ent);
     let mut app: Option<Header> = None;
     let mut bs: Option<Header> = None;
+    let mut count = 0u8;
+    let mut app_idx = 0u8;
+    let mut trailer = 0u32;
     while let Some(h) = next_header(&mut r, vol, dev, buf, part)? {
         let slot = if h.kind == KIND_APP { &mut app } else { &mut bs };
         if slot.is_some() {
@@ -104,27 +119,45 @@ fn validate<D: BlockRead>(vol: &Volume, dev: &mut D, ent: &DirEnt, part: Part, b
             chunk(&mut r, vol, dev, buf)?;
             st.feed(buf).map_err(RecoverError::Image)?;
             off += 512;
+            if h.kind == KIND_APP && off == h.len {
+                trailer = rd32(buf, 508);
+            }
         }
         st.finish().map_err(RecoverError::Image)?;
+        if h.kind == KIND_APP {
+            app_idx = count;
+        }
+        count = count.wrapping_add(1);
         *slot = Some(h);
     }
     match app {
-        Some(app) => Ok(Plan { app, bs }),
+        Some(app) => Ok(Plan { app, bs, count, app_idx, trailer }),
         None => Err(RecoverError::NoApp),
     }
 }
 
 /// GLB bit mask (bit n = lock region n of the plane `dest` is in) of the
 /// regions under `[dest, dest + len)`. Same values as `lock_mask_at` in
-/// `mcu/fwupdater/src/logic.rs`: the app at `APP_BASE` covers bits 1.., never
-/// bit 0 (the resident region).
+/// `mcu/fwupdater/src/logic.rs` for every range inside a plane; the app at
+/// `APP_BASE` covers bits 1.., never bit 0 (the resident region). A range
+/// that is not inside one plane gives all ones ("everything locked"), so a
+/// caller that checks `lock_bits & mask` refuses it; no arithmetic here can
+/// underflow.
 pub fn lock_mask_at(dest: u32, len: u32) -> u32 {
     if len == 0 {
         return 0;
     }
     let base = if dest >= PLANE1_BASE { PLANE1_BASE } else { FLASH_BASE };
-    let first = (dest - base) / LAYOUT;
-    let last = (dest - base + len - 1) / LAYOUT;
+    let off = match dest.checked_sub(base) {
+        Some(o) => o,
+        None => return u32::MAX,
+    };
+    let end = match off.checked_add(len) {
+        Some(e) if e <= PLANE_LEN => e,
+        _ => return u32::MAX,
+    };
+    let first = off / LAYOUT;
+    let last = (end - 1) / LAYOUT;
     let hi = if last >= 31 { u32::MAX } else { (1u32 << (last + 1)) - 1 };
     hi & !((1u32 << first) - 1)
 }
@@ -141,10 +174,16 @@ fn check_locks<F: Flash>(f: &mut F, plan: &Plan) -> Result<(), RecoverError> {
     Ok(())
 }
 
-/// EWP one page, wait, read it back and compare.
-fn write_page<F: Flash>(f: &mut F, addr: u32, data: &[u8; PAGE]) -> Result<(), RecoverError> {
+/// EWP one page (no read-back).
+fn ewp_page<F: Flash>(f: &mut F, part: Part, addr: u32, data: &[u8; PAGE]) -> Result<(), RecoverError> {
     let (plane, page) = locate(addr).ok_or(RecoverError::Flash(FlashError::Refused))?;
-    f.ewp(plane, page, data).map_err(fe)?;
+    let cmd = FcrCmd::ewp(part, plane, page).ok_or(RecoverError::Flash(FlashError::Refused))?;
+    f.ewp(cmd, data).map_err(fe)
+}
+
+/// EWP one page, then read it back and compare.
+fn write_page<F: Flash>(f: &mut F, part: Part, addr: u32, data: &[u8; PAGE]) -> Result<(), RecoverError> {
+    ewp_page(f, part, addr, data)?;
     let mut t = [0u8; 32];
     let mut a = addr;
     for piece in data.chunks_exact(32) {
@@ -158,20 +197,48 @@ fn write_page<F: Flash>(f: &mut F, addr: u32, data: &[u8; PAGE]) -> Result<(), R
 }
 
 /// The two pages of one 512-byte chunk, lower page first.
-fn write_chunk<F: Flash>(f: &mut F, addr: u32, buf: &[u8; 512]) -> Result<(), RecoverError> {
+fn write_chunk<F: Flash>(f: &mut F, part: Part, addr: u32, buf: &[u8; 512]) -> Result<(), RecoverError> {
     let mut a = addr;
     for page in buf.as_chunks::<PAGE>().0 {
-        write_page(f, a, page)?;
+        write_page(f, part, a, page)?;
         a += PAGE as u32;
     }
     Ok(())
 }
 
-/// Invalidate the application: erase the descriptor page, then the vector page.
-fn erase_head<F: Flash>(f: &mut F) -> Result<(), RecoverError> {
+/// Invalidate the application: erase the descriptor page, then the vector
+/// page, and check that the descriptor no longer parses (even with the
+/// unsealed dev rule). A weak cell that does not read back as 0xFF does not
+/// matter as long as the application is invalid; the pages are written and
+/// read back later anyway.
+fn erase_head<F: Flash>(f: &mut F, part: Part) -> Result<(), RecoverError> {
     let ff = [0xFFu8; PAGE];
-    write_page(f, APP_BASE + PAGE as u32, &ff)?;
-    write_page(f, APP_BASE, &ff)
+    ewp_page(f, part, APP_BASE + PAGE as u32, &ff)?;
+    ewp_page(f, part, APP_BASE, &ff)?;
+    let mut d = [0u8; DESC_LEN];
+    f.read(APP_BASE + DESC_OFF, &mut d);
+    if parse_descriptor(&d, true).is_ok() {
+        return Err(RecoverError::Verify);
+    }
+    Ok(())
+}
+
+/// Is the application in flash valid and the one of the file (same length,
+/// same trailer CRC), with the bitstream of the file (if any) in plane 1?
+fn already_installed<F: Flash>(f: &mut F, part: Part, plan: &Plan) -> bool {
+    match verify_flash_app(f, part, false) {
+        Ok(len) if len == plan.app.len => {}
+        _ => return false,
+    }
+    let mut t = [0u8; 4];
+    f.read(APP_BASE + plan.app.len - 4, &mut t);
+    if u32::from_le_bytes(t) != plan.trailer {
+        return false;
+    }
+    match &plan.bs {
+        Some(bs) => crc_flash(f, PLANE1_BASE, bs.len) == bs.crc,
+        None => true,
+    }
 }
 
 fn crc_flash<F: Flash>(f: &mut F, addr: u32, len: u32) -> u32 {
@@ -197,21 +264,27 @@ fn write_body<D: BlockRead, F: Flash>(
     buf: &mut [u8; 512],
 ) -> Result<(), RecoverError> {
     let mut r = FileReader::new(ent);
+    let mut idx = 0u8;
     while let Some(h) = next_header(&mut r, vol, dev, buf, part)? {
         let app = h.kind == KIND_APP;
         let expect = if app { Some(plan.app) } else { plan.bs };
-        if expect != Some(h) {
+        // the same image, at the same position, and no more of them than in pass 1
+        if expect != Some(h) || idx >= plan.count || app != (idx == plan.app_idx) {
             return Err(RecoverError::Changed);
         }
+        idx += 1;
         let base = if app { APP_BASE } else { PLANE1_BASE };
         let mut off = 0;
         while off < h.len {
             chunk(&mut r, vol, dev, buf)?;
             if !(app && off == 0) {
-                write_chunk(flash, base + off, buf)?;
+                write_chunk(flash, part, base + off, buf)?;
             }
             off += 512;
         }
+    }
+    if idx != plan.count {
+        return Err(RecoverError::Changed);
     }
     Ok(())
 }
@@ -227,14 +300,16 @@ fn write_head<D: BlockRead, F: Flash>(
     buf: &mut [u8; 512],
 ) -> Result<(), RecoverError> {
     let mut r = FileReader::new(ent);
+    let mut idx = 0u8;
     while let Some(h) = next_header(&mut r, vol, dev, buf, part)? {
         if h.kind == KIND_APP {
-            if h != plan.app {
+            if h != plan.app || idx != plan.app_idx {
                 return Err(RecoverError::Changed);
             }
             chunk(&mut r, vol, dev, buf)?;
-            return write_chunk(flash, APP_BASE, buf);
+            return write_chunk(flash, part, APP_BASE, buf);
         }
+        idx = idx.wrapping_add(1);
         let mut off = 0;
         while off < h.len {
             chunk(&mut r, vol, dev, buf)?;
@@ -265,10 +340,14 @@ pub fn sd_recover<D: BlockRead, F: Flash>(
 
     // 1. nothing is touched unless the whole file is good and unlocked
     let plan = validate(&vol, dev, &ent, part, buf)?;
+    // already there: write nothing
+    if already_installed(flash, part, &plan) {
+        return Ok(plan.app.len);
+    }
     check_locks(flash, &plan)?;
 
     // 2. the application becomes invalid
-    erase_head(flash)?;
+    erase_head(flash, part)?;
 
     // 3. everything but its first chunk
     write_body(&vol, dev, flash, &ent, &plan, part, buf)?;
@@ -284,7 +363,7 @@ pub fn sd_recover<D: BlockRead, F: Flash>(
         Ok(len) if len == plan.app.len => Ok(len),
         _ => {
             // Do not leave something that looks half valid.
-            let _ = erase_head(flash);
+            let _ = erase_head(flash, part);
             Err(RecoverError::Verify)
         }
     }

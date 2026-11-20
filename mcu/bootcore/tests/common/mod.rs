@@ -5,8 +5,8 @@
 use bootcore::app::{APP_BASE, DESC_OFF};
 use bootcore::crc;
 use bootcore::fat::BlockRead;
-use bootcore::fcr::{fcr_word_for, Cmd, Plane};
-use bootcore::flash::{Flash, FlashError, Poll, FLASH_BASE, PAGE, PLANE1_BASE};
+use bootcore::fcr::{FcrCmd, Plane, EEFC0_BASE, EEFC1_BASE};
+use bootcore::flash::{Flash, FlashError, FLASH_BASE, PAGE, PLANE1_BASE};
 use bootcore::part::Part;
 
 // ---------------------------------------------------------------- rng
@@ -99,6 +99,9 @@ pub struct Card {
     pub fail_at: Option<usize>,
     /// Flip a byte of the n-th read (transient corruption), (read index, byte offset).
     pub glitch: Option<(usize, usize)>,
+    /// From the n-th read on, serve this image instead (the card changed
+    /// between two passes).
+    pub swap: Option<(usize, std::sync::Arc<Vec<u8>>)>,
 }
 
 impl Card {
@@ -108,7 +111,7 @@ impl Card {
 
     /// Many cards over one image (the sweeps make tens of thousands).
     pub fn shared(img: std::sync::Arc<Vec<u8>>) -> Card {
-        Card { img, reads: 0, fail_at: None, glitch: None }
+        Card { img, reads: 0, fail_at: None, glitch: None, swap: None }
     }
 }
 
@@ -122,7 +125,11 @@ impl BlockRead for Card {
             }
         }
         let o = lba as usize * 512;
-        match self.img.get(o..o + 512) {
+        let img = match &self.swap {
+            Some((k, alt)) if n >= *k => alt,
+            _ => &self.img,
+        };
+        match img.get(o..o + 512) {
             Some(s) => buf.copy_from_slice(s),
             None => return Err(()),
         }
@@ -166,9 +173,11 @@ pub struct Model {
     pub has_p1: bool,
     /// Lock bits per plane (GLB result).
     pub lock: [u32; 2],
-    busy: u32,
-    pending: Option<Result<(), FlashError>>,
-    /// Reads issued while a command was running (must stay 0).
+    /// True while `ewp` runs. Bootcore is single threaded and `ewp` blocks,
+    /// so a `read` seen with this set is a re-entrant call: counted as a
+    /// violation (must stay 0).
+    in_ewp: bool,
+    /// Reads issued while an EWP was running (must stay 0).
     pub violations: u32,
     /// EWPs accepted for execution (not counting refused/locked ones).
     pub ops: usize,
@@ -177,7 +186,15 @@ pub struct Model {
     /// FLOCKE count.
     pub flocke: u32,
     pub cut: Option<Cut>,
+    /// Like `cut`, but FRDY never comes: the EWP leaves the outcome in the
+    /// page and returns `Timeout` while the power stays on.
+    pub timeout: Option<Cut>,
     pub dead: bool,
+    /// A weak cell: an EWP of an all-0xFF page (an erase) leaves bit 0 of
+    /// this byte cleared.
+    pub weak_erase: Option<u32>,
+    /// An EWP of the page holding this address does nothing (and succeeds).
+    pub ignore: Option<u32>,
     /// A stuck bit: after an EWP that covers this address, bit 0 of that
     /// byte reads back flipped (a failing cell).
     pub stuck: Option<u32>,
@@ -189,14 +206,16 @@ impl Model {
             mem: vec![0xFF; 2 * P1_OFF],
             has_p1: part.has_plane1(),
             lock: [1, 0], // region 0 of plane 0 = the resident, locked
-            busy: 0,
-            pending: None,
+            in_ewp: false,
             violations: 0,
             ops: 0,
             log: vec![],
             flocke: 0,
             cut: None,
+            timeout: None,
             dead: false,
+            weak_erase: None,
+            ignore: None,
             stuck: None,
         };
         // A resident that nobody may touch.
@@ -229,9 +248,9 @@ impl Model {
     /// Back from a power cut: controller idle, cut plan cleared.
     pub fn power_up(&mut self) {
         self.dead = false;
-        self.busy = 0;
-        self.pending = None;
+        self.in_ewp = false;
         self.cut = None;
+        self.timeout = None;
         self.violations = 0;
         self.ops = 0;
         self.log.clear();
@@ -256,29 +275,20 @@ impl Model {
     }
 }
 
-impl Flash for Model {
-    fn read(&mut self, addr: u32, out: &mut [u8]) {
-        if self.busy > 0 {
-            self.violations += 1;
-        }
-        match Model::idx(addr) {
-            Some(i) if i + out.len() <= self.mem.len() => out.copy_from_slice(&self.mem[i..i + out.len()]),
-            _ => out.fill(0xFF),
-        }
-    }
-
-    fn ewp_start(&mut self, plane: Plane, page: u32, data: &[u8; PAGE]) -> Result<(), FlashError> {
+impl Model {
+    fn ewp_inner(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError> {
         if self.dead {
             return Err(FlashError::Failed);
         }
-        if self.busy > 0 {
-            panic!("EWP while busy");
-        }
-        // The hardware sees exactly the word fcr_word gives, nothing else.
-        let w = fcr_word_for(plane, Cmd::Ewp, page).ok_or(FlashError::Refused)?;
+        // The hardware sees exactly this register and word, nothing else.
+        let w = cmd.word();
+        let plane = cmd.plane();
+        let page = cmd.arg();
         assert_eq!(w >> 24, 0x5A);
-        assert_eq!(w & 0xFF, 3);
-        assert_eq!((w >> 8) & 0xFFFF, page);
+        assert_eq!(w & 0xFF, 3, "not an EWP");
+        assert_eq!(cmd.eefc_base(), if plane == Plane::P0 { EEFC0_BASE } else { EEFC1_BASE });
+        assert_eq!(cmd.fcr_addr(), cmd.eefc_base() + 4);
+        assert_eq!(cmd.page_addr(), if plane == Plane::P0 { FLASH_BASE } else { PLANE1_BASE } + page * PAGE as u32);
         if plane == Plane::P1 && !self.has_p1 {
             return Err(FlashError::Refused);
         }
@@ -288,23 +298,39 @@ impl Flash for Model {
         if (self.lock[pi] >> region) & 1 != 0 {
             // aborted, FLOCKE set, plane untouched
             self.flocke += 1;
-            self.pending = Some(Err(FlashError::Locked));
-            self.busy = 2;
-            return Ok(());
+            return Err(FlashError::Locked);
         }
         let op = self.ops;
         self.ops += 1;
-        self.log.push(if plane == Plane::P0 { FLASH_BASE } else { PLANE1_BASE } + page * PAGE as u32);
+        self.log.push(cmd.page_addr());
         if let Some(c) = self.cut {
             if c.op == op {
                 self.apply_cut(i, data, c.outcome);
                 self.dead = true;
-                self.pending = Some(Err(FlashError::Failed));
-                self.busy = 1;
-                return Ok(());
+                return Err(FlashError::Failed);
+            }
+        }
+        if let Some(c) = self.timeout {
+            if c.op == op {
+                self.apply_cut(i, data, c.outcome);
+                return Err(FlashError::Timeout);
+            }
+        }
+        if let Some(a) = self.ignore {
+            if let Some(si) = Model::idx(a) {
+                if si >= i && si < i + PAGE {
+                    return Ok(());
+                }
             }
         }
         self.mem[i..i + PAGE].copy_from_slice(data);
+        if let Some(a) = self.weak_erase {
+            if let Some(si) = Model::idx(a) {
+                if si >= i && si < i + PAGE && data.iter().all(|&b| b == 0xFF) {
+                    self.mem[si] &= !1;
+                }
+            }
+        }
         if let Some(a) = self.stuck {
             if let Some(si) = Model::idx(a) {
                 if si >= i && si < i + PAGE {
@@ -312,17 +338,27 @@ impl Flash for Model {
                 }
             }
         }
-        self.pending = Some(Ok(()));
-        self.busy = 3;
         Ok(())
     }
+}
 
-    fn ewp_poll(&mut self) -> Poll {
-        if self.busy > 0 {
-            self.busy -= 1;
-            return Poll::Busy;
+impl Flash for Model {
+    fn read(&mut self, addr: u32, out: &mut [u8]) {
+        if self.in_ewp {
+            self.violations += 1;
         }
-        Poll::Done(self.pending.take().unwrap_or(Ok(())))
+        match Model::idx(addr) {
+            Some(i) if i + out.len() <= self.mem.len() => out.copy_from_slice(&self.mem[i..i + out.len()]),
+            _ => out.fill(0xFF),
+        }
+    }
+
+    fn ewp(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError> {
+        assert!(!self.in_ewp, "EWP entered re-entrantly");
+        self.in_ewp = true;
+        let r = self.ewp_inner(cmd, data);
+        self.in_ewp = false;
+        r
     }
 
     fn lock_bits(&mut self, plane: Plane) -> u32 {

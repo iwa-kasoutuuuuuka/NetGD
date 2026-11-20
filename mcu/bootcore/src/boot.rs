@@ -13,15 +13,29 @@ pub enum Action {
     /// Set VTOR, load MSP, branch to the application's reset vector.
     RunApp,
     /// Initialise the SD card and look for `NETGD.OGF`.
-    Recover,
+    ///
+    /// `clear_request`: the request came from GPBR0 (the magic is there), so
+    /// the caller must write 0 to GPBR0 **before** it starts recovering.
+    /// GPBR survives a reset; without this a recovery that succeeds (or
+    /// fails) would be requested again by every following reset.
+    Recover { clear_request: bool },
 }
 
 /// D5: an SD update happens only when the application is invalid, or the
 /// front button is held at power-on, or the application asked for it through
 /// GPBR0. A file on the card alone never triggers anything.
+///
+/// Protocol of the caller: on `Recover`, clear GPBR0 if asked, run
+/// `sd_recover`; if it returns `Ok`, jump to the application at once (do not
+/// reset and `decide` again: the button may still be held); if it fails,
+/// follow [`after_failed_recovery`]. A button that stays pressed costs one
+/// card read per boot but no flash write: `sd_recover` leaves the flash alone
+/// when the application in it is valid and is the file's (same length and
+/// trailer CRC, and the bitstream matches).
 pub fn decide(app_valid: bool, button_held: bool, gpbr0: u32) -> Action {
-    if button_held || gpbr0 == GPBR_RECOVER_MAGIC || !app_valid {
-        Action::Recover
+    let requested = gpbr0 == GPBR_RECOVER_MAGIC;
+    if button_held || requested || !app_valid {
+        Action::Recover { clear_request: requested }
     } else {
         Action::RunApp
     }
