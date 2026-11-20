@@ -151,6 +151,7 @@ img=3 probe=HASH fad=45150 ssz=2048 crc=0badf00d
 python compare.py stock.txt netgd.txt            # プローブごとの差分（rc / status / err / bytes / data / ハッシュ）。時間は「注記」で別枠
 python compare.py --image disc.gdi rec.txt       # GDI のトラック表からセクタを再計算して、HASH 行と照合
 python compare.py --image disc.gdi --img 3 rec.txt   # img=3 の HASH だけ
+python compare.py --manifest OUTDIR/NETGD-PROBE-MANIFEST.json rec.txt   # tools/mksdcard のイメージ（03〜06）。ファイル不要、期待値を再計算
 python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のトラックファイル 1 本と照合（CDI から取り出したデータトラックなど）
 ```
 

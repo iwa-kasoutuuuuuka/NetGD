@@ -214,6 +214,72 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class ManifestTests(unittest.TestCase):
+    """compare.py --manifest: expected sectors are regenerated from the mksdcard manifest."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(HERE, '..', '..', 'mksdcard'))
+        import mksdcard
+        cls.mk = mksdcard
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.card = os.path.join(cls.tmp.name, 'card')
+        mksdcard.make_card(cls.card, small=True)
+        cls.manifest = os.path.join(cls.card, mksdcard.MANIFEST_NAME)
+        import json
+        with open(cls.manifest) as f:
+            cls.man = json.load(f)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def hash_line(self, img, fad, ssz, corrupt=False):
+        e = self.man['images']['%02d' % img]
+        lba = fad - 150
+        tr = [t for t in e['tracks'] if t['start_lba'] <= lba < t['start_lba'] + t['sector_count']][0]
+        data, why = self.mk.sector_for(tr, lba, ssz)
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        if corrupt:
+            crc ^= 1
+        return 'img=%d probe=HASH fad=%d ssz=%d crc=%08x\n' % (img, fad, ssz, crc)
+
+    def write(self, text):
+        p = os.path.join(self.tmp.name, 'rec.txt')
+        with open(p, 'w') as f:
+            f.write(text)
+        return p
+
+    def test_all_match(self):
+        text = ''.join([
+            self.hash_line(3, 45150, 2048), self.hash_line(3, 45151, 2048), self.hash_line(3, 45150, 2352),
+            self.hash_line(4, 11852, 2048), self.hash_line(4, 11853, 2352),
+            self.hash_line(5, 12404, 2048), self.hash_line(6, 45150 + 700, 2048),
+            self.hash_line(6, 756 + 150 + 3, 2352),
+        ])
+        rc, out, _ = run(['--manifest', self.manifest, self.write(text)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('8 match, 0 mismatch, 0 not checked', out)
+
+    def test_mismatch_reported_per_image_and_lba(self):
+        text = self.hash_line(3, 45150, 2048) + self.hash_line(4, 11853, 2048, corrupt=True)
+        rc, out, _ = run(['--manifest', self.manifest, self.write(text)])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=4 fad=11853 lba=11703 track 2: MISMATCH', out)
+        self.assertIn('1 match, 1 mismatch', out)
+
+    def test_not_checked_and_filter(self):
+        text = ('img=2 probe=HASH fad=45150 ssz=2048 crc=00000000\n'      # dcload folder: no generated image
+                'img=3 probe=HASH fad=9999999 ssz=2048 crc=00000000\n'    # outside every track
+                'img=3 probe=HASH fad=906 ssz=2048 crc=00000000\n')       # audio track needs ssz 2352
+        rc, out, _ = run(['--manifest', self.manifest, self.write(text)])
+        self.assertEqual(rc, 2, out)
+        self.assertIn('0 match, 0 mismatch, 3 not checked', out)
+        text = self.hash_line(3, 45150, 2048) + 'img=4 probe=HASH fad=11852 ssz=2048 crc=00000000\n'
+        rc, out, _ = run(['--manifest', self.manifest, '--img', '3', self.write(text)])
+        self.assertEqual(rc, 0, out)
+
+
 class SampleFromCTests(unittest.TestCase):
     def test_runner_output_parses_and_self_compares(self):
         p = os.environ.get('GDPROBE_SAMPLE')

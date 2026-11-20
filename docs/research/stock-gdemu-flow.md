@@ -58,14 +58,16 @@ flowchart LR
 |----------|------|------------|
 | `01` | GDmenu か openMenu（普段どおり） | メニュー。ここから `02` を選ぶ |
 | `02` | **dcload-ip のディスク**（固定 IP 版。ユーザーの `make_dcload_disc.ps1` で作れる） | プローブを BBA で送り込むため。プローブは RAM 上で動くので、起動後に別のイメージへ切り替えてよい |
-| `03` | GD-ROM のゲーム（GDI、自分で吸い出したもの） | GD-ROM の TOC・REQ_SES（**D-4**：セッション数は1か2か）、IP.BIN の読み出し、読み込み速度とシーク時間 |
-| `04` | **トラック2本の CDI**（音声 + データ、selfboot のホームブリューなど） | **D-1**：セッション2を返すか（NetGD は今 ABRT） |
-| `05` | トラック3本以上の CDI | D-1 の対照、CDI の lead-out と pregap（**D-5**） |
-| `06` | CD 音声トラックのある GDI（あれば） | GET_SCD の形式（**D-2**）、REQ_STAT（**D-3**） |
+| `03` | GD-ROM の GDI（`tools/mksdcard` が作る合成イメージ） | GD-ROM の TOC・REQ_SES（**D-4**：セッション数は1か2か）、IP.BIN の読み出し、読み込み速度とシーク時間 |
+| `04` | **トラック2本の CDI**（音声 + データ。`mksdcard` が作る合成イメージ） | **D-1**：セッション2を返すか（NetGD は今 ABRT） |
+| `05` | トラック3本の CDI（音声2 + データ。`mksdcard`） | D-1 の対照、CDI の lead-out と pregap（**D-5**） |
+| `06` | CD 音声トラックのある GDI（音声3本。`mksdcard`） | GET_SCD の形式（**D-2**）、REQ_STAT（**D-3**） |
 | `07` | **空のフォルダ**（イメージなし） | 切替先にイメージが無いとき純正がどうするか（R18 の欠陥1と同じ状況） |
 
-- イメージは自分で所有するディスクから作ったもの、または配布が許されたホームブリューだけを使う。
-- PC 側の比較（⑥）でセクタのハッシュを照合するので、**SD に入れたのと同じイメージファイルを PC にも残しておく**。
+- **`03`〜`06` は `tools/mksdcard` が生成する**（`python tools/mksdcard/mksdcard.py OUTDIR --menu <普段の 01> --dcload <dcload-ip の CDI>`。手順・diskpart・限界は `tools/mksdcard/README_ja.md`）。
+  合成データなので著作物は含まず、起動はしない。`01` / `02` は自分のカードのものを `--menu` / `--dcload` で入れる。`07` は空のフォルダ（コピーで落ちたら手で作る）。
+- 純正が mksdcard の CDI を受け付けるかは未確認で、それ自体が調査結果になる。動作確認済みの自作ソフトの CDI があれば、任意で 1 本追加してよい。
+- PC 側の比較（⑥）で照合するので、**`NETGD-PROBE-MANIFEST.json`（と生成した OUTDIR）を PC に残しておく**。市販ディスクから作ったイメージを使う場合は、そのファイルを PC にも残す。
 
 ## ④ BBA で PC と接続
 
@@ -96,6 +98,7 @@ flowchart LR
   - 純正の記録どうし（同じイメージを2回）→ 値がぶれる項目（時間など）を見分ける。
   - 純正 vs NetGD（NetGD を書き込んだ後）→ `compare.py a.txt b.txt`。
   - データの完全性 → `compare.py --image <SD に入れたのと同じ .gdi/.cdi> <記録>`。
+  - mksdcard のイメージの完全性 → `compare.py --manifest OUTDIR/NETGD-PROBE-MANIFEST.json <記録>`（イメージのファイルは不要。期待値をマニフェストと生成コードから再計算し、不一致を「イメージ・LBA」単位で出す）。
 
 ## ⑦ 結果の判断と反映
 

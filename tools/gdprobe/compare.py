@@ -6,6 +6,10 @@
   compare.py --image DISC.gdi REC   recompute per-sector hashes from the image and check the record
   compare.py --raw FILE --raw-start-fad N [--raw-sector-size 2352] REC
                                     same, for one raw track file (e.g. a CDI data track you extracted)
+  compare.py --manifest OUTDIR/NETGD-PROBE-MANIFEST.json REC
+                                    check the hashes against the images made by tools/mksdcard: the expected
+                                    sectors are regenerated (no image files needed); mismatches are listed
+                                    per image (HASH lines carry img = SD folder number) and LBA
 
 Exit status: 0 = no significant difference / all hashes match, 1 = differences / mismatches, 2 = usage or input error.
 
@@ -320,6 +324,63 @@ def cmd_image(args):
     return 1 if bad else 0
 
 
+def find_track(tracks, lba):
+    for t in tracks:
+        if t['start_lba'] <= lba < t['start_lba'] + t['sector_count']:
+            return t
+    return None
+
+
+def cmd_manifest(args):
+    import json
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mksdcard'))
+    import mksdcard  # the generator itself: the expected sectors are recomputed, not read from disk
+    with open(args.manifest, encoding='utf-8') as f:
+        man = json.load(f)
+    _, entries = parse_record(read_text(args.record))
+    ok = bad = skipped = 0
+    problems = []
+    for e in entries:
+        if e['probe'] != 'HASH' or (args.img is not None and e['img'] != args.img):
+            continue
+        fad, ssz, crc = to_int(e.get('fad')), to_int(e.get('ssz')), e.get('crc')
+        if fad is None or ssz is None or crc is None:
+            continue
+        name = '%02d' % e['img']
+        img = man['images'].get(name)
+        if img is None:
+            skipped += 1
+            problems.append('img=%d fad=%d: not checked (folder %s has no generated image)' % (e['img'], fad, name))
+            continue
+        lba = fad - 150
+        tr = find_track(img['tracks'], lba)
+        if tr is None:
+            skipped += 1
+            problems.append('img=%d fad=%d: not checked (lba %d is in no track of image %s)' % (e['img'], fad, lba, name))
+            continue
+        data, why = mksdcard.sector_for(tr, lba, ssz)
+        if data is None:
+            skipped += 1
+            problems.append('img=%d fad=%d: not checked (%s)' % (e['img'], fad, why))
+            continue
+        want = '%08x' % (zlib.crc32(data) & 0xFFFFFFFF)
+        if want == crc.lower():
+            ok += 1
+        else:
+            bad += 1
+            problems.append('img=%d fad=%d lba=%d track %d: MISMATCH record crc=%s expected crc=%s (ssz %d)' %
+                            (e['img'], fad, lba, tr['number'], crc, want, ssz))
+    for p in problems[:args.max_report]:
+        print('  ' + p)
+    if len(problems) > args.max_report:
+        print('  ... %d more' % (len(problems) - args.max_report))
+    print('hashes: %d match, %d mismatch, %d not checked' % (ok, bad, skipped))
+    if ok + bad == 0:
+        print('nothing was checked (no HASH lines for the generated images)')
+        return 2
+    return 1 if bad else 0
+
+
 # --------------------------------------------------------------------- main
 def main(argv=None):
     ap = argparse.ArgumentParser(description='gdprobe record compare / image check')
@@ -328,12 +389,18 @@ def main(argv=None):
     ap.add_argument('--raw', help='one raw track file to check against (with --raw-start-fad)')
     ap.add_argument('--raw-start-fad', type=int, default=0, help='FAD of the first sector of the raw file')
     ap.add_argument('--raw-sector-size', type=int, default=2352, choices=(2048, 2352))
+    ap.add_argument('--manifest', help='NETGD-PROBE-MANIFEST.json made by tools/mksdcard: check hashes against the generated images')
     ap.add_argument('--img', type=int, help='check only HASH lines tagged with this image number')
     ap.add_argument('--ratio', type=float, default=TIMING_RATIO_DEFAULT, help='timing ratio worth a note (default 1.5)')
     ap.add_argument('--ignore-timing', action='store_true')
     ap.add_argument('--max-report', type=int, default=20)
     args = ap.parse_args(argv)
     try:
+        if args.manifest:
+            if len(args.files) != 1:
+                ap.error('--manifest takes exactly one record file')
+            args.record = args.files[0]
+            return cmd_manifest(args)
         if args.image or args.raw:
             if len(args.files) != 1:
                 ap.error('--image/--raw take exactly one record file')
