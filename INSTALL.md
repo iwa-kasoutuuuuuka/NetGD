@@ -338,24 +338,34 @@ above.
 
 1. Format the card **FAT32** (one partition, MBR).
 2. One folder per disc at the root, each holding that disc's `.gdi` and its
-   track files (or a `.cdi`):
+   track files (or a `.cdi`). Name the folders with numbers the way the original
+   GDEMU does: two digits `01`–`99`, three digits `100`–`999`, four digits
+   `1000` and up. Folder `01` is the one mounted when nothing else is
+   selected, so put the menu (GDmenu or openMenu) there:
 
    ```
-   /SONICADV/  sonicadv.gdi  track01.bin  track02.raw  track03.bin  …
-   /MENU/      disc.gdi      …
+   /01/  disc.gdi      …                                  (the menu)
+   /02/  sonicadv.gdi  track01.bin  track02.raw  track03.bin  …
    ```
+
+   Menus choose a disc by sending the GDEMU image-selection command (`0x52`)
+   to the drive, which mounts the folder with that number; the front-panel
+   button steps to the next numbered folder, wrapping from the last to `01`
+   (unless the mounted disc's `GAME.CFG` names a `next` disc, which wins).
+   Gaps in the numbering are skipped. Folders with other names still work when
+   `GDEMU.CFG` names them.
 
 3. Optional `/GDEMU.CFG` at the root picks which disc is mounted at power-on, by
-   folder name:
+   folder name (a numbered folder, or any other folder on the card):
 
    ```
-   image=SONICADV
+   image=02
    ```
 
    Lines starting with `#` are comments; the key is case-insensitive. Without
-   this file the firmware mounts whatever it finds first, and a card with
-   nothing usable comes up empty. The selection made at runtime lives in RAM
-   only — a power cycle returns to what `GDEMU.CFG` names.
+   this file the firmware mounts folder `01`, and a card with neither comes up
+   empty. The selection made at runtime lives in RAM only — a power cycle
+   returns to what `GDEMU.CFG` names (or folder `01`).
 
 Note the file name is `GDEMU.CFG`, 8.3 — not `OPENGDEMU.CFG`.
 

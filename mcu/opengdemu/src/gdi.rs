@@ -463,7 +463,8 @@ fn remember(dir: ImagePath, name: &str) {
 
 
 /// Load whichever image should be mounted now: the runtime choice if there is
-/// one, else whatever `GDEMU.CFG` names. A card with neither comes up empty.
+/// one, else whatever `GDEMU.CFG` names, else folder 01. A card with none of
+/// the three comes up empty.
 ///
 /// Both are resolved by name, so mounting opens one directory. Nothing here
 /// walks the card or builds a list of images: which disc to serve is the
@@ -489,12 +490,77 @@ pub fn load_default(num_blocks: u32) -> Result<Gdi, GdiError> {
         }
     }
 
-    // Nothing named, so nothing to mount. The firmware does not go looking:
-    // finding "some image" means walking the card, and the answer to an
-    // unconfigured card is to configure it, not to guess. The drive comes up
-    // empty and the host sees no disc.
-    warn!("gdi: no image selected and no usable GDEMU.CFG -- coming up empty");
+    // Nothing named, so do what the original GDEMU does on a card insert:
+    // mount folder 01 (where GDmenu / openMenu usually live). This is a
+    // lookup of one numbered folder, not a guess at "some image" -- a card
+    // without a folder 01 still comes up empty and the host sees no disc.
+    if let Some(name) = folder_for_number(num_blocks, 1) {
+        match load_by_name(num_blocks, name.as_str()) {
+            Ok(gdi) => return Ok(gdi),
+            Err(e) => warn!("gdi: default folder '{}' is unusable ({:?})", name.as_str(), e),
+        }
+    }
+    warn!("gdi: no image selected, no usable GDEMU.CFG and no folder 01 -- coming up empty");
     Err(GdiError::NoGdiFile)
+}
+
+/// Call `f(number, entry)` for every numbered image folder in the root.
+///
+/// Numbered means [`discimg::slot::number_of`] accepts the folder's 8.3 base
+/// name and it has no extension. One pass, no collection of the entries.
+fn for_each_slot<F: FnMut(u16, &embedded_sdmmc::DirEntry)>(num_blocks: u32, mut f: F) {
+    let dev = HsmciBlockDevice::new();
+    dev.set_num_blocks(num_blocks);
+    let mgr = VolumeManager::new(dev, crate::blockdev::DummyClock);
+    let Ok(volume) = mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) else { return };
+    let Ok(root) = volume.open_root_dir() else { return };
+    let _ = root.iterate_dir(|entry| {
+        if !entry.attributes.is_directory() || !entry.name.extension().is_empty() {
+            return;
+        }
+        if let Some(n) = discimg::slot::number_of(entry.name.base_name()) {
+            f(n, entry);
+        }
+    });
+}
+
+/// The root folder numbered `n`, under the name `load_by_name` takes.
+/// With several folders of the same number (`01` and `001`) the first on the
+/// card wins.
+pub fn folder_for_number(num_blocks: u32, n: u16) -> Option<String<MAX_NAME_CHARS>> {
+    let mut found: Option<String<MAX_NAME_CHARS>> = None;
+    for_each_slot(num_blocks, |num, entry| {
+        if num == n && found.is_none() {
+            found = Some(entry_name(entry, None));
+        }
+    });
+    found
+}
+
+/// The number of the mounted folder, if it is a numbered one.
+pub fn mounted_number() -> Option<u16> {
+    let name = unsafe { &*core::ptr::addr_of!(SELECTED_NAME) }.as_ref()?;
+    let name = name.as_str().trim().trim_end_matches('/');
+    if name.contains('/') {
+        return None;
+    }
+    discimg::slot::number_of(name.as_bytes())
+}
+
+/// The next numbered folder in `dir` from the mounted one, wrapping, with
+/// numbering gaps skipped. `None` when the card has no numbered folder.
+///
+/// One pass over the root picks the number ([`discimg::slot::Nearest`]),
+/// a second fetches its name. Probing number by number instead would walk
+/// the card once per gap -- a folder called `2024` next to `01` would cost
+/// two thousand directory scans inside one ATAPI command.
+pub fn step_folder(
+    num_blocks: u32,
+    dir: discimg::slot::Step,
+) -> Option<String<MAX_NAME_CHARS>> {
+    let mut pick = discimg::slot::Nearest::new(mounted_number(), dir);
+    for_each_slot(num_blocks, |num, _| pick.offer(num));
+    folder_for_number(num_blocks, pick.result()?)
 }
 
 

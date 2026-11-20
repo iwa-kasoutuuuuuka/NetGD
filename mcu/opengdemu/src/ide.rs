@@ -1000,11 +1000,22 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
         return;
     }
     let name = unsafe { &*core::ptr::addr_of!(SWAP_NAME) };
+    let ok = mount_named(state, label, name.as_str()).await;
+    info!("{}: button swapped to '{}' (mounted: {})", label, name.as_str(), ok);
+}
+
+/// Mount the folder called `name`, replacing whatever is mounted.
+///
+/// Stops CD-DA, drops the media and the sector cache, mounts by name,
+/// prefetches IP.BIN, then raises UNIT ATTENTION so the host re-reads the
+/// TOC. On failure the drive is left empty (`GDI = None`, no medium).
+/// Returns whether an image mounted.
+async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -> bool {
     crate::cdda::stop();
     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
     invalidate_cd_read_cache();
 
-    let ok = match crate::gdi::load_by_name(disk_sectors(), name.as_str()) {
+    let ok = match crate::gdi::load_by_name(disk_sectors(), name) {
         Ok(g) => {
             mount_gdi(g);
             if let Some(g) = gdi_ref() {
@@ -1013,7 +1024,7 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
             true
         }
         Err(e) => {
-            warn!("{}: button swap to '{}' failed: {:?}", label, name.as_str(), e);
+            warn!("{}: mount '{}' failed: {:?}", label, name, e);
             unsafe { GDI = None };
             false
         }
@@ -1021,7 +1032,8 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     state.unit_attention = true;
     state.pending_sense_key = 0x06;
-    info!("{}: button swapped to '{}' (mounted: {})", label, name.as_str(), ok);
+    info!("{}: mounted '{}' ({})", label, name, ok);
+    ok
 }
 
 async fn swap_media(state: &mut DeviceState, label: &'static str) -> bool {
@@ -1176,9 +1188,12 @@ async fn handle_packet(
     // a "ready" drive after reset and never proceeds past TOC validation.
     // (Verified via dcload-serial against a stock GDEMU: TEST_UNIT_READY
     // first response = STATUS=0x11, ERR=0x60.)
+    // GDEMU_CMD is exempt too: a menu must be able to switch images while a
+    // UA is pending or the drive is empty, and it leaves the UA for the host.
     if state.unit_attention
         && opcode != ATAPI_REQUEST_SENSE
         && opcode != SEGA_REQ_ERROR
+        && opcode != GDEMU_CMD
     {
         info!("{}: UNIT_ATTENTION served on opcode 0x{:02x}", label, opcode);
         dev.set_error(0x60); // sense key 6 << 4
@@ -1422,6 +1437,9 @@ async fn handle_packet(
         }
         OGDM_IMAGE_CTL => {
             handle_image_ctl(dev, state, label, &packet).await;
+        }
+        GDEMU_CMD => {
+            handle_gdemu_cmd(dev, state, label, &packet).await;
         }
         SEGA_VENDOR_70 => {
             // Per iceGDROM rv32/source/ide.c — 0x70 is a no-data probe
@@ -1823,27 +1841,7 @@ async fn handle_image_ctl(
                 finish_ok(dev);
                 return;
             }
-            crate::cdda::stop();
-            MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
-            invalidate_cd_read_cache();
-            let ok = match crate::gdi::load_by_name(disk_sectors(), name.as_str()) {
-                Ok(g) => {
-                    mount_gdi(g);
-                    if let Some(g) = gdi_ref() {
-                        prefetch_ip_bin(g).await;
-                    }
-                    true
-                }
-                Err(e) => {
-                    warn!("{}: mount '{}' failed: {:?}", label, name.as_str(), e);
-                    unsafe { GDI = None };
-                    false
-                }
-            };
-            MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
-            state.unit_attention = true;
-            state.pending_sense_key = 0x06;
-            info!("{}: mounted '{}' ({})", label, name.as_str(), ok);
+            let ok = mount_named(state, label, name.as_str()).await;
             if ok {
                 finish_ok(dev);
             } else {
@@ -1870,6 +1868,117 @@ async fn handle_image_ctl(
         }
         sub => {
             warn!("{}: IMAGE_CTL sub-command {} not supported", label, sub);
+            finish_illegal(dev, state);
+        }
+    }
+}
+
+/// Original GDEMU's image-selection command, which menus (GDmenu, openMenu)
+/// send to the GD-ROM device. CDB byte 1 is the sub-code:
+///
+///   52 82 lo hi  mount image number `lo | hi << 8`; 0 = back to the default.
+///                No data phase. A number with no folder, or a failed
+///                mount, is ILLEGAL REQUEST; an unknown number leaves the
+///                current media untouched.
+///   52 81 55     next image          (wraps from the last to the first)
+///   52 81 44     previous image
+///   52 00        data-in, 8 bytes: two little-endian u32, bootloader then
+///                firmware version, each packed `major << 24 | minor << 16 |
+///                patch << 8` (`00 00 09 01` is 1.9.0). Cut by the CDB's
+///                allocation length like the 0xE0 version reply.
+///
+/// Anything else is ILLEGAL REQUEST. Images are numbered folders in the root
+/// of the card (`discimg::slot`).
+const GDEMU_CMD: u8 = 0x52;
+const GDEMU_MOUNT: u8 = 0x82;
+const GDEMU_STEP: u8 = 0x81;
+const GDEMU_STEP_NEXT: u8 = 0x55;
+const GDEMU_STEP_PREV: u8 = 0x44;
+const GDEMU_VERSION: u8 = 0x00;
+
+/// The GDEMU protocol level NetGD emulates, as (major, minor, patch).
+/// Reported as the firmware version of `52 00`; the bootloader reports 0.0.0.
+const GDEMU_COMPAT_VERSION: (u8, u8, u8) = (5, 20, 0);
+
+/// Resolve a GDEMU target folder -- number `n`, or one step from the mounted
+/// folder -- into `MOUNT_NAME`. Done in a plain function and through a static
+/// so the 100-odd byte name never lives in the async frame: the IDE task's
+/// stack is the scarce thing, and this runs ahead of the deepest path.
+#[inline(never)]
+fn stage_folder(n: Option<u16>, dir: Option<discimg::slot::Step>) -> bool {
+    let blocks = disk_sectors();
+    let found = match (n, dir) {
+        (Some(n), _) => crate::gdi::folder_for_number(blocks, n),
+        (None, Some(dir)) => crate::gdi::step_folder(blocks, dir),
+        (None, None) => None,
+    };
+    let Some(found) = found else { return false };
+    let name = unsafe { &mut *core::ptr::addr_of_mut!(MOUNT_NAME) };
+    name.clear();
+    let _ = name.push_str(found.as_str());
+    true
+}
+
+async fn handle_gdemu_cmd(
+    dev: &IdeDevice,
+    state: &mut DeviceState,
+    label: &'static str,
+    packet: &[u8; 12],
+) {
+    match packet[1] {
+        GDEMU_MOUNT => {
+            let n = (packet[2] as u16) | ((packet[3] as u16) << 8);
+            if n == 0 {
+                crate::gdi::select_default();
+                swap_media(state, label).await;
+                finish_ok(dev);
+                return;
+            }
+            // Resolve first: an unknown number must not disturb what is
+            // mounted.
+            if !stage_folder(Some(n), None) {
+                warn!("{}: GDEMU mount: no folder numbered {}", label, n);
+                finish_illegal(dev, state);
+                return;
+            }
+            let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
+            if mount_named(state, label, name.as_str()).await {
+                finish_ok(dev);
+            } else {
+                finish_illegal(dev, state);
+            }
+        }
+        GDEMU_STEP => {
+            let dir = match packet[2] {
+                GDEMU_STEP_NEXT => discimg::slot::Step::Next,
+                GDEMU_STEP_PREV => discimg::slot::Step::Prev,
+                _ => {
+                    finish_illegal(dev, state);
+                    return;
+                }
+            };
+            if !stage_folder(None, Some(dir)) {
+                warn!("{}: GDEMU step: no numbered folder", label);
+                finish_illegal(dev, state);
+                return;
+            }
+            let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
+            if mount_named(state, label, name.as_str()).await {
+                finish_ok(dev);
+            } else {
+                finish_illegal(dev, state);
+            }
+        }
+        GDEMU_VERSION => {
+            let (ma, mi, pa) = GDEMU_COMPAT_VERSION;
+            let fw = (ma as u32) << 24 | (mi as u32) << 16 | (pa as u32) << 8;
+            let mut out = [0u8; 8];
+            // Bootloader 0.0.0 in the first word, firmware in the second.
+            out[4..].copy_from_slice(&fw.to_le_bytes());
+            send_alloc(dev, packet, &out).await;
+        }
+        sub => {
+            warn!("{}: GDEMU sub-command 0x{:02x} not supported", label, sub);
             finish_illegal(dev, state);
         }
     }

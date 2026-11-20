@@ -31,7 +31,7 @@ heapless = { version = "0.8", features = ["defmt-03"] }
 [features]
 # Target the SAM3U2E instead of the 4E: one 128 K flash plane instead of two,
 # and 16 K of SRAM0 instead of 32 K. Selects `link/sam3u2e.x` (see build.rs),
-# moves `cdda::RING` into the otherwise-unused NFC SRAM, and caps MAX_IMAGES.
+# moves `cdda::RING` into the otherwise-unused NFC SRAM.
 # Build it as `DEFMT_LOG=off cargo build --release --features sam3u2e`; the
 # logging code is part of what has to come out to fit.
 sam3u2e = []

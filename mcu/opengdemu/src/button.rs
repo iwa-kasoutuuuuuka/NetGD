@@ -64,17 +64,29 @@ fn on_press() {
     // Read the mounted folder's `next` now rather than having remembered it.
     // This is the shallowest caller in the firmware, which is where the work
     // of opening the card belongs.
-    match crate::gdi::next_of_mounted(crate::ide::disk_sectors()) {
-        Some(name) => {
-            info!("button: following link to '{}'", name.as_str());
-            crate::ide::request_swap(name.as_str());
-            // Wake the IDE task: it owns the device state the swap needs,
-            // and on an idle bus its interrupt would not otherwise come.
-            embassy_atsam3::gpio::pioa_signal_wake();
-        }
-        // The folder named nowhere to go. Doing nothing is deliberate:
-        // swapping to an unrelated disc under a running game would hand it
-        // one it never asked for.
-        None => info!("button: pressed, but this image has no 'next' link"),
+    let blocks = crate::ide::disk_sectors();
+    if let Some(name) = crate::gdi::next_of_mounted(blocks) {
+        info!("button: following link to '{}'", name.as_str());
+        swap_to(name.as_str());
+        return;
     }
+    // No link. A numbered folder steps to the next numbered one, as the
+    // original GDEMU's button does; anything else does nothing, because
+    // swapping to an unrelated disc under a running game would hand it one
+    // it never asked for.
+    if crate::gdi::mounted_number().is_some() {
+        if let Some(name) = crate::gdi::step_folder(blocks, discimg::slot::Step::Next) {
+            info!("button: next numbered folder '{}'", name.as_str());
+            swap_to(name.as_str());
+            return;
+        }
+    }
+    info!("button: pressed, but this image has no 'next' link");
+}
+
+fn swap_to(name: &str) {
+    crate::ide::request_swap(name);
+    // Wake the IDE task: it owns the device state the swap needs,
+    // and on an idle bus its interrupt would not otherwise come.
+    embassy_atsam3::gpio::pioa_signal_wake();
 }

@@ -14,6 +14,7 @@
 pub mod atapi;
 pub mod cdi;
 pub mod gdi;
+pub mod slot;
 
 pub use heapless::{String, Vec};
 
