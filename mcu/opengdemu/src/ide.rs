@@ -3001,54 +3001,33 @@ static REQUEST_SENSE_REPLY: [u8; 18] = [
     0x00, 0x00, 0x00, // sense-key specific
 ];
 
-/// Where the pickup "is" for REQ_STAT / GET_SCD: `(fad, track)` -- the
-/// sector CDDA is playing or paused at, or the start of track 1 when idle.
-fn head_position() -> (u32, Option<&'static crate::gdi::Track>) {
-    let s = crate::cdda::snapshot();
-    let gdi = gdi_ref();
-    let fad = match s.status {
-        crate::cdda::Status::Standby => 150,
-        _ => s.fad,
-    };
-    let track = gdi.and_then(|g| g.track_for_lba(fad.saturating_sub(150)));
-    (fad, track)
+fn audio_state(s: crate::cdda::Status) -> discimg::atapi::AudioState {
+    use discimg::atapi::AudioState;
+    match s {
+        crate::cdda::Status::Playing => AudioState::Playing,
+        crate::cdda::Status::Paused => AudioState::Paused,
+        crate::cdda::Status::Finished => AudioState::Finished,
+        crate::cdda::Status::Error => AudioState::Error,
+        crate::cdda::Status::Standby => AudioState::Standby,
+    }
+}
+
+/// The mounted image's tracks, or none.
+fn mounted_tracks() -> &'static [crate::gdi::Track] {
+    match gdi_ref() {
+        Some(g) => g.tracks(),
+        None => &[],
+    }
 }
 
 /// 10-byte Sega REQ_STAT reply (Marcus Comstedt's layout): drive status,
 /// repeat count, CTRL/ADR, TNO, index, FAD MSB..LSB, max retry, 0.
 fn build_req_stat_reply() -> [u8; 10] {
     let s = crate::cdda::snapshot();
-    let status: u8 = match s.status {
-        crate::cdda::Status::Playing => 3,
-        crate::cdda::Status::Paused | crate::cdda::Status::Finished => 1,
-        crate::cdda::Status::Error => 9,
-        crate::cdda::Status::Standby => 2,
-    };
-    let (fad, track) = head_position();
-    let (ctrl_adr, tno) = track.map(|t| ((t.ctrl << 4) | 1, t.number)).unwrap_or((0x41, 1));
-    [
-        status,
-        s.repeat,
-        ctrl_adr,
-        tno,
-        0x01,
-        (fad >> 16) as u8,
-        (fad >> 8) as u8,
-        fad as u8,
-        0x00,
-        0x00,
-    ]
-}
-
-fn bcd(n: u32) -> u8 {
-    (((n / 10) << 4) | (n % 10)) as u8
-}
-
-/// Minute/second/frame of a block address, BCD, into `out[0..3]`.
-fn put_msf(out: &mut [u8], blk: u32) {
-    out[0] = bcd(blk / 4500);
-    out[1] = bcd((blk % 4500) / 75);
-    out[2] = bcd(blk % 75);
+    let state = audio_state(s.status);
+    let tracks = mounted_tracks();
+    let (fad, track) = discimg::atapi::head_position(tracks, state, s.fad);
+    discimg::atapi::req_stat_reply(state, s.repeat, fad, track)
 }
 
 /// 32-byte REQ_MODE reply. The Sega GD-ROM REQ_MODE packet selects an
@@ -3088,54 +3067,10 @@ static REQ_ERROR_REPLY: [u8; 10] = [0; 10];
 /// GD-ROM image gets reported as a single session here. Earlier
 /// 0-indexed-iceGDROM-style mapping was wrong.
 fn build_req_ses_reply(_gdi: Option<&'static crate::gdi::Gdi>, session: u8) -> Option<[u8; 6]> {
-    let mut r = [0u8; 6];
-    r[0] = 0x01; // drive status: ready (matches LBA_LOW=0x81 low nibble)
-    let (track, fad) = if let Some(g) = gdi_ref() {
-        match session {
-            0 => {
-                // Disc summary: session *count* + lead-out FAD.
-                //
-                // Not the first track number. The two are the same value on a
-                // GD-ROM -- stock GDEMU reports one session, whose first track
-                // is also 1 -- which is why sending the track number here
-                // matched a stock unit byte-for-byte and still broke MIL-CD.
-                // A MIL-CD has two sessions and keeps its IP.BIN, its ISO9660
-                // filesystem and its 1ST_READ.BIN in the second one, so
-                // claiming one session tells the BIOS the only bootable part
-                // of the disc is not there. It then never probes session 2,
-                // never reads a sector, and gives up.
-                // flycast `core/imgread/common.h`, `GetSessionInfo`:
-                //   if (session == 0) { to[2] = sessions.size(); ... }
-                (g.sessions, g.leadout_lba() + 150)
-            }
-            1 => {
-                // Session 1 = SDA: first SDA track + its starting FAD.
-                let t = g.tracks().iter().find(|t| t.start_lba < g.boot_area_lba)?;
-                (t.number, t.start_lba + 150)
-            }
-            2 if g.is_cdi => {
-                // A MIL-CD really has two sessions, and its bootable data
-                // track is the whole of session 2. The BIOS learns the
-                // session count from which index first returns ABRT, so
-                // stopping at 1 (correct for a GD-ROM, which stock GDEMU
-                // reports as a single session) tells it session 2 does not
-                // exist -- and session 2 is the only place a MIL-CD keeps
-                // anything bootable. `boot_area_lba` is the first track
-                // numbered 3 or above, which on a CDI is exactly where the
-                // second session begins.
-                let t = g.tracks().iter().find(|t| t.start_lba >= g.boot_area_lba)?;
-                (t.number, t.start_lba + 150)
-            }
-            _ => return None, // out of range — caller should abort
-        }
-    } else {
-        return None;
-    };
-    r[2] = track;
-    r[3] = (fad >> 16) as u8;
-    r[4] = (fad >> 8) as u8;
-    r[5] = fad as u8;
-    Some(r)
+    // The per-subcommand reasoning (session count vs first track number,
+    // MIL-CD's second session) lives with the builder, in discimg::atapi.
+    let g = gdi_ref()?;
+    discimg::atapi::req_ses_reply(g.tracks(), g.is_cdi, g.boot_area_lba, g.sessions, session)
 }
 
 /// Build a 100-byte CD_SCD format-0 reply with a bit-expanded
@@ -3153,57 +3088,9 @@ fn build_req_ses_reply(_gdi: Option<&'static crate::gdi::Gdi>, session: u8) -> O
 /// length.
 fn build_get_scd_reply(format: u8, r: &mut [u8; 100]) -> usize {
     let s = crate::cdda::snapshot();
-    let audio_status: u8 = match s.status {
-        crate::cdda::Status::Playing => 0x11,
-        crate::cdda::Status::Paused => 0x12,
-        crate::cdda::Status::Finished => 0x13,
-        crate::cdda::Status::Error => 0x14,
-        crate::cdda::Status::Standby => 0x15, // no current audio status
-    };
-    let (fad, track) = head_position();
-    let mut q: [u8; 12] = [0; 12];
-    match track {
-        Some(t) => {
-            q[0] = (t.ctrl << 4) | 1; // CTRL, ADR=1 (Q-mode 1)
-            q[1] = bcd(t.number as u32);
-            put_msf(&mut q[3..6], fad.saturating_sub(t.start_lba + 150));
-        }
-        None => q[0] = 0x41,
-    }
-    q[2] = 0x01; // index 1
-    put_msf(&mut q[7..10], fad);
-    // q[10..12] will be overwritten with CRC mid-expansion.
-
-    r.fill(0);
-    r[1] = audio_status;
-    if format == 1 {
-        r[3] = 14;
-        r[4..14].copy_from_slice(&q[..10]);
-        return 14;
-    }
-    r[3] = 100;        // data length
-
-    // Expand bits MSB-first; compute CRC-CCITT across the bit stream.
-    // After processing the first 80 bits (Q[0..10]) we substitute the
-    // computed CRC into q[10..12] before continuing — matches iceGDROM.
-    let mut crc: u16 = 0;
-    for i in 0..12 {
-        if i == 10 {
-            let crc_done = !crc;
-            q[10] = (crc_done >> 8) as u8;
-            q[11] = (crc_done & 0xff) as u8;
-        }
-        let byte = q[i];
-        for bit in 0..8 {
-            let b = (byte >> (7 - bit)) & 1;
-            // CRC update before emitting (poly 0x1021, MSB-first).
-            let top = (crc >> 15) & 1;
-            crc = (crc << 1) ^ if (top ^ b as u16) != 0 { 0x1021 } else { 0 };
-            // Emit bit as 0x7F / 0x3F at offset 4 + i*8 + bit.
-            r[4 + i * 8 + bit] = if b != 0 { 0x7F } else { 0x3F };
-        }
-    }
-    100
+    let state = audio_state(s.status);
+    let (fad, track) = discimg::atapi::head_position(mounted_tracks(), state, s.fad);
+    discimg::atapi::get_scd_reply(format, state, fad, track, r)
 }
 
 // ---------------------------------------------------------------------------

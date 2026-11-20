@@ -14,6 +14,7 @@ critical-section = "1.1"
 static_cell = "2"
 gamecfg = { path = "../../common/gamecfg", features = ["defmt"] }
 lzma = { path = "../../common/lzma" }
+discimg = { path = "../../common/discimg", features = ["defmt"] }
 
 embassy-atsam3 = { path = "../embassy-atsam3", features = ["rt", "time-driver"] }
 embassy-time = "0.5"

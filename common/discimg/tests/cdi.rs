@@ -1,0 +1,273 @@
+//! Characterization tests for the CDI descriptor parser, on synthetic images
+//! built per the layout documented in the firmware's cdi.rs.
+
+mod oracle;
+
+use discimg::cdi::{parse, parse_slice, sector_size};
+use discimg::{Error, Full, TrackDesc, TrackSink};
+
+struct T {
+    name_len: usize,
+    pregap: u32,
+    sector_count: u32,
+    start_lba: u32,
+    total_length: u32,
+    read_mode: u32,
+    control: u32,
+}
+
+/// Build a CDI file: `data_len` bytes of fake track data, then the descriptor
+/// for `sessions` (each a list of tracks), a terminator, and the length word.
+fn build(data_len: usize, sessions: &[Vec<T>]) -> Vec<u8> {
+    let mut f = vec![0xAAu8; data_len];
+    let desc_start = f.len();
+    f.push(sessions.len() as u8);
+    for s in sessions {
+        f.extend_from_slice(&[0, s.len() as u8, (s.len() >> 8) as u8, 0, 0, 0, 0]);
+        for (i, t) in s.iter().enumerate() {
+            // Track header: 25 + name + 31. The name length is byte 24.
+            let mut h = vec![0x11u8; 25];
+            h[24] = t.name_len as u8;
+            f.extend_from_slice(&h);
+            f.extend(core::iter::repeat(b'N').take(t.name_len));
+            f.extend_from_slice(&[0x22u8; 31]);
+            // Track data: 180 bytes, 188 for the last of the session.
+            let mut d = vec![0u8; if i + 1 == s.len() { 188 } else { 180 }];
+            d[2..6].copy_from_slice(&t.pregap.to_le_bytes());
+            d[6..10].copy_from_slice(&t.sector_count.to_le_bytes());
+            d[32..36].copy_from_slice(&t.start_lba.to_le_bytes());
+            d[36..40].copy_from_slice(&t.total_length.to_le_bytes());
+            d[56..60].copy_from_slice(&t.read_mode.to_le_bytes());
+            d[60..64].copy_from_slice(&t.control.to_le_bytes());
+            f.extend_from_slice(&d);
+        }
+    }
+    // Terminator: empty session header, a track header, some disc info.
+    f.extend_from_slice(&[0u8; 7]);
+    f.extend_from_slice(&[0u8; 56]);
+    f.extend_from_slice(&[0x33u8; 40]);
+    let len = (f.len() - desc_start + 4) as u32;
+    f.extend_from_slice(&len.to_le_bytes());
+    f
+}
+
+/// A typical homebrew MIL-CD: session 1 = two audio tracks, session 2 = one
+/// Mode 2 data track; filenames of 32, 56 and 7 bytes.
+fn mil_cd() -> Vec<u8> {
+    build(
+        1_000_000,
+        &[
+            vec![
+                T { name_len: 32, pregap: 150, sector_count: 3000, start_lba: 0, total_length: 3150, read_mode: 2, control: 0 },
+                T { name_len: 56, pregap: 0, sector_count: 7000, start_lba: 3150, total_length: 7000, read_mode: 2, control: 0 },
+            ],
+            vec![
+                T { name_len: 7, pregap: 150, sector_count: 20000, start_lba: 45000, total_length: 20150, read_mode: 1, control: 0x14 },
+            ],
+        ],
+    )
+}
+
+fn mil_cd_expected() -> Vec<(u8, u32, u8, u16, u32, u32)> {
+    // (number, start_lba, ctrl, sector_size, sector_count, file_offset)
+    // base1 = 0                      offset1 = 150*2352                   = 352_800
+    // base2 = 3150*2352 = 7_408_800  offset2 = base2 (no pregap)          = 7_408_800
+    // base3 = base2 + 7000*2352      = 23_872_800; offset3 = base3 + 150*2336 = 24_223_200
+    vec![
+        (1, 0, 0, 2352, 3000, 352_800),
+        (2, 3150, 0, 2352, 7000, 7_408_800),
+        (3, 45000, 4, 2336, 20000, 24_223_200),
+    ]
+}
+
+fn summary(t: &[TrackDesc]) -> Vec<(u8, u32, u8, u16, u32, u32)> {
+    t.iter()
+        .map(|t| (t.number, t.start_lba, t.ctrl, t.sector_size, t.sector_count, t.file_offset))
+        .collect()
+}
+
+#[test]
+fn two_session_mil_cd_with_variable_length_filenames() {
+    let (sessions, tracks) = parse_slice(&mil_cd()).unwrap();
+    assert_eq!(sessions, 2);
+    assert_eq!(summary(&tracks), mil_cd_expected());
+    assert!(tracks.iter().all(|t| t.filename.is_empty()));
+}
+
+#[test]
+fn control_is_masked_to_four_bits() {
+    // 0x14 -> 4 (the ADR nibble is dropped).
+    let (_, t) = parse_slice(&mil_cd()).unwrap();
+    assert_eq!(t[2].ctrl, 4);
+}
+
+#[test]
+fn read_mode_to_sector_size() {
+    assert_eq!(sector_size(0), Some(2048));
+    assert_eq!(sector_size(1), Some(2336));
+    assert_eq!(sector_size(2), Some(2352));
+    assert_eq!(sector_size(3), None);
+    assert_eq!(sector_size(u32::MAX), None);
+}
+
+#[test]
+fn single_session_cooked_data_track() {
+    let f = build(
+        4096,
+        &[vec![T { name_len: 32, pregap: 0, sector_count: 2, start_lba: 0, total_length: 2, read_mode: 0, control: 4 }]],
+    );
+    let (s, t) = parse_slice(&f).unwrap();
+    assert_eq!(s, 1);
+    assert_eq!(summary(&t), vec![(1, 0, 4, 2048, 2, 0)]);
+}
+
+#[test]
+fn mixed_name_lengths_do_not_misalign_later_tracks() {
+    // 0 and 255-byte names (255 is the u8 maximum) around a normal one.
+    let mk = |n| T { name_len: n, pregap: 0, sector_count: 10, start_lba: n as u32, total_length: 10, read_mode: 2, control: 0 };
+    let f = build(100, &[vec![mk(0), mk(255), mk(1), mk(56)]]);
+    let (_, t) = parse_slice(&f).unwrap();
+    assert_eq!(t.iter().map(|t| t.start_lba).collect::<Vec<_>>(), vec![0, 255, 1, 56]);
+    assert_eq!(t.iter().map(|t| t.file_offset).collect::<Vec<_>>(), vec![0, 23520, 47040, 70560]);
+}
+
+#[test]
+fn track_numbers_run_across_sessions() {
+    let (_, t) = parse_slice(&mil_cd()).unwrap();
+    assert_eq!(t.iter().map(|t| t.number).collect::<Vec<_>>(), vec![1, 2, 3]);
+}
+
+#[test]
+fn errors() {
+    let good = mil_cd();
+    // Too short for the length word + anything.
+    assert_eq!(parse_slice(&good[..7]), Err(Error::BadCdi));
+    // Descriptor length below 16 / past the start of the file.
+    let mut f = good.clone();
+    let n = f.len();
+    f[n - 4..].copy_from_slice(&15u32.to_le_bytes());
+    assert_eq!(parse_slice(&f), Err(Error::BadCdi));
+    f[n - 4..].copy_from_slice(&(n as u32 + 1).to_le_bytes());
+    assert_eq!(parse_slice(&f), Err(Error::BadCdi));
+    // Unknown read mode.
+    let bad = build(
+        64,
+        &[vec![T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 0, total_length: 1, read_mode: 3, control: 0 }]],
+    );
+    assert_eq!(parse_slice(&bad), Err(Error::BadCdi));
+    // pregap * sector size overflows.
+    let bad = build(
+        64,
+        &[vec![T { name_len: 1, pregap: 0x4000_0000, sector_count: 1, start_lba: 0, total_length: 1, read_mode: 2, control: 0 }]],
+    );
+    assert_eq!(parse_slice(&bad), Err(Error::BadCdi));
+    // running base overflows on the second track.
+    let t = |total| T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 0, total_length: total, read_mode: 2, control: 0 };
+    let bad = build(64, &[vec![t(0x2000_0000), t(0x2000_0000)]]);
+    assert_eq!(parse_slice(&bad), Err(Error::BadCdi));
+    // No sessions / no tracks at all.
+    assert_eq!(parse_slice(&build(64, &[])), Err(Error::BadCdi));
+    assert_eq!(parse_slice(&build(64, &[vec![]])), Err(Error::BadCdi));
+}
+
+#[test]
+fn truncated_descriptor_is_a_read_error() {
+    // Claims two sessions but the descriptor is cut mid-way: the next read
+    // runs past EOF, which is a reader failure rather than BadCdi.
+    let f = build(
+        64,
+        &[vec![T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 0, total_length: 1, read_mode: 2, control: 0 }]],
+    );
+    let mut g = f.clone();
+    // Bump the session count so the walk wants a second session header past
+    // the real one; with the terminator (7+56+40 bytes) in place this reads
+    // the terminator as a session with 0 tracks, so cut the file instead.
+    let ds = 64;
+    g[ds] = 200;
+    let r = parse_slice(&g);
+    assert_eq!(r, Err(Error::Read));
+}
+
+struct Cap {
+    cap: usize,
+    n: usize,
+    hdr: Option<(u32, u8)>,
+    cleared: usize,
+}
+impl TrackSink for Cap {
+    type Error = ();
+    fn clear(&mut self) { self.n = 0; self.cleared += 1; }
+    fn push(&mut self, _: &TrackDesc) -> Result<(), ()> {
+        if self.n == self.cap { return Err(()); }
+        self.n += 1;
+        Ok(())
+    }
+    fn cdi_header(&mut self, l: u32, s: u8) { self.hdr = Some((l, s)); }
+}
+
+#[test]
+fn sink_sees_header_then_clear_and_its_errors_pass_through() {
+    let f = mil_cd();
+    let rd = |off: u32, buf: &mut [u8]| -> Result<(), ()> {
+        let o = off as usize;
+        buf.copy_from_slice(f.get(o..o + buf.len()).ok_or(())?);
+        Ok(())
+    };
+    let mut c = Cap { cap: 99, n: 0, hdr: None, cleared: 0 };
+    assert_eq!(parse(f.len() as u32, rd, &mut c), Ok(2));
+    assert_eq!((c.n, c.cleared), (3, 1));
+    let (dl, s) = c.hdr.unwrap();
+    assert_eq!(s, 2);
+    // desc_len counts back from EOF and includes the length word itself.
+    assert_eq!(f.len() - dl as usize, 1_000_000);
+    let mut c = Cap { cap: 2, n: 0, hdr: None, cleared: 0 };
+    assert_eq!(parse(f.len() as u32, rd, &mut c), Err(Error::Sink(())));
+    // Failure before the header (length word) leaves the sink untouched.
+    let mut c = Cap { cap: 99, n: 7, hdr: None, cleared: 0 };
+    assert_eq!(parse(4, rd, &mut c), Err(Error::BadCdi));
+    assert_eq!((c.n, c.cleared), (7, 0));
+}
+
+#[test]
+fn too_many_tracks_is_the_sinks_call() {
+    // 100 tracks into the 99-entry VecSink.
+    let t = |i: u32| T { name_len: 1, pregap: 0, sector_count: 1, start_lba: i, total_length: 1, read_mode: 2, control: 0 };
+    let f = build(64, &[(0..100).map(t).collect()]);
+    assert_eq!(parse_slice(&f), Err(Error::Sink(Full)));
+    let f = build(64, &[(0..99).map(t).collect()]);
+    assert_eq!(parse_slice(&f).unwrap().1.len(), 99);
+}
+
+#[test]
+fn agrees_with_the_original_walk() {
+    let mut images = vec![mil_cd()];
+    images.push(build(
+        4096,
+        &[vec![T { name_len: 32, pregap: 0, sector_count: 2, start_lba: 0, total_length: 2, read_mode: 0, control: 4 }]],
+    ));
+    images.push(build(10, &[]));
+    images.push(vec![0u8; 7]);
+    images.push(vec![0xFF; 100]);
+    let mut cut = mil_cd();
+    cut[1_000_000] = 9;
+    images.push(cut);
+    for f in &images {
+        let new = parse_slice(f);
+        let old = oracle::cdi_parse(f);
+        match (new, old) {
+            (Ok((s, t)), Ok((os, ot, offs))) => {
+                assert_eq!(s, os);
+                assert_eq!(t.len(), ot.len());
+                for ((a, b), off) in t.iter().zip(ot.iter()).zip(offs.iter()) {
+                    assert_eq!(
+                        (a.number, a.start_lba, a.ctrl, a.sector_size, a.sector_count, a.file_offset),
+                        (b.number, b.start_lba, b.ctrl, b.sector_size, b.sector_count, *off)
+                    );
+                }
+            }
+            (Err(Error::BadCdi), Err("BadCdi")) => {}
+            (Err(Error::Read), Err("Read")) => {}
+            (n, o) => panic!("mismatch: {:?} vs {:?}", n, o),
+        }
+    }
+}

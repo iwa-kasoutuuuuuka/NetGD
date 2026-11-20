@@ -189,7 +189,7 @@ impl Gdi {
 
     /// Track containing `lba`, if any. Linear scan since N ≤ 99.
     pub fn track_for_lba(&self, lba: u32) -> Option<&Track> {
-        self.tracks().iter().rfind(|t| t.start_lba <= lba)
+        discimg::atapi::track_for_lba(self.tracks(), lba)
     }
 
     /// `(filename, byte_offset)` for reading `lba`. Caller opens the
@@ -226,12 +226,7 @@ impl Gdi {
     /// abandons the boot and starts over rather than load anything -- it
     /// never reads past the ISO9660 root directory.
     pub fn leadout_lba(&self) -> u32 {
-        if self.is_cdi {
-            if let Some(last) = self.tracks().last() {
-                return last.start_lba + last.sector_count;
-            }
-        }
-        549150
+        discimg::atapi::leadout_lba(self.tracks(), self.is_cdi)
     }
 
     /// Build a 408-byte Sega GD-ROM TOC response. `area` selects which
@@ -246,89 +241,7 @@ impl Gdi {
     /// Sega/iceGDROM convention, opposite to what the standard ATAPI
     /// READ_TOC uses). Unused track slots are 0xFF-filled.
     pub fn build_toc(&self, area: u8, out: &mut [u8; 408]) {
-        out.fill(0xFF);
-
-        // A MIL-CD has no high-density area. Every track on it is an ordinary
-        // CD track in the single-density area, and once the host is told the
-        // disc is CD-ROM XA it stops asking for area 1 altogether -- so
-        // splitting a CDI at `boot_area_lba` hides its data track from the
-        // only area the host still looks at. The BIOS then sees two audio
-        // tracks with nothing bootable and never issues a read at all.
-        let in_area = |t: &Track| -> bool {
-            if self.is_cdi {
-                area == 0
-            } else if area == 0 {
-                t.start_lba < self.boot_area_lba
-            } else {
-                t.start_lba >= self.boot_area_lba
-            }
-        };
-        // Sega TOC layout (per iceGDROM tools/imgfile.c:165): CTL in
-        // the upper nibble, ADR=1 in the lower. Opposite of the
-        // standard CD-ROM TOC, but the DC BIOS does this byte-swap
-        // and expects this convention.
-        let ctrl_adr = |ctl: u8| -> u8 { (ctl << 4) | 0x01 };
-
-        let mut first: Option<u8> = None;
-        let mut last: Option<u8> = None;
-        let mut last_track_ref: Option<&Track> = None;
-
-        for t in self.tracks().iter() {
-            if !in_area(t) {
-                continue;
-            }
-            if t.number == 0 || t.number > 99 {
-                continue;
-            }
-            let idx = (t.number - 1) as usize * 4;
-            let fad = t.start_lba + 150;
-            out[idx] = ctrl_adr(t.ctrl);
-            out[idx + 1] = (fad >> 16) as u8;
-            out[idx + 2] = (fad >> 8) as u8;
-            out[idx + 3] = fad as u8;
-
-            first.get_or_insert(t.number);
-            last = Some(t.number);
-            last_track_ref = Some(t);
-        }
-
-        if let (Some(f), Some(l), Some(lt)) = (first, last, last_track_ref) {
-            // First track entry (offset 99*4 = 396).
-            let first_ctrl = self.tracks().iter()
-                .find(|t| t.number == f)
-                .map(|t| ctrl_adr(t.ctrl))
-                .unwrap_or(0x01);
-            out[396] = first_ctrl;
-            out[397] = f;
-            out[398] = 0;
-            out[399] = 0;
-            // Last track entry (offset 100*4 = 400).
-            out[400] = ctrl_adr(lt.ctrl);
-            out[401] = l;
-            out[402] = 0;
-            out[403] = 0;
-            // Lead-out entry (offset 101*4 = 404). FAD = first sector
-            // after the last track (matches iceGDROM tools/imgfile.c
-            // line 172: start_sector + data_count).
-            // A GDI carries no track lengths; a pressed GD-ROM's high-density
-            // area always runs out to LBA 549150, so report that for the HD
-            // lead-out even when the last track file is trimmed short
-            // (homebrew GDIs, "trimmed" dumps). The low-density area is only
-            // as long as its files.
-            //
-            // A CDI is exempt: its descriptor gives exact per-track sector
-            // counts, so `lt` already ends where the disc really ends, and
-            // padding a MIL-CD out to a pressed disc's capacity is what made
-            // the BIOS refuse to boot one.
-            let mut leadout_fad = (lt.start_lba + lt.sector_count) + 150;
-            if area == 1 && !self.is_cdi {
-                leadout_fad = leadout_fad.max(self.leadout_lba() + 150);
-            }
-            out[404] = ctrl_adr(lt.ctrl);
-            out[405] = (leadout_fad >> 16) as u8;
-            out[406] = (leadout_fad >> 8) as u8;
-            out[407] = leadout_fad as u8;
-        }
+        discimg::atapi::build_toc(self.tracks(), self.is_cdi, self.boot_area_lba, area, out)
     }
 }
 
@@ -973,39 +886,13 @@ fn read_file_to_buf(
 
 fn parse(data: &[u8]) -> Result<Gdi, GdiError> {
     // Straight into the pool: 99 of these will not fit on the stack, which
-    // is the whole reason the pool exists. Cleared first, so a failed parse
-    // cannot leave the previous image's tail behind this one's.
+    // is the whole reason the pool exists. Cleared first (by the parser), so
+    // a failed parse cannot leave the previous image's tail behind this one's.
+    discimg::gdi::parse(data, &mut PoolSink { cdi: None }).map_err(|e| match e {
+        discimg::Error::Sink(e) => e,
+        _ => GdiError::Parse,
+    })?;
     let tracks = tracks_mut();
-    tracks.clear();
-    let mut lines = SplitLines::new(data);
-
-    // Line 1: number of tracks.
-    let header = lines.next().ok_or(GdiError::Parse)?;
-    let _expected: u32 = parse_u32(header)?;
-
-    while let Some(line) = lines.next() {
-        let trimmed = trim(line);
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut fields = SplitWS::new(trimmed);
-        let number = parse_u32(fields.next().ok_or(GdiError::Parse)?)? as u8;
-        let start_lba = parse_u32(fields.next().ok_or(GdiError::Parse)?)?;
-        let ctrl = parse_u32(fields.next().ok_or(GdiError::Parse)?)? as u8;
-        let sector_size = parse_u32(fields.next().ok_or(GdiError::Parse)?)? as u16;
-        let filename_raw = fields.next().ok_or(GdiError::Parse)?;
-        // The pregap field (last) we ignore.
-        let _ = fields.next();
-
-        let filename = sfn_from_bytes(filename_raw)?;
-        // sector_count gets filled in after we've parsed the GDI text
-        // by walking the image dir and matching each filename to its
-        // FAT-reported file size.
-        tracks
-            .push(Track { number, start_lba, ctrl, sector_size, sector_count: 0, filename,
-                          file_offset: 0, ext_start: 0, ext_len: 0 })
-            .map_err(|_| GdiError::TooManyTracks)?;
-    }
 
     let boot_area_lba = tracks.iter()
         .find(|t| t.number >= 3)
@@ -1033,74 +920,59 @@ fn parse(data: &[u8]) -> Result<Gdi, GdiError> {
     Ok(gdi)
 }
 
-fn parse_u32(s: &[u8]) -> Result<u32, GdiError> {
-    let mut n: u32 = 0;
-    let mut any = false;
-    for &b in s {
-        if !b.is_ascii_digit() {
-            if any { break; }
-            return Err(GdiError::Parse);
+/// Feeds the static track pool from `discimg`'s parsers. `cdi` is the image
+/// file's name when parsing a CDI (every track lives in that one file), `None`
+/// for a GDI (each track names its own).
+pub(crate) struct PoolSink {
+    pub cdi: Option<ShortFileName>,
+}
+
+impl discimg::TrackSink for PoolSink {
+    type Error = GdiError;
+
+    fn cdi_header(&mut self, desc_len: u32, sessions: u8) {
+        info!("cdi: descriptor {} bytes, {} session(s)", desc_len, sessions);
+    }
+
+    fn clear(&mut self) {
+        tracks_mut().clear();
+    }
+
+    fn push(&mut self, t: &discimg::TrackDesc) -> Result<(), GdiError> {
+        let is_cdi = self.cdi.is_some();
+        let filename = match &self.cdi {
+            Some(name) => name.clone(),
+            None => ShortFileName::create_from_str(t.filename.as_str())
+                .map_err(|_| GdiError::BadFilename)?,
+        };
+        tracks_mut()
+            .push(Track {
+                number: t.number,
+                start_lba: t.start_lba,
+                ctrl: t.ctrl,
+                sector_size: t.sector_size,
+                sector_count: t.sector_count,
+                filename,
+                file_offset: t.file_offset,
+                ext_start: 0,
+                ext_len: 0,
+            })
+            .map_err(|_| if is_cdi { GdiError::BadCdi } else { GdiError::TooManyTracks })?;
+        if is_cdi {
+            info!(
+                "cdi: track {} lba={} sectors={} ssize={} ctrl={:#04x} off={}",
+                t.number, t.start_lba, t.sector_count, t.sector_size, t.ctrl, t.file_offset
+            );
         }
-        n = n.checked_mul(10).and_then(|x| x.checked_add((b - b'0') as u32))
-            .ok_or(GdiError::Parse)?;
-        any = true;
-    }
-    if !any { return Err(GdiError::Parse); }
-    Ok(n)
-}
-
-fn sfn_from_bytes(raw: &[u8]) -> Result<ShortFileName, GdiError> {
-    // Build a trimmed copy in-place. embedded-sdmmc's ShortFileName::create
-    // wants a regular filename string.
-    let mut buf: String<32> = String::new();
-    for &b in raw {
-        if b == b'"' { continue; }  // GDI sometimes quotes the filename
-        buf.push(b as char).map_err(|_| GdiError::Parse)?;
-    }
-    ShortFileName::create_from_str(buf.as_str()).map_err(|_| GdiError::BadFilename)
-}
-
-fn trim(s: &[u8]) -> &[u8] {
-    let mut start = 0;
-    while start < s.len() && (s[start] == b' ' || s[start] == b'\t' || s[start] == b'\r') {
-        start += 1;
-    }
-    let mut end = s.len();
-    while end > start && (s[end - 1] == b' ' || s[end - 1] == b'\t' || s[end - 1] == b'\r') {
-        end -= 1;
-    }
-    &s[start..end]
-}
-
-struct SplitLines<'a> { data: &'a [u8], i: usize }
-impl<'a> SplitLines<'a> {
-    fn new(data: &'a [u8]) -> Self { Self { data, i: 0 } }
-    fn next(&mut self) -> Option<&'a [u8]> {
-        if self.i >= self.data.len() { return None; }
-        let start = self.i;
-        while self.i < self.data.len() && self.data[self.i] != b'\n' {
-            self.i += 1;
-        }
-        let line = &self.data[start..self.i];
-        if self.i < self.data.len() { self.i += 1; }
-        Some(line)
+        Ok(())
     }
 }
 
-struct SplitWS<'a> { data: &'a [u8], i: usize }
-impl<'a> SplitWS<'a> {
-    fn new(data: &'a [u8]) -> Self { Self { data, i: 0 } }
-    fn next(&mut self) -> Option<&'a [u8]> {
-        while self.i < self.data.len() && (self.data[self.i] == b' ' || self.data[self.i] == b'\t') {
-            self.i += 1;
-        }
-        if self.i >= self.data.len() { return None; }
-        let start = self.i;
-        while self.i < self.data.len() && self.data[self.i] != b' ' && self.data[self.i] != b'\t' {
-            self.i += 1;
-        }
-        Some(&self.data[start..self.i])
-    }
+impl discimg::TrackInfo for Track {
+    fn number(&self) -> u8 { self.number }
+    fn start_lba(&self) -> u32 { self.start_lba }
+    fn ctrl(&self) -> u8 { self.ctrl }
+    fn sector_count(&self) -> u32 { self.sector_count }
 }
 
 /// Format a short filename as `BASE.EXT` into a fixed-size buffer

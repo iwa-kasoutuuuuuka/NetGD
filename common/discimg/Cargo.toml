@@ -1,0 +1,14 @@
+[package]
+name = "discimg"
+description = "Disc-image parsing (GDI, CDI) and ATAPI reply builders, shared by the firmware and the host tests"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Let the firmware log these types. Off by default so the host tests do not
+# need defmt.
+defmt = ["dep:defmt", "heapless/defmt-03"]
+
+[dependencies]
+heapless = "0.8"
+defmt = { version = "0.3", optional = true }
