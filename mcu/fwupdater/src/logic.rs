@@ -299,6 +299,57 @@ pub fn lock_mask_at(dest: u32, len: u32) -> u32 {
     hi & !lo
 }
 
+/// The lock regions this build must find unlocked before it writes
+/// `[dest, dest + len)`: [`lock_mask_at`]. `main.rs` uses this one (not
+/// [`lock_mask`], which assumes the image starts at a plane base and would
+/// test bit 0, the resident's own lock, for a format-3 image at `APP_BASE`:
+/// on a board whose resident is locked every update would then be refused as
+/// `Locked`). For a header [`check_header`] accepted in a `resident` build
+/// the mask never has bit 0 of plane 0.
+pub fn lock_mask_of(dest: u32, len: u32) -> u32 {
+    lock_mask_at(dest, len)
+}
+
+// --- EEFC_FCR ----------------------------------------------------------------
+
+/// Flash writing protection key (FKEY, `EEFC_FCR` bits 31:24).
+pub const FKEY: u32 = 0x5A;
+/// Erase page and write page.
+pub const FCMD_EWP: u32 = 0x03;
+/// Pages of the resident region (lock region 0 of plane 0).
+pub const RESIDENT_PAGES: u32 = LAYOUT / PAGE;
+/// `RSTC_CR` (0x400E_1200) word: key 0xA5, PERRST, PROCRST. What a `resident`
+/// build resets with (contract X7; `AIRCR.SYSRESETREQ` leaves it open
+/// whether the peripherals are reset).
+pub const RSTC_CR_PROC_PERI_RESET: u32 = 0xA500_0005;
+
+/// The one place where this crate makes the `EEFC_FCR` word of a page write:
+/// `(plane 1?, word)` for the page at flash address `addr`, `None` when this
+/// build may not write there. Same words as `bootcore::fcr::FcrCmd::ewp`
+/// (tested against it). `addr` must be page aligned and inside a plane; in a
+/// `resident` build (`resident` = true) pages 0..31 of plane 0, the resident
+/// region, cannot be named at all (contract X3), whatever the header said.
+/// Whether the part has a plane 1 is `check_header`'s business.
+pub fn ewp_fcr_for(addr: u32, resident: bool) -> Option<(bool, u32)> {
+    if addr % PAGE != 0 {
+        return None;
+    }
+    let (plane1, base) = if addr >= PLANE1_BASE { (true, PLANE1_BASE) } else { (false, PLANE0_BASE) };
+    if addr < base || addr - base >= PLANE_LEN {
+        return None;
+    }
+    let page = (addr - base) / PAGE;
+    if resident && !plane1 && page < RESIDENT_PAGES {
+        return None;
+    }
+    Some((plane1, (FKEY << 24) | (page << 8) | FCMD_EWP))
+}
+
+/// [`ewp_fcr_for`] of this build.
+pub fn ewp_fcr(addr: u32) -> Option<(bool, u32)> {
+    ewp_fcr_for(addr, RESIDENT)
+}
+
 // --- app descriptor and trailer (format 3) ----------------------------------
 
 /// Why a format-3 code image was refused after the header passed. (Separate
@@ -615,6 +666,77 @@ mod tests {
             n += 1;
         }
         assert!(n >= 10);
+    }
+
+    /// B10 of R89: the EWP words, against the resident's own producer.
+    #[test]
+    fn ewp_words_match_bootcore_and_spare_the_resident() {
+        use bootcore::fcr::{FcrCmd, Plane};
+        let b4 = bootcore::part::Part::Sam3u4e;
+        assert_eq!(RESIDENT_PAGES, 32);
+        assert_eq!(RESIDENT_PAGES, bootcore::fcr::RESIDENT_PAGES);
+        assert_eq!(FKEY, bootcore::fcr::KEY);
+        assert_eq!(FCMD_EWP, bootcore::fcr::CMD_EWP as u32);
+        for (base, plane) in [(PLANE0_BASE, Plane::P0), (PLANE1_BASE, Plane::P1)] {
+            for page in 0..PLANE_LEN / PAGE {
+                let addr = base + page * PAGE;
+                let theirs = FcrCmd::ewp(b4, plane, page).map(|c| (c.plane() == Plane::P1, c.word()));
+                // a resident build names exactly the pages the resident's own rule allows
+                assert_eq!(ewp_fcr_for(addr, true), theirs, "{addr:#x}");
+                // a format-2 build may also write pages 0..31 of plane 0 (there is no resident)
+                let ours = ewp_fcr_for(addr, false).unwrap();
+                assert_eq!(ours, (plane == Plane::P1, 0x5A00_0003 | page << 8), "{addr:#x}");
+                if let Some(t) = theirs {
+                    assert_eq!(ours, t);
+                } else {
+                    assert!(plane == Plane::P0 && page < 32);
+                }
+                // not page aligned
+                for d in [1, 4, 255] {
+                    assert_eq!(ewp_fcr_for(addr + d, false), None);
+                    assert_eq!(ewp_fcr_for(addr + d, true), None);
+                }
+            }
+        }
+        // the resident region, explicitly
+        assert_eq!(ewp_fcr_for(PLANE0_BASE, true), None);
+        assert_eq!(ewp_fcr_for(APP_BASE - PAGE, true), None);
+        assert_eq!(ewp_fcr_for(APP_BASE, true), Some((false, 0x5A00_2003)));
+        assert_eq!(ewp_fcr_for(PLANE0_BASE, false), Some((false, 0x5A00_0003)));
+        // outside both planes
+        for resident in [false, true] {
+            for a in [0, PLANE0_BASE - PAGE, PLANE0_BASE + PLANE_LEN, PLANE1_BASE - PAGE, PLANE1_BASE + PLANE_LEN, 0x2000_0000, 0xFFFF_FF00] {
+                assert_eq!(ewp_fcr_for(a, resident), None, "{a:#x}");
+            }
+        }
+        // this build's own
+        assert_eq!(ewp_fcr(PLANE0_BASE).is_some(), !RESIDENT);
+        assert_eq!(ewp_fcr(APP_BASE), Some((false, 0x5A00_2003)));
+        // no word is one of the dangerous commands (SGPB 0x0B, CGPB 0x0C, CLB 0x09, EA 0x05, SLB 0x08)
+        assert_eq!(ewp_fcr_for(PLANE1_BASE + PLANE_LEN - PAGE, true).unwrap().1 & 0xFF, 3);
+        assert_eq!(RSTC_CR_PROC_PERI_RESET, 0xA500_0005);
+    }
+
+    /// B10 of R89: the lock check of a format-3 image must not look at bit 0
+    /// (the resident's lock, set on every board in the field).
+    #[test]
+    fn lock_mask_of_an_accepted_format3_image_never_has_the_resident_bit() {
+        for len in (512..=PLANE_LEN - LAYOUT).step_by(512) {
+            let m = lock_mask_of(APP_BASE, len);
+            assert_eq!(m & 1, 0, "{len}");
+            assert_ne!(m & 2, 0);
+            assert_eq!(m, lock_mask_at(APP_BASE, len));
+            assert_eq!(m, bootcore::update::lock_mask_at(APP_BASE, len), "{len}");
+            // what `lock_mask` (plane-base images) would have tested instead
+            assert_eq!(lock_mask(len) & 1, 1);
+        }
+        // a resident whose region is locked (GLB bit 0 = 1) does not make the app region "locked"
+        assert_eq!(1 & lock_mask_of(APP_BASE, PLANE_LEN - LAYOUT), 0);
+        // format 2 and bitstreams: unchanged
+        for len in [512, 8192, 8193, PLANE_LEN] {
+            assert_eq!(lock_mask_of(PLANE0_BASE, len), lock_mask(len));
+            assert_eq!(lock_mask_of(PLANE1_BASE, len), lock_mask(len));
+        }
     }
 
     #[test]

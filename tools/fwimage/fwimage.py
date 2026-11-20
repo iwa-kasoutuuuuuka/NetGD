@@ -62,6 +62,10 @@ TRAILER_LEN = 4
 
 # GPBR0, app -> resident: the request word "NGRC".
 GPBR_RECOVER_MAGIC = 0x4352474E
+# GPBR0, written by the resident over the request while it recovers ("in
+# progress"): the complement. A boot that finds it does not recover again on
+# that ground and reports REQ (FORMAT.md, "GPBR0").
+GPBR_RECOVER_BUSY = GPBR_RECOVER_MAGIC ^ 0xFFFFFFFF
 # GPBR1, resident -> app: mark 0x4EB1 << 16 | flags << 8 | result
 GPBR1_MARK = 0x4EB1
 REPORT_BTN = 1 << 8
@@ -70,6 +74,8 @@ REPORT_WROTE = 1 << 10
 REPORT_LOCKED = 1 << 11
 REPORT_SLB = 1 << 12
 REPORT_UNSEALED = 1 << 13
+REPORT_LOCK_UNKNOWN = 1 << 14  # the GLB failed; LOCKED is 0 and says nothing
+RESULT_INTERRUPTED = 10  # GPBR0 held GPBR_RECOVER_BUSY and the app is valid
 RESULT_NAMES = {0: "none", 1: "recovered", 2: "no card", 3: "no file", 4: "read error", 5: "header refused",
                 6: "app region locked", 7: "write error", 8: "CRC mismatch", 9: "verify failed"}
 
@@ -284,23 +290,29 @@ def seal_payload(buf):
 # --- GPBR1 report, resident info block, NGAX (design 3-2, 3-3, 3-5) ---------
 
 
-def pack_report(button=False, request=False, wrote=False, locked=False, slb=False, unsealed=False, result=0):
-    """The GPBR1 word (bootcore::boot::report)."""
+def pack_report(button=False, request=False, wrote=False, locked=False, slb=False, unsealed=False, result=0,
+                lock_unknown=False):
+    """The GPBR1 word (bootcore::boot::report). LOCK_UNKNOWN and LOCKED never
+    come together: unknown wins."""
     w = (GPBR1_MARK << 16) | (result & 0xFF)
     for on, bit in ((button, REPORT_BTN), (request, REPORT_REQ), (wrote, REPORT_WROTE),
-                    (locked, REPORT_LOCKED), (slb, REPORT_SLB), (unsealed, REPORT_UNSEALED)):
+                    (locked and not lock_unknown, REPORT_LOCKED), (slb, REPORT_SLB), (unsealed, REPORT_UNSEALED),
+                    (lock_unknown, REPORT_LOCK_UNKNOWN)):
         if on:
             w |= bit
     return w
 
 
 def parse_report(w):
-    """(button, request, wrote, locked, slb, unsealed, result) or None when the
-    mark is missing. Reserved bits are ignored (bootcore::boot::Report::parse)."""
+    """(button, request, wrote, locked, slb, unsealed, lock_unknown, result) or
+    None when the mark is missing. The reserved bit is ignored
+    (bootcore::boot::Report::parse); `locked` is False when `lock_unknown`."""
     if w >> 16 != GPBR1_MARK:
         return None
-    return (bool(w & REPORT_BTN), bool(w & REPORT_REQ), bool(w & REPORT_WROTE), bool(w & REPORT_LOCKED),
-            bool(w & REPORT_SLB), bool(w & REPORT_UNSEALED), w & 0xFF)
+    unknown = bool(w & REPORT_LOCK_UNKNOWN)
+    return (bool(w & REPORT_BTN), bool(w & REPORT_REQ), bool(w & REPORT_WROTE),
+            bool(w & REPORT_LOCKED) and not unknown,
+            bool(w & REPORT_SLB), bool(w & REPORT_UNSEALED), unknown, w & 0xFF)
 
 
 @dataclass(frozen=True)
@@ -636,6 +648,35 @@ def images_from_elf(elf, target, image_version=0, fmt=FORMAT_2):
     return images
 
 
+def check_built_for(images, target, code_only=False, any_sp=False):
+    """`build` only: is this ELF really a build for `target`? The updater's
+    own checks cannot tell (a SAM3U2E image's stack pointer 0x20004000 is a
+    valid one on a SAM3U4E too, and its CIDR word is whatever `--target`
+    said), and a 2E build written to a 4E board leaves the FPGA without its
+    bitstream: on a format-2 board only SWD brings that back.
+
+    * The initial SP must be exactly the end of the target's SRAM0, which is
+      where every netgd linker script puts it (`BadTarget`; `any_sp` for an
+      ELF with a deliberately different stack).
+    * A SAM3U4E file must carry the plane-1 (bitstream) image (`NoBitstream`;
+      `code_only` for a code-only update of a board whose stored bitstream is
+      the right one already)."""
+    p = PARTS[target]
+    code = next((i for i in images if i.header.kind == KIND_CODE), None)
+    if code is None:
+        raise FwImageError("BadElf", "no code image")
+    sp = struct.unpack_from("<I", code.payload)[0]
+    if sp != p.sram0_end and not any_sp:
+        other = [q.name for q in PARTS.values() if q.sram0_end == sp and q is not p]
+        hint = f"; this looks like a {other[0]} build" if other else ""
+        raise FwImageError("BadTarget", f"initial SP {sp:#010x} is not the end of {p.name}'s SRAM0 "
+                                        f"({p.sram0_end:#010x}){hint}. --any-sp builds it anyway")
+    if p.has_plane1 and not any(i.header.kind == KIND_BITSTREAM for i in images) and not code_only:
+        raise FwImageError("NoBitstream", f"the ELF has no plane-1 content, but a {p.name} board loads its FPGA "
+                                          "bitstream from plane 1 (is this a build for another part?). "
+                                          "--code-only makes a file with the code image alone")
+
+
 def seal_elf(elf):
     """Development flashing (design 2-5 (1)): write the descriptor length and
     CRC and the trailer CRC into the ELF itself, so `probe-rs run` flashes a
@@ -750,13 +791,15 @@ def cmd_build(args):
     with open(args.elf, "rb") as f:
         elf = f.read()
     images = images_from_elf(elf, args.target, args.image_version, args.format)
+    check_built_for(images, args.target, code_only=args.code_only, any_sp=args.any_sp)
     out = b"".join(i.pack() for i in images)
     with open(args.output, "wb") as f:
         f.write(out)
     print(f"{args.output}: {len(out)} bytes for {PARTS[args.target].name}, format {args.format}")
     describe(images)
-    if args.target == "4e" and len(images) == 1:
-        print("warning: no plane-1 content in the ELF; the file has a code image only", file=sys.stderr)
+    if PARTS[args.target].has_plane1 and len(images) == 1:
+        print("warning: --code-only: the file has a code image only; the board keeps the bitstream it has",
+              file=sys.stderr)
 
 
 def cmd_seal(args):
@@ -851,6 +894,10 @@ def main(argv=None):
     b.add_argument("--image-version", type=lambda s: int(s, 0), default=0)
     b.add_argument("--format", type=int, choices=FORMATS, default=FORMAT_VERSION,
                    help="2: boards without a resident region (default); 3: with one (app linked at 0x82000)")
+    b.add_argument("--code-only", action="store_true",
+                   help="4e: accept an ELF without plane-1 content (the board keeps its stored bitstream)")
+    b.add_argument("--any-sp", action="store_true",
+                   help="accept an initial SP that is not the end of the target's SRAM0")
     b.set_defaults(fn=cmd_build)
     s = sub.add_parser("seal", help="write descriptor length/CRC and the image CRC into the ELF (development flashing)")
     s.add_argument("elf")

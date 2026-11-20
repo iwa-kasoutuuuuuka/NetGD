@@ -306,7 +306,7 @@ fn flocke_midway_is_reported_and_leaves_the_app_invalid() {
         fn slb(&mut self, c: bootcore::fcr::FcrCmd) -> Result<(), FlashError> {
             self.0.slb(c)
         }
-        fn lock_bits(&mut self, p: bootcore::fcr::Plane) -> u32 {
+        fn lock_bits(&mut self, p: bootcore::fcr::Plane) -> Option<u32> {
             self.0.lock_bits(p)
         }
     }
@@ -396,19 +396,33 @@ enum Boot {
 fn reset(m: &mut Model, part: Part, img: &std::sync::Arc<Vec<u8>>, gpbr: &mut u32, button: bool) -> Boot {
     use bootcore::boot::*;
     m.power_up();
+    bootcore::flash::Flash::set_fws(m, bootcore::part::FWS_RUN); // the resident's start-up
     let app_valid = verify_flash_app(m, part, false).is_ok();
     match decide(app_valid, button, *gpbr) {
-        Action::RunApp => Boot::Run,
-        Action::Recover { clear_request } => {
-            if clear_request {
-                *gpbr = 0;
+        Action::RunApp { request } => {
+            if let Some(w) = request.gpbr0_at_handoff() {
+                *gpbr = w;
+            }
+            Boot::Run
+        }
+        Action::Recover { request } => {
+            if let Some(w) = request.gpbr0_before_recovery() {
+                *gpbr = w;
             }
             let mut card = Card::shared(img.clone());
-            match recover(m, part, &mut card) {
+            let r = recover(m, part, &mut card);
+            let fallback = after_failed_recovery(app_valid, 0);
+            if r.is_ok() || fallback == Fallback::StartApp {
+                // every hand-off clears the resident's word in GPBR0
+                if let Some(w) = request.gpbr0_at_handoff() {
+                    *gpbr = w;
+                }
+            }
+            match r {
                 Ok(len) => Boot::RecoveredRun(len),
-                Err(_) => match after_failed_recovery(app_valid) {
+                Err(_) => match fallback {
                     Fallback::StartApp => Boot::FailedStart,
-                    Fallback::RetryRecovery => Boot::FailedRetry,
+                    _ => Boot::FailedRetry,
                 },
             }
         }
@@ -550,8 +564,11 @@ fn erase_only_needs_the_app_to_become_invalid() {
     assert_eq!(m.ops, 2, "nothing beyond the two erases");
 }
 
+/// An EWP whose FRDY never comes does not return to the caller: the RAM
+/// routine resets the chip (B5 of R89). In the model that is a reset inside
+/// the command, like a power cut with the supply still on.
 #[test]
-fn flash_timeout_is_a_failure_and_leaves_no_wrong_app() {
+fn flash_timeout_resets_and_leaves_no_wrong_app() {
     let part = Part::Sam3u2e;
     let old = app_image(part, 4096, 1);
     let app = app_image(part, 8192, 2);
@@ -570,7 +587,11 @@ fn flash_timeout_is_a_failure_and_leaves_no_wrong_app() {
             let mut m = base.clone();
             m.timeout = Some(Cut { op, outcome: o });
             let r = recover(&mut m, part, &mut Card::new(img.clone()));
-            assert_eq!(r, Err(RecoverError::Flash(FlashError::Timeout)), "op {op} {o:?}");
+            // the code under test never sees `Timeout` from an EWP
+            assert_ne!(r, Err(RecoverError::Flash(FlashError::Timeout)), "op {op} {o:?}");
+            assert!(r.is_err(), "op {op} {o:?}");
+            assert!(m.dead, "op {op} {o:?}: the chip was reset");
+            assert_eq!(m.timeout_resets, 1);
             assert_eq!(m.ops, op + 1, "EWPs were issued after a timeout");
             // what the boot check makes of it: invalid, the old app (op 0
             // untouched) or, at the very last EWP, a fully written new one
@@ -587,6 +608,7 @@ fn flash_timeout_is_a_failure_and_leaves_no_wrong_app() {
             m.power_up();
             assert_eq!(recover(&mut m, part, &mut Card::new(img.clone())), Ok(8192), "op {op} {o:?}");
             assert_eq!(m.peek(APP_BASE, 8192), &app[..]);
+            assert_eq!(m.fws_violations, 0, "op {op} {o:?}");
         }
     }
 }

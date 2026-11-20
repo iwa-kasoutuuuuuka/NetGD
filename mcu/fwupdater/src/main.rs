@@ -93,7 +93,7 @@ use core::mem::MaybeUninit;
 use core::ptr::{read_volatile, write_volatile};
 
 use fwupdater_logic as logic;
-use logic::{Header, Part, Reject, KIND_CODE, PAGE, PLANE0_BASE, PLANE1_BASE};
+use logic::{Header, Part, Reject, FKEY, KIND_CODE, PAGE, PLANE0_BASE, PLANE1_BASE};
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -175,18 +175,20 @@ const FSR_FRDY: u32 = 1 << 0;
 /// FCMDE | FLOCKE: bad command, or the target lock region is locked.
 const FSR_ERRORS: u32 = (1 << 1) | (1 << 2);
 
-/// Erase page and write page, in one command. SAM3U still has EWP (SAM4
-/// dropped it for a separate erase), which is why there is no erase pass
-/// below — but also why a page must be filled completely before committing.
-const FCMD_EWP: u32 = 0x03;
+// Erase page and write page, in one command (`logic::FCMD_EWP`; the word is
+// made by `logic::ewp_fcr`). SAM3U still has EWP (SAM4 dropped it for a
+// separate erase), which is why there is no erase pass below — but also why
+// a page must be filled completely before committing.
 /// Get Lock Bit: the lock bits of the plane come back in EEFC_FRR.
 const FCMD_GLB: u32 = 0x0A;
-const FKEY: u32 = 0x5A;
 
 /// Wait states during programming. Errata 46.1.1.3: with fewer, the data
 /// written may not be the data expected. Set once at entry; the board resets
 /// at the end, which restores the firmware's own setting.
 const PROGRAMMING_FWS: u32 = 6;
+
+/// Reset controller control register (used by a `resident` build only).
+const RSTC_CR: *mut u32 = 0x400E_1200 as *mut u32;
 
 /// CHIPID_CIDR. The flash writer takes the part from here, not from a build
 /// option, so an image cannot be steered to the wrong part by the firmware
@@ -451,8 +453,15 @@ pub extern "C" fn _start(base: *mut u16) -> ! {
 }
 
 fn reset() -> ! {
-    // AIRCR: VECTKEY | SYSRESETREQ.
-    unsafe { write_volatile(0xE000_ED0C as *mut u32, 0x05FA_0004) };
+    if logic::RESIDENT {
+        // RSTC_CR: key | PERRST | PROCRST (contract X7). The resident then
+        // starts from a chip whose peripherals are in their reset state;
+        // what SYSRESETREQ does to them the datasheet does not say.
+        unsafe { write_volatile(RSTC_CR, logic::RSTC_CR_PROC_PERI_RESET) };
+    } else {
+        // Format 2, as shipped: AIRCR, VECTKEY | SYSRESETREQ.
+        unsafe { write_volatile(0xE000_ED0C as *mut u32, 0x05FA_0004) };
+    }
     loop {
         core::hint::spin_loop();
     }
@@ -643,33 +652,41 @@ fn wait_ready(efc: *mut u32) -> bool {
     }
 }
 
-/// Issue one command. Stale FCMDE/FLOCKE from earlier are cleared by a read
-/// of FSR first, so an error seen afterwards is this command's.
+/// Issue one command (`fcr` is the whole word, key included). Stale
+/// FCMDE/FLOCKE from earlier are cleared by a read of FSR first, so an error
+/// seen afterwards is this command's.
 fn command(efc: *mut u32, fcr: u32) -> bool {
     unsafe {
         let _ = read_volatile(efc.add(EEFC_FSR));
-        write_volatile(efc.add(EEFC_FCR), (FKEY << 24) | fcr);
+        write_volatile(efc.add(EEFC_FCR), fcr);
     }
     wait_ready(efc)
 }
 
-/// Commit the latch buffer to the page containing `addr`.
+/// Commit the latch buffer to the page at `addr`. The command word comes
+/// from `logic::ewp_fcr`, which has none for an address this build may not
+/// write: in a `resident` build that is all of the resident region (pages
+/// 0..31 of plane 0), whatever led here.
 fn program_page(addr: u32) -> bool {
-    let (efc, plane) = efc_of(addr);
-    // FARG is the page index within the plane; each EEFC numbers from 0.
-    let page = (addr - plane) / PAGE;
-    command(efc, ((page & 0xFFFF) << 8) | FCMD_EWP)
+    let Some((plane1, word)) = logic::ewp_fcr(addr) else {
+        return false;
+    };
+    command(if plane1 { EFC1 } else { EFC0 }, word)
 }
 
 /// Is any lock region under `[addr, addr + len)` locked? A failed lock-bit
-/// read counts as locked.
+/// read counts as locked for this one command (the host sees `Locked` and may
+/// send the header again; nothing is remembered).
 fn locked(addr: u32, len: u32) -> bool {
     let (efc, _) = efc_of(addr);
-    if !command(efc, FCMD_GLB) {
+    if !command(efc, (FKEY << 24) | FCMD_GLB) {
         return true;
     }
     let bits = unsafe { read_volatile(efc.add(EEFC_FRR)) };
-    bits & logic::lock_mask(len) != 0
+    // The regions under the image, counted from where it starts: a format-3
+    // image begins in region 1, and bit 0 (the resident's own lock, set on
+    // every board with a resident) must not be looked at.
+    bits & logic::lock_mask_of(addr, len) != 0
 }
 
 /// Continue a CRC over `len` bytes of flash at `addr`.

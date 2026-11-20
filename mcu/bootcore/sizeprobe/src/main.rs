@@ -7,12 +7,12 @@
 #![no_main]
 
 use bootcore::app::{verify_flash_app, APP_BASE};
-use bootcore::boot::{decide, lock_resident, report, Action, Trigger};
+use bootcore::boot::{decide, lock_resident, report, Action, LockOutcome, Request, Trigger};
 use bootcore::fat::{BlockRead, NAME_APP};
 use bootcore::fcr::{Cmd, FcrCmd, Plane};
 use bootcore::flash::{Flash, FlashError, PAGE};
 use bootcore::part::Part;
-use bootcore::update::sd_recover_ex;
+use bootcore::update::sd_recover_attempt;
 use core::ptr::{read_volatile, write_volatile};
 
 #[panic_handler]
@@ -34,25 +34,12 @@ impl Flash for Hw {
         }
     }
 
-    // On the board: RAM routine, FCR write, poll FSR with a timeout.
+    // On the board: RAM routine, FSR read, FCR write, poll FSR with a
+    // timeout. Flash stays readable during SLB, so a timeout may return.
     fn slb(&mut self, cmd: FcrCmd) -> Result<(), FlashError> {
-        unsafe { write_volatile(cmd.fcr_addr() as *mut u32, cmd.word()) };
-        let mut n = 0u32;
-        loop {
-            let fsr = unsafe { read_volatile(cmd.fsr_addr() as *const u32) };
-            if fsr & 1 != 0 {
-                return if fsr & 4 != 0 {
-                    Err(FlashError::Locked)
-                } else if fsr & 2 != 0 {
-                    Err(FlashError::Refused)
-                } else {
-                    Ok(())
-                };
-            }
-            n += 1;
-            if n > 4_000_000 {
-                return Err(FlashError::Timeout);
-            }
+        match run(cmd) {
+            Some(fsr) => flags(fsr),
+            None => Err(FlashError::Timeout),
         }
     }
 
@@ -63,51 +50,77 @@ impl Flash for Hw {
     }
 
     // On the board this whole function is one RAM routine: latch with 32-bit
-    // writes, FCR, poll FSR with a timeout, FLOCKE/FCMDE from the same read
-    // that saw FRDY.
+    // writes, FSR read, FCR, poll FSR with a timeout, FLOCKE/FCMDE from the
+    // same read that saw FRDY. **On a timeout it does not return** (the
+    // caller is in the plane that is still busy): it resets the chip.
     fn ewp(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError> {
         let latch = cmd.page_addr() as *mut u32;
         for (i, c) in data.chunks_exact(4).enumerate() {
             let v = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             unsafe { write_volatile(latch.add(i), v) };
         }
-        unsafe { write_volatile(cmd.fcr_addr() as *mut u32, cmd.word()) };
-        let mut n = 0u32;
-        loop {
-            let fsr = unsafe { read_volatile(cmd.fsr_addr() as *const u32) };
-            if fsr & 1 != 0 {
-                return if fsr & 4 != 0 {
-                    Err(FlashError::Locked)
-                } else if fsr & 2 != 0 {
-                    Err(FlashError::Refused)
-                } else {
-                    Ok(())
-                };
-            }
-            n += 1;
-            if n > 4_000_000 {
-                return Err(FlashError::Timeout);
-            }
+        match run(cmd) {
+            Some(fsr) => flags(fsr),
+            None => reset_from_ram(),
         }
     }
 
-    fn lock_bits(&mut self, plane: Plane) -> u32 {
-        if let Some(c) = FcrCmd::glb(self.0, plane) {
-            unsafe {
-                write_volatile(c.fcr_addr() as *mut u32, c.word());
-                let fsr = c.fsr_addr() as *const u32;
-                let mut n = 0u32;
-                while read_volatile(fsr) & 1 == 0 {
-                    n += 1;
-                    if n > 4_000_000 {
-                        return !0;
-                    }
-                }
-                read_volatile((c.eefc_base() + 0xC) as *const u32)
-            }
-        } else {
-            !0
+    // FSR is read before the FCR write (in `run`), and FCMDE of the read
+    // that saw FRDY means FRR holds nothing: `None`, not "all locked".
+    fn lock_bits(&mut self, plane: Plane) -> Option<u32> {
+        let c = FcrCmd::glb(self.0, plane)?;
+        let fsr = run(c)?;
+        if fsr & FSR_FCMDE != 0 {
+            return None;
         }
+        Some(unsafe { read_volatile((c.eefc_base() + 0xC) as *const u32) })
+    }
+}
+
+const FSR_FRDY: u32 = 1;
+const FSR_FCMDE: u32 = 2;
+const FSR_FLOCKE: u32 = 4;
+
+/// One command: read FSR (FCMDE and FLOCKE clear on read, so what is seen
+/// afterwards is this command's), write FCR, wait for FRDY. The FSR value of
+/// the read that saw FRDY, or `None` on a timeout. One copy, as on the board
+/// (the resident has one RAM routine that writes FCR).
+#[inline(never)]
+fn run(cmd: FcrCmd) -> Option<u32> {
+    unsafe {
+        let _ = read_volatile(cmd.fsr_addr() as *const u32);
+        write_volatile(cmd.fcr_addr() as *mut u32, cmd.word());
+    }
+    let mut n = 0u32;
+    loop {
+        let fsr = unsafe { read_volatile(cmd.fsr_addr() as *const u32) };
+        if fsr & FSR_FRDY != 0 {
+            return Some(fsr);
+        }
+        n += 1;
+        if n > 4_000_000 {
+            return None;
+        }
+    }
+}
+
+#[inline(always)]
+fn flags(fsr: u32) -> Result<(), FlashError> {
+    if fsr & FSR_FLOCKE != 0 {
+        Err(FlashError::Locked)
+    } else if fsr & FSR_FCMDE != 0 {
+        Err(FlashError::Refused)
+    } else {
+        Ok(())
+    }
+}
+
+/// `RSTC_CR` = key | PERRST | PROCRST. On the board this is part of the RAM
+/// routine: nothing here may be fetched from flash.
+#[inline(always)]
+fn reset_from_ram() -> ! {
+    loop {
+        unsafe { write_volatile(0x400E_1200 as *mut u32, 0xA500_0005) };
     }
 }
 
@@ -149,7 +162,7 @@ fn part_of(p: u32) -> Part {
 #[inline(never)]
 pub extern "C" fn probe_boot(part: u32, allow_unsealed: u32, button: u32, gpbr: u32) -> u32 {
     let ok = verify_flash_app(&mut Hw(part_of(part)), part_of(part), allow_unsealed != 0).is_ok();
-    (decide(ok, button != 0, gpbr) == Action::RunApp) as u32
+    (decide(ok, button != 0, gpbr) == Action::RunApp { request: Request::None }) as u32
 }
 
 /// SD recovery: FAT32, validation, the three passes, EWP.
@@ -161,9 +174,11 @@ pub extern "C" fn probe_recover(part: u32, buf: *mut [u8; 512]) -> u32 {
     // report and of the error mapping included)
     let t = Trigger { button: part & 2 != 0, request: part & 4 != 0 };
     let p = part_of(part & 1);
-    let w = match sd_recover_ex(&mut Sd, &mut Hw(p), p, buf, &NAME_APP) {
-        Ok(r) => report(t, r.wrote, true, false, false, 1) ^ r.len,
-        Err(e) => report(t, false, true, false, false, e.result_code()),
+    let lock = LockOutcome { locked: true, slb: false, unknown: part & 8 != 0 };
+    let a = sd_recover_attempt(&mut Sd, &mut Hw(p), p, buf, &NAME_APP);
+    let w = match a.result {
+        Ok(r) => report(t, r.wrote, lock, false, 1) ^ r.len,
+        Err(e) => report(t, a.wrote, lock, false, e.result_code()),
     };
     unsafe { write_volatile(0x400E_1294 as *mut u32, w) };
     w
@@ -174,7 +189,7 @@ pub extern "C" fn probe_recover(part: u32, buf: *mut [u8; 512]) -> u32 {
 #[inline(never)]
 pub extern "C" fn probe_lock(part: u32, dev: u32) -> u32 {
     let o = lock_resident(&mut Hw(part_of(part)), part_of(part), dev != 0);
-    o.locked as u32 | (o.slb as u32) << 1
+    o.locked as u32 | (o.slb as u32) << 1 | (o.unknown as u32) << 2
 }
 
 #[no_mangle]

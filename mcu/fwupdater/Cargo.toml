@@ -18,6 +18,12 @@ bench = false
 
 [dependencies]
 
+# Host tests only: the EWP words and lock masks are checked against the
+# resident's own rules (`bootcore::fcr`, `bootcore::update`). The blob itself
+# still depends on nothing.
+[dev-dependencies]
+bootcore = { path = "../bootcore" }
+
 [profile.release]
 opt-level = "s"
 lto = true
@@ -29,6 +35,8 @@ panic = "abort"
 # A board with the resident boot region (docs/design/fw-bootloader.md): the
 # updater then accepts OGFW format 3 only (app at APP_BASE, descriptor and
 # trailer CRC). Off: format 2 only, exactly what ships today. main.rs does not
-# use the format-3 pieces yet (stage S5); `cargo test --lib --features resident`
-# runs the host tests of both.
+# use the format-3 pieces yet (stage S5), but with the feature it already
+# cannot name a page of the resident region, checks the lock bits of the
+# regions the image really covers (not bit 0), and resets through RSTC_CR.
+# `cargo test --lib --features resident` runs the host tests of both.
 resident = []

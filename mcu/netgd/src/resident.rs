@@ -75,8 +75,10 @@ pub fn boot_report() -> Option<Report> {
 /// Contract rule X6: may this boot ask for a recovery? Not when there is no
 /// resident to answer (no report: the request would reset the chip into the
 /// same application, forever), and not when this boot already is the result
-/// of such a request (a recovery that did not fix the problem would loop).
-/// Both are `bootcore::boot::request_allowed`.
+/// of such a request (a recovery that did not fix the problem would loop),
+/// or follows one that a reset cut short (the resident found its "in
+/// progress" word in GPBR0 and reports `REQ` with result 10).
+/// All are `bootcore::boot::request_allowed`.
 pub fn request_allowed(report: Option<Report>) -> bool {
     boot::request_allowed(report)
 }
@@ -195,13 +197,18 @@ pub fn log_boot() {
     match boot_report() {
         Some(r) => {
             defmt::info!(
-                "boot report: result {} button {} request {} wrote {} locked {} slb {} unsealed {}",
-                r.result, r.trigger.button, r.trigger.request, r.wrote, r.locked, r.slb, r.unsealed
+                "boot report: result {} button {} request {} wrote {} locked {} slb {} unsealed {} lock_unknown {}",
+                r.result, r.trigger.button, r.trigger.request, r.wrote, r.locked, r.slb, r.unsealed, r.lock_unknown
             );
-            if !r.locked {
+            if r.lock_unknown {
+                // the resident's GLB failed: `locked` says nothing (contract 3-2)
+                defmt::warn!("resident region: lock state unknown (the lock bits could not be read)");
+            } else if !r.locked {
                 defmt::warn!("resident region is not locked");
             }
-            if r.result >= 2 {
+            if r.result == boot::RESULT_INTERRUPTED {
+                defmt::warn!("a requested recovery was interrupted by a reset; not asking again in this run");
+            } else if r.result >= 2 {
                 defmt::warn!("the resident's recovery failed (code {}); this is the previous application", r.result);
             }
         }

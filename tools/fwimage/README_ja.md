@@ -18,6 +18,9 @@ python tools/fwimage/fwimage.py inspect fw_2e.ogfw [--target 2e|4e]
   隙間と 512 バイト境界までの端数は 0xFF。ヘッダにターゲットの CHIPID_CIDR、長さ、CRC-32 を入れる。
   作る前にベクタ表（SP が対象の SRAM0 内、Reset/NMI/HardFault が奇数でイメージ内）とヘッダを更新側と同じ規則で検査する。
   2E 向けに 4E の ELF（プレーン1あり）を渡すと拒否する。
+  **別の型番用の ELF は断る**（R89 の B1）：初期 SP が対象の SRAM0 の終わり（2E `0x20004000`、4E `0x20008000`）と一致しなければ `BadTarget`、
+  `--target 4e` でプレーン1の中身が無ければ `NoBitstream`。2E の ELF を 4E 用にすると、4E の基板（形式 2）で FPGA が起動せず SWD でしか戻せないため。
+  わざとそうする場合だけ `--any-sp`（スタックの位置が違う ELF）、`--code-only`（4E でコードだけの更新。基板のビットストリームはそのまま）を付ける。
 - `inspect`：ヘッダ CRC・ペイロード CRC・ベクタ表を検査し、どの型番向けかを表示する。`--target` で別の型番に対する検査もできる（食い違えば BadTarget）。
 - 形式 3（常駐ブート領域のある基板用、`docs/design/fw-bootloader.md` §2-5・§2-6）：`build --format 3` は ELF を `0x82000` にリンクしたアプリ
   （`+0x100` に "NGAP" 記述子）から作り、記述子の長さ・CRC と末尾の CRC を埋める。`0x80000` にリンクした今の ELF は `BadDest` で拒否する。
@@ -42,3 +45,5 @@ cd mcu/fwupdater && cargo test --lib --target x86_64-pc-windows-msvc
 - **実機では未検証。** 更新プログラムとこのイメージ形式を実機で動かした記録はまだ無い。
 - 更新中に電源が落ちる・ホストが消えると、ページ0を書き換えるまでの間は SWD でしか戻せない（FORMAT.md 末尾）。
   常駐ブート領域（LOG R37 の対策 B）が入るまで、2E での更新は SWD の手段（Pico など）を用意してから行う。
+- 4E（形式 2）はコードとビットストリームの 2 イメージを順に確定する。コードを確定してからビットストリームを確定するまでの間に止まると、
+  「新しいコード＋古い（または書きかけの）ビットストリーム」になり、FPGA が起動しなければ SWD でしか戻せない（FORMAT.md 末尾の「the window between the two images」）。

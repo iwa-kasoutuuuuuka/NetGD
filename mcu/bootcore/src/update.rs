@@ -3,11 +3,15 @@
 //!
 //! 1. The whole file is validated first (every header, every payload CRC,
 //!    descriptor, vectors); nothing is erased unless it all passes and none
-//!    of the target lock regions is locked.
+//!    of the target lock regions is locked. If the lock bits cannot be read
+//!    (GLB failed), a valid application is not touched (this attempt ends
+//!    with `LockUnknown`; the next one asks again), and an invalid one is
+//!    rewritten anyway: there is nothing to lose, and a page that is locked
+//!    answers FLOCKE before it is changed.
 //! 0. If the application in flash is already valid and is the one of the
-//!    file (same length, same trailer CRC; and the bitstream matches),
-//!    nothing is written: a button that stays pressed, or a repeated
-//!    request, costs no flash endurance.
+//!    file (same length, same trailer CRC; and the bitstream matches: CRC
+//!    and last word), nothing is written: a button that stays pressed, or a
+//!    repeated request, costs no flash endurance.
 //! 2. The first two pages of the application (vector table, descriptor) are
 //!    erased first, descriptor page first. From then on the application is
 //!    invalid: no descriptor, so the next boot goes straight to recovery
@@ -52,6 +56,10 @@ pub enum RecoverError {
     NoApp,
     /// A target lock region is locked (FLOCKE would follow).
     Locked,
+    /// The lock bits could not be read (GLB failed) and the application in
+    /// flash is valid, so it was left alone. Not final: every attempt reads
+    /// the lock bits again.
+    LockUnknown,
     Flash(FlashError),
     /// A page read back differently, or the final check failed.
     Verify,
@@ -67,6 +75,11 @@ struct Plan {
     app_idx: u8,
     /// The trailing CRC of the application, as in the file.
     trailer: u32,
+    /// The last word of the bitstream image, as in the file (0 without one).
+    /// For a stamped bitstream it is the CRC-32 of the rest (contract 4-3),
+    /// and then the header's `payload_crc` is the same for every bitstream
+    /// (the CRC residue 0x2144DF1C): only this word tells two of them apart.
+    bs_trailer: u32,
 }
 
 impl RecoverError {
@@ -96,7 +109,7 @@ impl RecoverError {
                 ImageError::Truncated | ImageError::CrcMismatch | ImageError::BadTrailer => RESULT_CRC,
             },
             RecoverError::Changed => RESULT_READ,
-            RecoverError::Locked => RESULT_LOCKED,
+            RecoverError::Locked | RecoverError::LockUnknown => RESULT_LOCKED,
             RecoverError::Flash(_) => RESULT_WRITE,
             RecoverError::Verify => RESULT_VERIFY,
         }
@@ -109,6 +122,18 @@ pub struct Recovered {
     /// Length of the application now in flash.
     pub len: u32,
     /// Flash was written (false: the application in it was already the file's).
+    pub wrote: bool,
+}
+
+/// One recovery attempt, however it ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Attempt {
+    pub result: Result<Recovered, RecoverError>,
+    /// The attempt got as far as issuing flash commands (the application's
+    /// head was, or was about to be, erased). True for every success that
+    /// wrote and for every failure after validation and the lock check. The
+    /// resident counts these against
+    /// [`crate::boot::MAX_WRITING_ATTEMPTS`].
     pub wrote: bool,
 }
 
@@ -153,6 +178,7 @@ fn validate<D: BlockRead>(vol: &Volume, dev: &mut D, ent: &DirEnt, part: Part, b
     let mut count = 0u8;
     let mut app_idx = 0u8;
     let mut trailer = 0u32;
+    let mut bs_trailer = 0u32;
     while let Some(h) = next_header(&mut r, vol, dev, buf, part)? {
         let slot = if h.kind == KIND_APP { &mut app } else { &mut bs };
         if slot.is_some() {
@@ -165,8 +191,12 @@ fn validate<D: BlockRead>(vol: &Volume, dev: &mut D, ent: &DirEnt, part: Part, b
             chunk(&mut r, vol, dev, buf)?;
             st.feed(buf).map_err(RecoverError::Image)?;
             off += 512;
-            if h.kind == KIND_APP && off == h.len {
-                trailer = rd32(buf, 508);
+            if off == h.len {
+                if h.kind == KIND_APP {
+                    trailer = rd32(buf, 508);
+                } else {
+                    bs_trailer = rd32(buf, 508);
+                }
             }
         }
         st.finish().map_err(RecoverError::Image)?;
@@ -177,7 +207,7 @@ fn validate<D: BlockRead>(vol: &Volume, dev: &mut D, ent: &DirEnt, part: Part, b
         *slot = Some(h);
     }
     match app {
-        Some(app) => Ok(Plan { app, bs, count, app_idx, trailer }),
+        Some(app) => Ok(Plan { app, bs, count, app_idx, trailer, bs_trailer }),
         None => Err(RecoverError::NoApp),
     }
 }
@@ -208,14 +238,24 @@ pub fn lock_mask_at(dest: u32, len: u32) -> u32 {
     hi & !((1u32 << first) - 1)
 }
 
-fn check_locks<F: Flash>(f: &mut F, plan: &Plan) -> Result<(), RecoverError> {
-    if f.lock_bits(Plane::P0) & lock_mask_at(APP_BASE, plan.app.len) != 0 {
-        return Err(RecoverError::Locked);
+/// May the regions under `mask` be written, given the GLB result `bits`?
+/// `None` = the GLB failed (finding B12 of R89). Then nothing is known: a
+/// valid application is not put at risk (were a region in the middle of the
+/// image locked, the head would be erased and the body could never be
+/// written), an invalid one is rewritten regardless.
+pub fn lock_verdict(bits: Option<u32>, mask: u32, app_valid: bool) -> Result<(), RecoverError> {
+    match bits {
+        Some(b) if b & mask != 0 => Err(RecoverError::Locked),
+        Some(_) => Ok(()),
+        None if app_valid => Err(RecoverError::LockUnknown),
+        None => Ok(()),
     }
+}
+
+fn check_locks<F: Flash>(f: &mut F, plan: &Plan, app_valid: bool) -> Result<(), RecoverError> {
+    lock_verdict(f.lock_bits(Plane::P0), lock_mask_at(APP_BASE, plan.app.len), app_valid)?;
     if let Some(bs) = &plan.bs {
-        if f.lock_bits(Plane::P1) & lock_mask_at(PLANE1_BASE, bs.len) != 0 {
-            return Err(RecoverError::Locked);
-        }
+        lock_verdict(f.lock_bits(Plane::P1), lock_mask_at(PLANE1_BASE, bs.len), app_valid)?;
     }
     Ok(())
 }
@@ -273,22 +313,31 @@ fn erase_head<F: Flash>(f: &mut F, part: Part) -> Result<(), RecoverError> {
     Ok(())
 }
 
-/// Is the application in flash valid and the one of the file (same length,
-/// same trailer CRC), with the bitstream of the file (if any) in plane 1?
-fn already_installed<F: Flash>(f: &mut F, part: Part, plan: &Plan) -> bool {
-    match verify_flash_app(f, part, false) {
-        Ok(len) if len == plan.app.len => {}
-        _ => return false,
-    }
+fn flash_word<F: Flash>(f: &mut F, addr: u32) -> u32 {
     let mut t = [0u8; 4];
-    f.read(APP_BASE + plan.app.len - 4, &mut t);
-    if u32::from_le_bytes(t) != plan.trailer {
-        return false;
-    }
+    f.read(addr, &mut t);
+    u32::from_le_bytes(t)
+}
+
+/// Is the bitstream of the file (if it has one) what plane 1 holds: the CRC
+/// of the header, and the last word (see `Plan::bs_trailer`)?
+fn bitstream_is<F: Flash>(f: &mut F, plan: &Plan) -> bool {
     match &plan.bs {
-        Some(bs) => crc_flash(f, PLANE1_BASE, bs.len) == bs.crc,
+        Some(bs) => {
+            crc_flash(f, PLANE1_BASE, bs.len) == bs.crc
+                && flash_word(f, PLANE1_BASE + bs.len - 4) == plan.bs_trailer
+        }
         None => true,
     }
+}
+
+/// Is the application in flash (valid, of length `installed`) the one of the
+/// file (same length, same trailer CRC), with the bitstream of the file (if
+/// any) in plane 1?
+fn already_installed<F: Flash>(f: &mut F, installed: u32, plan: &Plan) -> bool {
+    installed == plan.app.len
+        && flash_word(f, APP_BASE + plan.app.len - 4) == plan.trailer
+        && bitstream_is(f, plan)
 }
 
 fn crc_flash<F: Flash>(f: &mut F, addr: u32, len: u32) -> u32 {
@@ -392,6 +441,39 @@ pub fn sd_recover_ex<D: BlockRead, F: Flash>(
     buf: &mut [u8; 512],
     name: &[u8; 11],
 ) -> Result<Recovered, RecoverError> {
+    sd_recover_attempt(dev, flash, part, buf, name).result
+}
+
+/// [`sd_recover_ex`] that says whether flash commands were issued also when
+/// it failed: what the resident counts to bound its retries
+/// ([`crate::boot::after_failed_recovery`]).
+pub fn sd_recover_attempt<D: BlockRead, F: Flash>(
+    dev: &mut D,
+    flash: &mut F,
+    part: Part,
+    buf: &mut [u8; 512],
+    name: &[u8; 11],
+) -> Attempt {
+    let mut wrote = false;
+    let result = recover(dev, flash, part, buf, name, &mut wrote);
+    Attempt { result, wrote }
+}
+
+fn recover<D: BlockRead, F: Flash>(
+    dev: &mut D,
+    flash: &mut F,
+    part: Part,
+    buf: &mut [u8; 512],
+    name: &[u8; 11],
+    wrote: &mut bool,
+) -> Result<Recovered, RecoverError> {
+    // Before anything is read from flash: FWS on every plane. On a 4E the
+    // application sets EEFC1's FWS, not the resident's start-up, and after a
+    // reset it is 0; plane 1 read at 96 MHz with FWS = 0 gives garbage, the
+    // bitstream "differs", and the whole image would be rewritten at every
+    // recovery (contract K7, finding B2 of R89).
+    flash.set_fws(FWS_RUN);
+
     let vol = Volume::mount(dev, buf).map_err(RecoverError::Fat)?;
     let ent = match vol.find(dev, buf, name) {
         Ok(e) => e,
@@ -402,20 +484,22 @@ pub fn sd_recover_ex<D: BlockRead, F: Flash>(
     // 1. nothing is touched unless the whole file is good and unlocked
     let plan = validate(&vol, dev, &ent, part, buf)?;
     // already there: write nothing
-    if already_installed(flash, part, &plan) {
-        return Ok(Recovered { len: plan.app.len, wrote: false });
+    let installed = verify_flash_app(flash, part, false);
+    if let Ok(len) = installed {
+        if already_installed(flash, len, &plan) {
+            return Ok(Recovered { len: plan.app.len, wrote: false });
+        }
     }
-    check_locks(flash, &plan)?;
+    check_locks(flash, &plan, installed.is_ok())?;
 
     // 2. the application becomes invalid
+    *wrote = true;
     erase_head(flash, part)?;
 
     // 3. everything but its first chunk
     write_body(&vol, dev, flash, &ent, &plan, part, buf)?;
-    if let Some(bs) = &plan.bs {
-        if crc_flash(flash, PLANE1_BASE, bs.len) != bs.crc {
-            return Err(RecoverError::Verify);
-        }
+    if !bitstream_is(flash, &plan) {
+        return Err(RecoverError::Verify);
     }
 
     // 4. the first chunk, last

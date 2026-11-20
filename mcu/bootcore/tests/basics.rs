@@ -631,37 +631,67 @@ fn image_stream_checks() {
 #[test]
 fn boot_decision_explicit_rows() {
     const M: u32 = GPBR_RECOVER_MAGIC;
-    use Action::*;
-    let rec = |c: bool| Recover { clear_request: c };
+    const B: u32 = GPBR_RECOVER_BUSY;
+    use Request::{Interrupted, New};
+    let run = |r: Request| Action::RunApp { request: r };
+    let rec = |r: Request| Action::Recover { request: r };
+    let none = Request::None;
     // (app_valid, button, gpbr0, expected)
-    let rows: [(bool, bool, u32, Action); 18] = [
+    let rows: [(bool, bool, u32, Action); 24] = [
         // D5: no request, valid app -> run, nothing about files on the card
-        (true, false, 0, RunApp),
-        (true, false, 0xFFFF_FFFF, RunApp),
-        (true, false, M ^ 1, RunApp),
-        (true, false, 0x1234_5678, RunApp),
+        (true, false, 0, run(none)),
+        (true, false, 0xFFFF_FFFF, run(none)),
+        (true, false, M ^ 1, run(none)),
+        (true, false, 0x1234_5678, run(none)),
         // the button
-        (true, true, 0, rec(false)),
-        (true, true, 0xFFFF_FFFF, rec(false)),
-        (true, true, M ^ 1, rec(false)),
-        // the request of the application: recover and clear GPBR0
-        (true, false, M, rec(true)),
-        (true, true, M, rec(true)),
+        (true, true, 0, rec(none)),
+        (true, true, 0xFFFF_FFFF, rec(none)),
+        (true, true, M ^ 1, rec(none)),
+        // the request of the application: recover, GPBR0 becomes "in progress"
+        (true, false, M, rec(New)),
+        (true, true, M, rec(New)),
         // no valid application
-        (false, false, 0, rec(false)),
-        (false, false, 0xFFFF_FFFF, rec(false)),
-        (false, false, M ^ 1, rec(false)),
-        (false, false, 0x1234_5678, rec(false)),
-        (false, true, 0, rec(false)),
-        (false, true, M ^ 1, rec(false)),
-        // an invalid app and a request: the request is still cleared
-        (false, false, M, rec(true)),
-        (false, true, M, rec(true)),
-        (false, true, 0xFFFF_FFFF, rec(false)),
+        (false, false, 0, rec(none)),
+        (false, false, 0xFFFF_FFFF, rec(none)),
+        (false, false, M ^ 1, rec(none)),
+        (false, false, 0x1234_5678, rec(none)),
+        (false, true, 0, rec(none)),
+        (false, true, M ^ 1, rec(none)),
+        // an invalid app and a request
+        (false, false, M, rec(New)),
+        (false, true, M, rec(New)),
+        (false, true, 0xFFFF_FFFF, rec(none)),
+        // B6: a requested recovery was cut short by a reset. A valid app runs
+        // (no second recovery on that ground); the button or an invalid app
+        // still recover, and the request is remembered for the report.
+        (true, false, B, run(Interrupted)),
+        (true, true, B, rec(Interrupted)),
+        (false, false, B, rec(Interrupted)),
+        (false, true, B, rec(Interrupted)),
+        // one bit off is nothing
+        (true, false, B ^ 1, run(none)),
+        (false, false, B ^ 0x8000_0000, rec(none)),
     ];
     for (valid, button, g, want) in rows {
         assert_eq!(decide(valid, button, g), want, "valid={valid} button={button} gpbr={g:#x}");
     }
+    // the two words, and what the resident writes over them
+    assert_eq!(B, 0xBCAD_B8B1);
+    assert_eq!((M ^ B).count_ones(), 32);
+    assert!(B != 0 && B != u32::MAX && B >> 16 != GPBR1_MARK);
+    assert_eq!(Request::of(M), New);
+    assert_eq!(Request::of(B), Interrupted);
+    for g in [0u32, u32::MAX, M ^ 1, B ^ 1, 0x4EB1_0001, M.swap_bytes(), B.swap_bytes()] {
+        assert_eq!(Request::of(g), none, "{g:#x}");
+    }
+    assert_eq!(none.gpbr0_before_recovery(), None);
+    assert_eq!(New.gpbr0_before_recovery(), Some(B));
+    assert_eq!(Interrupted.gpbr0_before_recovery(), None, "it stays BUSY while the resident recovers");
+    assert_eq!(none.gpbr0_at_handoff(), None, "GPBR0 is not the resident's to change");
+    assert_eq!(New.gpbr0_at_handoff(), Some(0));
+    assert_eq!(Interrupted.gpbr0_at_handoff(), Some(0));
+    assert!(!none.reported() && New.reported() && Interrupted.reported());
+    assert!(WDT_RESTART_TO_JUMP_US >= 100);
     assert_ne!(GPBR_RECOVER_MAGIC, 0);
     assert_ne!(GPBR_RECOVER_MAGIC, u32::MAX);
     assert!(button_held([true, true, true]));
@@ -670,6 +700,12 @@ fn boot_decision_explicit_rows() {
         s[i] = false;
         assert!(!button_held(s));
     }
-    assert_eq!(after_failed_recovery(true), Fallback::StartApp);
-    assert_eq!(after_failed_recovery(false), Fallback::RetryRecovery);
+    // B8: a valid application always starts; without one the resident keeps
+    // polling, until this boot has written MAX_WRITING_ATTEMPTS times
+    assert_eq!(MAX_WRITING_ATTEMPTS, 3);
+    for n in 0..=255u8 {
+        assert_eq!(after_failed_recovery(true, n), Fallback::StartApp);
+        let want = if n >= MAX_WRITING_ATTEMPTS { Fallback::GiveUp } else { Fallback::RetryRecovery };
+        assert_eq!(after_failed_recovery(false, n), want, "{n}");
+    }
 }

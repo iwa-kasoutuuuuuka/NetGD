@@ -139,13 +139,13 @@ class SharedVectors(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 20)
         for r in rows:
             if r[0] == "E":
-                b, rq, w, l, sl, u = (x == "1" for x in r[1:7])
-                word = int(r[8], 16)
-                self.assertEqual(F.pack_report(b, rq, w, l, sl, u, int(r[7])), word, r)
-                self.assertEqual(F.parse_report(word), (b, rq, w, l, sl, u, int(r[7])), r)
+                b, rq, w, l, sl, u, k = (x == "1" for x in r[1:8])
+                word = int(r[9], 16)
+                self.assertEqual(F.pack_report(b, rq, w, l, sl, u, int(r[8]), lock_unknown=k), word, r)
+                self.assertEqual(F.parse_report(word), (b, rq, w, l, sl, u, k, int(r[8])), r)
             elif r[0] == "R":
                 self.assertEqual(F.parse_report(int(r[1], 16)),
-                                 tuple([x == "1" for x in r[2:8]] + [int(r[8])]), r)
+                                 tuple([x == "1" for x in r[2:9]] + [int(r[9])]), r)
             else:
                 self.assertEqual(r[0], "N")
                 self.assertIsNone(F.parse_report(int(r[1], 16)), r)
@@ -272,6 +272,8 @@ class FromElf(unittest.TestCase):
         self.assertEqual(cm.exception.kind, "BadDest")
 
     def test_4e_elf_with_2e_sp_is_fine_but_2e_with_4e_sp_is_not(self):
+        # the updater's rule (and so `images_from_elf`): a 2E stack pointer is
+        # inside a 4E's SRAM0. `build` is stricter, see BuildForTheRightPart.
         F.images_from_elf(make_elf([(0x80000, vtable(sp=0x20004000))]), "4e")
         with self.assertRaises(F.FwImageError) as cm:
             F.images_from_elf(make_elf([(0x80000, vtable(sp=0x20008000))]), "2e")
@@ -302,6 +304,119 @@ class FromElf(unittest.TestCase):
             self.assertIn("OK for SAM3U2E", buf.getvalue())
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(F.main(["inspect", out, "--target", "4e"]), 1)  # BadTarget
+
+
+class BuildForTheRightPart(unittest.TestCase):
+    """R89 B1: `build --target 4e` used to take a SAM3U2E ELF (its SP is valid
+    on a 4E, and the missing plane 1 was only a warning). Written to a
+    format-2 4E board that leaves the FPGA without a bitstream."""
+
+    SP = {"2e": 0x20004000, "4e": 0x20008000}
+
+    def elf_2e(self, base=0x80000):
+        return make_elf([(base, vtable(self.SP["2e"], base + 0x101, base + 0x103, base + 0x105) + bytes(0x300))])
+
+    def elf_4e(self, base=0x80000, bits=True):
+        segs = [(base, vtable(self.SP["4e"], base + 0x101, base + 0x103, base + 0x105) + bytes(0x300))]
+        if bits:
+            segs.append((0x100000, b"\x33" * 900))
+        return make_elf(segs)
+
+    def kind(self, elf, target, **kw):
+        try:
+            F.check_built_for(F.images_from_elf(elf, target), target, **kw)
+            return "OK"
+        except F.FwImageError as e:
+            return e.kind
+
+    def test_a_2e_elf_is_refused_for_4e(self):
+        # both reasons apply; the stack pointer is reported first
+        self.assertEqual(self.kind(self.elf_2e(), "4e"), "BadTarget")
+        # each override alone is not enough for a real 2E build
+        self.assertEqual(self.kind(self.elf_2e(), "4e", any_sp=True), "NoBitstream")
+        self.assertEqual(self.kind(self.elf_2e(), "4e", code_only=True), "BadTarget")
+        # only both, said explicitly, get it through
+        self.assertEqual(self.kind(self.elf_2e(), "4e", any_sp=True, code_only=True), "OK")
+
+    def test_the_right_part_passes(self):
+        self.assertEqual(self.kind(self.elf_2e(), "2e"), "OK")
+        self.assertEqual(self.kind(self.elf_4e(), "4e"), "OK")
+
+    def test_4e_without_plane1_needs_code_only(self):
+        self.assertEqual(self.kind(self.elf_4e(bits=False), "4e"), "NoBitstream")
+        self.assertEqual(self.kind(self.elf_4e(bits=False), "4e", code_only=True), "OK")
+        # a 2E never has plane 1: nothing to ask for
+        self.assertEqual(self.kind(self.elf_2e(), "2e", code_only=False), "OK")
+
+    def test_sp_must_be_the_end_of_sram0(self):
+        # a 4E ELF whose SP is valid but not the end (e.g. the 2E's end + something)
+        for sp in (0x20004000, 0x20007FFC, 0x20000004, 0x20006000):
+            elf = make_elf([(0x80000, vtable(sp) + bytes(0x300)), (0x100000, b"\x33" * 900)])
+            self.assertEqual(self.kind(elf, "4e"), "BadTarget", hex(sp))
+            self.assertEqual(self.kind(elf, "4e", any_sp=True), "OK", hex(sp))
+        for sp in (0x20003FFC, 0x20002000):
+            elf = make_elf([(0x80000, vtable(sp) + bytes(0x300))])
+            self.assertEqual(self.kind(elf, "2e"), "BadTarget", hex(sp))
+            self.assertEqual(self.kind(elf, "2e", any_sp=True), "OK", hex(sp))
+        # the message names the part the ELF looks like
+        with self.assertRaises(F.FwImageError) as cm:
+            F.check_built_for(F.images_from_elf(self.elf_2e(), "4e"), "4e")
+        self.assertIn("SAM3U2E", str(cm.exception))
+        self.assertIn("0x20008000", str(cm.exception))
+
+    def test_format3_too(self):
+        app2 = make_elf([(AB, app_blob(0x800, sp=self.SP["2e"]))])
+        app4 = make_elf([(AB, app_blob(0x800, sp=self.SP["4e"])), (0x100000, b"\x33" * 700)])
+        app4_code = make_elf([(AB, app_blob(0x800, sp=self.SP["4e"]))])
+        for elf, target, kw, want in (
+            (app2, "2e", {}, "OK"),
+            (app4, "4e", {}, "OK"),
+            (app2, "4e", {}, "BadTarget"),
+            (app4_code, "4e", {}, "NoBitstream"),
+            (app4_code, "4e", {"code_only": True}, "OK"),
+        ):
+            try:
+                F.check_built_for(F.images_from_elf(elf, target, fmt=3), target, **kw)
+                got = "OK"
+            except F.FwImageError as e:
+                got = e.kind
+            self.assertEqual(got, want, (target, kw))
+
+    def test_cli(self):
+        with tempfile.TemporaryDirectory() as d:
+            e2, e4, e4c = (os.path.join(d, n) for n in ("2e.elf", "4e.elf", "4e_code.elf"))
+            out = os.path.join(d, "x.ogfw")
+            for path, elf in ((e2, self.elf_2e()), (e4, self.elf_4e()), (e4c, self.elf_4e(bits=False))):
+                with open(path, "wb") as f:
+                    f.write(elf)
+
+            def run(*argv):
+                err = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    rc = F.main(["build", "-o", out, *argv])
+                return rc, err.getvalue()
+
+            # the finding: a 2E ELF built as a 4E image
+            rc, err = run("--elf", e2, "--target", "4e")
+            self.assertEqual(rc, 1)
+            self.assertIn("BadTarget", err)
+            self.assertFalse(os.path.exists(out), "a refused build must not leave a file")
+            rc, err = run("--elf", e2, "--target", "4e", "--any-sp")
+            self.assertEqual(rc, 1)
+            self.assertIn("NoBitstream", err)
+            self.assertFalse(os.path.exists(out))
+            # the right ones
+            self.assertEqual(run("--elf", e2, "--target", "2e")[0], 0)
+            self.assertEqual(run("--elf", e4, "--target", "4e")[0], 0)
+            rc, err = run("--elf", e4c, "--target", "4e")
+            self.assertEqual(rc, 1)
+            self.assertIn("NoBitstream", err)
+            rc, err = run("--elf", e4c, "--target", "4e", "--code-only")
+            self.assertEqual(rc, 0)
+            self.assertIn("code image only", err)
+            # and the other way round is refused as before (BadVector, by the updater's own rule)
+            rc, err = run("--elf", e4, "--target", "2e")
+            self.assertEqual(rc, 1)
 
 
 AB = F.APP_BASE
@@ -473,6 +588,17 @@ class Contract(unittest.TestCase):
         self.assertEqual(struct.unpack("<I", F.INFO_MAGIC)[0], 0x5352474E)
         self.assertEqual(F.AX_OFFSET, 0x120)
         self.assertEqual(F.pack_report(), 0x4EB10000)
+        # the resident's "in progress" word in GPBR0, the LOCK_UNKNOWN flag, result 10
+        self.assertEqual(F.GPBR_RECOVER_BUSY, 0xBCADB8B1)
+        self.assertEqual(F.GPBR_RECOVER_BUSY ^ F.GPBR_RECOVER_MAGIC, 0xFFFFFFFF)
+        self.assertIsNone(F.parse_report(F.GPBR_RECOVER_BUSY))
+        self.assertEqual(F.REPORT_LOCK_UNKNOWN, 0x4000)
+        self.assertEqual(F.RESULT_INTERRUPTED, 10)
+        self.assertEqual(F.pack_report(request=True, locked=True, result=F.RESULT_INTERRUPTED), 0x4EB10A0A)
+        # unknown wins over locked, both ways
+        self.assertEqual(F.pack_report(locked=True, lock_unknown=True), 0x4EB14000)
+        self.assertEqual(F.parse_report(0x4EB14800)[3], False)
+        self.assertEqual(F.parse_report(0x4EB14800)[6], True)
 
     def test_info_and_ax_roundtrip(self):
         b = F.pack_info(1, 0x1E, 0x2000, 0x010203, 0xDEADBEEF)
@@ -591,7 +717,9 @@ class Contract(unittest.TestCase):
                 f.write(elf)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                self.assertEqual(F.main(["build", "--elf", e, "--target", "4e", "--format", "3", "-o", o]), 0)
+                # the synthetic app has the 2E's stack pointer: say so (`build` checks, R89 B1)
+                self.assertEqual(
+                    F.main(["build", "--elf", e, "--target", "4e", "--format", "3", "--any-sp", "-o", o]), 0)
                 self.assertEqual(F.main(["inspect", o]), 0)
             self.assertIn("NGAX: len=32 min_gen=1 bs_stamp=0x", buf.getvalue())
 
@@ -687,8 +815,10 @@ class RealElfs(unittest.TestCase):
         code = imgs[0]
         sp, reset = struct.unpack_from("<2I", code.payload)
         self.assertEqual(code.header.target_cidr, F.PARTS[target].cidr)
-        self.assertLessEqual(sp, F.PARTS[target].sram0_end)
+        self.assertEqual(sp, F.PARTS[target].sram0_end)
         self.assertEqual(reset & 1, 1)
+        # `build` accepts it for its own part without any override ...
+        F.check_built_for(imgs, target)
         self.assertLessEqual(code.header.length, F.PLANE_LEN)
         # the other part must refuse it
         other = "4e" if target == "2e" else "2e"
@@ -703,6 +833,21 @@ class RealElfs(unittest.TestCase):
 
     def test_real_2e(self):
         self.check("FWIMAGE_ELF_2E", "2e", 1)
+
+    def test_real_2e_elf_is_refused_as_a_4e_build(self):
+        # R89 B1 with the real thing: the updater's checks let it through
+        # (`images_from_elf`), `build` does not.
+        path = real("FWIMAGE_ELF_2E")
+        if not path:
+            self.skipTest("FWIMAGE_ELF_2E not set")
+        with open(path, "rb") as f:
+            imgs = F.images_from_elf(f.read(), "4e", 1)
+        with self.assertRaises(F.FwImageError) as cm:
+            F.check_built_for(imgs, "4e")
+        self.assertEqual(cm.exception.kind, "BadTarget")
+        with self.assertRaises(F.FwImageError) as cm:
+            F.check_built_for(imgs, "4e", any_sp=True)
+        self.assertEqual(cm.exception.kind, "NoBitstream")
 
     def test_real_elfs_not_yet_format3(self):
         # Until stage S2 relinks the app at APP_BASE the shipped ELFs must be
