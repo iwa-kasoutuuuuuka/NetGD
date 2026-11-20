@@ -22,8 +22,8 @@ A fork of [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski
 | # | 目標 | Goal | 状況 / Status |
 |---|------|------|---------------|
 | **G1** | **GDEMU 6.0 基板で動く**（上流は v5.5 / v5.15b クローンのみ） | **Run on GDEMU 6.0 boards** (upstream targets v5.5 / v5.15b clones only) | 基板を調査済み：MCU は ATSAM3U2E、FPGA は **AGM AG16KDDF256**（v5.5 は Cyclone II）。FPGA の移植が本体 / Board surveyed: ATSAM3U2E MCU and an **AGM AG16KDDF256** FPGA instead of Cyclone II; the FPGA port is the main work |
-| **G2** | **ブロードバンドアダプタ（BBA）経由で SD カードにゲームイメージを書き込む**（本家 GDEMU では不可） | **Write game images to the SD card over the Broadband Adapter** (the original GDEMU cannot) | 設計済み。ファーム側の必須修正（F1〜F5）は実装済み（実機未検証） / Designed; the required firmware fixes (F1–F5) are in (not yet hardware-tested) |
-| **G3** | **本家 GDEMU と同等の機能を持ち、より高性能** | **Match the original GDEMU's features, with better performance** | 番号フォルダ方式と、GDmenu / openMenu の切替コマンド `0x52` を実装（実機未検証） / Numbered folders and the GDmenu / openMenu image command `0x52` are in (not yet hardware-tested) |
+| **G2** | **ブロードバンドアダプタ（BBA）経由で SD カードにゲームイメージを書き込む**（本家 GDEMU では不可） | **Write game images to the SD card over the Broadband Adapter** (the original GDEMU cannot) | 設計済み。ファーム側の修正（F1〜F8）は実装済み、PC 側ツール netgd-send は実装済み、Dreamcast 側のコンソールアプリは作業中（いずれも実機未検証） / Designed; firmware fixes F1–F8 are in, the PC tool netgd-send is done, the console app is in progress (none hardware-tested yet) |
+| **G3** | **本家 GDEMU と同等の機能を持ち、より高性能** | **Match the original GDEMU's features, with better performance** | 番号フォルダ方式、GDmenu / openMenu の切替コマンド `0x52`、`GDEMU.INI` を実装（実機未検証） / Numbered folders, the GDmenu / openMenu image command `0x52`, and `GDEMU.INI` are in (not yet hardware-tested) |
 
 詳細な計画（フェーズ、モデルの役割分担、未解決の課題）は [`docs/PLAN.md`](docs/PLAN.md) にあります。
 
@@ -38,9 +38,13 @@ mcu/fwupdater/      RAM で動くファーム更新プログラム（ファー�
 common/discimg/     GDI / CDI 解析と ATAPI 応答（no_std、ホストでテスト可能） GDI/CDI parsing and ATAPI replies (host-tested)
 common/lzma/        FPGA ビットストリーム用の LZMA 展開                       LZMA decoder for the FPGA bitstream
 common/gamecfg/     GAME.CFG などの設定ファイルの解析                         Config file parsing
-fpga/amaranth/      FPGA コア（Amaranth HDL）とシミュレーション               FPGA core (Amaranth HDL) and simulations
+fpga/amaranth/      FPGA コア（Amaranth HDL）とシミュレーション。`main.py --target ag16k` で AG16K（6.0）用の Verilog を出す   FPGA core (Amaranth HDL) and simulations; `main.py --target ag16k` emits Verilog for the AG16K (6.0)
 fpga/Quartus/       Cyclone II 用 Quartus プロジェクト（v5.5 クローン向け）   Quartus project for Cyclone II (v5.5 clones)
 tools/gdprobe/      純正 GDEMU を調べる読み取り専用プローブ（KallistiOS）     Read-only GD-ROM probe for the stock GDEMU (KallistiOS)
+tools/mksdcard/       調査用 SD カードの中身一式を生成する（Python 標準ライブラリ）     Generates the whole test SD card for the probe (Python stdlib)
+tools/fwbackup/       純正 GDEMU 6.0 の MCU フラッシュを読み取り専用で確認・バックアップ（SWD）。吸い出したファイルは非公開     Read-only check and backup of the stock GDEMU 6.0 MCU flash over SWD; dumps stay private
+tools/netgd-send/     BBA 経由の SD 書き込みの PC 側（Python）     PC side of writes to the SD card over the BBA (Python)
+tools/ci/             KOS ビルドのスクリプト（GitHub Actions から呼ぶ）     KallistiOS build script (called by GitHub Actions)
 docs/               計画・調査・設計・基板の資料                               Plan, research, designs, board notes
 ```
 
@@ -62,11 +66,13 @@ Per the code; not yet verified on hardware with NetGD.
 | 番号フォルダ | 本家と同じく SD のルートに `01`、`02`… のフォルダを置く。設定ファイル（`GDEMU.CFG`）が無ければ `01`（メニュー）をマウントする | **Numbered folders:** `01`, `02`, … in the card root like the original; without `GDEMU.CFG`, folder `01` (the menu) is mounted |
 | イメージ選択 | 本家の切替コマンド `0x52`（GDmenu / openMenu が使う：番号指定、次／前、バージョン）と、独自コマンド `0xE0`（フォルダ名でマウント） | **Image selection:** the original's `0x52` command used by GDmenu / openMenu (by number, next/previous, version) and NetGD's own `0xE0` (mount by folder name) |
 | ボタン | `GAME.CFG` に `next` があればそれに従い、無ければ次の番号のフォルダへ（最後の次は `01`、イメージの無いフォルダは飛ばす） | **Button:** follows `GAME.CFG`'s `next`, otherwise steps to the next numbered folder (wrapping to `01`, skipping folders without an image) |
+| 設定ファイル | `GDEMU.INI`（本家と同じ。`reset_goto`・`open_time`・`detect_time` に対応）と、NetGD 独自の `GDEMU.CFG`（`image=` で起動時のイメージ） | **Config files:** `GDEMU.INI` like the original (`reset_goto`, `open_time`, `detect_time`) plus NetGD's own `GDEMU.CFG` (`image=` for the power-on image) |
+| BBA 書き込み用 | セカンダリへの書き込みセッション（`0xE0` の 6/7/8）、MBR の保護、書き込みデータの FNV-1a、FLUSH CACHE、MWDMA2 | **For BBA writes:** a write session on IMAGE_CTL (`0xE0` 6/7/8), MBR protection, per-command FNV-1a of written data, FLUSH CACHE, MWDMA2 |
 | ファーム更新 | セカンダリへの独自コマンド `0xF9` で、RAM 上の更新プログラムに切り替えて書き換える | **Firmware update:** vendor command `0xF9` on the secondary hands over to the RAM-resident updater |
 
-本家との残りの差（`GDEMU.ini`、活線挿抜、SD からのファーム更新など）は [`docs/research/gdemu6-and-parity.md`](docs/research/gdemu6-and-parity.md) にあります。
+本家との残りの差（活線挿抜、SD からのファーム更新など）は [`docs/research/gdemu6-and-parity.md`](docs/research/gdemu6-and-parity.md) にあります。
 
-Remaining gaps against the original (`GDEMU.ini`, card hot-swap, firmware update from SD, …) are listed in [`docs/research/gdemu6-and-parity.md`](docs/research/gdemu6-and-parity.md).
+Remaining gaps against the original (card hot-swap, firmware update from SD, …) are listed in [`docs/research/gdemu6-and-parity.md`](docs/research/gdemu6-and-parity.md).
 
 ## ビルドとテスト / Build and test
 
@@ -86,6 +92,9 @@ DEFMT_LOG=off cargo build --release --features sam3u2e
 (cd common/lzma && cargo test)
 (cd common/gamecfg && cargo test)
 (cd tools/gdprobe && sh tests/run_tests.sh)
+(cd tools/mksdcard && python tests/test_mksdcard.py)
+(cd tools/netgd-send && python -m unittest discover -s tests -v)
+(cd tools/fwbackup && FWBACKUP_TEST_WRAPPER=1 python -m unittest discover -s tests -v)
 
 # FPGA シミュレーション / FPGA simulations
 cd fpga/amaranth
@@ -97,6 +106,8 @@ amaranth_env/bin/python test.py   # test_cdda.py / test_timing.py / test_top.py 
   Don't pass `--target-dir` to `cargo build`: the linker's `-Map=target/openmenu.map` is a relative path and the link fails.
 - Cyclone II のビットストリームは Quartus II 13.0.1 Web Edition をコンテナで動かして作ります（`Containers/QuartusII_x64`、`fpga/build_fpga.sh`）。
   The Cyclone II bitstream is built with Quartus II 13.0.1 Web Edition in a container (`Containers/QuartusII_x64`, `fpga/build_fpga.sh`).
+- KallistiOS（Dreamcast）向けのプログラム（`tools/gdprobe` など）は GitHub Actions（`.github/workflows/kos.yaml`）でビルドされます。ビルドされた ELF は `dreamcast-elfs` という artifact からダウンロードできます（ローカルに DreamSDK は要りません）。
+  Programs for KallistiOS (Dreamcast), such as `tools/gdprobe`, are built by GitHub Actions (`.github/workflows/kos.yaml`). The built ELFs can be downloaded from the `dreamcast-elfs` artifact (no local DreamSDK needed).
 - CI（`.github/workflows/build.yaml`）が、ファームのビルド、ホストテスト、FPGA シミュ、生成済み Verilog の一致をチェックします。
   CI (`.github/workflows/build.yaml`) builds the firmware and runs the host tests, the FPGA simulations, and a check that the committed Verilog matches its source.
 

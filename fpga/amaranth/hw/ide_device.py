@@ -853,20 +853,8 @@ class IDEDevice(Elaboratable):
             ]
 
         # ----- MCU window --------------------------------------------------
-        # Layout (word addresses; matches docs/AddressMapMCU.md):
-        #   0  HW info      bit 0 = !primary, bit 1 = COMMAND_PEND
-        #   1  Status       ERR/DRQ/DF/DRDY/BSY
-        #   2  Device       8b
-        #   3  Error        bit 2 = ABRT
-        #   4  Command lo / Features hi
-        #   5  Sector Count 16b
-        #   6  LBA Low / LBA Mid
-        #   7  LBA High / LBA Low Prev
-        #   8  LBA Mid Prev / LBA High Prev
-        #   9  Data FIFO    (read = pop write_fifo; write = push read_fifo)
-        #  10  Read FIFO occupancy
-        #  11  Write FIFO occupancy
-        #  12  Debug test   reads 0xC0DE
+        # MCU window: the 7-bit slot index is mcu_addr. Slot 12 reads the
+        # ID value 0xC0DE. The full slot map is in docs/AddressMapMCU.md.
         # The SMC read is a pure combinational cone: MCU_ADDR -> decode -> a
         # 22-way mux -> the data pins, with nothing registered and no timing
         # constraint on any of it (56 unconstrained input ports). Its budget is
