@@ -287,7 +287,7 @@ probe-rs info --verbose</code></pre><span class="sub">6.0 の MCU は 2E なの�
         <div class="tbl"><table>
           <thead><tr><th>結果</th><th>意味</th></tr></thead>
           <tbody>
-            <tr><td><code>281a0761</code></td><td>SAM3U2E で、<b>純正はフラッシュをロックしていない</b>（ERASE なしで書き込める可能性）</td></tr>
+            <tr><td><code>281a0761</code></td><td>SAM3U2E で、<b>純正はフラッシュをロックしていない</b>。この場合は<b>純正ファームを丸ごと読み出して保存できる</b>可能性が高いので、何かを書き込む前に、まず Claude と読み出しコマンドを確認してバックアップを取る（フラッシュ 128 KB、読み取りだけ）</td></tr>
             <tr><td><code>28100961</code> など <code>2810…</code></td><td>4E が載っている（写真と矛盾。刻印を見直す）</td></tr>
             <tr><td>読み出しは失敗、<code>info --verbose</code> でデバッグポート（DP）は見える</td><td><b>純正がロックしている</b>可能性が高い。書き込みには ERASE が必要</td></tr>
             <tr><td>DP も見えない</td><td>配線・電源（Dreamcast の電源が入っているか）・JTAGSEL（142 番）を疑う</td></tr>
