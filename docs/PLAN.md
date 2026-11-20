@@ -52,6 +52,9 @@ RAM 実行のファーム更新（`0xF9`）。
   AG16K の型番規則上「DD」は DDR 内蔵を意味し、ARM コア内蔵の SoC 品の可能性がある（要確認）。
   パッシブシリアルでのコンフィグには対応しているとされるが、ピン・タイミング・ビットストリームのサイズは非公開。
   開発ツール Supra は Quartus 13.1 と併用、または Yosys 内蔵という報告がある。オープンなツールは見当たらない。
+- web 調査の追加（`docs/research/web-findings-2026-11.md`）：AG16KDDF256 は FPGA + Cortex コア + DDR 128 Mbit + **SPI フラッシュ**を
+  1 パッケージにした品（AGM データシート）。外付けの SPI フラッシュが無いのはこのためで、純正は内蔵フラッシュから起動している可能性がある。
+  オープンなツールとして `pablomarx/rodinia`（Supra を解読。付属 Yosys の `synth_agm` → `.vqm` → `af` で P&R、PLL は `alta_pllx`）がある。
 - **G1-1 調査** — 済（上記）。6.0 基板の MCU / FPGA / 水晶 / ヘッダ配置を公開情報から洗い出し、v5.5 との差分を表にする。
 - **G1-2 実物確認（ユーザー）** — 基板の両面写真とチップ型番。SWD・UART・ERASE パッドの位置。
 - **G1-3 移植** — 差分に応じて HAL / ピン割り当て / FPGA ターゲット（Quartus プロジェクト）を分岐。
@@ -79,7 +82,12 @@ RAM 実行のファーム更新（`0xF9`）。
 - **G3-2 不足機能の実装** — 差分表から優先度順に。上位5件：
   1. **番号フォルダ方式（`01` = GDmenu）と、設定なしでの既定マウント。** 今は設定がないと空のまま起動する
      （`gdi.rs` `load_default`）。INSTALL.md の「最初に見つけたものをマウント」という記述も実装と食い違っている（Opus 確認済み）。
-  2. GDmenu / openMenu が本家に送るイメージ切替コマンドへの対応（NetGD は独自の `0xE0` のみ）。仕様は未入手。
+  2. GDmenu / openMenu が本家に送るイメージ切替コマンドへの対応（NetGD は独自の `0xE0` のみ）。
+     **仕様が判明**（openMenu `src/openmenu/src/backend/gdemu_sdk.c`、Opus が原文を確認）：ATAPI PACKET `0x52`。
+     `52 82 lo hi` = 番号 N（1〜999、0 = 既定に戻す）をマウント、`52 81 55|44` = 次／前、`52 00` = 8 バイトのバージョン応答
+     （ブートローダ版と FW 版、16 ビット単位で転送）。データ転送なしで完了時に INTRQ。メニューは SD を直接読まず、
+     メニューディスク内の `OPENMENU.INI` の番号＝SD のフォルダ番号として指定する。切替後は NOT READY → MEDIA CHANGE → READY を
+     約 10 秒以内に返す必要がある（openMenu は 20 ms 間隔で最大 500 回再試行）。詳細は `docs/research/web-findings-2026-11.md`。
   3. ボタンでの切替を番号順送りに（今は `GAME.CFG` の `next` 依存、`button.rs`）。
   4. `GDEMU.ini` への対応（今は `GDEMU.CFG` の `image=` のみ）。
   5. SD カードの活線挿抜と、SD からのファーム更新。
