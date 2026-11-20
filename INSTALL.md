@@ -1,6 +1,6 @@
 # INSTALL — SWD probe setup and flashing
 
-This guide gets a stock GDEMU clone board flashed with OpenGDEMU using a
+This guide gets a stock GDEMU clone board flashed with NetGD using a
 Raspberry Pi Pico as the SWD probe. Nothing here builds from source: you need a
 prebuilt firmware `.elf`, a host flashing tool, and a prepared SD card with
 `.gdi` images on it.
@@ -29,7 +29,7 @@ prebuilt firmware `.elf`, a host flashing tool, and a prepared SD card with
 | File | Where from |
 |------|------------|
 | `debugprobe.uf2` | <https://github.com/raspberrypi/debugprobe/releases> — the **`debugprobe.uf2`** asset for your board (`debugprobe_on_pico.uf2` for a plain Pico, `_on_pico2` for a Pico 2). Version **2.2.0 or newer.** |
-| `opengdemu.elf` | The OpenGDEMU firmware ELF. The FPGA bitstream is compressed **inside** this ELF, so there is no separate `.rbf` to program. |
+| `opengdemu.elf` | The NetGD firmware ELF. The FPGA bitstream is compressed **inside** this ELF, so there is no separate `.rbf` to program. |
 | `*.gdi` / `*.cdi` disc images | Yours. One folder per disc on the card. |
 
 ---
@@ -204,7 +204,7 @@ pad next to the MCU** (it is not on any header).
 
 > **This is destructive and irreversible.** It erases the stock GDEMU firmware
 > completely, and nobody has a dump of it. Once you do this the board runs
-> OpenGDEMU or nothing.
+> NetGD or nothing.
 
 ### Procedure
 
@@ -236,7 +236,7 @@ You should now get a CHIPID back (`400e0740: 28100961`) instead of a lock
 error. The flash is
 empty at this point — the MCU is running nothing, which is expected. Go to §7.
 
-Do this once per board. Re-flashing later needs no erase: OpenGDEMU does not
+Do this once per board. Re-flashing later needs no erase: NetGD does not
 set the security bit, so the debug port stays open.
 
 ---

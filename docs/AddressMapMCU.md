@@ -1,55 +1,284 @@
 # Address Map for MCU
 
-## 0x00
-### Bit 0 : ? (RO)
-0 = Primary
-1 = Secondary
+This is the SAM3U side of the FPGA register window: what the firmware sees when it reads and writes the
+FPGA over the Static Memory Controller. The Dreamcast-side (G1) register decode is not covered here.
 
-### Bit 1 : ? (RW)
-Set if command is pending
+Sources: `mcu/opengdemu/src/ide.rs` (the `REG_*`, `HW_*`, `STATUS_*` constants and their use),
+`mcu/opengdemu/src/cdda.rs` and `main.rs` (slots 12, 14-18, 29-31), `fpga/amaranth/hw/ide_device.py` (the
+MCU-side `Switch` on `mcu_addr`), `fpga/amaranth/hw/cdda.py` (slots 29-31 bit layout), `fpga/amaranth/hw/OpenGDEMU.py`
+and `mcu/embassy-atsam3/src/smc.rs` (window placement). Where the sources disagree, the section
+"Discrepancies" at the end says so.
 
-## 0x02
-### Bit 0 : ERR  (RW)
-### Bit 3 : DRQ  (RW)
-### Bit 5 : DF   (RW)
-### Bit 6 : DRDY (RW)
-### Bit 7 : BSY  (RW)
+## Addressing
 
+- The window is chip select 3: base `0x6300_0000` (`FPGA_BASE` in `smc.rs`).
+- `MCU_ADDR[8:1]` is wired to SAM3U `A[8:1]` (`OpenGDEMU.v`, `OpenGDEMU.qsf`). The SMC address is therefore a
+  byte address, and every slot is one 16-bit word: slot `n` is at byte `0x6300_0000 + 2n`.
+- `io_MCU_ADDR[7]` selects the device:
+  - Primary (GD-ROM): slots `0x00`-`0x7F`, bytes `0x6300_0000`-`0x6300_00FE`. Only slots `0x00`-`0x1F` are decoded.
+  - Secondary (ATA disk): slots `0x80`-`0xFF`, bytes `0x6300_0100`-`0x6300_01FE`. In Rust this is
+    `fpga_window().add(0x80)` (a `*mut u16`).
+- Within a device, the 7-bit slot index is `io_MCU_ADDR[6:0]`.
+- Data is 16 bits wide. `MCU_NBS` (byte enables) is not used by the decoder, so every access is a full word.
 
-## 0x04
-### Bits 7 to 0 : DEVICE (RW)
+Write behaviour, which matters when a bus access is held for several FPGA cycles:
 
-## 0x06
-### Bits 7 to 0 : ABRT (RW)
+- Register writes are level-sampled (`cs & wr`). Writing the same value twice is harmless.
+- Slot 9 (data FIFO) and slot 31 (CDDA push) are edge-sampled: one push or pop per access, however long the
+  strobe is held.
+- A read-modify-write of slot 0 is needed by anything that wants to keep COMMAND_PEND while touching the reset
+  bit. Every write to slot 0 loads COMMAND_PEND from bit 1 (`ide_device.py`, case 0).
 
-## 0x08
-### Bits 7 to 0 : COMMAND (RW)
-### Bits 15 to 8 : Features (RO)
-?? I added for debugging ??
+Bit names follow ATA. "RO" means reads only, "W" means writes only (reads return 0), "R/W" means both. Byte
+offsets are the slot number times two, for comparison with the old version of this file.
 
-## 0x0A
-### Bits 15 to 0 : SectorCount (RW)
+## Summary
 
-## 0x0C
-### Bits 7 to 0 : LBALow (RW)
-### Bits 15 to 8 : LBAMid (RW)
+| Slot | Byte | Name | Access | Purpose |
+|------|------|------|--------|---------|
+| 0 | 0x00 | HW_INFO | R/W | Device id, COMMAND_PEND, RESET_SEEN, nIEN, IN_RESET |
+| 1 | 0x02 | STATUS | R/W (bit 8 W) | ATA status; write bit 8 to raise INTRQ |
+| 2 | 0x04 | DEVICE | R/W | Device register (bit 4 = DEV) |
+| 3 | 0x06 | ERROR | R/W | ABRT and sense key |
+| 4 | 0x08 | COMMAND / FEATURES | R/W | Latched command (low), features (high) |
+| 5 | 0x0A | SECTOR_COUNT | R/W | Sector count; ATAPI interrupt reason in the low byte |
+| 6 | 0x0C | LBA_LOW / LBA_MID | R/W | LBA bits 7:0 and 15:8 |
+| 7 | 0x0E | LBA_HIGH / LBA_LOW_PREV | R/W | LBA bits 23:16; previous LBA_LOW |
+| 8 | 0x10 | LBA_MID_PREV / LBA_HIGH_PREV | R/W | Previous LBA_MID and LBA_HIGH |
+| 9 | 0x12 | DATA_FIFO | R/W (edge) | Data register FIFOs: read pops host-to-MCU, write pushes MCU-to-host |
+| 10 | 0x14 | READ_FIFO_LEVEL | RO | Words waiting for the host (MCU to host) |
+| 11 | 0x16 | WRITE_FIFO_LEVEL | RO | Words waiting for the MCU (host to MCU) |
+| 12 | 0x18 | ID | RO | Always `0xC0DE` |
+| 13 | 0x1A | INTRQ_PENDING | R/W | IDE INTRQ flop, bit 0 |
+| 14 | 0x1C | FREE_RUN | RO | Core clock counter |
+| 15 | 0x1E | IDE_STROBES | RO | Host strobe counter |
+| 16 | 0x20 | RSTN_EDGES | RO | Reset edge counters (low: rises, high: falls) |
+| 17 | 0x22 | BUS_STATE | RO | Live IDE control lines |
+| 18 | 0x24 | AUDIO_ALIVE | RO | Audio-clock heartbeat counter |
+| 19 | 0x26 | DMA_MODE / flow control | R/W | DMA direction, PIO flow control, packet phase |
+| 20 | 0x28 | CAP_CTRL | R/W | In-fabric capture control (not built in shipped image) |
+| 21 | 0x2A | CAP_DATA | R/W | In-fabric capture read index and value |
+| 22 | 0x2C | LVL_AT_READ | RO | Debug: write FIFO level at the last slot 11 read |
+| 23 | 0x2E | LVL_READ_COUNT | RO | Debug: number of slot 11 reads |
+| 24 | 0x30 | HOST_STATUS_RDS | RO | Status reads (low), Alt Status reads (high), since last Command write |
+| 25 | 0x32 | HOST_DATA_RDS | RO | Data register reads since last Command write |
+| 26 | 0x34 | HOST_DEVCTL | RO | Last Device Control byte (low), write count (high) |
+| 27 | 0x36 | PREV_STATUS_RDS | RO | Slot 24 as of the most recent Command write |
+| 28 | 0x38 | PREV_DATA_RDS | RO | Slot 25 as of the most recent Command write |
+| 29 | 0x3A | CDDA_CTRL | R/W | CDDA enable, clear underflow, flush (primary device only) |
+| 30 | 0x3C | CDDA_LEVEL | RO | CDDA sample FIFO level, in words (primary device only) |
+| 31 | 0x3E | CDDA_PUSH | W (edge) | One PCM word per write, left then right (primary device only) |
 
-## 0x0E 
-### Bits 7 to 0 : LBAHigh (RW)
-### Bits 15 to 8 : LBALowPrev (RW)
+## Slot details
 
-## 0x10
-### Bits 7 to 0 : LBAMidPrev (RW)
-### Bits 15 to 8 : LBAHighPrev (RW)
+### Slot 0 (0x00): HW_INFO
 
-## 0x12
-### Bits 15 to 8 : FIFOs (RW)
+| Bit | Name | Access | Meaning |
+|-----|------|--------|---------|
+| 0 | DEV_ID | RO | 0 = primary (GD-ROM), 1 = secondary (ATA disk) |
+| 1 | COMMAND_PEND | R/W | Set by a host Command write. The MCU clears it by writing 0 (`ack_command`). The FPGA raises MCU_IRQn while it is set. |
+| 2 | RESET_SEEN | R/W | Sticky. Set by a hard reset (RSTn low) or SRST. Write 1 to clear. |
+| 3 | nIEN | RO | Live copy of Device Control bit 1. |
+| 4 | IN_RESET | RO | Live: RSTn is low or SRST is set. |
 
-## 0x14
-### Bits 10 to 0 : Read FIFO Count (RW)
+Bits 5-15 read 0.
 
-## 0x16
-### Bits 10 to 0 : Write FIFO Count
+### Slot 1 (0x02): STATUS
 
-## 0x18
-### Bits 15 to 0 : Read Test (RO)
+Read: bit 0 ERR, bit 3 DRQ, bit 4 DSC, bit 5 DF, bit 6 DRDY, bit 7 BSY. Bits 1-2 read 0.
+
+Write: the same bits set the status the host sees. Bit 8 (write only, not stored) raises INTRQ in the same
+FPGA cycle as the new status. Writing bit 8 as 0 does nothing.
+
+Firmware uses bit 8 for every completion and every DRQ transition (`set_status_intrq`). Posting status and
+INTRQ as two writes left a window where the host could read Status and issue its next command before the
+interrupt, so the interrupt landed on that command.
+
+### Slot 2 (0x04): DEVICE
+
+R/W, full byte. Bit 4 (DEV) is the device-select bit. Bit 6 is the LBA-mode flag (the firmware refuses CHS
+on the disk path; the FPGA only stores it). An MCU write changes only this device's copy.
+
+### Slot 3 (0x06): ERROR
+
+R/W. Only two parts of the byte are stored:
+
+- Bit 2: ABRT.
+- Bits 7-4: sense key (ATAPI).
+
+Other bits read 0. ERR (bit 0) lives in slot 1, not here. The firmware writes whole bytes such as `0x20`
+(NOT READY, sense 2) and `0x60` (UNIT ATTENTION, sense 6) on the packet path.
+
+### Slot 4 (0x08): COMMAND (low) / FEATURES (high)
+
+R/W. Holds the opcode the host last wrote to the Command register, and the Features byte. An MCU write
+updates only the readback; it does not set COMMAND_PEND.
+
+### Slot 5 (0x0A): SECTOR_COUNT
+
+R/W, 16 bits. Reset value `0x0001`.
+
+- Low byte: the sector count, or on the packet device the ATAPI interrupt reason (C/D bit 0, I/O bit 1).
+- High byte: the previous sector count, used by LBA48.
+
+`set_irr` in the firmware writes the whole word, so it zeroes the high byte.
+
+### Slot 6 (0x0C): LBA_LOW (low) / LBA_MID (high)
+
+R/W. On the GD-ROM, LBA_LOW is Sega's SECNR: disc format in the high nibble, drive status in the low nibble.
+Reset values:
+
+- Primary: LBA_LOW `0x81` (GD-ROM, ready), LBA_MID `0x14`.
+- Secondary: LBA_LOW `0x01`, LBA_MID `0x00`, the non-packet ATA signature.
+
+On the packet path, LBA_MID and LBA_HIGH together carry the host's ATAPI byte count.
+
+### Slot 7 (0x0E): LBA_HIGH (low) / LBA_LOW_PREV (high)
+
+R/W. Reset LBA_HIGH is `0xEB` on the primary and `0x00` on the secondary.
+
+### Slot 8 (0x10): LBA_MID_PREV (low) / LBA_HIGH_PREV (high)
+
+R/W.
+
+Each host write to an LBA register pushes the old value into the matching `_PREV` field. The LBA48 address is
+then the current byte plus the previous one, the way the host's two writes arrive. The firmware reads the
+`_PREV` values for LBA48 commands.
+
+### Slot 9 (0x12): DATA_FIFO
+
+R/W, edge-sampled.
+
+- Read: pops one word from the write FIFO (host to MCU). Used for ATAPI command packets and disk write data.
+- Write: pushes one word into the read FIFO (MCU to host). The host reads it through its Data register.
+
+FIFO depths are set in the FPGA:
+
+| | Read FIFO (MCU to host) | Write FIFO (host to MCU) |
+|-|-------------------------|--------------------------|
+| Primary | 4096 words | 32 words |
+| Secondary | 1024 words | 512 words |
+
+Words pushed past the FIFO's capacity are dropped without any error. `push_buf_to_fifo` checks slot 10 before
+each push and keeps four words of headroom.
+
+### Slot 10 (0x14): READ_FIFO_LEVEL
+
+RO. Words currently in the read FIFO (MCU to host).
+
+### Slot 11 (0x16): WRITE_FIFO_LEVEL
+
+RO. Words currently in the write FIFO (host to MCU). Reading this slot also updates slots 22 and 23.
+
+### Slot 12 (0x18): ID
+
+RO, always `0xC0DE`. `main.rs` reads it on both devices after the FPGA loads, as a bus sanity check.
+
+### Slot 13 (0x1A): INTRQ_PENDING
+
+R/W, bit 0.
+
+- Write 1: asserts the IDE INTRQ line. It is gated by device select and nIEN on the IDE side.
+- Write 0: clears it.
+- Read: returns the flop.
+
+The FPGA clears the flop itself when the host reads Status, and when the host writes Command.
+
+### Slots 14-18: diagnostic counters
+
+These are all RO.
+
+| Slot | Name | Meaning |
+|------|------|---------|
+| 14 | FREE_RUN | Free-running counter on the core clock. A change between reads means the FPGA is clocked. |
+| 15 | IDE_STROBES | Host strobes counted (writes, and falling edges of RD). Stays at 0 if the host never touches the bus. |
+| 16 | RSTN_EDGES | Low byte: rising edges of RSTn. High byte: falling edges. |
+| 17 | BUS_STATE | Bit 0 RSTn (1 = out of reset), bit 1 CSn[0] deasserted, bit 2 CSn[1] deasserted, bit 3 RD, bit 4 WR. |
+| 18 | AUDIO_ALIVE | Counter driven by a divided audio-clock toggle. A change means the 11.2896 MHz crystal reaches the fabric. |
+
+`main.rs` reads slots 14-18 once a second whether or not the `fpga-diag` feature is on. Only the logging is
+gated.
+
+### Slot 19 (0x26): DMA_MODE and flow control
+
+R/W.
+
+| Bits | Name | Meaning |
+|------|------|---------|
+| 1:0 | DMA_MODE | 0 = off, 1 = device to host (DMARQ means "data ready"), 2 = host to device (DMARQ means "room"). 3 is decoded as off. |
+| 2 | PIO_WR_FC | During a PIO data-out phase, drop host-visible DRQ while the write FIFO is full. |
+| 3 | PIO_RD_FC | During a PIO data-in phase, show DRQ only while the read FIFO has data. |
+| 4 | PKT_PHASE | Packet phase. Set by the FPGA when a PACKET command opens the CDB phase, and by the MCU. |
+
+Reads return the same bits. The FPGA clears DMA_MODE and both flow-control bits on reset.
+
+The firmware's `set_dma_mode` and `set_pio_flow_control` each write the whole slot, so each call clears the
+bits the other one set.
+
+### Slot 20 (0x28): CAP_CTRL and slot 21 (0x2A): CAP_DATA
+
+Debug capture. Slot 20 arms and reports; slot 21 writes the read index, then reads the value.
+
+- Slot 20 write bit 0 = 1: arm, and reset the pointers. Write 0: disarm.
+- Slot 20 read: bit 0 armed, bit 1 running, bit 2 done, bits 15-8 the event count divided by 2.
+- Slot 21 write: sets the index (bits 8:0). Read: returns the sample at that index.
+
+This only records data when the device is built with `capture=True`. `OpenGDEMU.py` does not do that, so the
+shipped image accepts the arm, and every sample reads 0. The firmware arms it on each WRITE DMA and dumps it on a
+host stall (`capture_arm`, `capture_dump`).
+
+### Slots 22 (0x2C) and 23 (0x2E): debug counters
+
+RO. Slot 22 is the write FIFO level at the last slot 11 read. Slot 23 counts slot 11 reads. Both are always
+present. `ide.rs` reads them directly as raw numbers, with no named constants.
+
+### Slots 24 (0x30) to 28 (0x38): host access counters
+
+RO. These count what the host did on the Dreamcast bus. The FPGA clears 24 and 25 on each Command write.
+
+- 24: low byte = Status register reads, high byte = Alt Status reads (8 bits each).
+- 25: Data register reads (16 bits).
+- 26: low byte = last Device Control byte written, high byte = number of Device Control writes.
+- 27: slot 24 as it stood at the most recent Command write.
+- 28: slot 25 as it stood at the most recent Command write.
+
+Slots 27 and 28 let the firmware read what the host did during the previous command, after the next one has
+started.
+
+### Slot 29 (0x3A): CDDA_CTRL
+
+Primary device only. Layout from `hw/cdda.py`:
+
+- Write: bit 0 enable output, bit 1 clear the underflow flag and counter, bit 2 flush the FIFO.
+- Read: bit 0 enable, bit 1 underflow (sticky), bits 15-8 silent frames inserted since the last clear
+  (saturating).
+
+### Slot 30 (0x3C): CDDA_LEVEL
+
+Primary device only. RO. Words in the CDDA sample FIFO (depth 768). The firmware keeps it topped up to 760.
+
+### Slot 31 (0x3E): CDDA_PUSH
+
+Primary device only. Write only. Each write pushes one 16-bit PCM word. Samples go in left then right. The
+push is edge-sampled, so one write is one word.
+
+## Discrepancies and open points
+
+These were found while writing this page. Nothing was changed in the code to resolve them.
+
+1. **Byte addresses in `OpenGDEMU.py`.** The class docstring gives the secondary window as `0x6300_0080`-`0x6300_00FF`,
+   a 128-byte window. The wiring and firmware both use word slots: `MCU_ADDR[8:1]` and `fpga_window().add(0x80)`
+   put the secondary at byte `0x6300_0100`, and each window is 128 words = 256 bytes. The table above follows the
+   wiring.
+2. **`ide_device.py` class docstring is out of date.** It says FIFO slots 9-11 are stubbed, that Data reads return
+   `0xFFFF`, and that the layout "matches the prior design's `docs/AddressMapMCU.md`". The FIFOs are implemented
+   now, and the old address map is replaced by this page.
+3. **Secondary read FIFO depth comment in `ide.rs`.** The comment on `IdeDevice::read_fifo_depth` says the
+   secondary FIFO holds 256 words. The constant `SECONDARY_FIFO_DEPTH_WORDS` is 1024, which matches
+   `SECONDARY_READ_FIFO_DEPTH` in the Python.
+4. **Capture (slots 20/21) is not in the shipped image.** The firmware depends on it for diagnostics only, and it
+   reads zeros in the shipped build. If it is needed, build with `capture=True` and rebuild the bitstream. The
+   Python notes say enabling it has changed fitter results before.
+5. **Whole-word writes to shared slots.** `set_irr` (slot 5), `set_dma_mode` and `set_pio_flow_control` (slot 19)
+   write the whole register. A caller that wants to change one field has to keep the others.
+6. **Slot 1 bit 8 is a pulse.** Reads never show it, so the MCU cannot check whether INTRQ was raised.

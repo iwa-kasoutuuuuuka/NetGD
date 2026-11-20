@@ -1,4 +1,12 @@
-# OpenGDEMU
+# NetGD
+
+NetGD is a fork of [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski: open-source firmware and FPGA core for GDEMU-style Dreamcast GD-ROM replacement boards. Its goals are:
+
+1. Run on GDEMU 6.0 boards, which upstream OpenGDEMU does not target.
+2. Write game images to the SD card over the Dreamcast Broadband Adapter, which the original GDEMU cannot do.
+3. Reach feature parity with the original GDEMU, with better performance.
+
+The plan is in [`docs/PLAN.md`](docs/PLAN.md). None of this has been verified on hardware yet.
 
 ### Warning:
 At the moment this is a WIP. DO NOT ATTEMPT to flash unless you are okay with having a non-functional
@@ -27,37 +35,47 @@ some of those questions as time goes on.
             header block -- if you fetch it by hand and get a 403, that is why.
 
 ### Current Status
-- Can successfully execute code on the SAM3U
-- Communicate between SDCard and SAM3U
-- Able to load bitstream into FPGA
-- Generate the clock signal (for audio iirc?) so a Dreamcast will boot properly
-- Communicate with registers in FPGA using SAM3U Static Memory Controller*
-- Dreamcast can Read IDE registers*
+The MCU firmware is now Rust (`mcu/opengdemu`, embassy). The list below describes what the code does.
+None of it has been checked on a Dreamcast yet; the hardware bring-up plan is in `docs/PLAN.md`.
 
-\* These arent working great. Last I touched this I was having issues I believe came down to bus timings. 
-Was seeing symptoms like some bits flipped on some bytes. Was kinda a pain to hookup any kind of logic
-analyzer, would be nice to make a board that broke out some of the extra unused fpga pins for debug :) 
+- **Boot:** the FPGA bitstream is LZMA-compressed in flash and unpacked straight into the passive-serial
+  loader, so the FPGA is configured before anything else (`main.rs`). Then the SD card comes up, the MBR and
+  FAT32 volume are read, the default image is mounted, IP.BIN is prefetched, and the single IDE task starts.
+- **GD-ROM (primary device):** an ATAPI packet device. It answers TOC and session queries, serves
+  `CD_READ`/`CD_READ2` from GDI or CDI images on the SD card (PIO and DMA), and plays CD audio through the
+  FPGA's serialiser (`cdda.rs`). Eject and load use the standard `START STOP UNIT` with LoEj. Image parsing is
+  in `gdi.rs` and `cdi.rs`.
+- **Secondary IDE device:** a plain ATA disk that exposes the whole SD card, MBR included
+  (`size_disk_from_mbr`, `handle_disk_read`, `handle_disk_write`). It supports PIO and DMA, LBA28 and LBA48.
+  Writes are refused while a GD-ROM image is mounted, so the host has to eject first.
+- **Image selection:** vendor command `0xE0` (IMAGE_CTL) mounts an image by folder name and reports the
+  firmware version (`handle_image_ctl`). Images are named, not numbered.
+- **Disc swap button:** a press on PA20 follows the `next` link in the mounted folder's `GAME.CFG` and swaps
+  the disc (`button.rs`).
+- **Firmware update:** vendor opcode `0xF9` on the secondary device, behind a two-step key. The firmware copies
+  a RAM-resident updater (`mcu/fwupdater`) into SRAM1 and branches to it (`fwupdate.rs`).
+- **FPGA (`fpga/amaranth`):** two `IDEDevice` instances on the shared G1 bus, plus the CDDA output. Simulation
+  tests are in `fpga/amaranth/test*.py`.
 
-### Goals
-I really wanted to be able to try and see what other features could be added past the support in the
-official (or clone) firmware. Initially it was the complaint that you can't use a GDEMU with a secondary
-IDE disk. In addition I'd like to support some further features that I beleieve would be useful for 
-both development and future homebrew could take advantage of. Something like the following:
+Open question: the bit-flip symptoms on the IDE bus described in the older notes have not been re-tested with
+this firmware.
 
-1. Add a custom commannd to "eject" a GDROM image
-2. Emulate an IDE hard drive on the secondary interface that just exposes the SDCard to the
-   Dreamcast. Preferibly with write support. This would allow a piece of homebrew (ex. a menu launcher) to update CDIs/GDIs. Perhaps extending dcload to write your updated assets image in a developers build script?
-3. Add a custom command with a path parameter on the secondary IDE device to "eject" itself and
-   remount a GDROM image
+### Upstream goals (OpenGDEMU)
+The three goals from the original OpenGDEMU plan, and where each one stands:
 
+1. **Eject a GD-ROM image.** Implemented, but not as a custom command. Eject and load go through the standard
+   ATAPI `START STOP UNIT` with LoEj (`handle_packet` in `ide.rs`). Choosing which image to load is the
+   custom `0xE0` command.
+2. **Secondary IDE disk that exposes the SD card, with write support.** Implemented in the firmware
+   (`ide.rs`: `handle_disk_read`, `handle_disk_write`, `stage_identify_disk`, `size_disk_from_mbr`). Writes are
+   refused while a GD-ROM image is mounted. The disk size comes from the MBR partition table, because the
+   card's CSD value was found to undercount the capacity.
+3. **Custom command to eject and remount an image by path.** Partly implemented, and on a different device than
+   planned. Mounting by folder name is `0xE0` (`handle_image_ctl`), and it is sent as an ATAPI PACKET to the
+   GD-ROM (primary device), not to the secondary disk.
 
-### My Current TODOs
-- [ ] Fix hard coded paths, I know some are to my user directory :sweat_smile:
-- [ ] Check if FatFS is working
-- [ ] Answer documentation questions that are lack of research
-- [ ] KiCAD PCB Design
-- [ ] Make it work
-- [ ] Put some work into breaking up above task into portions ;)
+### Next Steps
+The work list is in `docs/PLAN.md`. Phase 5 (hardware verification) is the one that needs a board.
 
 ### Just on the off chance that maybe things go too easily
 - Would be pretty cool to compile the Verilog to C with Verilator and hook up to Lxdream-nitro. 
@@ -67,5 +85,6 @@ Might be too slow, never used Verilator before this just sounded like a good exc
 ### Projects in Use
 - [Amaranth](https://github.com/amaranth-lang/amaranth) BSD-2-Clause
 - [embassy](https://github.com/embassy-rs/embassy) (MCU firmware)
+- [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski, GPL-3.0 (see `LICENSE`). NetGD is forked from it.
 
 Any omissions are not intentional. Please open an issue if you notice any missed attributions.

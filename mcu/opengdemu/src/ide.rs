@@ -1,16 +1,35 @@
-//! ATA/ATAPI command-handling task on the MCU side.
+//! ATA/ATAPI command task on the MCU side, serving both emulated devices.
 //!
-//! The FPGA latches incoming IDE register writes and sets `COMMAND_PEND`
-//! whenever the host writes the Command register. This task polls that
-//! flag, reads the command word + features + LBA + sector count, decodes
-//! the opcode, and writes back the resulting status / error and clears
-//! `COMMAND_PEND` so the FPGA accepts the next command.
+//! One task, `ide_task`, services the FPGA's two IDE devices. The FPGA ORs
+//! each device's `COMMAND_PEND` onto MCU_IRQn, which lands on PA22 here
+//! (falling edge, `pioa_wait_irq`). After every wake-up the task sweeps both
+//! devices; the disc-swap button wakes it the same way. A command is
+//! snapshotted from the register window, dispatched on its opcode, answered
+//! through STATUS / ERROR / INTRQ, and acknowledged by clearing COMMAND_PEND.
+//! The register layout is in `docs/AddressMapMCU.md`.
 //!
-//! Phase scope: trivial commands only — `DEVICE_RESET`, `SET_FEATURES`,
-//! `IDENTIFY DEVICE` (ABRTed because we are ATAPI). `PACKET` (`0xA0`) is
-//! still a stub: we ack with ABRT for now until the GDI parser + FIFO
-//! data path land. Every command — known or not — is logged via defmt so
-//! we can see what the DC's GD-ROM driver issues during bring-up.
+//! The two devices are told apart by `Role`:
+//!
+//! - Primary, `Role::Packet`: the GD-ROM, an ATAPI packet device. IDENTIFY
+//!   DEVICE is ABRTed so the host falls back to IDENTIFY PACKET DEVICE.
+//!   PACKET (`0xA0`) runs the ATAPI packet protocol in `handle_packet`. That
+//!   covers TEST UNIT READY, REQUEST SENSE and START STOP UNIT (eject and
+//!   load), plus Sega's GD-ROM set: TOC and session queries, CD_READ and
+//!   CD_READ2 from the mounted image (`handle_cd_read`, PIO or DMA, streamed
+//!   from SD), CD_PLAY and CD_SEEK for CD audio (`cdda.rs`), and vendor `0xE0`
+//!   (IMAGE_CTL) to mount an image by folder name. A unit attention left by a
+//!   reset is reported as CHECK CONDITION until the host reads it back with
+//!   REQUEST SENSE.
+//! - Secondary, `Role::Disk`: a plain ATA disk that exposes the whole SD card,
+//!   MBR included. IDENTIFY DEVICE is answered. READ and WRITE SECTORS, their
+//!   DMA forms and the LBA48 variants go to `handle_disk_read` and
+//!   `handle_disk_write`; CHS is refused. Writes are refused while GD-ROM
+//!   media is loaded, so the host has to eject first. Vendor `0xF9` is the
+//!   firmware updater entry point (`fwupdate.rs`).
+//!
+//! Generic ATA commands (NOP, DEVICE RESET, SET FEATURES) are acknowledged on
+//! both devices. Anything else is ABRTed and logged. Every command, known or
+//! not, is logged via defmt so bus traffic can be followed during bring-up.
 
 use core::ptr::{read_volatile, write_volatile};
 
