@@ -937,6 +937,12 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 対応：警告掃除（P3、同じファイルを編集中）が終わってから修正を割り当てる。M1 は既定のビルドにも効くので優先。
 - 信頼度：コードの読解（確認済み）、データシートの挙動は記憶（要確認）。
 
+### R74 P3 警告掃除（Sonnet）
+- 結論：`opengdemu` の警告 12 件（`dead_code` 11、`unreachable_code` 1）を5種類のビルド（4E・2E・v60・`resident`・`sd-fast`）すべてで 0 に。`embassy-atsam3` は元々 0。
+  **フラッシュの内容は5種類ともバイト単位で同一**（`DEFMT_LOG=off`、`llvm-objcopy -O binary` の `cmp` と SHA-256。R4 の 60 バイト差より良い）。
+- 方法：`main.rs` の `defmt::panic!` の後の到達しない `loop{}` を削除。残りは削除せず項目単位の `#[allow(dead_code)]`（`GdiError` の変体を消すと defmt の `Format` の番号がずれるため。`blockdev.rs` の `LbaOffset`、`gdi.rs` の `read_ip_header` ほか、`ide.rs` の `assert_intrq` ほか）。
+- 残る出力：自動生成の `atsam3u4e-pac` の「lifetime elided」3,122 行（範囲外として未対処）。死んだコードの塊の削除は、defmt ありのビルドでの比較が要るので別の作業。
+
 ---
 
 ## 判断の記録（Decisions）

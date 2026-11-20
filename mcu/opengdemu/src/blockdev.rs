@@ -75,6 +75,7 @@ impl BlockDevice for HsmciBlockDevice {
 /// LBA 0 to the start of a partition, without embedded-sdmmc doing any
 /// partition parsing of its own. Needed for GPT disks (embedded-sdmmc
 /// only knows about MBR).
+#[allow(dead_code)] // GPT adapter, currently unused
 pub struct LbaOffset<B: BlockDevice> {
     inner: B,
     start: u32,
@@ -82,6 +83,7 @@ pub struct LbaOffset<B: BlockDevice> {
 }
 
 impl<B: BlockDevice> LbaOffset<B> {
+    #[allow(dead_code)]
     pub fn new(inner: B, start: u32, length: u32) -> Self {
         Self { inner, start, length }
     }

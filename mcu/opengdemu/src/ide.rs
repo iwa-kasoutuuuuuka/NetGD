@@ -303,6 +303,7 @@ impl IdeDevice {
     /// which the FPGA observes and clears the latched flop. Without
     /// this the BIOS waits on the IRQ pin for a transition that never
     /// happens and times out.
+    #[allow(dead_code)]
     fn assert_intrq(&self) {
         self.write(REG_INTRQ_PENDING, 0x0001);
     }
@@ -472,6 +473,7 @@ impl IdeDevice {
     /// Return the host-requested ATAPI byte count (Cylinder Low / High,
     /// our LBA_MID / LBA_HIGH). Hosts use this to ask for a specific
     /// transfer length on data-in/data-out PIO transfers.
+    #[allow(dead_code)]
     fn atapi_byte_count(&self) -> u16 {
         let low_mid = self.read(REG_LBA_LOW_MID);
         let high_lowp = self.read(REG_LBA_HIGH_LOWP);
@@ -2823,6 +2825,7 @@ async fn push_buf_to_fifo(dev: &IdeDevice, data: &[u8]) -> usize {
     i
 }
 
+#[allow(dead_code)]
 async fn stream_pattern(dev: &IdeDevice, byte_count: usize) {
     // Push a sliding incrementing pattern, refilling the FIFO whenever
     // it has room. The FIFO is 1024 words = 2 KB, so for a single 2 KB
@@ -3590,6 +3593,7 @@ fn build_req_stat_reply() -> [u8; 10] {
 /// else and it loops the read forever (per iceGDROM's empirical
 /// findings, ide.c:195/207). Other ranges are best-effort filler that
 /// looks like a real GD-ROM drive.
+#[allow(dead_code)]
 static REQ_MODE_REPLY: [u8; 32] = [
     0x00, 0x00, // bytes 0..2:    reserved
     b'S', b'E', b' ', b' ', b' ', b' ', b' ', b' ', // bytes 2..10:   hardware id

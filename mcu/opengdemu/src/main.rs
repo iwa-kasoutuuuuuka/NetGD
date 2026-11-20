@@ -35,7 +35,6 @@ static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 unsafe fn DefaultHandler(irqn: i16) {
     cortex_m::asm::bkpt();
     defmt::panic!("Unhandled exception (IRQn = {})", irqn);
-    loop{}
 }
 
 #[entry]

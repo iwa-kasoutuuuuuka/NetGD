@@ -130,6 +130,7 @@ impl Track {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_data(&self) -> bool {
         // Ctrl bit 2 set → data track (CD-ROM Mode 1/2). Audio = bit 2 = 0.
         (self.ctrl & 0x04) != 0
@@ -196,6 +197,7 @@ impl Gdi {
 
     /// `(filename, byte_offset)` for reading `lba`. Caller opens the
     /// file by name and seeks to the offset.
+    #[allow(dead_code)]
     pub fn locate(&self, lba: u32) -> Option<(ShortFileName, u32)> {
         let t = self.track_for_lba(lba)?;
         let sector = lba - t.start_lba;
@@ -206,6 +208,7 @@ impl Gdi {
     }
 
     /// First and last track numbers (used by READ_TOC).
+    #[allow(dead_code)]
     pub fn track_bounds(&self) -> Option<(u8, u8)> {
         let first = self.tracks().first()?.number;
         let last = self.tracks().last()?.number;
@@ -227,6 +230,7 @@ impl Gdi {
     /// area runs ~192000 sectors past its own last track, and the BIOS
     /// abandons the boot and starts over rather than load anything -- it
     /// never reads past the ISO9660 root directory.
+    #[allow(dead_code)]
     pub fn leadout_lba(&self) -> u32 {
         discimg::atapi::leadout_lba(self.tracks(), self.is_cdi)
     }
@@ -873,6 +877,7 @@ pub fn parse_image(num_blocks: u32, which: &ImageRef) -> Result<Gdi, GdiError> {
 
 /// Bytes of the IP.BIN header the host is given: hardware ID through the
 /// 128-byte title (offsets 0x00..0x100 of the boot track's first sector).
+#[allow(dead_code)]
 pub const IP_HEADER_BYTES: usize = 256;
 
 /// Read the IP.BIN header of `which` without mounting it. Returns the track
@@ -885,6 +890,7 @@ pub const IP_HEADER_BYTES: usize = 256;
 /// that order and take the first that is signed; a disc with no signed
 /// track yields the first data track's sector unsigned, and `NoIpBin` only
 /// when nothing at all could be read.
+#[allow(dead_code)]
 pub fn read_ip_header(
     num_blocks: u32,
     which: &ImageRef,
@@ -989,6 +995,7 @@ fn map_track_extents(gdi: &mut Gdi) {
 /// Read `buf.len()` bytes starting at `byte_offset` within the track
 /// file for the given LBA. Re-opens the FAT volume on each call —
 /// fine for short single-sector probes but too slow for game data.
+#[allow(dead_code)]
 pub fn read_at_lba(gdi: &Gdi, lba: u32, buf: &mut [u8]) -> Result<usize, GdiError> {
     let (track_filename, byte_offset) = gdi.locate(lba).ok_or(GdiError::LbaOutOfRange)?;
 
@@ -1179,13 +1186,16 @@ pub enum GdiError {
     OpenImageDir,
     OpenGdiFile,
     ReadGdiFile,
+    #[allow(dead_code)]
     LbaOutOfRange,
+    #[allow(dead_code)]
     NoImageDir,
     NoGdiFile,
     BadCdi,
     Parse,
     BadFilename,
     TooManyTracks,
+    #[allow(dead_code)]
     NoIpBin,
     Block(BlockError),
 }
