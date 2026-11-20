@@ -371,6 +371,35 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **確認（Opus）**：差分は docstring のみ。シミュ 30/3/5/5 件パス（Haiku 実行）、生成 Verilog はコミット済みのものと一致（Opus が `git diff --exit-code` で確認）。
 - 残り（未修正）：`ide_device.py` 845 行付近の「Layout」コメントがスロット 0〜12 しか挙げず、スロット 12 を「Debug test reads 0xC0DE」としている。`ide.rs` の `read_fifo_depth` のコメント（256 と 1024）。
 
+### R26 `tools/gdprobe` の KOS 部分の静的レビュー（Fable、Opus が要点を確認して一部を修正）
+- **最重要（確認済み、修正済み）**：`g1_ata_mutex_unlock()` が `g1_ata_select_device(G1_ATA_MASTER)` を呼び、**毎コマンド後に DEVICE_SELECT（0xA05F7098）へ 0x00 を書いていた**
+  （KOS フォーク `g1ata.c:216-222`。Opus が確認）。KOS の cdrom ドライバも openMenu もこの書き込みはしない。→ `cdrom.c:57` の `_g1_ata_sem` を直接 `sem_wait`/`sem_signal` に変更（コミット `2e3ae3f8`）。
+- **高（仕様で確認、修正を Sonnet に依頼中）**：`0x03`（REQUEST SENSE）は GD-ROM の SPI 仕様に**存在しない**（表 6.1 は 00h、10h〜16h、20h〜22h、30h、31h、40h のみ。Opus が `spi.txt` 1274 行などで確認）。
+  センスは REQ_ERROR（0x13、10 バイト）で取る。純正に「誰も送ったことのないコマンド」を送るところだった。
+- **高（推測、修正済み）**：PACKET 直後に前のコマンドの CHECK ビットを誤検出すると CDB を送らず固まる → パケット段階では ERR を見ず DRQ だけを待つ（openMenu と同じ）。
+- **中（確認済み、修正済み）**：KOS の `fs_iso9660` の vblank ハンドラはディスクの交換を検知しても `cdrom_reinit` は呼ばない（R24 の懸念は当たらない）。ただし毎フレーム `cdrom_get_status`（BIOS の check drive）を呼ぶ。
+  排他は `_g1_ata_sem` で効いている。→ 記録を汚さないよう `KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM)` で cdrom_init と ISO9660 を外した（`main.c`）。KOS は GD-ROM のコマンド割り込みをフックしていない。
+- **中（確認済み、修正済み）**：IDENTIFY（0xA1）の応答は GD-ROM では 80 バイト（SPI 表 3.5）→ DRQ が立っている間だけ読む。
+- **中（修正を依頼中）**：`profiles/gdprobe.ps1` が `-BbaTools` を渡さない、README が勧める「プリセットのコピー」でパスが壊れる。
+- **CD_READ のバイト1（仕様で確認）**：bit5 = Data、bit3-1 = 期待データ型（010 = Mode 1、100 = Mode 2 Form 1）、bit0 = FAD。0x24 は GDI 向けに正しい。CDI は 0x28、任意型は 0x20。
+  NetGD の `handle_cd_read` はバイト1を見ずに常に 2048 バイトで返す。
+- 正しいと確認：コンパイル・リンクの API、Makefile と build.ps1 の慣習、G1 レジスタのアドレス、PIO データインの手順（複数 DRQ ブロックにも対応）、各 CDB のレイアウト、許可リスト、/pc/ の 4 KB 書き出し。
+
+### R27 G3：`GDEMU.INI` への対応（Sonnet 実装、Opus がビルド・テストを確認）
+- `common/gamecfg::ini`（テスト 12 件追加、計 21 件）。`reset_goto=N`：ハードリセット（RSTn のカウンタ）でイメージ N をマウント（無ければ何もしない）。
+  `open_time`・`detect_time`（150〜5000 ms）：切替後にその合計の時間 NOT READY を返す（ファイルで指定したときだけ。INI が無ければ従来どおり）。
+  `image_tests`・`high_speed`・`read_limit`・未知のキーは読み飛ばしてログを出す。INI はカードを読むたびに読み直す。`GDEMU.CFG` の `image=` は引き続き電源投入時のイメージを決める。
+- **確認（Opus）**：gamecfg 21 / discimg 68 / lzma 5 件パス、4E・2E とも警告は従来の 13 件。2E の text 115944（空き約 14.6 KB）。コミット `9cbffeca`。
+- **未確認・要検討**：根拠は公式ページの要約メモ（`web-findings-2026-11.md` 2-1）で、原文の引用ではない。切替後の UA は NOT READY の前に1回返しており、本家の順序（NOT READY → MEDIA CHANGE → READY）とは違う可能性がある。
+  INI が無いときに本家の既定値（500/250 ms）を当てていない。→ 純正のプローブ記録（切替後の SENSE の並びと時間）で確かめてから合わせる。
+
+### R28 調査用 SD の生成ツール `tools/mksdcard`（Sonnet 実装、Opus がコミット）
+- `03`（GDI）・`04`（2トラック CDI、データは LBA 11702）・`05`（音声2本＋データの CDI）・`06`（音声3本の GDI）を決定的に生成。全セクタに画像番号・トラック・LBA のタグと疑似乱数。
+  CDI の書き出しは mkdcdisc（https://gitlab.com/simulant/mkdcdisc 、MIT）に項目単位で合わせた。合計 125 MB（`--small` で約 17 MB）。
+- 検証：`verify.py` で4つとも NetGD のパーサ（新しい `discimg/examples/inspect.rs`）で読め、マニフェストと一致。`compare.py --manifest` で、イメージファイルなしに期待 CRC を再計算できる。テスト mksdcard 17・compare 17 件。コミット `a1f9a294`。
+- **NetGD 側の疑い（新規）**：mkdcdisc は音声が2本以上の CDI で、トラックの `start_lba` を pregap の先頭に置く。NetGD はそれをデータの先頭として扱うので、`05` のトラック2が 150 セクタずれる（R11 の D-5 の「CDI の pregap の扱い」と同じ根）。
+- **未確認**：純正 GDEMU が生成した CDI を受け付けるか。Mode 1 の P/Q ECC は独自の参照実装でしか確かめていない（mkdcdisc の libedc とのビルド比較は権限で拒否）。
+
 ---
 
 ## 判断の記録（Decisions）
