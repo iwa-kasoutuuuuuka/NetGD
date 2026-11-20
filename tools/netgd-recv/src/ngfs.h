@@ -48,6 +48,8 @@ ng_err_t ngfs_map(FRESULT r);                  /* FatFs result -> NG error (uses
 /* ---- paths ---- */
 void ngfs_dirpath(const char *image, char *out, size_t n);     /* "0:/" + image */
 int ngfs_mkdir_p(const char *dir);                              /* all levels; FRESULT */
+/* canonical folder path: no leading/trailing "/", "//" collapsed, trailing space/dot of components dropped */
+void ngfs_norm_path(const char *in, char *out, size_t n);
 int ngfs_protected(const char *image);                          /* GDEMU.CFG default, "01" (5.5) */
 int ngfs_default_image(char *out, size_t n);                    /* GDEMU.CFG image=, 0 if none */
 
@@ -76,6 +78,7 @@ typedef struct {
     uint32_t base_lba;
     FIL fp;
     int open;
+    const char *note;       /* set when the direct path was asked for but refused (why) */
 } ng_wfile_t;
 
 ng_err_t ngfs_wfile_open(ng_wfile_t *w, const char *path, uint32_t size, int contig);
@@ -85,8 +88,10 @@ ng_err_t ngfs_wfile_close(ng_wfile_t *w);
 
 int ngfs_stat_size(const char *path, uint32_t *size);          /* 0 if it is a file */
 
-/* read a file back through FatFs: CRC32 + size check */
-ng_err_t ngfs_file_crc(const char *path, uint32_t *size, uint32_t *crc, void *buf, uint32_t bufn);
+/* read a file back through FatFs: CRC32 + size check.  tick (may be NULL) is called after every
+   bufn-byte read with the bytes done so far; non-zero stops the read (returns NG_E_STOP). */
+ng_err_t ngfs_file_crc(const char *path, uint32_t *size, uint32_t *crc, void *buf, uint32_t bufn,
+                       int (*tick)(void *ctx, uint32_t done), void *ctx);
 
 /* ---- commit (5.2 step 5) ---- */
 /* Rewrite the 3 extension bytes of the 8.3 entry of `path` (DESC.NGP) to `newext`

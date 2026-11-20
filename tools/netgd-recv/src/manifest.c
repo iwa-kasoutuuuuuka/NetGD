@@ -42,7 +42,7 @@ static int name_ok(const char *s, char *err, size_t en, const char *what)
     return 0;
 }
 
-static int image_ok(const char *path, char *err, size_t en)
+int ng_path_ok(const char *path, char *err, size_t en)
 {
     char tmp[NG_PATH_MAX + 1];
     int parts = 0;
@@ -179,7 +179,7 @@ int ng_manifest_parse(const char *text, size_t len, ng_manifest_t *m, char *err,
     if (!strcmp(type, "gdi")) m->is_cdi = 0;
     else if (!strcmp(type, "cdi")) m->is_cdi = 1;
     else { seterr(err, errn, "type must be gdi or cdi"); return -1; }
-    if (image_ok(m->image, err, errn)) return -1;
+    if (ng_path_ok(m->image, err, errn)) return -1;
     if (m->nfiles < 1) { seterr(err, errn, "no files"); return -1; }
     for (int i = 0; i < m->nfiles; i++) {
         if (name_ok(m->files[i].name, err, errn, "file name")) return -1;
@@ -204,6 +204,17 @@ int ng_manifest_parse(const char *text, size_t len, ng_manifest_t *m, char *err,
         }
     }
     if (descriptor_ok(m->files[m->descriptor].name, err, errn)) return -1;
+    {
+        /* no data file may carry the name of the descriptor's .NGP placeholder (it would be the same
+           directory entry while the image is being written) */
+        char ngp[16], fin[16];
+        ng_manifest_ngp_name(m, ngp, fin);
+        for (int i = 0; i < m->nfiles; i++)
+            if (i != m->descriptor && ieq(m->files[i].name, ngp)) {
+                seterr(err, errn, "file name %s collides with the descriptor placeholder", m->files[i].name);
+                return -1;
+            }
+    }
     return 0;
 }
 

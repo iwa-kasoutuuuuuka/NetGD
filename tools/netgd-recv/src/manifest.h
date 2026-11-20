@@ -26,6 +26,11 @@ typedef struct {
     ng_mfile_t files[NG_MAX_FILES];
 } ng_manifest_t;
 
+/* An image folder path as put accepts it: 1..NG_PATH_MAX chars, at most NG_PATH_PARTS '/'-separated
+   components, each printable ASCII, FAT-safe, non-empty, no leading/trailing '.' or ' ' and not "..".
+   (So no leading/trailing '/', no "//".)  Used for every folder argument of the job.  0 ok, -1 + err. */
+int ng_path_ok(const char *path, char *err, size_t errn);
+
 /* returns 0, or -1 with a message in err */
 int ng_manifest_parse(const char *text, size_t len, ng_manifest_t *m, char *err, size_t errn);
 

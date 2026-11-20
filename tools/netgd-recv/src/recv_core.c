@@ -74,11 +74,18 @@ ng_err_t ng_session_open(const ng_sink_t *sk)
         ng_emit_error(sk, "session", NG_E_FW, 0, 0, "no NetGD firmware answered (this is not a NetGD)");
         return NG_E_FW;
     }
+    /* Writing needs the protected area and the write-check value of the firmware: the KOS g1ata PIO
+       write does not report errors, so the FNV-1a in STATUS is the only proof that a sector arrived. */
+    if ((g_fw.caps & (FW_CAP_SESSION | FW_CAP_CHECKSUM)) != (FW_CAP_SESSION | FW_CAP_CHECKSUM)) {
+        ng_emit_error(sk, "session", NG_E_FW, 0, 0,
+                      "firmware lacks FW_CAP_SESSION and FW_CAP_CHECKSUM (VERSION caps bit0, bit1): will not write");
+        return NG_E_FW;
+    }
     if (ngdev_init() != 0) {
         ng_emit_error(sk, "session", NG_E_IO, 0, 0, "no secondary IDE disk");
         return NG_E_IO;
     }
-    ngblk_check_fnv = (g_fw.caps & FW_CAP_CHECKSUM) != 0;
+    ngblk_check_fnv = 1;
     ngdev_use_dma = (g_fw.caps & FW_CAP_DMA) != 0;
     if (fw_session_begin(&g_fw) != 0) {
         ng_emit_error(sk, "session", NG_E_FW, 0, 0, "write session refused");
@@ -88,6 +95,7 @@ ng_err_t ng_session_open(const ng_sink_t *sk)
     e = ngfs_mount(why, sizeof why);
     if (e) {
         ng_emit_error(sk, "session", e, 0, 0, why);
+        ng_session_close(sk, 1, NULL, 1);           /* the session is open: always end it (default image back) */
         return e;
     }
     ngfs_statfs(&fr, &tot, NULL);
@@ -103,16 +111,21 @@ ng_err_t ng_session_close(const ng_sink_t *sk, int mode, const char *folder, int
     const char *mounted = NULL;
     if (!g_session) return NG_OK;
     if (mode == 2) {
-        ngfs_dirpath(folder, dir, sizeof dir);
-        if (!strcmp(ngfs_classify(dir), "complete")) mounted = folder;
-        else fwmode = 1;
+        char why[96];
+        if (!folder || ng_path_ok(folder, why, sizeof why) != 0) {      /* also: at most NG_PATH_MAX = 96, the firmware's MOUNT_NAME capacity */
+            fwmode = 1;
+        } else {
+            ngfs_dirpath(folder, dir, sizeof dir);
+            if (!strcmp(ngfs_classify(dir), "complete")) mounted = folder;
+            else fwmode = 1;
+        }
     }
     ngfs_unmount();
     rc = fw_session_end(&g_fw, fwmode, mounted);
     g_session = 0;
     if (!quiet) {
         if (rc != 0) ng_emitf(sk, 0, "NGD:FINISH fail code=EFW");
-        else if (mode == 2 && !mounted) ng_emitf(sk, 0, "NGD:FINISH fail code=ENOENT msg=\"folder is not a complete image\"");
+        else if (mode == 2 && !mounted) ng_emitf(sk, 0, "NGD:FINISH fail code=ENOENT msg=\"folder name invalid or not a complete image\"");
         else if (mounted) ng_emitf(sk, 0, "NGD:FINISH ok mounted=\"%s\"", mounted);
         else ng_emitf(sk, 0, "NGD:FINISH ok");
     }
@@ -149,11 +162,41 @@ static void file_path(char *out, size_t n, const char *dir, const ng_manifest_t 
     snprintf(out, n, "%s/%s", dir, (i == m->descriptor && use_ngp) ? ngp : m->files[i].name);
 }
 
-/* read every file back and compare CRC32; returns 0 or an error with *bad = file index */
+typedef struct {
+    const ng_sink_t *sk;
+    const char *tag, *name;
+    int fi, fn;
+    uint64_t base, total;
+    uint32_t tlast;
+} rb_t;
+
+/* called by ngfs_file_crc after every 64 KiB: cancel check, and a progress line (at most 1 per
+   second) so that the PC side keeps seeing activity on /pc/ during a long read-back */
+static int rb_tick(void *ctx, uint32_t done)
+{
+    rb_t *r = (rb_t *)ctx;
+    uint32_t t = now(r->sk);
+    if (r->sk->poll && r->sk->poll(r->sk->ctx)) return 1;
+    if (t - r->tlast >= 1000) {
+        r->tlast = t;
+        ng_emitf(r->sk, 1, "NGD:READBACK %s file=%d/%d bytes=%llu/%llu", r->tag, r->fi, r->fn,
+                 (unsigned long long)(r->base + done), (unsigned long long)r->total);
+        if (r->sk->ui) {
+            ng_ui_t u = { "verify", r->name, r->fi, r->fn, r->base + done, r->total, 0 };
+            r->sk->ui(r->sk->ctx, &u);
+        }
+    }
+    return 0;
+}
+
+/* read every file back and compare CRC32; returns 0 or an error with *bad = file index.
+   NG_E_STOP: reload.req / cancel.req / B was seen (nothing is changed on the card by a read-back). */
 static ng_err_t readback_all(const ng_sink_t *sk, const char *dir, const ng_manifest_t *m, const char *ngp,
                              const char *fin, int *bad, const char *tag, int emit_file)
 {
-    (void)sk;
+    rb_t rb;
+    rb.sk = sk; rb.tag = tag; rb.name = ""; rb.fi = 1; rb.fn = m->nfiles; rb.base = 0; rb.total = m->total_bytes;
+    rb.tlast = now(sk);
     for (int i = 0; i < m->nfiles; i++) {
         char path[NG_PATH_BUF];
         uint32_t size = 0, crc = 0;
@@ -165,11 +208,13 @@ static ng_err_t readback_all(const ng_sink_t *sk, const char *dir, const ng_mani
         } else {
             snprintf(path, sizeof path, "%s/%s", dir, m->files[i].name);
         }
-        e = ngfs_file_crc(path, &size, &crc, iobuf, sizeof iobuf);
+        rb.fi = i + 1; rb.name = m->files[i].name;
+        e = ngfs_file_crc(path, &size, &crc, iobuf, sizeof iobuf, rb_tick, &rb);
         *bad = i;
         if (e) return e;
         if (size != m->files[i].size || crc != m->files[i].crc) return NG_E_CRC;
         if (emit_file) ng_emitf(sk, 0, "NGD:FILE %s file=%d size=%u crc=%08X", tag, i + 1, (unsigned)size, (unsigned)crc);
+        rb.base += m->files[i].size;
     }
     return NG_OK;
 }
@@ -259,6 +304,7 @@ ng_err_t ng_put(const ng_sink_t *sk, const char *tag, const ng_manifest_t *m, co
 
     if (action == A_COMPLETE) {
         e = readback_all(sk, dir, m, ngp, fin, &bad, tag, 1);
+        if (e == NG_E_STOP) { ng_emitf(sk, 0, "NGD:STOP %s", tag); return e; }
         if (e) { ng_emit_error(sk, tag, e, bad + 1, 0, "image already on the card does not verify"); return e; }
         ng_emitf(sk, 0, "NGD:DONE %s ok", tag);
         return NG_OK;
@@ -332,6 +378,8 @@ ng_err_t ng_put(const ng_sink_t *sk, const char *tag, const ng_manifest_t *m, co
         file_path(path, sizeof path, dir, m, i, ngp, 1);
         e = ngfs_wfile_open(&w, path, f->size, contig);
         if (e) { ng_emit_error(sk, tag, e, i + 1, pos, "cannot open the pre-allocated file"); return e; }
+        if (w.note)
+            ng_emitf(sk, 0, "NGD:NOTE %s file=%d slow-path reason=\"%s\"", tag, i + 1, w.note);
         if (f->size && src->open(src->ctx, i, pos) != 0) {
             ngfs_wfile_close(&w);
             ng_emit_error(sk, tag, NG_E_SRC, i + 1, pos, "cannot open the source under /pc/");
@@ -396,7 +444,12 @@ ng_err_t ng_put(const ng_sink_t *sk, const char *tag, const ng_manifest_t *m, co
 
     /* 3. verify (readback is required when the firmware cannot check the bus: 4.5) */
     if (ng_cfg.readback || !ngblk_check_fnv) {
+        if (ng_phase_hook) ng_phase_hook("readback");
         e = readback_all(sk, dir, m, ngp, fin, &bad, tag, 0);
+        if (e == NG_E_STOP) {           /* the checkpoint says "all files written": a resume goes straight to the read-back */
+            ng_emitf(sk, 0, "NGD:STOP %s", tag);
+            return e;
+        }
         if (e) {
             if (e == NG_E_CRC) {
                 ck.state = CKP_TRANSFER; ck.files_done = (uint16_t)bad; ck.offset = 0; ck.crc = 0;
@@ -434,6 +487,18 @@ fail_new:
 
 /* ------------------------------------------------------------------ other operations */
 
+/* every folder argument of the job goes through the validation of a put's image path */
+static ng_err_t check_folder_arg(const ng_sink_t *sk, const char *tag, const char *folder, int allow_root)
+{
+    char why[96];
+    if (allow_root && (!folder[0] || !strcmp(folder, "/"))) return NG_OK;
+    if (ng_path_ok(folder, why, sizeof why) != 0) {
+        ng_emit_error(sk, tag, NG_E_MANIFEST, 0, 0, why);
+        return NG_E_MANIFEST;
+    }
+    return NG_OK;
+}
+
 ng_err_t ng_verify(const ng_sink_t *sk, const char *folder)
 {
     char dir[NG_PATH_BUF], path[NG_PATH_BUF], ngp[16], fin[16];
@@ -443,6 +508,8 @@ ng_err_t ng_verify(const ng_sink_t *sk, const char *folder)
     char err[96];
     int bad = 0;
     ng_err_t e;
+    e = check_folder_arg(sk, "verify", folder, 0);
+    if (e) return e;
     ngfs_dirpath(folder, dir, sizeof dir);
     snprintf(path, sizeof path, "%s/NETGD.MF", dir);
     if (f_open(&fp, path, FA_READ) != FR_OK) {
@@ -457,6 +524,7 @@ ng_err_t ng_verify(const ng_sink_t *sk, const char *folder)
     }
     ng_manifest_ngp_name(&vm, ngp, fin);
     e = readback_all(sk, dir, &vm, ngp, fin, &bad, "verify", 0);
+    if (e == NG_E_STOP) { ng_emitf(sk, 0, "NGD:STOP verify"); return e; }
     if (e) {
         ng_emitf(sk, 0, "NGD:VERIFY \"%s\" fail code=%s file=%d", folder, ng_err_name(e), bad + 1);
         return e;
@@ -473,6 +541,8 @@ ng_err_t ng_delete(const ng_sink_t *sk, const char *folder)
         ng_emit_error(sk, "delete", NG_E_PROTECTED, 0, 0, "the root cannot be deleted");
         return NG_E_PROTECTED;
     }
+    e = check_folder_arg(sk, "delete", folder, 0);
+    if (e) return e;
     ngfs_dirpath(folder, dir, sizeof dir);
     if (!ngfs_is_image_dir(dir)) {
         ng_emit_error(sk, "delete", NG_E_PROTECTED, 0, 0, "not an image folder (no NETGD.MF/.GDI/.CDI/.NGP)");
@@ -495,7 +565,9 @@ static void list_cb(void *ctx, const char *state, const char *path)
 
 ng_err_t ng_list(const ng_sink_t *sk, const char *folder)
 {
-    ng_err_t e = ngfs_list(folder, list_cb, (void *)sk);
+    ng_err_t e = check_folder_arg(sk, "list", folder, 1);
+    if (e) return e;
+    e = ngfs_list(folder, list_cb, (void *)sk);
     if (e) ng_emit_error(sk, "list", e, 0, 0, NULL);
     return e;
 }

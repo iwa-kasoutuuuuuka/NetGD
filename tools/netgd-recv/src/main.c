@@ -56,7 +56,7 @@ static void ui_progress(const ng_ui_t *u)
         snprintf(l, sizeof l, "[%s] %3d%%", bar, pct);
     }
     draw(5, l);
-    snprintf(l, sizeof l, "%u KB/s  %u/%u MB", u->rate / 1024, (unsigned)(u->cum >> 20), (unsigned)(u->total >> 20));
+    snprintf(l, sizeof l, "%u KB/s  %u/%u MB", (unsigned)(u->rate / 1024), (unsigned)(u->cum >> 20), (unsigned)(u->total >> 20));
     draw(6, l);
     if (u->rate) {
         unsigned left = (unsigned)((u->total - u->cum) / u->rate);

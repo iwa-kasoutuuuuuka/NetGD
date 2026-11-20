@@ -130,7 +130,7 @@ jobs:
           - tool: fwimage
             dir: .
             cmd: python -m unittest discover -s tools/fwimage -v
-          # Needs gcc (preinstalled on ubuntu-latest), about 6.5 min.
+          # Needs gcc (preinstalled on ubuntu-latest), about 15 s (full sweep, CI=true).
           - tool: netgd-recv
             dir: .
             cmd: python tools/netgd-recv/test/run_tests.py

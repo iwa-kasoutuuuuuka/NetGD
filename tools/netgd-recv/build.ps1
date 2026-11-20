@@ -22,6 +22,6 @@ if (-not $BbaTools -or -not (Test-Path (Join-Path $BbaTools 'scripts\_common.ps1
 $dbg = if ($Debug) { 'DEBUG=1' } else { '' }
 $job = if ($JobDir) { "NG_JOBDIR=$JobDir" } else { '' }
 # Stop MSYS2 from rewriting "/pc/..." into "C:/DreamSDK/pc/..." when kos-cc (a Windows exe) is called.
-$env:MSYS2_ARG_CONV_EXCL = '-DNG_JOBDIR_DEFAULT='
+$env:MSYS2_ARG_CONV_EXCL = '-DNG_JOBDIR_RAW='
 Invoke-DreamSdkBash "make clean >/dev/null; make $dbg $job" $PSScriptRoot
 Write-Host "Built $(Join-Path $PSScriptRoot 'netgd-recv.elf')"

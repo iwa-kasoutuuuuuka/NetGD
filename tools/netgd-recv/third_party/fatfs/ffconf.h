@@ -6,7 +6,8 @@
 /   FF_USE_EXPAND=1 (f_expand: contiguous pre-allocation), FF_CODE_PAGE=437,
 /   FF_USE_LFN=2 (LFN on the stack), FF_USE_MKFS=NG_FF_MKFS (host tests only;
 /   NG_FF_MKFS is 1 when built with -DNG_HOST). Everything else is stock:
-/   FF_FS_NOFSINFO=0, FF_MULTI_PARTITION=0, FF_MAX_SS=512, FF_FS_EXFAT=0.
+/   FF_FS_NOFSINFO=1 (do not trust the FSInfo free-cluster count: f_getfree scans the FAT once per mount),
+/   FF_MULTI_PARTITION=0, FF_MAX_SS=512, FF_FS_EXFAT=0.
 /   The real-time clock comes from get_fattime() (ng_plat). */
 #ifdef NG_HOST
 #define NG_FF_MKFS 1
@@ -267,7 +268,7 @@
 /  set 1, the file created time is available in FILINFO structure. */
 
 
-#define FF_FS_NOFSINFO	0
+#define FF_FS_NOFSINFO	1
 /* If you need to know the correct free space on the FAT32 volume, set bit 0 of
 /  this option, and f_getfree() on the first time after volume mount will force
 /  a full FAT scan. Bit 1 controls the use of last allocated cluster number.

@@ -3,6 +3,7 @@
    (a sector is atomic, as an SD block is). */
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "ngdev.h"
 #include "crc32.h"
 #include "simdisk.h"
@@ -12,6 +13,9 @@ int64_t sim_cut_after = -1;
 int sim_dead;
 uint64_t sim_sector_writes, sim_cmd_writes;
 int64_t sim_flip_cmd = -1;
+int64_t sim_rflip_cmd = -1;
+int sim_rflip_every;
+static uint64_t rd1_count;
 uint32_t sim_part_off, sim_protect_lba;
 uint64_t sim_violations;
 uint32_t sim_last_lba, sim_last_n, sim_last_fnv;
@@ -22,13 +26,23 @@ extern int sim_session;
 static FILE *img;
 static uint32_t nsec;
 
-int sim_open(const char *path, uint32_t sectors)
+/* create != 0: make a new, empty image (mkimage).  Otherwise the file must exist: an image that
+   cannot be opened is an error, never silently replaced by an empty one.  A few short retries,
+   because on Windows a virus scanner may still hold a file that was copied a moment ago. */
+int sim_open_ex(const char *path, uint32_t sectors, int create)
 {
-    img = fopen(path, "r+b");
-    if (!img) img = fopen(path, "w+b");
+    for (int i = 0; i < 40 && !img; i++) {
+        img = fopen(path, create ? "w+b" : "r+b");
+        if (!img) {
+            clock_t t = clock();
+            while ((double)(clock() - t) / CLOCKS_PER_SEC < 0.05) { }
+        }
+    }
     nsec = sectors;
     return img ? 0 : -1;
 }
+
+int sim_open(const char *path, uint32_t sectors) { return sim_open_ex(path, sectors, 0); }
 
 void sim_close(void)
 {
@@ -47,6 +61,11 @@ int ngdev_read(uint32_t lba, uint32_t n, void *buf)
     fseek(img, (long)(((uint64_t)lba + sim_part_off) * 512), SEEK_SET);
     got = fread(buf, 1, (size_t)n * 512, img);
     if (got < (size_t)n * 512) memset((uint8_t *)buf + got, 0, (size_t)n * 512 - got);   /* beyond EOF = zeros */
+    if (n == 1) {                                                   /* G1 read bit flips (only in what the app sees) */
+        rd1_count++;
+        if (sim_rflip_cmd > 0 && (int64_t)rd1_count == sim_rflip_cmd) ((uint8_t *)buf)[100] ^= 0x04;
+        if (sim_rflip_every) ((uint8_t *)buf)[(rd1_count * 7) % 512] ^= (uint8_t)(1u << (rd1_count % 8));
+    }
     return 0;
 }
 

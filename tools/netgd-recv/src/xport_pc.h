@@ -3,6 +3,12 @@
 #define NG_XPORT_PC_H
 #include "recv_core.h"
 
+/* NG_JOBDIR_RAW arrives unquoted from the Makefile (-DNG_JOBDIR_RAW=/pc/netgd/dc1) */
+#define NG_STR_(x) #x
+#define NG_STR(x)  NG_STR_(x)
+#ifdef NG_JOBDIR_RAW
+#define NG_JOBDIR_DEFAULT NG_STR(NG_JOBDIR_RAW)
+#endif
 #ifndef NG_JOBDIR_DEFAULT
 #define NG_JOBDIR_DEFAULT "/pc/netgd/dc1"
 #endif

@@ -786,6 +786,26 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：ホストテストで確認済み（Sonnet の実行。CI でも再実行される）。実機では未検証。
 - 関連：`mcu/bootcore/src/{flash,fcr,boot,update,fat}.rs`・`tests/`・`sizeprobe/`。
 
+### R62 `netgd-recv` の修正の引き継ぎ（Sonnet → Fable）と「テストが固まる」件の原因
+- 問い：`sweep_medium_strided` で `test_host.exe` が固まったのは中核の無限ループか。R48 の 11 項目と CI の失敗は直ったか。
+- 結論：**固まったのではなく遅かっただけ**。`run_tests.py` の作業フォルダが `test/_work_*`（E: = USB 接続の HDD、WD My Book Duo）にあり、模擬カードは書き込みコマンドのたびに flush、切断点ごとにイメージをコピーして子プロセスを 2〜3 個起動していた。
+  同じテストが C:（NVMe）なら 10.3 秒、E: なら 464.5 秒（切断点あたり約 5.5 秒）。止めた時点でもファイルは更新され続けていた。
+  - 中核の確認：Windows で子プロセスの上限 25 秒で通過。Linux（WSL、gcc 13）で中サイズのイメージの全切断位置（高速・低速の経路、読み戻しなし）3,270 通りを子プロセスの上限 10 秒で実行、タイムアウト 0、不変条件すべて成立。`src/*.c` のループを全部読み、上限のないものは無い。
+  - 実機で上限なく待つのは KOS の g1ata の中（60 秒のウォッチドッグで対処。生の ATAPI 経路も対象に追加済み）と dcload の `/pc/` 呼び出しだけ。
+  - ついでに見つかったテスト側の不具合：`sim_open` がイメージを開けないと `w+b` で空のファイルを作り、カードを黙って置き換えていた → 失敗するように修正（作るのは `mkimage` だけ）。
+- テストの仕組み：子プロセスごとに上限（`NETGD_CHILD_TIMEOUT`、既定 120 秒、超えたら FAIL）、テストごとに上限（`NETGD_TEST_WORK`/`NETGD_TEST_TIMEOUT`、既定 1800 秒）、作業フォルダはシステムの一時フォルダ。
+  既定は quick（351 切断点）、`--full-sweep` / `NETGD_SWEEP=full` / `CI=true` で full（567）。quick は full の 13 刻みで飛ばしていた中サイズのコミットの窓も含む。
+- 結果：Windows（MSYS2 gcc 16.1）quick 29/29 OK 34.6 秒、full 29/29 OK 55.5 秒。Linux（WSL Ubuntu 24.04、gcc 13.3、CI と同じコマンド）full 29/29 OK 11.3 秒。`Makefile.host` は警告 0（`-Wextra` でも）。
+- CI の修正：KOS は `-DNG_JOBDIR_DEFAULT=\"...\"` が `kos-cc` を通らなかったのが唯一のエラー → `Makefile:17` で引用符なしの `-DNG_JOBDIR_RAW=/pc/netgd/dc1` を渡し、`xport_pc.h` で文字列化（gdprobe と同じ方法。Sonnet はヘッダだけ直していた）。
+  `%u` は警告だけで Sonnet が修正済み。Linux の `direct.h`・`size_t` も Sonnet が修正済み。netgd-send は 5f4e02d8 以降緑。`build.yaml` の「約 6.5 分」の注記を「約 15 秒」に修正（Opus）。
+- R48 の 11 項目：すべて Sonnet が修正済みで、Fable が1つずつ確認し両方のホストで通過（UA で VERSION を1回再送、BEGIN 後のエラーで END、フォルダ引数の検査、FAT の読み取りを二重読み、FSInfo を使わない、SESSION+CHECKSUM の無いファームは書く前に拒否、
+  `atapi()` の後の SLAVE 選択、64 ビットのウォッチドッグ値を割り込み禁止で読み書き、読み戻し中の取り消しと進捗、直接書き込みの前提条件の確認、一覧の切り詰めほか）。
+- **残った懸念（未対処）**：4 と 5 の組み合わせで、マウントのたびに FAT 全体を1セクタずつ2回読む。128 GB・32 KiB クラスタで約 65,000 回の PIO コマンドと見積もられ、`NGD:HELLO` まで何も出力しない。数十秒〜数分かかり、PC 側のタイムアウトに当たるおそれ。
+  → FAT をまとめて読んで FatFs の空き数を設定する方式が対策候補（後続の作業）。
+- 未検証：KOS の実コンパイラでは未ビルド（`fwxfer_kos.c` と変更した `dev_kos.c` は次の `kos.yaml` が初めて）。スタブのヘッダで `-fsyntax-only` は警告 0。GitHub 上の Linux CI もこれから。実機では何も動かしていない。DMA の代替経路と UA の再送は模擬だけ。
+- 信頼度：ホストテストで確認済み（Fable の実行）。
+- 関連：`tools/netgd-recv/`（25 ファイル＋`src/fwxfer.h`・`src/fwxfer_kos.c`）、`.github/workflows/build.yaml`。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -808,3 +828,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | F5（リセット後の再マウント）は RSTn の立ち下がりカウンタで判定し、SRST では動かさない | SRST は KOS の `g1ata` 初期化で出て両デバイスに効くため、再マウントすると書き込みが全部拒否される（R15・R16） | Opus |
 | 2026-11-20 | `netgd-recv` の修正（R48 の 11 項目・CI の失敗・テストが固まる件）を途中で Sonnet から Fable に引き継ぐ。Sonnet の未コミットの変更は残し、Fable が取捨する | 固まった原因の究明はデバッグで Fable の担当。中核に無限ループがあれば実機でも固まるため | ユーザー |
 | 2026-11-20 | SLB 0 と CLB 0 が1ビット違いである危険は受け入れる。常駐部はロックの後に GLB で読み直し、外れていれば次の起動で再ロックする | SLB の引数はどちらの読み方でも領域0を指す 0 しか安全でない。CLB 0 はロックが外れるだけで壊れない（R61） | Opus |
+| 2026-11-20 | `netgd-recv` のホストテストは quick を既定、CI は full。作業フォルダはシステムの一時フォルダ | USB HDD 上での実行が遅さの原因だった。CI は `CI=true` で自動的に full（R62） | Fable 提案、Opus 承認 |

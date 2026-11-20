@@ -1,4 +1,4 @@
-/* Verified block writes: design 4.5 (F8) and 8 ("G1 bit flips", "SD write error").
+/* Verified block writes (and double-read single sectors, see ngblk_read): design 4.5 (F8) and 8 ("G1 bit flips", "SD write error").
    After every ATA write command the firmware's FNV-1a of the bytes it received is
    compared to ours; a mismatch rewrites the same LBAs (up to 3 times).  FAT and
    directory sectors go through here too: FatFs reaches the disk only via diskio.c. */
@@ -12,6 +12,15 @@ int ngblk_check_fnv;
 
 int ngblk_read(uint32_t lba, uint32_t n, void *buf)
 {
+    static uint8_t again[512] __attribute__((aligned(32)));
+    if (n == 1) {
+        for (int attempt = 0; attempt < NGBLK_READ_TRIES; attempt++) {
+            if (ngdev_read(lba, 1, buf) != 0 || ngdev_read(lba, 1, again) != 0) { ngblk_stats.io_retries++; continue; }
+            if (!memcmp(buf, again, 512)) return 0;
+            ngblk_stats.read_mismatches++;
+        }
+        return -1;
+    }
     for (int attempt = 0; attempt < NGBLK_MAX_RETRY; attempt++) {
         if (ngdev_read(lba, n, buf) == 0) return 0;
         ngblk_stats.io_retries++;

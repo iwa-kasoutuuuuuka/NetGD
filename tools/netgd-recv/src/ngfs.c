@@ -170,7 +170,31 @@ int ngfs_default_image(char *out, size_t n)
     return 0;
 }
 
-static int under(const char *image, const char *prot)
+/* Canonical form of a folder path for comparisons: components separated by single '/', no leading
+   or trailing '/', "//" collapsed, "." dropped, and trailing spaces/dots of each component removed
+   (FatFs ignores them, so "01." and "01 " name folder 01).  Case is folded by the compare. */
+void ngfs_norm_path(const char *in, char *out, size_t n)
+{
+    size_t o = 0;
+    const char *p = in;
+    if (!n) return;
+    while (*p) {
+        const char *s, *e;
+        size_t l;
+        while (*p == '/' || *p == '\\') p++;
+        s = p;
+        while (*p && *p != '/' && *p != '\\') p++;
+        e = p;
+        while (e > s && (e[-1] == ' ' || e[-1] == '.')) e--;
+        l = (size_t)(e - s);
+        if (!l) continue;
+        if (o && o + 1 < n) out[o++] = '/';
+        for (size_t i = 0; i < l && o + 1 < n; i++) out[o++] = s[i];
+    }
+    out[o] = 0;
+}
+
+static int under(const char *image, const char *prot)       /* both normalized, prot non-empty */
 {
     size_t n = strlen(prot);
     if (strlen(image) < n) return 0;
@@ -185,9 +209,14 @@ static int under(const char *image, const char *prot)
 
 int ngfs_protected(const char *image)
 {
-    char def[NG_PATH_MAX + 1];
-    if (under(image, "01")) return 1;
-    if (ngfs_default_image(def, sizeof def) && under(image, def)) return 1;
+    char def[NG_PATH_BUF], nd[NG_PATH_BUF], ni[NG_PATH_BUF];
+    ngfs_norm_path(image, ni, sizeof ni);
+    if (!ni[0]) return 1;                                    /* the root: never an image folder */
+    if (under(ni, "01")) return 1;
+    if (ngfs_default_image(def, sizeof def)) {
+        ngfs_norm_path(def, nd, sizeof nd);
+        if (nd[0] && under(ni, nd)) return 1;
+    }
     return 0;
 }
 
@@ -471,29 +500,33 @@ const char *ngfs_classify(const char *dir)
     return fin ? "complete" : "other";
 }
 
+#define LIST_BATCH 16
 static ng_err_t list_rec(const char *rel, int depth, ng_list_cb cb, void *ctx)
 {
     char dir[NG_PATH_BUF], child[NG_PATH_BUF];
-    DIR d;
-    FILINFO fno;
     ngfs_dirpath(rel, dir, sizeof dir);
-    if (f_opendir(&d, dir) != FR_OK) return NG_E_NOENT;
-    /* collect this level first: recursion would reuse the FatFs window anyway */
-    {
-        char list[32][NG_NAME_MAX + 1];
-        int n = 0;
-        while (n < 32 && rd(&d, &fno) == FR_OK && fno.fname[0])
-            if (fno.fattrib & AM_DIR) snprintf(list[n++], sizeof list[0], "%s", fno.fname);
+    /* Sub-folders are taken LIST_BATCH at a time (the FatFs window and the stack are small; recursion
+       would reuse the window anyway): re-open the directory and skip what was already reported. */
+    for (int skip = 0;; skip += LIST_BATCH) {
+        char list[LIST_BATCH][NG_NAME_MAX + 1];
+        DIR d;
+        FILINFO fno;
+        int n = 0, seen = 0;
+        if (f_opendir(&d, dir) != FR_OK) return skip ? NG_E_IO : NG_E_NOENT;
+        while (n < LIST_BATCH && rd(&d, &fno) == FR_OK && fno.fname[0])
+            if ((fno.fattrib & AM_DIR) && seen++ >= skip) snprintf(list[n++], sizeof list[0], "%s", fno.fname);
         f_closedir(&d);
         for (int i = 0; i < n; i++) {
             const char *st;
+            char cdir[NG_PATH_BUF];
             if (rel[0] && strcmp(rel, "/")) snprintf(child, sizeof child, "%s/%s", rel, list[i]);
             else snprintf(child, sizeof child, "%s", list[i]);
-            ngfs_dirpath(child, dir, sizeof dir);
-            st = ngfs_classify(dir);
+            ngfs_dirpath(child, cdir, sizeof cdir);
+            st = ngfs_classify(cdir);
             cb(ctx, st, child);
             if (!strcmp(st, "other") && depth + 1 < NG_PATH_PARTS) list_rec(child, depth + 1, cb, ctx);
         }
+        if (n < LIST_BATCH) break;
     }
     return NG_OK;
 }
@@ -525,6 +558,33 @@ ng_err_t ngfs_alloc_file(const char *path, uint32_t size, int allow_frag, int *f
     return ngfs_map(r);
 }
 
+/* The direct-write path trusts that the file is ONE run of clusters.  Check it on the card: the
+   start cluster is a data cluster, the run lies inside the volume, and the FAT chain really is
+   sclust, sclust+1, ... ending in an end-of-chain mark.  0 ok, 1 not usable (*why says why), -1 read error. */
+static int check_contiguous(DWORD sclust, uint32_t size, const char **why)
+{
+    uint32_t cb = (uint32_t)g_fs.csize * 512;
+    uint64_t ncl = ((uint64_t)size + cb - 1) / cb;
+    static uint8_t fatsec[512] __attribute__((aligned(32)));
+    LBA_t cur = (LBA_t)0 - 1;
+    if (sclust < 2) { *why = "start cluster below 2"; return 1; }
+    if ((uint64_t)sclust + ncl > g_fs.n_fatent) { *why = "run extends beyond the volume"; return 1; }
+    for (uint64_t k = 0; k < ncl; k++) {
+        DWORD c = sclust + (DWORD)k, v;
+        LBA_t sec = g_fs.fatbase + c / 128;
+        const uint8_t *e;
+        if (sec != cur) {
+            if (ngblk_read((uint32_t)sec, 1, fatsec)) return -1;
+            cur = sec;
+        }
+        e = fatsec + (c % 128) * 4;
+        v = ((DWORD)e[0] | (DWORD)e[1] << 8 | (DWORD)e[2] << 16 | (DWORD)e[3] << 24) & 0x0FFFFFFF;
+        if (k + 1 < ncl) { if (v != c + 1) { *why = "FAT chain is not contiguous"; return 1; } }
+        else if (v < 0x0FFFFFF8) { *why = "FAT chain does not end after the last cluster"; return 1; }
+    }
+    return 0;
+}
+
 ng_err_t ngfs_wfile_open(ng_wfile_t *w, const char *path, uint32_t size, int contig)
 {
     FRESULT r;
@@ -535,6 +595,18 @@ ng_err_t ngfs_wfile_open(ng_wfile_t *w, const char *path, uint32_t size, int con
     r = f_open(&w->fp, path, contig ? FA_READ : (FA_READ | FA_WRITE));
     if (r != FR_OK) return ngfs_map(r);
     if (f_size(&w->fp) != size) { f_close(&w->fp); return NG_E_STATE; }
+    if (contig && size) {
+        const char *why = "";
+        int c = check_contiguous(w->fp.obj.sclust, size, &why);
+        if (c < 0) { f_close(&w->fp); return NG_E_IO; }
+        if (c > 0) {                    /* the checkpoint claimed more than the card shows: take the slow, safe path */
+            f_close(&w->fp);
+            w->note = why;
+            w->contig = contig = 0;
+            r = f_open(&w->fp, path, FA_READ | FA_WRITE);
+            if (r != FR_OK) return ngfs_map(r);
+        }
+    }
     if (contig) {
         if (size) {
             w->base_lba = clst2lba(w->fp.obj.sclust);
@@ -588,11 +660,13 @@ ng_err_t ngfs_wfile_close(ng_wfile_t *w)
     return NG_OK;
 }
 
-ng_err_t ngfs_file_crc(const char *path, uint32_t *size, uint32_t *crc, void *buf, uint32_t bufn)
+ng_err_t ngfs_file_crc(const char *path, uint32_t *size, uint32_t *crc, void *buf, uint32_t bufn,
+                       int (*tick)(void *ctx, uint32_t done), void *ctx)
 {
     FIL fp;
     FRESULT r = f_open(&fp, path, FA_READ);
-    uint32_t c = 0;
+    uint32_t c = 0, done = 0;
+    int stop = 0;
     if (r != FR_OK) return ngfs_map(r);
     *size = (uint32_t)f_size(&fp);
     for (;;) {
@@ -601,10 +675,12 @@ ng_err_t ngfs_file_crc(const char *path, uint32_t *size, uint32_t *crc, void *bu
         if (r != FR_OK) break;
         if (!got) break;
         c = ng_crc32(c, buf, got);
+        done += got;
+        if (tick && tick(ctx, done)) { stop = 1; break; }
     }
     f_close(&fp);
     *crc = c;
-    return ngfs_map(r);
+    return stop ? NG_E_STOP : ngfs_map(r);
 }
 
 /* ------------------------------------------------------------------ commit */

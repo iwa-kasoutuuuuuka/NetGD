@@ -1,9 +1,10 @@
 /* The command layer to the NetGD firmware: 0xE0 IMAGE_CTL on the primary (GD-ROM)
    device -- VERSION, MOUNT_NAME, and the F6 write session (design 4.2).
 
-   ALL of the firmware-facing packet layouts live in fwctl.c (KOS build) so that when
-   the firmware side settles (mcu/opengdemu/src/ide.rs), this is the one file to fix.
-   The host tests link test/fwctl_sim.c instead. */
+   ALL of the firmware-facing packet layouts live in fwctl.c so that when the firmware
+   side settles (mcu/opengdemu/src/ide.rs), this is the one file to fix.  fwctl.c sends
+   its packets through fw_xfer (fwxfer.h): fwxfer_kos.c on the Dreamcast, the packet-level
+   firmware model test/fwctl_sim.c in the host tests. */
 #ifndef NG_FWCTL_H
 #define NG_FWCTL_H
 #include <stdint.h>
@@ -36,8 +37,8 @@ typedef struct {
 /* 0 on success.  <0: no answer / not "OGDM" (a stock GDEMU, or no firmware). */
 int fw_version(ng_fwinfo_t *out);
 
-/* Eject the GD-ROM image and open the write session.  With a firmware lacking
-   FW_CAP_SESSION this falls back to an ATAPI START STOP UNIT eject. */
+/* Eject the GD-ROM image and open the write session (WSESSION_BEGIN).  There is no fallback
+   for a firmware without FW_CAP_SESSION: ng_session_open refuses to write to one. */
 int fw_session_begin(const ng_fwinfo_t *fw);
 
 /* End it.  mode 0: mount nothing, 1: previous selection / GDEMU.CFG default,

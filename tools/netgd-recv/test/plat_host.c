@@ -8,7 +8,7 @@
 char sim_pc_root[260] = "";
 int sim_quiet;
 int sim_stop_after_polls = -1;
-static int polls;
+int sim_polls;
 
 uint32_t ng_plat_millis(void) { return (uint32_t)((double)clock() * 1000.0 / CLOCKS_PER_SEC); }
 
@@ -28,7 +28,8 @@ void ng_plat_console(const char *line)
 
 int ng_plat_user_stop(void)
 {
-    return sim_stop_after_polls >= 0 && ++polls > sim_stop_after_polls;
+    sim_polls++;
+    return sim_stop_after_polls >= 0 && sim_polls > sim_stop_after_polls;
 }
 
 DWORD get_fattime(void) { return ((DWORD)(2025 - 1980) << 25) | (6u << 21) | (1u << 16); }

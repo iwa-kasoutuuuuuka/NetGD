@@ -1,4 +1,5 @@
 /* FatFs diskio on top of ngblk.c (verified writes) -> ngdev (KOS g1ata or a test image file). */
+#include <stddef.h>
 #include "ff.h"
 #include "diskio.h"
 #include "ngdev.h"
