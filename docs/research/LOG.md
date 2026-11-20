@@ -1172,6 +1172,21 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 
 ---
 
+### R94 Supra の AGM 製実行ファイルを VirusTotal にアップロードする試み（Opus、R93 の続き）
+
+- 担当：Opus。ユーザーの許可：「すべて上げる」（`af.exe`・`Supra.exe`・`Downloader.exe`・`yosys.exe` の4つ）。
+- 問い：AGM 製の4つを VirusTotal に上げて、約 70 エンジンの判定を得られるか。
+- 結論：**アップロードはできなかった。何も送っていない**。
+  - 組み込みブラウザにはファイルを上げる機能が無い。Claude in Chrome の `file_upload` は1回 10 MB までで、指定した `<input type=file>` の ref が要る。
+  - 1回 10 MB を超えるので、zip にした（Compress-Archive）：`af` 5,295,481 B、`Supra` 9,493,900 B、`Downloader` 9,513,972 B。`yosys` は zip で 19,477,052 B、7z（`-mx=9`、BCJ2）でも 11,418,336 B で、10 MB に入らない。
+  - VirusTotal のアップロード画面は shadow DOM の中にファイル欄があり、`find` と `read_page` からは見えない（隠しの textarea しか取れない）。`/old-browsers/` も同じ画面に戻される。3回試して止めた。
+  - API（`/api/v3/files`）は API キーが要るので、Claude からは使わない（キーの入力は禁止事項）。
+- 根拠：4ファイルの SHA-256 が R92 の値と一致（`sha256sum`）。ブラウザでの操作結果は上のとおり。
+- 信頼度：確認済み（アップロードしていないこと）。
+- 次の段階：ユーザーが自分で https://www.virustotal.com/gui/home/upload に `scratchpad/supra/x/bin/` の3つと `map/bin/yosys.exe` をそのまま上げる（Web 画面は 650 MB まで受け付ける）。結果は新しい項目として記録する。
+- Opus による検証：該当なし（Opus 自身の作業）。
+- 関連：`docs/research/supra-static-analysis.md`、R92、R93。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -1206,3 +1221,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | 取り決めに GPBR0 の「復旧中」の値・`LOCK_UNKNOWN`・書き直しの上限3回を追加し、`IFACE_GEN` は 1 のまま | 常駐部もロック済みの基板もまだ無い（R90、契約 §10） | Fable 提案、Opus 承認 |
 | 2026-11-20 | `ack_command` の取りこぼし（A-c の残り）は FPGA の変更が要るので保留 | スロット 0 の書き込みで後から来たコマンドも消える（R90） | Opus |
 | 2026-11-20 | Supra は実行せず静的解析だけ。動かすなら隔離した環境で `af.exe`・`yosys.exe` だけ、urjtag（`inpout32` のカーネルドライバ）は使わない | 署名が無く公式の配布物との一致も未確認（R92） | Opus |
+| 2026-11-21 | VirusTotal への Supra のアップロードはユーザーが自分の手で行う | 拡張から shadow DOM のファイル欄に届かず、`yosys.exe` は 10 MB の上限も超える。API キーを Claude が扱うことはできない（R94） | Opus |
