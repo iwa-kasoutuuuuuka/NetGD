@@ -369,6 +369,34 @@ above.
 
 Note the file name is `GDEMU.CFG`, 8.3 — not `OPENGDEMU.CFG`.
 
+4. Optional `/GDEMU.INI` at the root: the original GDEMU's settings file. It is
+   re-read every time the card is scanned (power-on, a LOAD after an eject, a
+   host hard reset that remounts). A card without one keeps the previous
+   settings. `key=value` lines, keys case-insensitive, `#` or `;` start a
+   comment, `[sections]` are skipped.
+
+   ```
+   reset_goto=1
+   open_time=500
+   detect_time=250
+   ```
+
+   | key | range (default) | what NetGD does |
+   |-----|-----------------|-----------------|
+   | `reset_goto` | 0–9999 (0 = off) | When the console is hard-reset (the G1 RSTn line, not a soft SRST), mount image number N. If N has no image the disc is left as it is. If N is already mounted nothing happens. Above 9999 means off. |
+   | `open_time` | 150–5000 ms (500) | After a disc swap (the `0x52` command, the front-panel button), the drive answers NOT READY / MEDIUM NOT PRESENT for this long, then ready. Out-of-range values are clamped. |
+   | `detect_time` | 150–5000 ms (250) | Added to `open_time`: the total NOT READY time after a swap is `open_time + detect_time`. |
+   | `image_tests`, `high_speed`, `read_limit` | | Read and ignored (logged). Not implemented. |
+
+   `open_time` / `detect_time` only take effect for the keys the file sets: with
+   no `GDEMU.INI`, a swap has no extra delay (unlike the original, whose
+   built-in defaults are 500 / 250 ms). A normal LOAD after an eject and the
+   power-on mount are not delayed. Unknown keys are ignored.
+
+   How it combines with `GDEMU.CFG`: `GDEMU.CFG` `image=` still chooses the
+   power-on image (then folder `01`); `GDEMU.INI` only adds behaviour. A
+   `reset_goto` reset overrides whichever image was mounted.
+
 ---
 
 ## 10. Install the board and verify

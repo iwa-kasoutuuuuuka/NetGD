@@ -319,6 +319,57 @@ static mut LFN_STORE: [u8; 4 * MAX_NAME_CHARS] = [0; 4 * MAX_NAME_CHARS];
 const CONFIG_NAME: &str = "GDEMU.CFG";
 const MAX_CONFIG_BYTES: usize = 512;
 
+/// The original GDEMU's settings file, same place, same 8.3 rule.
+const INI_NAME: &str = "GDEMU.INI";
+
+/// Scratch for reading the two root config files. Never both at once: each
+/// reader finishes with it before returning.
+static mut CFG: [u8; MAX_CONFIG_BYTES] = [0; MAX_CONFIG_BYTES];
+
+/// The settings from the card's `GDEMU.INI`, as last read.
+static mut INI: gamecfg::ini::Ini = gamecfg::ini::Ini::new();
+
+/// The current `GDEMU.INI` settings (official defaults until a card with one
+/// is seen).
+pub fn ini() -> gamecfg::ini::Ini {
+    unsafe { *core::ptr::addr_of!(INI) }
+}
+
+/// Re-read `GDEMU.INI` from the card root. Called whenever the card is
+/// (re)scanned, as the original firmware re-reads it on card detection. A
+/// card without the file leaves the previous settings in place.
+fn reload_ini(num_blocks: u32) {
+    let dev = HsmciBlockDevice::new();
+    dev.set_num_blocks(num_blocks);
+    let mgr = VolumeManager::new(dev, crate::blockdev::DummyClock);
+    let Ok(volume) = mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) else { return };
+    let Ok(root) = volume.open_root_dir() else { return };
+    let Ok(name) = ShortFileName::create_from_str(INI_NAME) else { return };
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG) };
+    let Ok(len) = read_file_to_buf(&root, &name, buf) else {
+        info!("gdi: no GDEMU.INI, keeping the previous settings");
+        return;
+    };
+    // Non-UTF-8 bytes (a Shift-JIS comment) cut the text there rather than
+    // discarding the whole file.
+    let text = match core::str::from_utf8(&buf[..len]) {
+        Ok(t) => t,
+        Err(e) => core::str::from_utf8(&buf[..e.valid_up_to()]).unwrap_or(""),
+    };
+    let ini = gamecfg::ini::Ini::parse(text);
+    info!(
+        "gdi: GDEMU.INI open_time={} detect_time={} reset_goto={} swap_delay={}ms",
+        ini.open_time, ini.detect_time, ini.reset_goto, ini.swap_delay_ms()
+    );
+    if ini.unknown != 0 || ini.read_limit != 0 || ini.high_speed || !ini.image_tests {
+        info!(
+            "gdi: GDEMU.INI: image_tests/high_speed/read_limit are not implemented ({} unknown keys)",
+            ini.unknown
+        );
+    }
+    unsafe { INI = ini };
+}
+
 /// How a directory entry is named for matching and display.
 ///
 /// The long filename when there is one, else the 8.3 name. A directory whose
@@ -394,7 +445,6 @@ pub fn configured_name(num_blocks: u32) -> Option<String<MAX_NAME_CHARS>> {
     let root = volume.open_root_dir().ok()?;
     let name = ShortFileName::create_from_str(CONFIG_NAME).ok()?;
 
-    static mut CFG: [u8; MAX_CONFIG_BYTES] = [0; MAX_CONFIG_BYTES];
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG) };
     let len = read_file_to_buf(&root, &name, buf).ok()?;
 
@@ -472,6 +522,9 @@ fn remember(dir: ImagePath, name: &str) {
 /// walks the card or builds a list of images: which disc to serve is the
 /// host's business, and the host picks it by name over 0xE0.
 pub fn load_default(num_blocks: u32) -> Result<Gdi, GdiError> {
+    // A card scan: pick up GDEMU.INI first, so its settings are current for
+    // whatever mounts below. `GDEMU.CFG` `image=` still decides which image.
+    reload_ini(num_blocks);
     if let Some(name) = unsafe { &*core::ptr::addr_of!(SELECTED_NAME) }.clone() {
         match load_by_name(num_blocks, name.as_str()) {
             Ok(gdi) => return Ok(gdi),

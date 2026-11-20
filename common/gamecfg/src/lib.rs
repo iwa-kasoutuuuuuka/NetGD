@@ -40,6 +40,8 @@
 //! card. The extension has to be three characters for the name to be the same
 //! everywhere.
 
+pub mod ini;
+
 use heapless::String;
 
 /// The file this module looks for, in every image folder.

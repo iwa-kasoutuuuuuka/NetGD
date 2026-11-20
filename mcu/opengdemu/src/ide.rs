@@ -638,6 +638,26 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
     if RSTN_FALLS_SEEN.swap(falls, core::sync::atomic::Ordering::Relaxed) == falls {
         return;
     }
+    // GDEMU.INI `reset_goto=N`: a host hard reset switches to image N. An N
+    // with no image leaves the media as it is.
+    let goto = crate::gdi::ini().reset_goto;
+    if goto > 0 {
+        if media_present() && crate::gdi::mounted_number() == Some(goto) {
+            return;
+        }
+        match crate::gdi::folder_for_number(disk_sectors(), goto) {
+            Some(name) if crate::gdi::folder_has_image(disk_sectors(), name.as_str()) => {
+                info!("primary: hard reset -- reset_goto image {}", goto);
+                let ok = mount_named(state, "primary", name.as_str()).await;
+                // The host is rebooting anyway: no tray-cycle window.
+                unsafe { READY_AT = None };
+                if ok {
+                    return;
+                }
+            }
+            _ => warn!("primary: reset_goto {} has no image, leaving the media", goto),
+        }
+    }
     if media_present() {
         return;
     }
@@ -1006,6 +1026,7 @@ async fn rescan_media() -> bool {
 async fn load_media(state: &mut DeviceState) -> bool {
     crate::cdda::stop();
     let ok = rescan_media().await;
+    unsafe { READY_AT = None };
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     // The format nibble follows the mounted image (GDI -> GD-ROM, CDI -> CD-ROM
     // XA); without this a swap between the two shows the old one until reset.
@@ -1092,6 +1113,14 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
         }
     };
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
+    let delay = crate::gdi::ini().swap_delay_ms();
+    unsafe {
+        READY_AT = if ok && delay != 0 {
+            Some(Instant::now() + Duration::from_millis(delay as u64))
+        } else {
+            None
+        };
+    }
     // Same as `load_media`: the format nibble must follow the new image.
     IdeDevice::primary().reassert_disc_format();
     state.unit_attention = true;
@@ -1111,6 +1140,28 @@ async fn swap_media(state: &mut DeviceState, label: &'static str) -> bool {
 
 pub(crate) fn media_present() -> bool {
     MEDIA_PRESENT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// When a swapped-in disc stops reading NOT READY (GDEMU.INI `open_time` +
+/// `detect_time`, applied only for keys the card set). Only `ide_task` touches
+/// this. Non-blocking on purpose: the IDE task keeps answering commands during
+/// the window, so the host sees NOT READY rather than a stalled bus.
+static mut READY_AT: Option<Instant> = None;
+
+/// Mounted and past the swap window: what TEST UNIT READY, CD_READ and CD_PLAY
+/// answer on. (`media_present` is the ownership interlock and ignores it.)
+fn media_ready() -> bool {
+    if !media_present() {
+        return false;
+    }
+    match unsafe { READY_AT } {
+        Some(t) if Instant::now() < t => false,
+        Some(_) => {
+            unsafe { READY_AT = None };
+            true
+        }
+        None => true,
+    }
 }
 // Sega GD-ROM ATAPI extensions.
 const SEGA_REQ_STAT: u8 = 0x10;
@@ -1283,7 +1334,7 @@ async fn handle_packet(
         ATAPI_TEST_UNIT_READY => {
             // No data, just "I'm here" -- unless the tray is open.
             dev.set_irr(0x03);
-            if media_present() {
+            if media_ready() {
                 dev.set_error(0);
                 dev.set_status_intrq(STATUS_IDLE);
             } else {
@@ -1388,7 +1439,7 @@ async fn handle_packet(
             // cdda's SD reads would cut into an open CMD25. NOT READY /
             // MEDIUM NOT PRESENT, as TEST UNIT READY and CD_READ say.
             // (CD_SEEK only pauses or stops, which reads nothing.)
-            if !media_present() {
+            if !media_ready() {
                 info!("{}: CD_PLAY while ejected", label);
                 state.pending_sense_key = 0x02;
                 dev.set_irr(0x03);
@@ -1592,7 +1643,7 @@ async fn handle_cd_read(
         label, starting_fad, count, lba, dma
     );
 
-    if !media_present() {
+    if !media_ready() {
         // NOT READY / MEDIUM NOT PRESENT -- the host ejected and has not
         // loaded again, so it may be rewriting the filesystem right now.
         info!("{}: CD_READ while ejected", label);
