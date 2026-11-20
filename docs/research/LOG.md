@@ -1076,6 +1076,14 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 確認：discimg・fatmap・bootcore・fwimage（2 skip）・netgd-expect（1 skip）すべて通過。ファーム text：4E 120,360、2E 120,372、v60 66,796、**2E resident,sd-fast 122,120（512 B 丸めと CRC を入れて残り約 244 B）**。
 - 注：`link/*.x` の「スタックは約 2 KB」のコメントが古い（実際は約 8 KB 空き）。
 
+### R87 成果物の Google Drive への配置（Opus）
+- ユーザーの指示「成果物は Google Drive にも UP して」により、コミット 35285878（CI の Build and Test・KallistiOS とも成功）の成果物を、ユーザーの Drive の新しいフォルダ `NetGD` に置いた（非公開、共有設定は変えていない）。
+  - `firmware/`：`netgd-v55-4e`・`netgd-v55-2e`・`netgd-v60-2e-nobitstream` の `.bin` と `.elf`（`DEFMT_LOG=off` のリリースビルド、このPCでビルド）。resident 版は常駐部本体が未完成のため入れていない。
+  - `dreamcast/`：`netgd-recv.elf`・`netgd-fwupd.elf`・`gdprobe.elf`（KOS の CI 実行 44717854323 の成果物 `dreamcast-elfs`）。
+  - `docs/`：README.md・PLAN.md・LOG.md・user-tasks.html。最上位に `はじめに読む.txt`（各ファイルの説明、実機未検証、書き込む前に純正ファームをバックアップすること）。
+- Drive の 4E の .bin は Drive の判定で種類が別の表示になったが、内容（573,920 B）はそのまま。
+- 以後の更新：Drive は自動では同期しない。新しい版を置くときは同じフォルダに上書き（またはコミット名の付いたサブフォルダ）にする。
+
 ---
 
 ## 判断の記録（Decisions）
