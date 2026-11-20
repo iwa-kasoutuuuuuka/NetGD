@@ -15,7 +15,7 @@
 //! full read byte-identical to `lcg(seed, size)`, or the error that the
 //! reader gives today), `ideal=ok` (what a correct reader would do where
 //! today's behaviour is a refusal of something a real card can have: a known
-//! gap, see `known_gaps_*`), `note`.
+//! gap, see `former_gaps_*`), `note`.
 //!
 //! Not covered: a Windows-formatted card (no Windows formatter was usable
 //! without administrator rights when this was written).
@@ -314,12 +314,10 @@ fn fixtures_have_their_shapes() {
     assert_eq!(u16::from_le_bytes([c.sectors[&0][0x0B], c.sectors[&0][0x0C]]), 4096);
 }
 
-/// Known gaps: things a real card can have that the reader refuses today
-/// (each is a finding in the report; flip the fixture's `expect` and drop its
-/// `ideal=` when the reader is changed). Runs with `--ignored`.
+/// Former gaps (cards the reader used to refuse although they are legal
+/// FAT32; the fixtures carry `ideal=ok`): they must read correctly now.
 #[test]
-#[ignore = "known gaps: the reader refuses cards that are legal FAT32 (see ideal= in the fixtures)"]
-fn known_gaps_should_read_correctly() {
+fn former_gaps_read_correctly() {
     let mut bad = vec![];
     let mut n = 0;
     for name in all_names() {
@@ -332,10 +330,26 @@ fn known_gaps_should_read_correctly() {
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
-/// The gaps are exactly the ones documented: the fixtures that carry
-/// `ideal=ok` today behave as their `expect` says (so a fix flips these).
+/// The former gaps are exactly these two (a fixture marked `ideal=ok` whose
+/// `expect` is not `ok` would be an open gap: `check(.., false)` pins what
+/// the reader does today, `check(.., true)` what it should do).
 #[test]
-fn known_gaps_are_the_documented_ones() {
+fn former_gaps_are_the_documented_ones() {
     let gaps: Vec<String> = all_names().into_iter().filter(|n| meta(n).ideal_ok).collect();
     assert_eq!(gaps, ["fat_active1_stale0", "mbr_entry1"]);
+}
+
+/// A protective-MBR entry 0 is refused even when a FAT32 entry follows; an
+/// active-FAT number past the last FAT falls back to FAT 0.
+#[test]
+fn gpt_in_entry_0_and_bad_active_fat() {
+    let mut c = Sparse::load("mbr_entry1");
+    c.sectors.get_mut(&0).unwrap()[0x1BE + 4] = 0xEE;
+    let mut buf = [0u8; 512];
+    assert_eq!(Volume::mount(&mut c, &mut buf), Err(FatError::Gpt));
+
+    let mut c = Sparse::load("fat_active1_identical");
+    c.sectors.get_mut(&0).unwrap()[0x28] = 0x85; // active FAT 5 of 2: ignored
+    let v = Volume::mount(&mut c, &mut buf).unwrap();
+    assert_eq!(fetch(&mut c, &v, b"NETGD   OGF").unwrap(), lcg(7, 6000));
 }

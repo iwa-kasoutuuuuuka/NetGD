@@ -349,9 +349,9 @@ def main():
     vol = min_total(4)
     st1 = 2048 + small + 2048
     g.case("mbr_entry1", st1 + vol, 4, start=st1, ptype="c", pre_parts=[(2048, small, "83", False)], total_vol=vol, populate=basic,
-           files=both(6000), mount="NotFat32", ideal="ok",
+           files=both(6000), ideal="ok",
            desc="the FAT32 volume (0x0C) is MBR entry 1; entry 0 is a small type-0x83 partition",
-           note="mount only looks at MBR entry 0 (src/fat.rs Volume::mount)")
+           note="was a gap (reader only looked at MBR entry 0, NotFat32); fixed by scanning the four entries")
 
     # 4. 32 GB-class cards. SD Association layout of a 32 GB SDHC card:
     # 62333952 sectors, partition at 8192, 32 KiB clusters.
@@ -395,9 +395,9 @@ def main():
     g.case("fat_active1_identical", min_total(1), 1, populate=flags(0x0081, False), files=both(6000),
            desc="BPB 0x28 = 0x0081: mirroring off, active FAT 1; both FATs identical")
     g.case("fat_active1_stale0", min_total(1), 1, populate=flags(0x0081, True),
-           files=[(OGF, 7, 6000, "BadChain"), (BIT, 9, 3000, "BadChain")], ideal="ok",
+           files=both(6000), ideal="ok",
            desc="BPB 0x28 = 0x0081: active FAT 1 is current, FAT 0 is a stale copy from before the files were written (the spec lets the inactive FAT lag)",
-           note="the reader reads FAT 0 only (documented in src/fat.rs), so a card whose active FAT is 1 and whose FAT 0 lags is misread")
+           note="was a gap (reader read FAT 0 only, BadChain); fixed by honouring BPB 0x28")
     g.case("fat_single", min_total(2), 2, nfats=1, populate=basic, files=both(6000), desc="mkfs.fat -f 1: one FAT only")
     g.case("fat_res2", min_total(2), 2, reserved=2, populate=basic, files=both(6000), desc="mkfs.fat -R 2: the minimal reserved area FAT32 allows (no room for the backup BPB at sector 6)")
 

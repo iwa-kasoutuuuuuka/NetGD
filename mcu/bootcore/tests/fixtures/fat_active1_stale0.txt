@@ -1,6 +1,6 @@
 desc=BPB 0x28 = 0x0081: active FAT 1 is current, FAT 0 is a stale copy from before the files were written (the spec lets the inactive FAT lag)
 mount=ok
-file=NETGD   OGF:7:6000:BadChain
-file=NETGD   BIT:9:3000:BadChain
+file=NETGD   OGF:7:6000:ok
+file=NETGD   BIT:9:3000:ok
 ideal=ok
-note=the reader reads FAT 0 only (documented in src/fat.rs), so a card whose active FAT is 1 and whose FAT 0 lags is misread
+note=was a gap (reader read FAT 0 only, BadChain); fixed by honouring BPB 0x28

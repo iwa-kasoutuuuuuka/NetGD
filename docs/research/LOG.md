@@ -884,6 +884,13 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - サイズ：非圧縮 552,366 B（rodinia の `blinky16k.bin`、DDF256 で同じかは未確認）、LZMA は見積もり 55〜75 KB のまま（R66 の結論は変わらない）。
 - オーナーの判断：(1) WSL の venv に `yowasp-yosys` を入れてよいか（R39 の再現と Amaranth 側の確認だけ）、(2) Supra をオーナー側で取得するか（入れば基板なしで blinky → `fpga/agm/` → `synth_agm` → `af` → サイズ測定まで進められる）。
 
+### R70 常駐部の FAT リーダーの不足2つを修正（Sonnet）と CI の結果
+- 結論：`mcu/bootcore/src/fat.rs`：(1) BPB 0x28 のビット7が立ち、下位4ビットが FAT の数より小さければその FAT を読む（それ以外は FAT 0、別の FAT への再試行はしない）。
+  (2) LBA0 が BPB ならそのまま、項目0が 0xEE なら `Gpt`（従来どおり）、それ以外は MBR の4項目を順に試し、種別 0x0B/0x0C・開始が 0 でない・BPB が正しい最初の項目をマウント。どれも駄目なら最初の FAT32 候補のエラー（項目0だけのカードの結果は不変）。
+- 根拠：`cargo test` basics 19・fat 17・fat_real 39（ignore 0）・power_cut 7・update 17 すべて通過。新規テスト：項目0が 0xEE なら項目1が FAT32 でも `Gpt`、有効な FAT の番号が範囲外（0x85）なら FAT 0。
+- サイズ：`sizeprobe` で 5,902 B → 6,104 B（+202 B）。
+- CI：61dc290d で Build and Test と KallistiOS の両方が成功（**KOS の本物のコンパイラでの初めてのビルド成功**、`fwxfer_kos.c` を含む）。
+
 ---
 
 ## 判断の記録（Decisions）

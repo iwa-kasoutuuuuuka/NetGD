@@ -11,11 +11,13 @@
 //! * LBA 0 must end in 0x55 0xAA (same).
 //! * LBA 0 that already is a BPB (`EB`/`E9` jump, 512 bytes/sector, non-zero
 //!   sectors/cluster) is used as a "super floppy" (same).
-//! * Otherwise MBR partition entry 0 (same), **but only types 0x0B and
-//!   0x0C** (FAT32 CHS/LBA; what embedded-sdmmc accepts). Type 0xEE (GPT
-//!   protective MBR) is [`FatError::Gpt`]; every other type, and an `EXFAT`
-//!   boot sector, is [`FatError::NotFat32`]. fat.rs itself does not look at
-//!   the type byte; it looks at the BPB, as this code does too.
+//! * Otherwise the MBR: entry 0 of type 0xEE (GPT protective MBR) is
+//!   [`FatError::Gpt`]; else the four entries are tried in order and the
+//!   first of **type 0x0B or 0x0C** (FAT32 CHS/LBA) with a non-zero start
+//!   whose first sector is a valid FAT32 BPB is mounted (fat.rs only looks
+//!   at entry 0, and not at the type byte). With no usable entry the error
+//!   of the first FAT32-typed entry is returned, or [`FatError::NotFat32`]
+//!   if there is none; an `EXFAT` boot sector is also `NotFat32`.
 //! * BPB: FAT32 means `root_entries == 0`, `sectors_per_fat16 == 0`,
 //!   `sectors_per_fat32 != 0` (same, so FAT12/16 are refused). Additionally
 //!   refused here (fat.rs trusts them): sectors/cluster not a power of two
@@ -23,8 +25,10 @@
 //!   too small for the volume, sizes that overflow 32 bits.
 //! * The cluster count is **not** required to be >= 65525 (the Microsoft
 //!   rule for telling FAT32 from FAT16); the structural test above decides,
-//!   as in fat.rs. Only FAT 0 is read (the "only one FAT active" flag in
-//!   BPB offset 0x28 is ignored, as in fat.rs).
+//!   as in fat.rs. Only one FAT is read: FAT 0, or, when BPB 0x28 has bit 7
+//!   set (mirroring off) and its low nibble is below the number of FATs,
+//!   that active FAT (fat.rs always reads FAT 0). There is no fallback to
+//!   the other FAT.
 //! * The file is found by exact 8.3 name in the **root directory**. Long
 //!   name entries (attribute 0x0F), deleted entries, volume labels and
 //!   directories are skipped. A short name hidden behind a long one is found
@@ -136,31 +140,56 @@ impl Volume {
         if buf[510] != 0x55 || buf[511] != 0xAA {
             return Err(FatError::NoSignature);
         }
-        let base = if looks_like_bpb(buf) {
-            0
-        } else {
-            let ty = buf[0x1BE + 4];
-            if ty == 0xEE {
-                return Err(FatError::Gpt);
-            }
+        if looks_like_bpb(buf) {
+            return Self::parse(buf, 0);
+        }
+        if buf[0x1BE + 4] == 0xEE {
+            return Err(FatError::Gpt);
+        }
+        // The first of the four entries that is FAT32 (0x0B/0x0C) and whose
+        // first sector is a valid FAT32 BPB. The error of the first
+        // candidate is what a card without any usable one reports.
+        let mut first_err = FatError::NotFat32;
+        let mut seen = false;
+        for i in 0..4usize {
+            read(dev, 0, buf)?;
+            let e = 0x1BE + 16 * i;
+            let ty = buf[e + 4];
             if ty != 0x0B && ty != 0x0C {
-                return Err(FatError::NotFat32);
+                continue;
             }
-            let start = rd32(buf, 0x1BE + 8);
-            if start == 0 {
-                return Err(FatError::BadBpb);
+            let start = rd32(buf, e + 8);
+            let r = if start == 0 {
+                Err(FatError::BadBpb)
+            } else {
+                read(dev, start, buf).and_then(|_| {
+                    if buf[510] != 0x55 || buf[511] != 0xAA {
+                        Err(FatError::NoSignature)
+                    } else if !looks_like_bpb(buf) {
+                        Err(FatError::NotFat32)
+                    } else {
+                        Self::parse(buf, start)
+                    }
+                })
+            };
+            match r {
+                Ok(v) => return Ok(v),
+                Err(FatError::Read) => return Err(FatError::Read),
+                Err(err) => {
+                    if !seen {
+                        first_err = err;
+                        seen = true;
+                    }
+                }
             }
-            read(dev, start, buf)?;
-            if buf[510] != 0x55 || buf[511] != 0xAA {
-                return Err(FatError::NoSignature);
-            }
-            if !looks_like_bpb(buf) {
-                return Err(FatError::NotFat32);
-            }
-            start
-        };
+        }
+        Err(first_err)
+    }
+
+    /// Validate the BPB in `buf` (the volume's first sector, at `base`).
+    fn parse(buf: &[u8; 512], base: u32) -> Result<Volume, FatError> {
         // exFAT keeps a jump and "EXFAT   " but zeroes the BPB, so it fails
-        // looks_like_bpb above; this catches a super-floppy exFAT whose
+        // looks_like_bpb; this catches a super-floppy exFAT whose
         // bytes happen to look like an MBR with a FAT32 type.
         if buf.get(3..11) == Some(&b"EXFAT   "[..]) {
             return Err(FatError::NotFat32);
@@ -202,8 +231,12 @@ impl Volume {
         if root < 2 || root > max_cluster {
             return Err(FatError::BadBpb);
         }
-        let fat_lba = base.checked_add(reserved);
-        let data_lba = fat_lba.and_then(|l| l.checked_add(spf * nfats));
+        // BPB 0x28: bit 7 set = mirroring off, the low nibble is the one
+        // active FAT; otherwise FAT 0 (a mirrored card has identical FATs).
+        let flags = rd16(buf, 0x28);
+        let active = if flags & 0x80 != 0 && (flags & 0x0F) < nfats { flags & 0x0F } else { 0 };
+        let fat_lba = base.checked_add(reserved).and_then(|l| l.checked_add(active * spf));
+        let data_lba = base.checked_add(reserved).and_then(|l| l.checked_add(spf * nfats));
         let (fat_lba, data_lba) = match (fat_lba, data_lba) {
             (Some(f), Some(d)) if d.checked_add(clusters * spc).is_some() => (f, d),
             _ => return Err(FatError::BadBpb),
