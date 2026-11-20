@@ -40,8 +40,12 @@ type RootDir<'a> = Directory<'a, HsmciBlockDevice, crate::blockdev::DummyClock, 
 /// and this part has roughly 2 KB of stack, so the tracks cannot live in a
 /// `Gdi` that is built as a local and returned by value. Hence [`TRACKS`].
 pub const MAX_TRACKS: usize = 99;
-/// Max GDI file size we'll bother reading. A 4-track GDI is ~80 bytes.
-const MAX_GDI_BYTES: usize = 4096;
+/// Max GDI file size we'll read. A 4-track GDI is ~80 bytes; a 99-track one
+/// with Redump-length names (up to 128 bytes, `discimg::MAX_NAME`) is about
+/// 11 KB. It is the first part of `ide::loader_scratch()` (14 KB, no new RAM);
+/// the rest is the FAT reader's block buffer. A file that fills it is refused
+/// (`parse_image`), not read short.
+const MAX_GDI_BYTES: usize = 12 * 1024;
 
 #[derive(Clone, Format)]
 pub struct Track {
@@ -680,6 +684,22 @@ pub fn folder_has_image(num_blocks: u32, name: &str) -> bool {
     walk_to(&mut d, name, &mut path).is_ok() && locate_image(&d).is_some()
 }
 
+/// Whether `part` -- bytes the host or `GDEMU.CFG` sent, each widened to a
+/// char -- spells `name`, a long name held as UTF-8. The ordinary comparison
+/// sees two chars where the card has one non-ASCII char, so it never matches a
+/// non-ASCII folder. ASCII case-insensitive, no buffer.
+fn widened_eq(name: &str, part: &str) -> bool {
+    let mut bytes = name.bytes();
+    for c in part.chars() {
+        let cp = c as u32;
+        match bytes.next() {
+            Some(b) if cp <= 0xFF && b.eq_ignore_ascii_case(&(cp as u8)) => {}
+            _ => return false,
+        }
+    }
+    bytes.next().is_none()
+}
+
 /// Resolve `want` (components split by `/`) from `d`, one level at a time
 /// against the long names, leaving `d` in the folder and the 8.3 path in
 /// `path`. Shared by `load_by_name` and `folder_has_image`.
@@ -698,7 +718,9 @@ fn walk_to(d: &mut RootDir<'_>, want: &str, path: &mut ImagePath) -> Result<(), 
                 return;
             }
             let name = entry_name(entry, long);
-            if gamecfg::resolve(core::iter::once(name.as_str()), part).is_some() {
+            if gamecfg::resolve(core::iter::once(name.as_str()), part).is_some()
+                || widened_eq(name.as_str(), part)
+            {
                 hit = Some(entry.name.clone());
             }
         });
@@ -845,6 +867,11 @@ pub fn parse_image(num_blocks: u32, which: &ImageRef) -> Result<Gdi, GdiError> {
             let scratch = crate::ide::loader_scratch();
             let (text, work) = scratch.split_at_mut(MAX_GDI_BYTES);
             let len = read_file_to_buf(&image_dir, &image_file, text)?;
+            if len >= MAX_GDI_BYTES {
+                // Parsing a cut-off list would drop the tracks after the cut.
+                warn!("gdi: descriptor is {} bytes or more; refusing it", MAX_GDI_BYTES);
+                return Err(GdiError::Parse);
+            }
             parse(&text[..len], &image_path, work)?
         }
     } else {
@@ -887,7 +914,8 @@ pub fn parse_image(num_blocks: u32, which: &ImageRef) -> Result<Gdi, GdiError> {
                 if entry.name.base_name() == t.filename.base_name()
                     && entry.name.extension() == t.filename.extension()
                 {
-                    t.sector_count = entry.size / t.sector_size as u32;
+                    // `push` accepts only 2048/2336/2352; never divide by 0.
+                    t.sector_count = entry.size.checked_div(t.sector_size as u32).unwrap_or(0);
                     break;
                 }
             }
@@ -1178,12 +1206,30 @@ impl<'a> PoolSink<'a> {
     /// long-name walk is this firmware's own FAT reader), or the folder
     /// cannot be found.
     fn track_file(&mut self, name: &str) -> Result<ShortFileName, GdiError> {
-        if let Ok(n) = ShortFileName::create_from_str(name) {
-            return Ok(n);
-        }
         if name.is_empty() {
             return Err(GdiError::BadFilename);
         }
+        // Only a pure ASCII name can be taken as its own 8.3 form. Anything
+        // with a byte >= 0x80 may be the long name of a file whose alias is in
+        // the card's code page (cp932, cp437): look that up first.
+        let ascii = name.is_ascii();
+        if ascii {
+            if let Ok(n) = ShortFileName::create_from_str(name) {
+                return Ok(n);
+            }
+        }
+        match self.track_file_long(name) {
+            Ok(n) => Ok(n),
+            // No long-name entry: a name that is the file's own raw 8.3 bytes
+            // (no VFAT entry is kept for those) still opens as before.
+            Err(e) => match (ascii, ShortFileName::create_from_str(name)) {
+                (false, Ok(n)) => Ok(n),
+                _ => Err(e),
+            },
+        }
+    }
+
+    fn track_file_long(&mut self, name: &str) -> Result<ShortFileName, GdiError> {
         let (Some(dir), Some(work)) = (self.dir, self.work.as_deref_mut()) else {
             return Err(GdiError::BadFilename);
         };
@@ -1221,6 +1267,11 @@ impl discimg::TrackSink for PoolSink<'_> {
 
     fn push(&mut self, t: &discimg::TrackDesc) -> Result<(), GdiError> {
         let is_cdi = self.cdi.is_some();
+        // Sector sizes the data path knows. 0 would divide by zero in the size
+        // lookup and anything above 2352 slices past the sector buffer.
+        if !matches!(t.sector_size, 2048 | 2336 | 2352) {
+            return Err(if is_cdi { GdiError::BadCdi } else { GdiError::Parse });
+        }
         let filename = match &self.cdi {
             Some(name) => name.clone(),
             None => self.track_file(t.filename.as_str())?,

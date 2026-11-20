@@ -16,6 +16,10 @@ const HDR_AFTER_NAME: u32 = 31;
 const TRACK_DATA_LEN: u32 = 188;
 const SESSION_HDR_LEN: u32 = 7;
 
+/// Trailer version words (last 8 bytes: version, descriptor offset).
+const CDI_V3: u32 = 0x8000_0005;
+const CDI_V35: u32 = 0x8000_0006;
+
 /// FAD of LBA 0 (the 2-second pregap of the first track).
 const FAD_OFFSET: u32 = 150;
 
@@ -77,13 +81,32 @@ where
     }
     let mut rd = |off: u32, buf: &mut [u8]| read_at(off, buf).map_err(|_| Error::Read);
 
-    let mut w4 = [0u8; 4];
-    rd(file_len - 4, &mut w4)?;
-    let desc_len = rd_u32(&w4, 0);
-    if desc_len < 16 || desc_len > file_len {
-        return Err(Error::BadCdi);
-    }
-    let desc_start = file_len - desc_len;
+    // Trailer: version word, then the descriptor's offset (DiscJuggler; the
+    // same fields Flycast's `CDI_init` reads). v3.5 counts the offset back
+    // from the end of the file, v3 forward from its start. The track layout of
+    // the two is the same. v2 has a different per-track layout, which this
+    // parser does not know: rejected.
+    let mut tail = [0u8; 8];
+    rd(file_len - 8, &mut tail)?;
+    let version = rd_u32(&tail, 0);
+    let off = rd_u32(&tail, 4);
+    let desc_start = match version {
+        CDI_V35 => {
+            if off < 16 || off > file_len {
+                return Err(Error::BadCdi);
+            }
+            file_len - off
+        }
+        CDI_V3 => {
+            // The descriptor holds at least 16 bytes and ends at the trailer.
+            if off == 0 || off > file_len || file_len - off < 16 {
+                return Err(Error::BadCdi);
+            }
+            off
+        }
+        _ => return Err(Error::BadCdi),
+    };
+    let desc_len = file_len - desc_start;
 
     let mut one = [0u8; 1];
     rd(desc_start, &mut one)?;

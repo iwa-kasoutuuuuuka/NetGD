@@ -9,6 +9,8 @@ use defmt::{debug, info, warn};
 
 use embassy_atsam3::hsmci::{self, CmdError, Response};
 use embassy_time::{Duration, Timer};
+#[cfg(feature = "sd-bench")]
+use embassy_time::Instant;
 
 const ACMD: u8 = 0xC0; // marker — not really an opcode, just used here for logging
                        // clarity (real ACMDs use the same numeric encoding as their

@@ -7,7 +7,9 @@ use crate::{Error, Full, String, TrackDesc, TrackSink, Vec, VecSink, MAX_NAME, M
 ///
 /// The sink is cleared first, so a failed parse cannot leave the previous
 /// image's tail behind. The first line (the track count) must be a number but
-/// is otherwise ignored; blank lines are skipped; the pregap column and
+/// is otherwise ignored; blank lines (also before the count) are skipped; a
+/// track's number, control and sector size must fit u8/u8/u16 and the sector size
+/// must be 2048, 2336 or 2352 ([`Error::Parse`] otherwise); the pregap column and
 /// anything after it is ignored. A leading UTF-8 BOM is skipped. The file
 /// name is either a bare token or a double-quoted string, which may contain
 /// spaces (`"Track 01.bin"`); the quotes are not part of the name.
@@ -16,7 +18,14 @@ pub fn parse<S: TrackSink>(data: &[u8], sink: &mut S) -> Result<(), Error<S::Err
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
     let mut lines = SplitLines::new(data);
 
-    let header = lines.next().ok_or(Error::Parse)?;
+    // The track count: the first line that is not blank (the Python tool
+    // takes leading blank lines and spaces too).
+    let header = loop {
+        let l = trim(lines.next().ok_or(Error::Parse)?);
+        if !l.is_empty() {
+            break l;
+        }
+    };
     let _expected: u32 = parse_u32(header).map_err(|_| Error::Parse)?;
 
     while let Some(line) = lines.next() {
@@ -25,10 +34,18 @@ pub fn parse<S: TrackSink>(data: &[u8], sink: &mut S) -> Result<(), Error<S::Err
             continue;
         }
         let mut fields = SplitWS::new(trimmed);
-        let number = num(&mut fields)? as u8;
+        // No silent truncation: a value that does not fit its field is a
+        // malformed line, not a different track.
+        let number = u8::try_from(num(&mut fields)?).map_err(|_| Error::Parse)?;
         let start_lba = num(&mut fields)?;
-        let ctrl = num(&mut fields)? as u8;
-        let sector_size = num(&mut fields)? as u16;
+        let ctrl = u8::try_from(num(&mut fields)?).map_err(|_| Error::Parse)?;
+        let sector_size = u16::try_from(num(&mut fields)?).map_err(|_| Error::Parse)?;
+        // The data path divides by it and slices by it (cooked 2048, CDI-style
+        // 2336, raw 2352); anything else would be a divide by zero or a slice
+        // past the sector buffer.
+        if !matches!(sector_size, 2048 | 2336 | 2352) {
+            return Err(Error::Parse);
+        }
         let filename_raw = fields.next_name().ok_or(Error::Parse)?;
         let _ = fields.next(); // pregap, ignored
 

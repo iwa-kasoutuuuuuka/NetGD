@@ -46,6 +46,7 @@ fn build(data_len: usize, sessions: &[Vec<T>]) -> Vec<u8> {
     f.extend_from_slice(&[0u8; 7]);
     f.extend_from_slice(&[0u8; 56]);
     f.extend_from_slice(&[0x33u8; 40]);
+    f.extend_from_slice(&0x8000_0006u32.to_le_bytes());
     let len = (f.len() - desc_start + 4) as u32;
     f.extend_from_slice(&len.to_le_bytes());
     f
@@ -357,4 +358,51 @@ fn pregap_adjust(file: &[u8], number: u8, old_start: u32) -> u32 {
         }
     }
     unreachable!()
+}
+
+// ---- R89 C3: trailer version word ------------------------------------------
+
+/// The same descriptor re-stamped with another trailer: the version word and
+/// the offset (v3: from the start of the file, v3.5: from the end).
+fn with_trailer(good: &[u8], version: u32, offset: impl Fn(usize, usize) -> u32) -> Vec<u8> {
+    let n = good.len();
+    let desc_len = u32::from_le_bytes(good[n - 4..].try_into().unwrap()) as usize;
+    let desc_start = n - desc_len;
+    let mut f = good.to_vec();
+    f[n - 8..n - 4].copy_from_slice(&version.to_le_bytes());
+    f[n - 4..].copy_from_slice(&offset(desc_start, n).to_le_bytes());
+    f
+}
+
+#[test]
+fn v35_offset_counts_from_the_end() {
+    let good = mil_cd();
+    let f = with_trailer(&good, 0x8000_0006, |start, n| (n - start) as u32);
+    assert_eq!(f, good);
+    assert_eq!(parse_slice(&f).unwrap().0, 2);
+}
+
+#[test]
+fn v3_offset_counts_from_the_start() {
+    let v35 = parse_slice(&mil_cd()).unwrap();
+    let f = with_trailer(&mil_cd(), 0x8000_0005, |start, _| start as u32);
+    assert_eq!(parse_slice(&f).unwrap(), v35);
+    // The v3.5 reading of the same bytes is a different (wrong) place.
+    let g = with_trailer(&mil_cd(), 0x8000_0006, |start, _| start as u32);
+    assert!(parse_slice(&g).is_err());
+    // Offsets that leave no room for a descriptor.
+    let n = f.len() as u32;
+    for bad in [0, n - 15, n, n + 1] {
+        let f = with_trailer(&mil_cd(), 0x8000_0005, |_, _| bad);
+        let r = parse_slice(&f);
+        assert_eq!(r, Err(Error::BadCdi), "v3 offset {}", bad);
+    }
+}
+
+#[test]
+fn v2_and_unknown_versions_are_bad_cdi() {
+    for v in [0x8000_0004u32, 0x8000_0003, 0x8000_0007, 0, 0xFFFF_FFFF] {
+        let f = with_trailer(&mil_cd(), v, |start, n| (n - start) as u32);
+        assert_eq!(parse_slice(&f), Err(Error::BadCdi), "version {:#x}", v);
+    }
 }
