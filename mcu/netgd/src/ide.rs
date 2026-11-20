@@ -28,8 +28,9 @@
 //!   media is loaded, so the host has to eject first. Vendor `0xF9` is the
 //!   firmware updater entry point (`fwupdate.rs`).
 //!
-//! Generic ATA commands (NOP, DEVICE RESET, SET FEATURES) are acknowledged on
-//! both devices. Anything else is ABRTed and logged. Every command, known or
+//! Generic ATA commands (NOP, SET FEATURES) are acknowledged on both devices;
+//! DEVICE RESET and PACKET only on the packet device. Anything else is ABRTed
+//! and logged. Every command, known or
 //! not, is logged via defmt so bus traffic can be followed during bring-up.
 
 use core::ptr::{read_volatile, write_volatile};
@@ -102,6 +103,9 @@ const STATUS_ERR: u8 = 0x01;
 
 // Error register bits (we only model ABRT for now).
 const ERR_ABRT: u8 = 0x04;
+/// ATAPI Error register for a CD_READ the card failed under: sense key 3
+/// (MEDIUM ERROR) in the high nibble, plus ABRT.
+const ERR_MEDIUM: u8 = 0x30 | ERR_ABRT;
 
 // ATA / ATAPI command opcodes we handle (or explicitly ABRT).
 const CMD_NOP: u8 = 0x00;
@@ -177,6 +181,31 @@ impl IdeDevice {
     /// The host reset the device since `clear_reset_seen`.
     fn reset_seen(&self) -> bool {
         (self.read(REG_HW_INFO) & HW_RESET_SEEN) != 0
+    }
+
+    /// The command being served is dead: the host reset the bus, or wrote a
+    /// new command to this device (R89 A1). Only meaningful after the current
+    /// command's `ack_command`. Both flags are sticky until the command loop
+    /// gets back to them, so a caller may ask after the fact.
+    ///
+    /// Whoever sees this must stop writing Status, the byte count and the
+    /// interrupt reason -- they belong to the new command now, or to the
+    /// FPGA's post-reset state -- and post no completion. The FPGA clears its
+    /// FIFOs on a Command write but leaves DMA mode and PIO flow control
+    /// armed, so `disarm` is the one write still owed.
+    ///
+    /// A latch with the Command register reading 0x00 is not a command (see
+    /// `complete`) and does not count.
+    fn aborted(&self) -> bool {
+        let hw = self.read(REG_HW_INFO);
+        hw & HW_RESET_SEEN != 0
+            || (hw & HW_CMD_PEND != 0 && (self.read(REG_CMD_FEAT) & 0xFF) != 0)
+    }
+
+    /// DMA mode off and both PIO flow controls released (slot 19 holds all
+    /// three).
+    fn disarm(&self) {
+        self.write(REG_DMA_MODE, 0);
     }
 
     /// Clear the sticky reset flag without disturbing COMMAND_PEND (slot 0
@@ -428,13 +457,29 @@ impl IdeDevice {
         self.write(REG_LBA_LOW_MID, (low_mid & 0xFF00) | (disc_format() | status) as u16);
     }
 
+    /// Words in the write FIFO (host -> MCU), for "has the host sent enough".
+    ///
+    /// The SMC samples the FPGA's counter asynchronously, so one read can be
+    /// torn across a carry (3 -> 4 read as 7, 255 -> 256 as 511) and claim
+    /// words that are not there yet (R89 A-a). The lower of two reads cannot:
+    /// a tear in both, in the same direction, would take two carries inside
+    /// two bus cycles.
     fn write_fifo_level(&self) -> u16 {
-        self.read(REG_WRITE_FIFO_LEVEL)
+        self.read(REG_WRITE_FIFO_LEVEL).min(self.read(REG_WRITE_FIFO_LEVEL))
     }
 
     #[allow(dead_code)]
     fn read_fifo_level(&self) -> u16 {
         self.read(REG_READ_FIFO_LEVEL)
+    }
+
+    /// Words in the read FIFO (MCU -> host), for "how much room is there":
+    /// the higher of two reads, for the reason `write_fifo_level` takes the
+    /// lower. A level torn low (0x800 -> 0x7FF read as 0) would report room
+    /// that is not there, and the FPGA does not refuse a push into a full
+    /// FIFO.
+    fn read_fifo_level_hi(&self) -> u16 {
+        self.read(REG_READ_FIFO_LEVEL).max(self.read(REG_READ_FIFO_LEVEL))
     }
 
     /// Log what the host has done on the bus since the last Command
@@ -591,6 +636,11 @@ pub async fn ide_task(
     secondary: IdeDevice,
 ) {
     info!("IDE task started (gdi: {})", gdi_ref().is_some());
+    // The interlock starts out as what the boot mount actually achieved. It
+    // used to start `true` whatever happened, so a card with no usable image
+    // answered TEST UNIT READY with "ready" and refused disk writes with
+    // "eject first" over an empty drive (R89 A4).
+    MEDIA_PRESENT.store(gdi_ref().is_some(), core::sync::atomic::Ordering::Relaxed);
 
     // Assert the mounted disc's format before serving anything. The FPGA's
     // reset state machine loads a fixed GD-ROM SECNR, and until now nothing
@@ -615,8 +665,17 @@ pub async fn ide_task(
         // stays idle and a swap still lands immediately.
         let _ = embassy_atsam3::gpio::pioa_wait_irq().await;
         service_hard_reset(&primary, &mut primary_state).await;
-        sweep(&primary, &mut primary_state, "primary", Role::Packet).await;
-        sweep(&secondary, &mut secondary_state, "secondary", Role::Disk).await;
+        // Until neither has a command waiting: MCU_IRQn is the OR of the two
+        // latches and the interrupt is its falling edge, so a command that
+        // reaches the primary while the secondary's is still being served
+        // makes no new edge and would sit until the next one (R89 A-c).
+        loop {
+            sweep(&primary, &mut primary_state, "primary", Role::Packet).await;
+            sweep(&secondary, &mut secondary_state, "secondary", Role::Disk).await;
+            if !primary.command_pending() && !secondary.command_pending() {
+                break;
+            }
+        }
         service_swap_request(&mut primary_state, "primary").await;
     }
 }
@@ -787,7 +846,12 @@ async fn handle(
             dev.set_status_intrq(STATUS_IDLE);
             dev.ack_command();
         }
-        CMD_DEVICE_RESET => {
+        // DEVICE RESET and PACKET belong to the packet device. The disk ABRTs
+        // them below, as ATA has a non-packet device do: it used to load the
+        // ATAPI signature into the disk's registers and stop CD audio on
+        // 0x08, and hold BSY for ten seconds waiting for a CDB on 0xA0 (the
+        // FPGA only opens the CDB phase on the primary) (R89 A7).
+        CMD_DEVICE_RESET if role == Role::Packet => {
             crate::cdda::stop();
             // Soft reset: reload ATAPI signature, return to idle, no error.
             dev.load_atapi_signature();
@@ -858,7 +922,7 @@ async fn handle(
         crate::fwupdate::CMD_FW if role == Role::Disk => {
             handle_fw_command(dev, label, snap);
         }
-        CMD_PACKET => {
+        CMD_PACKET if role == Role::Packet => {
             handle_packet(dev, state, label).await;
             // ack_command happens inside handle_packet after the packet
             // protocol fully completes.
@@ -950,6 +1014,23 @@ pub fn size_disk_from_mbr(csd_blocks: u32) {
     if mbr[510] != 0x55 || mbr[511] != 0xAA {
         warn!("disk sizing: no MBR signature, using CSD value {}", csd_blocks);
         set_disk_sectors(csd_blocks);
+        return;
+    }
+    // A card with no partition table: sector 0 is the volume's own boot
+    // sector, and what sits where the partition entries would be is boot
+    // code. Same test as `fat::looks_like_bpb` (private there). The volume
+    // is the card, so take its sector count (16-bit field, else 32-bit).
+    if (mbr[0] == 0xEB || mbr[0] == 0xE9) && mbr[0x0B] == 0 && mbr[0x0C] == 2 && mbr[0x0D] != 0 {
+        let mut n = u16::from_le_bytes([mbr[0x13], mbr[0x14]]) as u32;
+        if n == 0 {
+            n = u32::from_le_bytes([mbr[0x20], mbr[0x21], mbr[0x22], mbr[0x23]]);
+        }
+        if n == 0 {
+            n = csd_blocks;
+        }
+        info!("disk sizing: no partition table, {} blocks from the boot sector (CSD said {})",
+              n, csd_blocks);
+        set_disk_sectors(n);
         return;
     }
     let mut end = 0u32;
@@ -1332,6 +1413,11 @@ async fn handle_packet(
     let packet = match recv_packet(dev).await {
         Ok(p) => p,
         Err(()) => {
+            // A reset, or a new command to this device, while the CDB was
+            // owed: Status is no longer this command's to write (R89 A1, A-b).
+            if dev.aborted() {
+                return;
+            }
             warn!("{}: timeout waiting for ATAPI packet", label);
             dev.set_error(ERR_ABRT);
             dev.set_status_intrq(STATUS_IDLE_ERR);
@@ -1479,6 +1565,10 @@ async fn handle_packet(
             // log the bytes; we don't yet act on them.
             let len = packet[4] as usize;
             let data = recv_data_out(dev, len).await;
+            // Cut off by a reset or a new command: no completion (R89 A-b).
+            if dev.aborted() {
+                return;
+            }
             info!(
                 "{}: SET_MODE got {} bytes: {=[u8]:02x}", label, data.len(), data.as_slice()
             );
@@ -1620,7 +1710,7 @@ async fn handle_packet(
             send_data_in(dev, &reply[..n as usize]).await;
         }
         SEGA_CD_READ | SEGA_CD_READ2 => {
-            handle_cd_read(dev, label, &packet, dma_requested, byte_limit).await;
+            handle_cd_read(dev, state, label, &packet, dma_requested, byte_limit).await;
         }
         OGDM_IMAGE_CTL => {
             handle_image_ctl(dev, state, label, &packet).await;
@@ -1672,6 +1762,7 @@ async fn handle_packet(
 /// 2-second pre-gap before track 1 in MSF/CD-DA terms).
 async fn handle_cd_read(
     dev: &IdeDevice,
+    state: &mut DeviceState,
     label: &'static str,
     packet: &[u8],
     dma: bool,
@@ -1740,7 +1831,11 @@ async fn handle_cd_read(
     }
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
     unsafe { STREAM_OK = false };
-    stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await;
+    if stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await {
+        // The card failed under the read: MEDIUM ERROR for the REQUEST SENSE
+        // that follows the error status the stream posted.
+        state.pending_sense_key = 0x03;
+    }
     // Only after a transfer that went all the way through (see `STREAM_OK`).
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
     if unsafe { STREAM_OK } {
@@ -2102,8 +2197,13 @@ async fn handle_image_ctl(
             if packet[2] == NO_SELECTION || name.is_empty() {
                 clear_mount_name();
                 crate::gdi::select_default();
-                swap_media(state, label).await;
-                finish_ok(dev);
+                // A failed mount is ILLEGAL REQUEST here as it is for a name
+                // (it used to report OK over an empty drive, R89 A8).
+                if swap_media(state, label).await {
+                    finish_ok(dev);
+                } else {
+                    finish_illegal(dev, state);
+                }
                 return;
             }
             let ok = mount_named(state, label, name.as_str()).await;
@@ -2295,8 +2395,13 @@ async fn handle_gdemu_cmd(
             let n = (packet[2] as u16) | ((packet[3] as u16) << 8);
             if n == 0 {
                 crate::gdi::select_default();
-                swap_media(state, label).await;
-                finish_ok(dev);
+                // "A failed mount is ILLEGAL REQUEST" holds for the default
+                // too (it used to report OK over an empty drive, R89 A8).
+                if swap_media(state, label).await {
+                    finish_ok(dev);
+                } else {
+                    finish_illegal(dev, state);
+                }
                 return;
             }
             // Resolve first: an unknown number, or a folder with no image in
@@ -2421,7 +2526,10 @@ async fn stream_from_sd(
     total_bytes: usize,
     dma: bool,
     byte_limit: u16,
-) {
+) -> bool {
+    // Returns whether the card failed under the read (an error status has
+    // been posted then, unless the command was already dead).
+    //
     // CD_READ_BUF is a staging window, not a size limit. Requests larger
     // than it are streamed: stage a chunk, push it, refill, repeat. The
     // host tolerates the refill gaps because negating DMARQ is flow
@@ -2444,12 +2552,20 @@ async fn stream_from_sd(
     // Stage the first chunk before arming DMA so the FIFO is primed and
     // DMARQ is already high when the host's channel starts.
     let first = count.min(stage_sectors);
-    if !stage_chunk(gdi, start_lba, first).await {
+    let staged = stage_chunk(gdi, start_lba, first).await;
+    // The card read can take long enough for the host to give up and reset
+    // the device or write a new command. Nothing is armed yet, and nothing
+    // below may be written over what the host has moved on to (R89 A1).
+    if dev.aborted() {
+        info!("  CD_READ dead before its data phase; no completion");
+        return false;
+    }
+    if !staged {
         warn!("stream_from_sd: SD read failed");
         dev.set_irr(0x03);
-        dev.set_error(ERR_ABRT);
+        dev.set_error(ERR_MEDIUM);
         dev.set_status_intrq(STATUS_IDLE_ERR);
-        return;
+        return true;
     }
 
     #[cfg(feature = "dma-pattern")]
@@ -2541,10 +2657,14 @@ async fn stream_from_sd(
     let mut pushed_bytes = primed + push_buf_to_fifo(dev, &buf[primed..]).await;
     let mut pushed_all = pushed_bytes == primed + first_rest;
     let mut sectors_done = first;
+    let mut sd_failed = false;
+    // A reset or a new command to this device ends the loop through
+    // `push_buf_to_fifo`, which then pushes nothing and returns short.
     while pushed_all && sectors_done < count {
         let this = (count - sectors_done).min(stage_sectors);
         if !stage_chunk(gdi, start_lba + sectors_done, this).await {
             warn!("stream_from_sd: SD read failed mid-stream at sector {}", sectors_done);
+            sd_failed = true;
             break;
         }
         #[cfg(feature = "dma-pattern")]
@@ -2618,6 +2738,10 @@ async fn stream_from_sd(
     #[cfg(feature = "fast-complete")]
     let (mut peak, mut pulled, mut zeros) = (level_after_prime, false, 0u8);
     for i in 0..200u32 {
+        // The host's Command write emptied the FIFO; that is not a drain.
+        if dev.aborted() {
+            break;
+        }
         let lvl = dev.read_fifo_level();
         #[cfg(feature = "fast-complete")]
         {
@@ -2644,9 +2768,13 @@ async fn stream_from_sd(
         }
         Timer::after(Duration::from_millis(1)).await;
     }
-    if dev.reset_seen() {
-        info!("  host reset during CD_READ; no completion");
-        return;
+    if dev.aborted() {
+        // Reset, or a new command to this device (R89 A1): the byte count,
+        // interrupt reason and Status are no longer ours. The FPGA dropped
+        // DMA mode itself on a reset but not on a Command write.
+        info!("  host reset or new command during CD_READ; no completion");
+        dev.disarm();
+        return false;
     }
     let leftover = dev.read_fifo_level();
     // Count against what we actually managed to stage, not the request: on a
@@ -2674,12 +2802,20 @@ async fn stream_from_sd(
     // the BIOS keeps thinking the transfer is still in flight.
     dev.set_atapi_byte_count((delivered.min(0xFFFE) & !1) as u16);
     dev.set_irr(0x03);
-    dev.complete(0, STATUS_IDLE);
+    if sd_failed {
+        // The card failed mid-stream: the host got fewer sectors than it
+        // asked for and must be told so, as the PIO path does. This used to
+        // complete with a clean status (R89 A2).
+        dev.complete(ERR_MEDIUM, STATUS_IDLE_ERR);
+    } else {
+        dev.complete(0, STATUS_IDLE);
+    }
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
     {
         unsafe { STREAM_OK = pushed_all && sectors_done == count };
     }
     info!("CD_READ complete ({} bytes)", delivered);
+    sd_failed
 }
 
 /// PIO CD_READ: the payload goes to the host in ATAPI DRQ blocks.
@@ -2702,7 +2838,7 @@ async fn stream_pio_from_sd(
     count: u32,
     total_bytes: usize,
     byte_limit: u16,
-) {
+) -> bool {
     let stage_sectors = stage_sectors_for(gdi, start_lba);
     // ATAPI: a limit of 0 (or 0xFFFF) means the host will take anything.
     let limit = match (byte_limit & !1) as usize {
@@ -2718,7 +2854,7 @@ async fn stream_pio_from_sd(
     let mut chunk_start = 0u32;
     let mut chunk_sectors = 0u32;
     let mut ok = true;
-    let mut reset = false;
+    let mut sd_failed = false;
 
     dev.set_irr(0x02);
     dev.set_error(0);
@@ -2732,11 +2868,20 @@ async fn stream_pio_from_sd(
             chunk_sectors = (count - sector).min(stage_sectors);
             if !stage_chunk(gdi, start_lba + sector, chunk_sectors).await {
                 warn!("stream_pio_from_sd: SD read failed at sector {}", sector);
+                sd_failed = true;
                 ok = false;
                 break;
             }
             let chunk = unsafe { &CD_READ_BUF[..(chunk_sectors as usize) * 2048] };
             hash = fnv1a(hash, chunk);
+        }
+        // Before announcing another block: a reset, or a new command to this
+        // device, since the last one (the card read above gives it time).
+        // The Status, byte count and DRQ written below would land on the new
+        // command's CDB phase (R89 A1).
+        if dev.aborted() {
+            ok = false;
+            break;
         }
         let off = sent - (chunk_start as usize) * 2048;
         let block = (total_bytes - sent)
@@ -2763,36 +2908,29 @@ async fn stream_pio_from_sd(
         }
         // The host owes us exactly `block` bytes of reads; the FPGA shows BSY
         // from the last pop until we re-arm DRQ above or complete below.
-        match wait_host(dev, || dev.read_fifo_level() == 0, 10_000).await {
-            Ok(()) => {}
-            Err(Stall::Reset) => { reset = true; break; }
-            Err(why) => {
-                if why == Stall::Timeout {
-                    warn!("  host left block {} undrained (lvl={}, {} of {} bytes sent)",
-                          blocks, dev.read_fifo_level(), sent, total_bytes);
-                    dev.log_host_activity("pio block stall");
-                }
-                ok = false;
-                break;
+        if let Err(why) = wait_host(dev, || dev.read_fifo_level() == 0, 10_000).await {
+            if why == Stall::Timeout {
+                warn!("  host left block {} undrained (lvl={}, {} of {} bytes sent)",
+                      blocks, dev.read_fifo_level(), sent, total_bytes);
+                dev.log_host_activity("pio block stall");
             }
+            ok = false;
+            break;
         }
         sent += block;
         blocks += 1;
     }
-    if reset || dev.reset_seen() {
-        info!("  host reset during CD_READ; no completion");
-        dev.set_pio_flow_control(false, false);
-        return;
-    }
     let leftover = dev.read_fifo_level() as usize * 2;
     let delivered = sent.saturating_sub(leftover);
-    if dev.command_pending() {
-        // The host moved on (its Command write is what emptied the FIFO).
-        // Nothing may be written to Status now -- see `complete`.
-        info!("  host abandoned CD_READ with a new command after {} of {} bytes; no completion",
+    if dev.reset_seen() || dev.command_pending() {
+        // The host reset the device, or moved on (its Command write is what
+        // emptied the FIFO). Nothing may be written to Status now -- see
+        // `complete` -- but flow control is still armed after a Command
+        // write, and would show BSY over the new command's CDB phase.
+        info!("  host reset or abandoned CD_READ after {} of {} bytes; no completion",
               delivered, total_bytes);
-        dev.set_pio_flow_control(false, false);
-        return;
+        dev.disarm();
+        return false;
     }
     // Hold BSY (and drop DRQ) *before* releasing flow control: the FPGA's
     // synthetic BSY only lasts while pio_rd_fc is set, so releasing first
@@ -2812,16 +2950,19 @@ async fn stream_pio_from_sd(
             unsafe { STREAM_OK = true };
         }
     } else {
-        dev.complete(ERR_ABRT, STATUS_IDLE_ERR);
+        dev.complete(if sd_failed { ERR_MEDIUM } else { ERR_ABRT }, STATUS_IDLE_ERR);
     }
     info!("CD_READ complete ({} bytes)", delivered);
+    sd_failed
 }
 
 
 /// Push `data` into the read FIFO via SAM3U DMAC, throttling on FIFO
-/// fullness. Returns `true` on success; `false` if the host stopped
-/// draining (FIFO full for >1 s) so the caller can wrap up the
-/// command early instead of stalling forever waiting on DRQ.
+/// fullness. Returns the bytes pushed: short if the host stopped draining
+/// (FIFO full for 5 s), reset the bus, or wrote a command to either device
+/// (see `wait_host`), so the caller can wrap up instead of stalling. A
+/// caller that gets a short count asks `IdeDevice::aborted` whether it may
+/// still write Status.
 ///
 /// DMAC pushes ~16+ MB/s steady-state, matching the DC's host DMA
 /// pull rate — without it the CPU `write_volatile` loop jittered with
@@ -2833,7 +2974,7 @@ async fn push_buf_to_fifo(dev: &IdeDevice, data: &[u8]) -> usize {
     let push_reg = unsafe { dev.base.add(REG_DATA_FIFO) };
     // Leave 4 words of headroom — DMAC writes immediately on arm,
     // we don't want to race the FPGA's r_rdy edge.
-    let room = || dev.fifo_depth_words().saturating_sub(dev.read_fifo_level() + 4) as usize;
+    let room = || dev.fifo_depth_words().saturating_sub(dev.read_fifo_level_hi() + 4) as usize;
     while i + 1 < data.len() {
         // A full FIFO drains in ~130 us at host DMA rate; sleeping here
         // cost a whole 1 ms tick per refill and was most of a CD_READ.
@@ -2971,6 +3112,12 @@ async fn recv_packet(dev: &IdeDevice) -> Result<[u8; PACKET_LEN_BYTES], ()> {
 /// command-complete (IRR=0x03 + STATUS_IDLE) status phase afterward.
 async fn recv_data_out(dev: &IdeDevice, len: usize) -> heapless::Vec<u8, 64> {
     let mut out = heapless::Vec::<u8, 64>::new();
+    // Nothing to receive: no data phase at all. Raising DRQ for it would
+    // have the host see "send me data" for a transfer of nothing, plus an
+    // interrupt ahead of the caller's completion one (R89 A8).
+    if len == 0 {
+        return out;
+    }
     let words = (len + 1) / 2;
     dev.set_atapi_byte_count(len as u16);
     // Interrupt Reason: data-out phase (I/O=0, C/D=0).
@@ -2995,6 +3142,13 @@ async fn recv_data_out(dev: &IdeDevice, len: usize) -> heapless::Vec<u8, 64> {
 }
 
 async fn send_data_in(dev: &IdeDevice, data: &[u8]) {
+    // An allocation length of 0 is "transfer nothing", not an error: go
+    // straight to the status phase. Opening a data phase for it raised DRQ
+    // over an empty FIFO and interrupted twice (R89 A8).
+    if data.is_empty() {
+        finish_ok(dev);
+        return;
+    }
     // Stage the response in the read FIFO. Pad to even byte count by
     // emitting a zero high byte if the response is odd-length.
     let mut i = 0;
@@ -3054,7 +3208,8 @@ async fn send_data_in(dev: &IdeDevice, data: &[u8]) {
         }
         // The FPGA holds the post-reset state; a completion write here
         // would only leave a stale status and IRQ for the host to find.
-        Err(Stall::Reset) => return,
+        // After a new command the interrupt reason is that command's too.
+        Err(Stall::Reset) | Err(Stall::OwnCommand) => return,
         _ => {}
     }
     // Command complete. IRR = 0x03 (C/D|I/O = 1|1) tells the host the
@@ -3231,6 +3386,13 @@ async fn handle_disk_read(
         warn!("{}: host left {} words in the read FIFO (dma={}, bus={:#04x}, strobes={})",
               label, dev.read_fifo_level(), dma, dev.read(17), dev.read(15));
     }
+    // Reset, or a new command to this device, at any point above: only let
+    // go of DMA mode / flow control (a Command write leaves them armed) and
+    // post nothing (R89 A1, A-b).
+    if dev.aborted() {
+        dev.disarm();
+        return;
+    }
     // BSY before flow control is released, so the host never sees DRQ with
     // an empty FIFO (see stream_pio_from_sd) -- unless the host has already
     // moved on, in which case Status belongs to its new command.
@@ -3285,6 +3447,9 @@ enum Stall {
     PeerCommand,
     /// The host reset the bus (hard reset or SRST) mid-transfer.
     Reset,
+    /// The host wrote a new command to *this* device (DEVICE RESET, or the
+    /// next PACKET over a transfer it gave up on).
+    OwnCommand,
 }
 
 /// `poll_until` for the waits where the host owes us something -- draining a
@@ -3296,6 +3461,16 @@ enum Stall {
 /// other device's BSY until this wait times out. Callers treat it like the
 /// host abandoning the transfer: give up, report ABRT, let the sweep move
 /// on to the command that is actually waiting.
+///
+/// A new command to *this* device ends the wait as well, and is reported
+/// even when `cond` holds: the FPGA empties both FIFOs on a Command write,
+/// which by itself satisfies "drained" and "has room", and a multi-chunk
+/// transfer used to carry on into the new command -- the next block's BSY,
+/// byte count and DRQ written over its CDB phase, stale sectors pushed into
+/// its FIFO (R89 A1). So `Ok` means the old command was still the current
+/// one. The caller must then post nothing (see `IdeDevice::aborted`); the
+/// command stays latched and the sweep serves it next. Every caller runs
+/// after its own `ack_command`, or the command being served would count.
 async fn wait_host(dev: &IdeDevice, mut cond: impl FnMut() -> bool, timeout_ms: u32)
     -> Result<(), Stall>
 {
@@ -3305,6 +3480,7 @@ async fn wait_host(dev: &IdeDevice, mut cond: impl FnMut() -> bool, timeout_ms: 
     let done = poll_until(
         || cond()
             || { reset = dev.reset_seen(); reset }
+            || dev.aborted()
             || { peer_cmd = peer.command_pending(); peer_cmd },
         timeout_ms,
     ).await;
@@ -3314,6 +3490,10 @@ async fn wait_host(dev: &IdeDevice, mut cond: impl FnMut() -> bool, timeout_ms: 
         warn!("{}: host reset the bus mid-transfer, abandoning this command",
               if dev.is_primary() { "primary" } else { "secondary" });
         Err(Stall::Reset)
+    } else if dev.aborted() {
+        info!("{}: host wrote a new command mid-transfer, abandoning this one",
+              if dev.is_primary() { "primary" } else { "secondary" });
+        Err(Stall::OwnCommand)
     } else if peer_cmd {
         warn!("{}: host issued a command to the other device mid-transfer, abandoning this one",
               if dev.is_primary() { "primary" } else { "secondary" });
@@ -3469,10 +3649,6 @@ async fn handle_disk_write(
     const WRITE_RUN: u32 = 32768;
     let mut block = [0u8; 512];
     let mut ok = true;
-    // Set when a host reset ended the wait: the FPGA holds the post-reset
-    // state, so nothing is completed (as `send_data_in` does), but the CMD25
-    // is still closed.
-    let mut reset = false;
     let mut done = 0u32; // sectors completed before the current run
     let mut fed = 0u32; // sectors the card accepted (F8 statistics)
     for (run_lba, run_n) in discimg::ata::runs(lba, count, WRITE_RUN) {
@@ -3495,13 +3671,16 @@ async fn handle_disk_write(
             // DMA needs none of this: DMARQ is driven from write-FIFO room, so
             // the flow control is in the FPGA and the host is already paced.
             if !dma && sector > 0 {
+                // Not over a reset or a new command that arrived while the
+                // card was programming the previous sector (R89 A1).
+                if dev.aborted() {
+                    ok = false;
+                    break;
+                }
                 dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
             }
 
             if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
-                if why == Stall::Reset {
-                    reset = true;
-                }
                 if why == Stall::Timeout {
                     // Sample what the FPGA holds while the host is polling. If
                     // this shows 0x58 while the DC reads 0xd8 off the bus, the
@@ -3527,17 +3706,24 @@ async fn handle_disk_write(
             dev.set_status(STATUS_BSY | STATUS_DRDY | STATUS_DSC);
             // The tail of a sector came back as one repeated word, which is what
             // popping a drained FIFO yields. Check the level actually covers the
-            // block before and after draining it.
-            let lvl_before = dev.write_fifo_level();
+            // block before draining it, and fail the write if it does not: the
+            // block would be the FIFO's stale last word, and it used to go to
+            // the card and be reported as written (R89 A8). The wait above saw
+            // a full sector, so a short level here means the FIFO was emptied
+            // under us (a Command write or a reset). The higher of two reads,
+            // so that a read torn low cannot fail a good write.
+            let lvl_before =
+                dev.read(REG_WRITE_FIFO_LEVEL).max(dev.read(REG_WRITE_FIFO_LEVEL));
+            if lvl_before < WORDS as u16 {
+                warn!("{}: sector {} of {}: level {} before pop (short!), failing the write",
+                      label, sector, count, lvl_before);
+                ok = false;
+                break;
+            }
             for i in 0..WORDS {
                 let w = dev.pop_write_fifo();
                 block[i * 2] = (w & 0xFF) as u8;
                 block[i * 2 + 1] = (w >> 8) as u8;
-            }
-            let lvl_after = dev.write_fifo_level();
-            if lvl_before < WORDS as u16 {
-                warn!("{}: sector {} of {}: level {} before pop, {} after (short!)",
-                      label, sector, count, lvl_before, lvl_after);
             }
             // F8: the bytes exactly as they left the FIFO.
             wsession().write_data(&block);
@@ -3565,10 +3751,12 @@ async fn handle_disk_write(
     } else {
         dev.set_pio_flow_control(false, false);
     }
-    wsession().write_end(ok && !reset, fed);
-    if reset {
+    // Every interrupted wait above cleared `ok`, a reset included.
+    wsession().write_end(ok, fed);
+    if dev.aborted() {
         // A completion write now would overwrite status/INTRQ inside the
-        // post-reset BSY window.
+        // post-reset BSY window, or land on the host's new command. The
+        // CMD25 has been closed all the same.
         return;
     }
     dev.complete(if ok { 0 } else { ERR_ABRT }, if ok { STATUS_IDLE } else { STATUS_IDLE_ERR });
@@ -3589,6 +3777,10 @@ async fn finish_pio_in(dev: &IdeDevice) {
         == Err(Stall::Timeout)
     {
         warn!("finish_pio_in: host never drained FIFO, abandoning");
+    }
+    // No completion over a reset or the host's next command (R89 A-b).
+    if dev.aborted() {
+        return;
     }
     dev.complete(0, STATUS_IDLE);
 }
