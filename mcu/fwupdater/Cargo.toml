@@ -24,3 +24,11 @@ lto = true
 codegen-units = 1
 # No unwinder, and no landing pads to pull one in.
 panic = "abort"
+
+[features]
+# A board with the resident boot region (docs/design/fw-bootloader.md): the
+# updater then accepts OGFW format 3 only (app at APP_BASE, descriptor and
+# trailer CRC). Off: format 2 only, exactly what ships today. main.rs does not
+# use the format-3 pieces yet (stage S5); `cargo test --lib --features resident`
+# runs the host tests of both.
+resident = []

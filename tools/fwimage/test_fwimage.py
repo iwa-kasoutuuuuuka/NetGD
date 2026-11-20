@@ -26,19 +26,40 @@ def vector_lines(name):
         return [l.split() for l in f if l.strip() and not l.startswith("#")]
 
 
-def make_elf(segments):
-    """Minimal ELF32-LE/ARM with one PT_LOAD per (paddr, bytes)."""
+def make_elf(segments, sections=()):
+    """Minimal ELF32-LE/ARM with one PT_LOAD per (paddr, bytes), and optional
+    section headers: `sections` is [(name, addr, size)], each lying inside one
+    of the segments (the section's file bytes are the segment's)."""
     n = len(segments)
     phoff = 52
     data_off = phoff + 32 * n
-    ehdr = b"\x7fELF" + bytes([1, 1, 1, 0]) + bytes(8)
-    ehdr += struct.pack("<HHIIIIIHHHHHH", 2, F.EM_ARM, 1, 0, phoff, 0, 0x05000000, 52, 32, n, 40, 0, 0)
     ph = b""
     body = b""
+    seg_off = []
     for paddr, data in segments:
+        seg_off.append(data_off + len(body))
         ph += struct.pack("<8I", F.PT_LOAD, data_off + len(body), paddr, paddr, len(data), len(data), 5, 4)
         body += data
-    return ehdr + ph + body
+    shoff = shnum = shstrndx = 0
+    tail = b""
+    if sections:
+        names = b"\0"
+        shdrs = [bytes(40)]
+        for name, addr, size in sections:
+            off = next(so + (addr - pa) for (pa, d), so in zip(segments, seg_off) if pa <= addr < pa + len(d))
+            shdrs.append(struct.pack("<10I", len(names), 1, 2, addr, off, size, 0, 0, 4, 0))
+            names += name.encode() + b"\0"
+        names += b".shstrtab\0"
+        str_off = data_off + len(body)
+        shdrs.append(struct.pack("<10I", len(names) - 10, 3, 0, 0, str_off, len(names), 0, 0, 1, 0))
+        tail = names
+        shoff = str_off + len(names)
+        shnum = len(shdrs)
+        shstrndx = shnum - 1
+        tail += b"".join(shdrs)
+    ehdr = b"\x7fELF" + bytes([1, 1, 1, 0]) + bytes(8)
+    ehdr += struct.pack("<HHIIIIIHHHHHH", 2, F.EM_ARM, 1, 0, phoff, shoff, 0x05000000, 52, 32, n, 40, shnum, shstrndx)
+    return ehdr + ph + body + tail
 
 
 def vtable(sp=0x20004000, reset=0x80101, nmi=0x80103, hf=0x80105):
@@ -73,11 +94,56 @@ class SharedVectors(unittest.TestCase):
         for part, hexs, want in rows:
             blk = bytes.fromhex(hexs)
             try:
-                F.check_header(F.parse_header(blk), part)
+                F.check_header(F.parse_header(blk, (2,)), part)
                 got = "OK"
             except F.FwImageError as e:
                 got = e.kind
             self.assertEqual(got, want, (part, hexs))
+
+    def test_header3(self):
+        rows = vector_lines("header3.txt")
+        self.assertGreaterEqual(len(rows), 20)
+        for part, hexs, want in rows:
+            blk = bytes.fromhex(hexs)
+            try:
+                F.check_header(F.parse_header(blk, (3,)), part)
+                got = "OK"
+            except F.FwImageError as e:
+                got = e.kind
+            self.assertEqual(got, want, (part, hexs))
+
+    def test_descriptor(self):
+        rows = vector_lines("desc.txt")
+        self.assertGreaterEqual(len(rows), 10)
+        for desc, n, want in rows:
+            try:
+                F.check_descriptor(bytes.fromhex(desc), int(n, 16))
+                got = "OK"
+            except F.FwImageError as e:
+                got = e.kind
+            self.assertEqual(got, want, (desc, n))
+
+    def test_trailer(self):
+        rows = vector_lines("trailer.txt")
+        self.assertGreaterEqual(len(rows), 8)
+        for data, want in rows:
+            try:
+                F.check_trailer(b"" if data == "-" else bytes.fromhex(data))
+                got = "OK"
+            except F.FwImageError as e:
+                got = e.kind
+            self.assertEqual(got, want, data)
+
+    def test_image3(self):
+        rows = vector_lines("image3.txt")
+        self.assertGreaterEqual(len(rows), 10)
+        for part, hexs, want in rows:
+            try:
+                F.validate_file(list(F.iter_images(bytes.fromhex(hexs), (3,))), part)
+                got = "OK"
+            except F.FwImageError as e:
+                got = e.kind
+            self.assertEqual(got, want, (part, hexs[:80]))
 
 
 class Images(unittest.TestCase):
@@ -199,6 +265,166 @@ class FromElf(unittest.TestCase):
                 self.assertEqual(F.main(["inspect", out, "--target", "4e"]), 1)  # BadTarget
 
 
+AB = F.APP_BASE
+
+
+def app_blob(size, sp=0x20004000, base=AB, desc=True):
+    """An app as linked: vectors, an unsealed NGAP descriptor at +0x100."""
+    b = bytearray(b"\xa5" * size)
+    b[:16] = struct.pack("<4I", sp, base + 0x101, base + 0x103, base + 0x105)
+    if desc:
+        b[0x100:0x120] = F.pack_descriptor(0)
+    return bytes(b)
+
+
+class Format3(unittest.TestCase):
+    def test_build_seals_and_roundtrips(self):
+        elf = make_elf([(AB, app_blob(0x1234)), (0x100000, b"\x33" * 700)])
+        imgs = F.images_from_elf(elf, "4e", 5, fmt=3)
+        code, bits = imgs
+        self.assertEqual((code.header.format, code.header.layout, code.header.dest), (3, 0x2000, AB))
+        self.assertEqual(code.header.length, 0x1400)  # 0x1234 + 4 rounded up to 512
+        self.assertEqual(code.payload[0x1234:0x13FC], b"\xff" * (0x13FC - 0x1234))
+        d = struct.unpack_from("<8I", code.payload, 0x100)
+        self.assertEqual(d[0], 0x5041474E)  # "NGAP" read as a little-endian word
+        self.assertEqual(d[2], 0x1400)
+        self.assertEqual(d[7], F.crc32(code.payload[0x100:0x11C]))
+        self.assertEqual(struct.unpack_from("<I", code.payload, 0x13FC)[0], F.crc32(code.payload[:0x13FC]))
+        self.assertEqual(bits.header.format, 3)
+        self.assertEqual(bits.header.length, 1024)
+        data = b"".join(i.pack() for i in imgs)
+        again = list(F.iter_images(data, (3,)))
+        self.assertEqual(again, imgs)
+        F.validate_file(again, "4e")
+        with self.assertRaises(F.FwImageError) as cm:  # a format-2 reader refuses it
+            list(F.iter_images(data, (2,)))
+        self.assertEqual(cm.exception.kind, "BadHeader")
+
+    def test_default_is_format_2(self):
+        elf = make_elf([(0x80000, vtable() + bytes(0x300))])
+        self.assertEqual(F.images_from_elf(elf, "2e")[0].header.format, 2)
+
+    def test_old_link_address_refused(self):
+        elf = make_elf([(0x80000, app_blob(0x400, base=0x80000))])
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(elf, "2e", fmt=3)
+        self.assertEqual(cm.exception.kind, "BadDest")
+        self.assertIn("APP_BASE", str(cm.exception))
+        # content straddling the boundary is refused too
+        elf = make_elf([(AB - 0x100, app_blob(0x800))])
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(elf, "2e", fmt=3)
+        self.assertEqual(cm.exception.kind, "BadDest")
+
+    def test_missing_descriptor_refused(self):
+        elf = make_elf([(AB, app_blob(0x400, desc=False))])
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(elf, "2e", fmt=3)
+        self.assertEqual(cm.exception.kind, "BadDescriptor")
+
+    def test_length_limit(self):
+        top = 0x20000 - 0x2000
+        F.images_from_elf(make_elf([(AB, app_blob(top - 4))]), "2e", fmt=3)  # fills the area exactly
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(make_elf([(AB, app_blob(top - 3))]), "2e", fmt=3)  # trailer no longer fits
+        self.assertEqual(cm.exception.kind, "BadLength")
+        with self.assertRaises(F.FwImageError) as cm:
+            F.images_from_elf(make_elf([(AB, app_blob(top + 0x200))]), "2e", fmt=3)  # runs past the flash
+        self.assertEqual(cm.exception.kind, "BadElf")
+
+    def test_tampering_is_caught(self):
+        img = F.images_from_elf(make_elf([(AB, app_blob(0x800))]), "2e", fmt=3)[0]
+        for off, kind in ((0x300, "BadTrailer"), (0x11C, "BadDescriptor"), (0x108, "BadDescriptor")):
+            p = bytearray(img.payload)
+            p[off] ^= 1
+            bad = F.Image(F.Header(0, img.header.target_cidr, AB, len(p), F.crc32(bytes(p)), 0, 3, 0x2000), bytes(p))
+            with self.assertRaises(F.FwImageError) as cm:
+                F.validate_image(bad, "2e")
+            self.assertEqual(cm.exception.kind, kind, hex(off))
+
+    def test_mixed_formats_refused(self):
+        a = F.make_image(F.KIND_CODE, "4e", AB, app_blob(0x400), fmt=3)
+        b = F.make_image(F.KIND_BITSTREAM, "4e", F.PLANE1_BASE, b"x" * 512, fmt=2)
+        with self.assertRaises(F.FwImageError):
+            F.validate_file([a, b], "4e")
+
+    def test_header_roundtrip_and_layout_under_crc(self):
+        h = F.Header(F.KIND_CODE, 0x281A0761, AB, 0x400, 0xDEADBEEF, 42, 3, 0x2000)
+        blk = h.pack()
+        self.assertEqual(struct.unpack_from("<2I", blk, 32), (F.header_crc3(blk[:32], 0x2000), 0x2000))
+        self.assertEqual(F.parse_header(blk), h)
+        self.assertEqual(blk[40:], bytes(512 - 40))
+        bad = bytearray(blk)
+        bad[36] ^= 1
+        with self.assertRaises(F.FwImageError):
+            F.parse_header(bytes(bad))
+
+    # --- seal -------------------------------------------------------------
+
+    def sealable_elf(self, n=0x800):
+        app = bytearray(app_blob(n))
+        app[n - 4:] = bytes(4)
+        return make_elf([(AB, bytes(app)), (0x20000000, b"\xee" * 16)],
+                        [(".app_desc", AB + 0x100, 32), (".image_crc", AB + n - 4, 4)])
+
+    def test_seal(self):
+        elf = self.sealable_elf()
+        self.assertEqual(set(F.elf_sections(elf)), {".app_desc", ".image_crc", ".shstrtab"})
+        sealed = F.seal_elf(elf)
+        self.assertEqual(len(sealed), len(elf))
+        # only the descriptor length/CRC and the trailer changed
+        diff = [i for i in range(len(elf)) if elf[i] != sealed[i]]
+        self.assertTrue(all(0 <= i - F.elf_sections(elf)[".app_desc"][1] < 32 or
+                            0 <= i - F.elf_sections(elf)[".image_crc"][1] < 4 for i in diff))
+        # the sealed ELF builds an image whose own checks pass, and that
+        # image's payload equals what the ELF holds
+        img = F.images_from_elf(sealed, "2e", fmt=3)[0]
+        self.assertEqual(img.header.length, 0x800)
+        F.validate_image(img, "2e")
+        segs = F.elf_load_segments(sealed)
+        self.assertEqual(img.payload, [d for a, d in segs if a == AB][0])
+        # idempotent
+        self.assertEqual(F.seal_elf(sealed), sealed)
+        # and `build` of the unsealed ELF gives the same payload as the sealed one
+        self.assertEqual(F.images_from_elf(elf, "2e", fmt=3)[0].payload, img.payload)
+
+    def test_seal_refuses(self):
+        for elf in (
+            make_elf([(AB, app_blob(0x800))]),  # no sections
+            make_elf([(AB, app_blob(0x800))], [(".app_desc", AB + 0x100, 32)]),  # no .image_crc
+            make_elf([(AB, app_blob(0x800))], [(".app_desc", AB + 0x100, 32), (".image_crc", AB + 0x7FC, 3)]),
+            make_elf([(AB, app_blob(0x800))], [(".app_desc", AB + 0x104, 32), (".image_crc", AB + 0x7FC, 4)]),
+            make_elf([(AB, app_blob(0x7F0))], [(".app_desc", AB + 0x100, 32), (".image_crc", AB + 0x7EC, 4)]),  # 0x7F0 long
+            make_elf([(AB, app_blob(0x800, desc=False))], [(".app_desc", AB + 0x100, 32), (".image_crc", AB + 0x7FC, 4)]),
+        ):
+            with self.assertRaises(F.FwImageError):
+                F.seal_elf(elf)
+
+    def test_cli_format3_and_seal(self):
+        with tempfile.TemporaryDirectory() as d:
+            elf = os.path.join(d, "x.elf")
+            sealed = os.path.join(d, "s.elf")
+            out = os.path.join(d, "x.ogfw")
+            old = os.path.join(d, "old.elf")
+            with open(elf, "wb") as f:
+                f.write(self.sealable_elf())
+            with open(old, "wb") as f:
+                f.write(make_elf([(0x80000, vtable() + bytes(0x300))]))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(F.main(["seal", elf, "-o", sealed]), 0)
+                self.assertEqual(F.main(["build", "--elf", sealed, "--target", "2e", "--format", "3", "-o", out]), 0)
+                self.assertEqual(F.main(["inspect", out]), 0)
+            self.assertIn("fmt=3 layout=0x2000", buf.getvalue())
+            self.assertIn("descriptor and trailer", buf.getvalue())
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(F.main(["build", "--elf", old, "--target", "2e", "--format", "3", "-o", out]), 1)
+                self.assertEqual(F.main(["seal", old, "-o", sealed]), 1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(F.main(["build", "--elf", old, "--target", "2e", "-o", out]), 0)  # default: format 2
+                self.assertEqual(F.main(["inspect", out]), 0)
+
+
 def real(env):
     p = os.environ.get(env)
     return p if p and os.path.exists(p) else None
@@ -235,6 +461,24 @@ class RealElfs(unittest.TestCase):
 
     def test_real_2e(self):
         self.check("FWIMAGE_ELF_2E", "2e", 1)
+
+    def test_real_elfs_not_yet_format3(self):
+        # Until stage S2 relinks the app at APP_BASE the shipped ELFs must be
+        # refused for format 3, and say why.
+        for env, tgt in (("FWIMAGE_ELF_2E", "2e"), ("FWIMAGE_ELF_4E", "4e")):
+            path = real(env)
+            if not path:
+                continue
+            with open(path, "rb") as f:
+                elf = f.read()
+            try:
+                F.images_from_elf(elf, tgt, 1, fmt=3)
+            except F.FwImageError as e:
+                self.assertIn(e.kind, ("BadDest", "BadDescriptor"), env)
+                if e.kind == "BadDest":
+                    self.assertIn("APP_BASE", str(e))
+            else:
+                self.fail(f"{env}: format 3 accepted an ELF linked at 0x80000")
 
 
 if __name__ == "__main__":

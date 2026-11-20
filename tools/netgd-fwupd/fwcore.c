@@ -68,30 +68,66 @@ int fw_check_vectors(const uint32_t v[4], uint32_t dest, uint32_t len, int part)
     return 0;
 }
 
-/* Intrinsic checks of one header block (logic.rs parse_header): magic, format, CRC, kind. */
-fw_verr fw_header_parse(const uint8_t *b, fw_header *h)
+/* Intrinsic checks of one header block (logic.rs parse_header_v2 / parse_header_v3): magic, format,
+ * CRC, kind. `formats` is the FW_ACCEPT_* mask this reader takes. Format 3: the header CRC covers
+ * bytes 0..31 and then the layout word (bytes 36..39). */
+fw_verr fw_header_parse_ex(const uint8_t *b, fw_header *h, unsigned formats)
 {
-    uint32_t w[FW_HDR_WORDS];
+    uint32_t w[FW_HDR_WORDS_V3], crc;
     int k;
-    for (k = 0; k < (int)FW_HDR_WORDS; k++) w[k] = le32(b + 4 * k);
+    for (k = 0; k < (int)FW_HDR_WORDS_V3; k++) w[k] = le32(b + 4 * k);
     if (w[0] != FW_MAGIC) return FWV_MAGIC;
-    if (w[1] != FW_FORMAT) return FWV_FORMAT;
-    if (fw_crc32(b, 32) != w[8]) return FWV_HDR_CRC;
+    if (!((w[1] == FW_FORMAT && (formats & FW_ACCEPT_2)) || (w[1] == FW_FORMAT_3 && (formats & FW_ACCEPT_3))))
+        return FWV_FORMAT;
+    crc = fw_crc32(b, 32);
+    if (w[1] == FW_FORMAT_3) crc = fw_crc32_update(crc, b + 36, 4);
+    if (crc != w[8]) return FWV_HDR_CRC;
     if (w[2] != FW_KIND_CODE && w[2] != FW_KIND_BITSTREAM) return FWV_KIND;
     h->kind = w[2]; h->target_cidr = w[3]; h->dest = w[4];
     h->len = w[5]; h->crc = w[6]; h->version = w[7];
+    h->format = w[1];
+    h->layout = w[1] == FW_FORMAT_3 ? w[9] : 0;
     return FWV_OK;
 }
 
-/* Is this image for `part` and aimed where it may go (logic.rs check_header)? */
+fw_verr fw_header_parse(const uint8_t *b, fw_header *h)
+{
+    return fw_header_parse_ex(b, h, FW_ACCEPT_ANY);
+}
+
+/* Is this image for `part` and aimed where it may go (logic.rs check_header)? Format 3: built for
+ * this layout, code at exactly APP_BASE, at most PLANE_LEN - LAYOUT long. */
 fw_verr fw_header_check(const fw_header *h, int part)
 {
+    int v3 = h->format == FW_FORMAT_3;
+    uint32_t limit = v3 && h->kind == FW_KIND_CODE ? FW_PLANE_LEN - FW_LAYOUT : FW_PLANE_LEN;
     if (part == FW_PART_NONE || fw_part_from_cidr(h->target_cidr) != part) return FWV_TARGET;
-    if (h->kind == FW_KIND_CODE ? h->dest != FW_PLANE0_BASE
+    if (v3 && h->layout != FW_LAYOUT) return FWV_DEST;
+    if (h->kind == FW_KIND_CODE ? h->dest != (v3 ? FW_APP_BASE : FW_PLANE0_BASE)
                                 : !(h->dest == FW_PLANE1_BASE && part == FW_PART_4E))
         return FWV_DEST;
-    if (h->len == 0 || h->len % FW_BLOCK != 0 || h->len > FW_PLANE_LEN) return FWV_LEN;
+    if (h->len == 0 || h->len % FW_BLOCK != 0 || h->len > limit) return FWV_LEN;
     return FWV_OK;
+}
+
+/* logic.rs check_descriptor: magic, version, length 0 -> unsealed, CRC over the first 28 bytes,
+ * length == the image's and a multiple of 512. */
+fw_verr fw_check_descriptor(const uint8_t *d, uint32_t image_len)
+{
+    uint32_t length;
+    if (memcmp(d, "NGAP", 4) != 0 || le32(d + 4) != FW_DESC_VERSION) return FWV_DESC;
+    length = le32(d + 8);
+    if (length == 0) return FWV_UNSEALED;
+    if (fw_crc32(d, 28) != le32(d + 28)) return FWV_DESC;
+    if (length != image_len || length % FW_BLOCK != 0) return FWV_DESC;
+    return FWV_OK;
+}
+
+/* logic.rs check_trailer: the last 4 bytes (LE) are the CRC-32 of everything before them. */
+fw_verr fw_check_trailer(const uint8_t *image, size_t n)
+{
+    if (n < FW_TRAILER_LEN) return FWV_TRAILER;
+    return fw_crc32(image, n - FW_TRAILER_LEN) == le32(image + n - FW_TRAILER_LEN) ? FWV_OK : FWV_TRAILER;
 }
 
 static int fail(fw_vres *res, fw_verr e, int index)
@@ -102,6 +138,11 @@ static int fail(fw_vres *res, fw_verr e, int index)
 }
 
 int fw_parse_file(const uint8_t *d, size_t n, fw_file *f, fw_vres *res)
+{
+    return fw_parse_file_ex(d, n, f, res, FW_ACCEPT_ANY);
+}
+
+int fw_parse_file_ex(const uint8_t *d, size_t n, fw_file *f, fw_vres *res, unsigned formats)
 {
     size_t off = 0;
     fw_vres dummy;
@@ -121,7 +162,7 @@ int fw_parse_file(const uint8_t *d, size_t n, fw_file *f, fw_vres *res)
 
         if (idx >= FW_MAX_IMAGES) return fail(res, FWV_DUP, idx);
         if (n - off < FW_BLOCK) return fail(res, FWV_SHORT, idx);
-        e = fw_header_parse(b, &h);
+        e = fw_header_parse_ex(b, &h, formats);
         if (e != FWV_OK) return fail(res, e, idx);
         part = fw_part_from_cidr(h.target_cidr);
         e = fw_header_check(&h, part);
@@ -134,7 +175,13 @@ int fw_parse_file(const uint8_t *d, size_t n, fw_file *f, fw_vres *res)
             uint32_t v[4];
             for (k = 0; k < 4; k++) v[k] = le32(d + off + 4 * k);
             if (fw_check_vectors(v, h.dest, h.len, part) != 0) return fail(res, FWV_VECTOR, idx);
+            if (h.format == FW_FORMAT_3) {
+                e = fw_check_descriptor(d + off + FW_DESC_OFFSET, h.len);
+                if (e == FWV_OK) e = fw_check_trailer(d + off, h.len);
+                if (e != FWV_OK) return fail(res, e, idx);
+            }
         }
+        if (f->n > 0 && f->img[0].h.format != h.format) return fail(res, FWV_MIXFMT, idx);
         for (k = 0; k < f->n; k++)
             if (f->img[k].h.kind == h.kind) return fail(res, FWV_DUP, idx);
         if (f->n > 0 && f->part != part) return fail(res, FWV_MIXED, idx);
@@ -229,6 +276,10 @@ int fw_verr_msgid(fw_verr e)
     case FWV_VECTOR: return FWM_V_VECTOR;
     case FWV_MIXED: return FWM_V_MIXED;
     case FWV_DUP: return FWM_V_DUP;
+    case FWV_DESC: return FWM_V_DESC;
+    case FWV_UNSEALED: return FWM_V_UNSEALED;
+    case FWV_TRAILER: return FWM_V_TRAILER;
+    case FWV_MIXFMT: return FWM_V_MIXFMT;
     default: return FWM_V_READ;
     }
 }
@@ -559,9 +610,10 @@ size_t fw_describe_text(char *buf, size_t cap, const char *image_path, size_t fi
     if (model && model[0]) app(buf, cap, &len, "device_model=%s\n", model);
     for (i = 0; f && i < f->n; i++) {
         const fw_header *h = &f->img[i].h;
-        app(buf, cap, &len, "image%d kind=%s dest=0x%08lx len=%lu crc=0x%08lx cidr=0x%08lx version=%lu\n", i,
+        app(buf, cap, &len, "image%d kind=%s dest=0x%08lx len=%lu crc=0x%08lx cidr=0x%08lx version=%lu format=%lu\n", i,
             h->kind == FW_KIND_CODE ? "code" : "bitstream", (unsigned long)h->dest, (unsigned long)h->len,
-            (unsigned long)h->crc, (unsigned long)h->target_cidr, (unsigned long)h->version);
+            (unsigned long)h->crc, (unsigned long)h->target_cidr, (unsigned long)h->version,
+            (unsigned long)h->format);
     }
     return len;
 }

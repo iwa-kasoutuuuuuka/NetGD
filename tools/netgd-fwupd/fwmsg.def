@@ -11,7 +11,7 @@ V_EMPTY | The update image is empty. | 更新イメージが空です。
 V_TOO_BIG | The update image is too large (more than two images). | 更新イメージが大きすぎます（2 つの画像の上限を超えています）。
 V_SHORT | The update image is cut off inside a header. | 更新イメージがヘッダの途中で終わっています。
 V_MAGIC | Not an OGFW update image (bad magic). | OGFW の更新イメージではありません（マジックが違います）。
-V_FORMAT | Unsupported OGFW format (only format 2). | 対応していない形式です（形式 2 のみ）。
+V_FORMAT | Unsupported OGFW format (only formats 2 and 3). | 対応していない形式です（形式 2 と 3 のみ）。
 V_HDR_CRC | Header CRC mismatch: the file is damaged. | ヘッダの CRC が合いません。ファイルが壊れています。
 V_KIND | Unknown image kind in the header. | ヘッダの種別が不明です。
 V_TARGET | The image is not for a SAM3U2E or SAM3U4E. | 対象が SAM3U2E / SAM3U4E ではありません。
@@ -22,6 +22,10 @@ V_PAYLOAD_CRC | Payload CRC mismatch: the file is damaged. | データの CRC �
 V_VECTOR | The vector table is not plausible for the part. | ベクタテーブルが不正です（SP またはハンドラ）。
 V_MIXED | The images are for different parts. | 画像ごとに対象の型番が違います。
 V_DUP | Two images of the same kind. | 同じ種別の画像が 2 つあります。
+V_DESC | The app descriptor (NGAP) is missing or damaged. | アプリの記述子（NGAP）がないか、壊れています。
+V_UNSEALED | The app image is not sealed (no length / CRC). | アプリのイメージが封印されていません（長さ・CRC がありません）。
+V_TRAILER | The image CRC at the end of the app does not match. | アプリ末尾のイメージ CRC が合いません。
+V_MIXFMT | The images are of different OGFW formats. | 画像ごとに OGFW の形式が違います。
 
 # ---- what the board answers (ERROR register with ERR) ----
 ST_OK | OK | 成功
@@ -78,6 +82,7 @@ UI_TARGET | Target chip | 対象チップ
 UI_IMG_CODE | code (flash plane 0) | コード（フラッシュ プレーン 0）
 UI_IMG_BITSTREAM | bitstream (flash plane 1) | ビットストリーム（プレーン 1）
 UI_VERSION | version | 版
+UI_FORMAT | OGFW format | OGFW 形式
 UI_BYTES | bytes | バイト
 UI_WARN_NO_BITSTREAM | Warning: a 4E image without a bitstream (code only). | 警告：4E 用ですがビットストリームがありません（コードのみ）。
 UI_WARN_POWER | Never power off, reset or unplug the LAN during the transfer. | 転送中は電源を切らない・リセットしない・LAN を抜かない。

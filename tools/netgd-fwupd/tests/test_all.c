@@ -176,6 +176,126 @@ static void test_vectors(void)
     CHECK(rows >= 10);
 }
 
+
+/* ---- format 3 (resident boot region): the shared vectors header3 / desc / trailer / image3 ---- */
+
+static const char *verr_name(fw_verr e)
+{
+    switch (e) {
+    case FWV_OK: return "OK";
+    case FWV_MAGIC: case FWV_FORMAT: case FWV_HDR_CRC: case FWV_KIND: return "BadHeader";
+    case FWV_TARGET: return "BadTarget";
+    case FWV_DEST: return "BadDest";
+    case FWV_LEN: return "BadLength";
+    case FWV_PAYLOAD_CRC: return "CrcMismatch";
+    case FWV_VECTOR: return "BadVector";
+    case FWV_DESC: return "BadDescriptor";
+    case FWV_UNSEALED: return "Unsealed";
+    case FWV_TRAILER: return "BadTrailer";
+    default: return "other";
+    }
+}
+
+static void test_vectors3(void)
+{
+    FILE *f;
+    static char line[40000];
+    char *tok[10];
+    static uint8_t buf[16384];
+    int n, rows;
+
+    f = open_vec("header3.txt");
+    rows = 0;
+    while ((n = next_row(f, tok, 10, line, sizeof line)) >= 3) {
+        /* part header-bytes(40, hex) expect: format 3 only, then check against the board's part */
+        uint8_t blk[512];
+        fw_header h;
+        int part = !strcmp(tok[0], "2e") ? FW_PART_2E : FW_PART_4E;
+        fw_verr e;
+        memset(blk, 0, sizeof blk);
+        CHECK(unhex(tok[1], blk) == 40);
+        e = fw_header_parse_ex(blk, &h, FW_ACCEPT_3);
+        if (e == FWV_OK) e = fw_header_check(&h, part);
+        if (strcmp(verr_name(e), tok[2])) { printf("header3 %s %s: got %s\n", tok[1], tok[2], verr_name(e)); CHECK(0); }
+        /* the same header read by a board that takes both formats must not do worse */
+        if (!strcmp(tok[2], "OK")) CHECK(fw_header_parse(blk, &h) == FWV_OK && h.format == 3 && h.layout == FW_LAYOUT);
+        rows++;
+    }
+    fclose(f);
+    CHECK(rows >= 20);
+
+    /* header.txt (format 2) once more through the strict format-2 reader; its fmt=3 row is BadHeader */
+    f = open_vec("header.txt");
+    rows = 0;
+    while ((n = next_row(f, tok, 10, line, sizeof line)) >= 3) {
+        uint8_t blk[512];
+        fw_header h;
+        int part = !strcmp(tok[0], "2e") ? FW_PART_2E : FW_PART_4E;
+        fw_verr e;
+        memset(blk, 0, sizeof blk);
+        CHECK(unhex(tok[1], blk) == 36);
+        e = fw_header_parse_ex(blk, &h, FW_ACCEPT_2);
+        if (e == FWV_OK) e = fw_header_check(&h, part);
+        if (strcmp(verr_name(e), tok[2])) { printf("header(2) %s %s: got %s\n", tok[1], tok[2], verr_name(e)); CHECK(0); }
+        rows++;
+    }
+    fclose(f);
+    CHECK(rows >= 20);
+
+    f = open_vec("desc.txt");
+    rows = 0;
+    while ((n = next_row(f, tok, 10, line, sizeof line)) >= 3) {
+        uint8_t d[64];
+        CHECK(unhex(tok[0], d) == 32);
+        if (strcmp(verr_name(fw_check_descriptor(d, (uint32_t)strtoul(tok[1], NULL, 16))), tok[2])) {
+            printf("desc %s %s: got %s\n", tok[0], tok[2],
+                   verr_name(fw_check_descriptor(d, (uint32_t)strtoul(tok[1], NULL, 16))));
+            CHECK(0);
+        }
+        rows++;
+    }
+    fclose(f);
+    CHECK(rows >= 10);
+
+    f = open_vec("trailer.txt");
+    rows = 0;
+    while ((n = next_row(f, tok, 10, line, sizeof line)) >= 2) {
+        size_t len = unhex(tok[0], buf);
+        if (strcmp(verr_name(fw_check_trailer(buf, len)), tok[1])) { printf("trailer %s %s\n", tok[0], tok[1]); CHECK(0); }
+        rows++;
+    }
+    fclose(f);
+    CHECK(rows >= 8);
+
+    f = open_vec("image3.txt");
+    rows = 0;
+    while ((n = next_row(f, tok, 10, line, sizeof line)) >= 3) {
+        /* board-part file-hex expect: one whole image, read by a format-3-only (resident) reader */
+        size_t len = unhex(tok[1], buf);
+        int board = !strcmp(tok[0], "2e") ? FW_PART_2E : FW_PART_4E;
+        fw_file ff;
+        fw_vres res;
+        const char *got;
+        if (fw_parse_file_ex(buf, len, &ff, &res, FW_ACCEPT_3) != 0) got = verr_name(res.err);
+        else got = ff.part != board ? "BadTarget" : "OK";
+        if (strcmp(got, tok[2])) { printf("image3 row %d (%s): got %s want %s\n", rows, tok[0], got, tok[2]); CHECK(0); }
+        if (rows == 0) {   /* the first row is a good 2E image: the result text shows the format */
+            char text[1024];
+            fw_describe_text(text, sizeof text, "/pc/x/netgd.ogfw", len, &ff, NULL);
+            CHECK(strstr(text, "image0 kind=code dest=0x00082000") && strstr(text, "format=3"));
+            CHECK(fw_verr_msgid(FWV_DESC) != fw_verr_msgid(FWV_TRAILER) && fw_verr_msgid(FWV_UNSEALED) != FWM_V_READ);
+        }
+        /* a board that takes both formats parses everything but the format-2 row the same way */
+        if (!strcmp(tok[2], "BadHeader")) {
+            fw_file f2;
+            CHECK(fw_parse_file(buf, len, &f2, NULL) != 0 || f2.img[0].h.format == 2);
+        }
+        rows++;
+    }
+    fclose(f);
+    CHECK(rows >= 10);
+}
+
 /* ------------------------------------------------------------ parsing */
 
 static void test_parse(void)
@@ -820,6 +940,7 @@ static void test_result_text(void)
     n = fw_describe_text(buf, sizeof buf, "/pc/x/netgd.ogfw", fb.len, &fb.f, "OpenGDEMU SD Disk");
     CHECK(n == strlen(buf));
     CHECK(strstr(buf, "file=/pc/x/netgd.ogfw size=") && strstr(buf, "target=SAM3U4E") && strstr(buf, "device_model=OpenGDEMU SD Disk"));
+    CHECK(strstr(buf, " format=2"));
     CHECK(strstr(buf, "image0 kind=code dest=0x00080000 len=16384") && strstr(buf, "image1 kind=bitstream dest=0x00100000 len=8192"));
     CHECK(strstr(buf, "version=305419896"));
 
@@ -909,6 +1030,7 @@ static void test_golden(void)
 int main(void)
 {
     test_vectors();
+    test_vectors3();
     test_parse();
     test_read();
     test_identify();

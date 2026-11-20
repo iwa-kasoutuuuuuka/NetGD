@@ -22,17 +22,51 @@
 //!   w7  image_version  free-form build number, informational
 //!   w8  header_crc32   CRC-32 of w0..w7 (the first 32 bytes)
 //! ```
+//!
+//! # Format 3 (boards with a resident boot region)
+//!
+//! `docs/design/fw-bootloader.md` section 2-6, `tools/fwimage/FORMAT.md`. Same
+//! words w0..w7, `format = 3`, plus `w9 = layout` (size of the resident
+//! region, 0x2000); `header_crc32` (w8) is the CRC-32 of w0..w7 *followed by*
+//! w9. A code image goes to `APP_BASE` (0x0008_2000) exactly, at most
+//! 0x20000 - layout bytes, with the "NGAP" descriptor at +0x100 and the CRC-32
+//! of everything before it in its last four bytes. Which format a build
+//! accepts is the cargo feature `resident` (format 3 only; without it, format
+//! 2 only). The format-specific functions exist in both builds so the host
+//! tests cover both.
 
 #![cfg_attr(not(test), no_std)]
 
 pub const MAGIC: u32 = 0x5746_474F;
-pub const FORMAT_VERSION: u32 = 2;
+/// Format 2: no resident region, code at the start of plane 0.
+pub const FORMAT_2: u32 = 2;
+/// Format 3: resident region first, app at `APP_BASE`.
+pub const FORMAT_3: u32 = 3;
+/// The format this build accepts (see the module docs).
+pub const FORMAT_VERSION: u32 = if RESIDENT { FORMAT_3 } else { FORMAT_2 };
+/// Built for a board with a resident boot region?
+pub const RESIDENT: bool = cfg!(feature = "resident");
 
 pub const KIND_CODE: u32 = 0;
 pub const KIND_BITSTREAM: u32 = 1;
 
-/// Words of the header block that carry fields, the CRC word included.
-pub const HEADER_WORDS: usize = 9;
+/// Words of the header block that carry fields, the CRC word included, in
+/// the format this build accepts.
+pub const HEADER_WORDS: usize = if RESIDENT { HEADER_WORDS_V3 } else { HEADER_WORDS_V2 };
+pub const HEADER_WORDS_V2: usize = 9;
+pub const HEADER_WORDS_V3: usize = 10;
+
+/// Size of the resident region, and so the offset of the app in plane 0.
+pub const LAYOUT: u32 = 0x2000;
+/// Where a format-3 code image goes and where the app is linked.
+pub const APP_BASE: u32 = PLANE0_BASE + LAYOUT;
+/// The app descriptor sits at this offset of the app image, 32 bytes.
+pub const DESC_OFFSET: usize = 0x100;
+pub const DESC_LEN: usize = 32;
+pub const DESC_MAGIC: [u8; 4] = *b"NGAP";
+pub const DESC_VERSION: u32 = 1;
+/// The image CRC-32 in the last four bytes of a format-3 code image.
+pub const TRAILER_LEN: usize = 4;
 
 pub const PLANE0_BASE: u32 = 0x0008_0000;
 pub const PLANE1_BASE: u32 = 0x0010_0000;
@@ -102,6 +136,10 @@ pub struct Header {
     pub len: u32,
     pub crc: u32,
     pub image_version: u32,
+    /// 2 or 3.
+    pub format: u32,
+    /// Size of the resident region the image was built for; 0 in format 2.
+    pub layout: u32,
 }
 
 // --- CRC-32 (reflected, 0xEDB88320: zlib, PNG) ------------------------------
@@ -146,11 +184,11 @@ pub fn crc32(data: &[u8]) -> u32 {
 
 // --- header -----------------------------------------------------------------
 
-/// Parse the field words of a header block. Checks only what is intrinsic to
-/// the block (magic, format, header CRC, known kind); whether the image suits
-/// *this* board is [`check_header`].
-pub fn parse_header(w: &[u32; HEADER_WORDS]) -> Result<Header, Reject> {
-    if w[0] != MAGIC || w[1] != FORMAT_VERSION {
+/// Parse the field words of a format-2 header block. Checks only what is
+/// intrinsic to the block (magic, format, header CRC, known kind); whether the
+/// image suits *this* board is [`check_header`].
+pub fn parse_header_v2(w: &[u32; HEADER_WORDS_V2]) -> Result<Header, Reject> {
+    if w[0] != MAGIC || w[1] != FORMAT_2 {
         return Err(Reject::BadHeader);
     }
     let mut c = CRC_INIT;
@@ -160,6 +198,27 @@ pub fn parse_header(w: &[u32; HEADER_WORDS]) -> Result<Header, Reject> {
     if crc_finish(c) != w[8] {
         return Err(Reject::BadHeader);
     }
+    fields(w, 0)
+}
+
+/// The same for a format-3 header: ten words, `w9` = layout, and the header
+/// CRC covers w0..w7 and then w9 (everything except the CRC word).
+pub fn parse_header_v3(w: &[u32; HEADER_WORDS_V3]) -> Result<Header, Reject> {
+    if w[0] != MAGIC || w[1] != FORMAT_3 {
+        return Err(Reject::BadHeader);
+    }
+    let mut c = CRC_INIT;
+    for &x in &w[..8] {
+        c = crc_word(c, x);
+    }
+    c = crc_word(c, w[9]);
+    if crc_finish(c) != w[8] {
+        return Err(Reject::BadHeader);
+    }
+    fields(w, w[9])
+}
+
+fn fields(w: &[u32], layout: u32) -> Result<Header, Reject> {
     if w[2] != KIND_CODE && w[2] != KIND_BITSTREAM {
         return Err(Reject::BadHeader);
     }
@@ -170,36 +229,144 @@ pub fn parse_header(w: &[u32; HEADER_WORDS]) -> Result<Header, Reject> {
         len: w[5],
         crc: w[6],
         image_version: w[7],
+        format: w[1],
+        layout,
     })
+}
+
+/// The header parser of this build: format 3 with the `resident` feature,
+/// format 2 without it.
+pub fn parse_header(w: &[u32; HEADER_WORDS]) -> Result<Header, Reject> {
+    #[cfg(feature = "resident")]
+    {
+        parse_header_v3(w)
+    }
+    #[cfg(not(feature = "resident"))]
+    {
+        parse_header_v2(w)
+    }
 }
 
 /// Is this image for this part, and does it go where such an image may go?
 ///
-/// A code image always replaces the whole plane-0 image from its first byte
-/// (the vector table); a bitstream image goes to the start of plane 1 and
-/// only a part that has one accepts it. There is deliberately no way to write
-/// anywhere else.
+/// Format 2: a code image replaces the whole plane-0 image from its first byte
+/// (the vector table). Format 3: it goes to exactly `APP_BASE` (anything
+/// before it is the resident region and is `BadDest` whatever the length), is
+/// at most `PLANE_LEN - LAYOUT` long, and was built for this `LAYOUT`. A
+/// bitstream image goes to the start of plane 1 and only a part that has one
+/// accepts it. There is deliberately no way to write anywhere else.
 pub fn check_header(h: &Header, part: Part) -> Result<(), Reject> {
     if Part::from_cidr(h.target_cidr) != Some(part) {
         return Err(Reject::BadTarget);
     }
+    let v3 = h.format == FORMAT_3;
+    if v3 && h.layout != LAYOUT {
+        return Err(Reject::BadDest);
+    }
     let ok_dest = match h.kind {
-        KIND_CODE => h.dest == PLANE0_BASE,
+        KIND_CODE => h.dest == if v3 { APP_BASE } else { PLANE0_BASE },
         _ => h.dest == PLANE1_BASE && part.has_plane1(),
     };
     if !ok_dest {
         return Err(Reject::BadDest);
     }
-    if h.len == 0 || h.len % 512 != 0 || h.len > PLANE_LEN {
+    let limit = if v3 && h.kind == KIND_CODE { PLANE_LEN - LAYOUT } else { PLANE_LEN };
+    if h.len == 0 || h.len % 512 != 0 || h.len > limit {
         return Err(Reject::BadLength);
     }
     Ok(())
 }
 
-/// Number of lock regions an image of `len` bytes spans, as a GLB bit mask.
+/// Lock regions an image of `len` bytes spans from the start of its plane, as
+/// a GLB bit mask (format 2: every image starts at a plane base).
 pub fn lock_mask(len: u32) -> u32 {
-    let n = (len + LOCK_REGION - 1) / LOCK_REGION; // at most 16
-    ((1u64 << n) - 1) as u32
+    lock_mask_at(PLANE0_BASE, len)
+}
+
+/// The GLB bit mask (EEFC_FRR bit n = lock region n *of the plane the
+/// address is in*) of the regions under `[dest, dest + len)`. With a resident
+/// region the app starts in region 1, so the mask is shifted up: the app
+/// image at `APP_BASE` covers bits 1.., never bit 0 (the resident region).
+pub fn lock_mask_at(dest: u32, len: u32) -> u32 {
+    if len == 0 {
+        return 0;
+    }
+    let base = if dest >= PLANE1_BASE { PLANE1_BASE } else { PLANE0_BASE };
+    let first = (dest - base) / LOCK_REGION;
+    let last = (dest - base + len - 1) / LOCK_REGION;
+    let hi = if last >= 31 { u32::MAX } else { (1u32 << (last + 1)) - 1 };
+    let lo = (1u32 << first) - 1;
+    hi & !lo
+}
+
+// --- app descriptor and trailer (format 3) ----------------------------------
+
+/// Why a format-3 code image was refused after the header passed. (Separate
+/// from [`Reject`] because `main.rs` maps `Reject` onto status codes
+/// exhaustively; stage S5 decides what these become on the wire.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageFault {
+    /// No "NGAP" descriptor, wrong version, bad descriptor CRC, or a length
+    /// that is not the image's.
+    BadDescriptor,
+    /// A well-formed descriptor whose length is 0: linked but not sealed.
+    Unsealed,
+    /// The image CRC in the last four bytes does not match.
+    BadTrailer,
+}
+
+/// The fields of the app descriptor (design 2-5). Only `length` is the
+/// resident region's business; the rest is for the app and for `fwimage`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Descriptor {
+    pub length: u32,
+    pub bitstream_addr: u32,
+    pub bitstream_len: u32,
+    pub bitstream_raw_len: u32,
+    pub kind_version: u32,
+}
+
+fn le32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+/// Check the 32 bytes at `APP_BASE + 0x100` of an image `image_len` bytes
+/// long (trailer included). Order: magic, version, length 0 -> `Unsealed`, CRC
+/// over the first 28 bytes, length equal to `image_len` and a multiple of 512.
+pub fn check_descriptor(d: &[u8; DESC_LEN], image_len: u32) -> Result<Descriptor, ImageFault> {
+    if d[..4] != DESC_MAGIC || le32(d, 4) != DESC_VERSION {
+        return Err(ImageFault::BadDescriptor);
+    }
+    let length = le32(d, 8);
+    if length == 0 {
+        return Err(ImageFault::Unsealed);
+    }
+    if crc32(&d[..28]) != le32(d, 28) {
+        return Err(ImageFault::BadDescriptor);
+    }
+    if length != image_len || length % 512 != 0 {
+        return Err(ImageFault::BadDescriptor);
+    }
+    Ok(Descriptor {
+        length,
+        bitstream_addr: le32(d, 12),
+        bitstream_len: le32(d, 16),
+        bitstream_raw_len: le32(d, 20),
+        kind_version: le32(d, 24),
+    })
+}
+
+/// The last four bytes of `image` (little-endian) are the CRC-32 of the bytes
+/// before them.
+pub fn check_trailer(image: &[u8]) -> Result<(), ImageFault> {
+    if image.len() < TRAILER_LEN {
+        return Err(ImageFault::BadTrailer);
+    }
+    let (body, t) = image.split_at(image.len() - TRAILER_LEN);
+    if crc32(body) != le32(t, 0) {
+        return Err(ImageFault::BadTrailer);
+    }
+    Ok(())
 }
 
 // --- vector table -----------------------------------------------------------
@@ -286,34 +453,175 @@ mod tests {
         assert!(n >= 10);
     }
 
-    fn words(hex_str: &str) -> [u32; HEADER_WORDS] {
+    fn words<const N: usize>(hex_str: &str) -> [u32; N] {
         let b = hex(hex_str);
-        assert_eq!(b.len(), HEADER_WORDS * 4);
-        let mut w = [0u32; HEADER_WORDS];
-        for i in 0..HEADER_WORDS {
+        assert_eq!(b.len(), N * 4);
+        let mut w = [0u32; N];
+        for i in 0..N {
             w[i] = u32::from_le_bytes(b[4 * i..4 * i + 4].try_into().unwrap());
         }
         w
     }
 
+    fn reject_name(r: Result<(), Reject>) -> String {
+        match r {
+            Ok(()) => "OK".into(),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
     #[test]
     fn header_vectors() {
+        // format 2 (header.txt): what a board without a resident region accepts
         let mut n = 0;
         for c in cases(include_str!("../../../tools/fwimage/vectors/header.txt")) {
-            // part header-hex expect
-            let r = parse_header(&words(c[1])).and_then(|h| check_header(&h, part(c[0])));
-            let want = match c[2] {
-                "OK" => Ok(()),
-                "BadHeader" => Err(Reject::BadHeader),
-                "BadTarget" => Err(Reject::BadTarget),
-                "BadDest" => Err(Reject::BadDest),
-                "BadLength" => Err(Reject::BadLength),
-                x => panic!("{x}"),
-            };
-            assert_eq!(r, want, "{c:?}");
+            // part header-hex(36 bytes) expect
+            let r = parse_header_v2(&words::<9>(c[1])).and_then(|h| check_header(&h, part(c[0])));
+            assert_eq!(reject_name(r), c[2], "{c:?}");
             n += 1;
         }
         assert!(n >= 10);
+    }
+
+    #[test]
+    fn header3_vectors() {
+        // format 3 (header3.txt): what a board with a resident region accepts
+        let mut n = 0;
+        for c in cases(include_str!("../../../tools/fwimage/vectors/header3.txt")) {
+            // part header-hex(40 bytes) expect
+            let r = parse_header_v3(&words::<10>(c[1])).and_then(|h| check_header(&h, part(c[0])));
+            assert_eq!(reject_name(r), c[2], "{c:?}");
+            n += 1;
+        }
+        assert!(n >= 20);
+    }
+
+    #[test]
+    fn this_build_parses_its_own_format() {
+        // `parse_header` is v3 under the feature, v2 without it
+        let v2 = cases(include_str!("../../../tools/fwimage/vectors/header.txt")).next().unwrap()[1];
+        let v3 = cases(include_str!("../../../tools/fwimage/vectors/header3.txt")).next().unwrap()[1];
+        let h3 = parse_header_v3(&words::<10>(v3));
+        assert!(h3.is_ok(), "{h3:?}");
+        assert_eq!(parse_header_v2(&words::<9>(v2)).map(|h| (h.format, h.layout)), Ok((2, 0)));
+        if RESIDENT {
+            assert_eq!(HEADER_WORDS, 10);
+            assert_eq!(parse_header(&words::<HEADER_WORDS>(v3)), h3);
+            assert_eq!(FORMAT_VERSION, 3);
+        } else {
+            assert_eq!(HEADER_WORDS, 9);
+            assert_eq!(parse_header(&words::<HEADER_WORDS>(v2)).map(|h| h.format), Ok(2));
+            assert_eq!(FORMAT_VERSION, 2);
+        }
+    }
+
+    #[test]
+    fn descriptor_vectors() {
+        let mut n = 0;
+        for c in cases(include_str!("../../../tools/fwimage/vectors/desc.txt")) {
+            // descriptor-hex image-len expect
+            let d: [u8; DESC_LEN] = hex(c[0]).try_into().unwrap();
+            let r = check_descriptor(&d, num(c[1])).map(|_| ());
+            let got = match r {
+                Ok(()) => "OK".to_string(),
+                Err(e) => format!("{e:?}"),
+            };
+            assert_eq!(got, c[2], "{c:?}");
+            n += 1;
+        }
+        assert!(n >= 10);
+    }
+
+    #[test]
+    fn descriptor_fields() {
+        let d: [u8; DESC_LEN] = hex(
+            "4e47415001000000000200000000100000900000000002000700000100000000",
+        )
+        .try_into()
+        .unwrap();
+        // (the CRC word above is wrong on purpose: only the fields are read here)
+        let mut ok = d;
+        ok[28..].copy_from_slice(&crc32(&d[..28]).to_le_bytes());
+        let got = check_descriptor(&ok, 0x200).unwrap();
+        assert_eq!(
+            got,
+            Descriptor {
+                length: 0x200,
+                bitstream_addr: 0x0010_0000,
+                bitstream_len: 0x9000,
+                bitstream_raw_len: 0x2_0000,
+                kind_version: 0x0100_0007
+            }
+        );
+        assert_eq!(check_descriptor(&d, 0x200), Err(ImageFault::BadDescriptor));
+    }
+
+    #[test]
+    fn trailer_vectors() {
+        let mut n = 0;
+        for c in cases(include_str!("../../../tools/fwimage/vectors/trailer.txt")) {
+            // image-hex expect
+            let got = match check_trailer(&hex(c[0])) {
+                Ok(()) => "OK".to_string(),
+                Err(e) => format!("{e:?}"),
+            };
+            assert_eq!(got, c[1], "{c:?}");
+            n += 1;
+        }
+        assert!(n >= 8);
+    }
+
+    /// One format-3 file as the resident-region reader checks it: header,
+    /// payload CRC, vectors, descriptor, trailer, in that order.
+    fn check_file3(file: &[u8], board: Part) -> String {
+        assert!(file.len() > 512);
+        let w: [u32; 10] = words::<10>(&hex_of(&file[..40]));
+        let h = match parse_header_v3(&w).and_then(|h| check_header(&h, board).map(|_| h)) {
+            Ok(h) => h,
+            Err(e) => return format!("{e:?}"),
+        };
+        let payload = &file[512..];
+        assert_eq!(payload.len() as u32, h.len, "test file is not a single whole image");
+        if crc32(payload) != h.crc {
+            return "CrcMismatch".into();
+        }
+        if h.kind == KIND_CODE {
+            let v = [le32(payload, 0), le32(payload, 4), le32(payload, 8), le32(payload, 12)];
+            if let Err(e) = check_vectors(&v, h.dest, h.len, board) {
+                return format!("{e:?}");
+            }
+            let d: [u8; DESC_LEN] = payload[DESC_OFFSET..DESC_OFFSET + DESC_LEN].try_into().unwrap();
+            if let Err(e) = check_descriptor(&d, h.len) {
+                return format!("{e:?}");
+            }
+            if let Err(e) = check_trailer(payload) {
+                return format!("{e:?}");
+            }
+        }
+        "OK".into()
+    }
+
+    fn hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn image3_vectors() {
+        let mut n = 0;
+        for c in cases(include_str!("../../../tools/fwimage/vectors/image3.txt")) {
+            // board-part file-hex expect
+            let got = check_file3(&hex(c[1]), part(c[0]));
+            assert_eq!(got, c[2], "{} {}", c[0], &c[1][..40]);
+            n += 1;
+        }
+        assert!(n >= 10);
+    }
+
+    #[test]
+    fn layout_constants() {
+        assert_eq!(APP_BASE, 0x0008_2000);
+        assert_eq!(LAYOUT % LOCK_REGION, 0); // the resident region is whole lock regions
+        assert_eq!(PLANE_LEN - LAYOUT, 0x1E000);
     }
 
     #[test]
@@ -327,5 +635,30 @@ mod tests {
         assert_eq!(lock_mask(8192), 1);
         assert_eq!(lock_mask(8193), 3);
         assert_eq!(lock_mask(PLANE_LEN), 0xFFFF);
+    }
+
+    #[test]
+    fn lock_mask_shifted_by_destination_region() {
+        // format 2 images start at a plane base: same as `lock_mask`
+        assert_eq!(lock_mask_at(PLANE0_BASE, 512), 0x0001);
+        assert_eq!(lock_mask_at(PLANE0_BASE, PLANE_LEN), 0xFFFF);
+        assert_eq!(lock_mask_at(PLANE0_BASE, 8193), 0x0003);
+        for len in [1, 512, 8192, 8193, 0x10000, PLANE_LEN] {
+            assert_eq!(lock_mask_at(PLANE0_BASE, len), lock_mask(len));
+        }
+        // format 3: the app starts in lock region 1, the resident region (bit 0) is never in the mask
+        assert_eq!(lock_mask_at(APP_BASE, 512), 0x0002);
+        assert_eq!(lock_mask_at(APP_BASE, 8192), 0x0002);
+        assert_eq!(lock_mask_at(APP_BASE, 8193), 0x0006);
+        assert_eq!(lock_mask_at(APP_BASE, PLANE_LEN - LAYOUT), 0xFFFE);
+        assert_eq!(lock_mask_at(APP_BASE, PLANE_LEN - LAYOUT) & 1, 0);
+        // the resident region on its own (what a write to it would touch)
+        assert_eq!(lock_mask_at(PLANE0_BASE, LAYOUT), 0x0001);
+        assert_eq!(lock_mask_at(PLANE0_BASE + LAYOUT - 1, 2), 0x0003);
+        // plane 1 is its own EEFC: region numbers restart at 0
+        assert_eq!(lock_mask_at(PLANE1_BASE, PLANE_LEN), 0xFFFF);
+        assert_eq!(lock_mask_at(PLANE1_BASE, 9000), 0x0003);
+        assert_eq!(lock_mask_at(PLANE1_BASE + 8192, 512), 0x0002);
+        assert_eq!(lock_mask_at(PLANE0_BASE, 0), 0);
     }
 }

@@ -282,6 +282,7 @@ static int confirm(void)
                     g_image_path + (pl > 40 ? pl - 40 : 0));
     }
     row = drawf(row, COL_WHITE, "%s: %s", fw_msg_euc(FWM_UI_TARGET), fw_part_name(g_fw.part));
+    row = drawf(row, COL_WHITE, "%s: %lu", fw_msg_euc(FWM_UI_FORMAT), (unsigned long)g_fw.img[0].h.format);
     for (i = 0; i < g_fw.n; i++) {
         const fw_header *h = &g_fw.img[i].h;
         row = drawf(row, COL_WHITE, "[%d] %s", i, fw_msg_euc(h->kind == FW_KIND_CODE ? FWM_UI_IMG_CODE : FWM_UI_IMG_BITSTREAM));

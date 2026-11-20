@@ -19,6 +19,9 @@ python tools/fwimage/fwimage.py inspect fw_2e.ogfw [--target 2e|4e]
   作る前にベクタ表（SP が対象の SRAM0 内、Reset/NMI/HardFault が奇数でイメージ内）とヘッダを更新側と同じ規則で検査する。
   2E 向けに 4E の ELF（プレーン1あり）を渡すと拒否する。
 - `inspect`：ヘッダ CRC・ペイロード CRC・ベクタ表を検査し、どの型番向けかを表示する。`--target` で別の型番に対する検査もできる（食い違えば BadTarget）。
+- 形式 3（常駐ブート領域のある基板用、`docs/design/fw-bootloader.md` §2-5・§2-6）：`build --format 3` は ELF を `0x82000` にリンクしたアプリ
+  （`+0x100` に "NGAP" 記述子）から作り、記述子の長さ・CRC と末尾の CRC を埋める。`0x80000` にリンクした今の ELF は `BadDest` で拒否する。
+  `seal in.elf -o out.elf` は開発用に ELF 自体へ長さと CRC を書き込む（`.app_desc`・`.image_crc` セクションが要る）。既定は形式 2 のまま。
 - 送信側（BBA 経由）はまだ無い。`fwimage.iter_images(data)` が CRC 検査済みのイメージ（`Image.header` / `.payload`）を返す。
   送る順序は FORMAT.md の「Sending」。
 

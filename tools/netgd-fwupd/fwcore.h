@@ -13,11 +13,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ---- OGFW v2 (logic.rs:5-24, FORMAT.md) --------------------------------------- */
+/* ---- OGFW v2 and v3 (logic.rs, FORMAT.md) -------------------------------------- */
 #define FW_BLOCK          512u
-#define FW_HDR_WORDS      9u
+#define FW_HDR_WORDS      9u                   /* format 2 */
+#define FW_HDR_WORDS_V3   10u                  /* format 3: + layout */
 #define FW_MAGIC          0x5746474Fu          /* "OGFW" */
-#define FW_FORMAT         2u
+#define FW_FORMAT         2u                   /* no resident region */
+#define FW_FORMAT_3       3u                   /* with one: app at FW_APP_BASE, descriptor + trailer */
+#define FW_ACCEPT_2       1u                   /* format masks for fw_header_parse_ex / fw_parse_file_ex */
+#define FW_ACCEPT_3       2u
+#define FW_ACCEPT_ANY     3u                   /* what netgd-fwupd itself accepts: the board decides */
+#define FW_LAYOUT         0x2000u              /* size of the resident region */
+#define FW_APP_BASE       0x00082000u
+#define FW_DESC_OFFSET    0x100u               /* "NGAP" descriptor in a format-3 code image */
+#define FW_DESC_LEN       32u
+#define FW_DESC_VERSION   1u
+#define FW_TRAILER_LEN    4u                   /* image CRC-32 in the last 4 bytes */
 #define FW_KIND_CODE      0u
 #define FW_KIND_BITSTREAM 1u
 #define FW_PLANE0_BASE    0x00080000u
@@ -63,11 +74,14 @@ uint32_t fw_crc32_update(uint32_t crc, const void *data, size_t n);   /* start w
 /* ---- image files ---------------------------------------------------------------- */
 typedef struct {
     uint32_t kind, target_cidr, dest, len, crc, version;
+    uint32_t format;               /* 2 or 3 */
+    uint32_t layout;               /* resident region size the image was built for (format 3), else 0 */
 } fw_header;
 
 typedef enum {
     FWV_OK = 0, FWV_EMPTY, FWV_TOO_BIG, FWV_SHORT, FWV_MAGIC, FWV_FORMAT, FWV_HDR_CRC, FWV_KIND,
     FWV_TARGET, FWV_DEST, FWV_LEN, FWV_TRUNC, FWV_PAYLOAD_CRC, FWV_VECTOR, FWV_MIXED, FWV_DUP,
+    FWV_DESC, FWV_UNSEALED, FWV_TRAILER, FWV_MIXFMT,
     FWV__COUNT
 } fw_verr;
 
@@ -87,9 +101,15 @@ typedef struct { fw_verr err; int index; } fw_vres;
 
 /* Same checks as fwimage.iter_images + validate_file (and the updater's before it
  * erases anything). Returns 0 and fills *f, or -1 and *res. `d` must outlive *f. */
-int fw_parse_file(const uint8_t *d, size_t n, fw_file *f, fw_vres *res);
-fw_verr fw_header_parse(const uint8_t *block512, fw_header *h);   /* magic, format, CRC, kind */
-fw_verr fw_header_check(const fw_header *h, int part);           /* target, dest, length */
+int fw_parse_file(const uint8_t *d, size_t n, fw_file *f, fw_vres *res);                 /* formats 2 and 3 */
+int fw_parse_file_ex(const uint8_t *d, size_t n, fw_file *f, fw_vres *res, unsigned formats);   /* FW_ACCEPT_* */
+fw_verr fw_header_parse(const uint8_t *block512, fw_header *h);   /* magic, format (2 or 3), CRC, kind */
+fw_verr fw_header_parse_ex(const uint8_t *block512, fw_header *h, unsigned formats);
+fw_verr fw_header_check(const fw_header *h, int part);           /* target, layout, dest, length */
+/* Format 3 code image: the 32 bytes at +0x100 (logic.rs check_descriptor; FWV_DESC, FWV_UNSEALED)
+ * and the CRC-32 in the last 4 bytes (check_trailer; FWV_TRAILER). */
+fw_verr fw_check_descriptor(const uint8_t *desc /* 32 bytes */, uint32_t image_len);
+fw_verr fw_check_trailer(const uint8_t *image, size_t n);
 int fw_part_from_cidr(uint32_t cidr);
 const char *fw_part_name(int part);                 /* "SAM3U2E" / "SAM3U4E" */
 uint32_t fw_part_sram0_end(int part);
