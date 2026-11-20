@@ -1,0 +1,96 @@
+# netgd-fwupd messages.  ID | English (ASCII, console / log key text) | Japanese (UTF-8)
+# "\n" is a line break.  gen_msgs.py turns this into fwmsg_gen.h (UTF-8 for the /pc/ file and
+# the dcload console, EUC-JP for the BIOS font on the Dreamcast screen).  Do not put "|" in a message.
+# Keep each screen line short: the screen is 640 px = 50 half-width or 25 full-width characters
+# (the screen code also wraps long lines).
+
+# ---- the image file (checked on the console before anything is sent) ----
+V_NOFILE | Cannot open the update image. | 更新イメージのファイルを開けません。
+V_READ | Reading the update image failed. | 更新イメージの読み込みに失敗しました。
+V_EMPTY | The update image is empty. | 更新イメージが空です。
+V_TOO_BIG | The update image is too large (more than two images). | 更新イメージが大きすぎます（2 つの画像の上限を超えています）。
+V_SHORT | The update image is cut off inside a header. | 更新イメージがヘッダの途中で終わっています。
+V_MAGIC | Not an OGFW update image (bad magic). | OGFW の更新イメージではありません（マジックが違います）。
+V_FORMAT | Unsupported OGFW format (only format 2). | 対応していない形式です（形式 2 のみ）。
+V_HDR_CRC | Header CRC mismatch: the file is damaged. | ヘッダの CRC が合いません。ファイルが壊れています。
+V_KIND | Unknown image kind in the header. | ヘッダの種別が不明です。
+V_TARGET | The image is not for a SAM3U2E or SAM3U4E. | 対象が SAM3U2E / SAM3U4E ではありません。
+V_DEST | Bad destination for this kind and part. | この種別・型番に対する書き込み先が不正です。
+V_LEN | Bad payload length in the header. | ヘッダのデータ長が不正です。
+V_TRUNC | The file ends before the payload does. | データの途中でファイルが終わっています。
+V_PAYLOAD_CRC | Payload CRC mismatch: the file is damaged. | データの CRC が合いません。ファイルが壊れています。
+V_VECTOR | The vector table is not plausible for the part. | ベクタテーブルが不正です（SP またはハンドラ）。
+V_MIXED | The images are for different parts. | 画像ごとに対象の型番が違います。
+V_DUP | Two images of the same kind. | 同じ種別の画像が 2 つあります。
+
+# ---- what the board answers (ERROR register with ERR) ----
+ST_OK | OK | 成功
+ST_REFUSED | Refused (plain ABRT 0x04). | 拒否されました（ABRT）。
+ST_BADHEADER | BadHeader: magic, format, header CRC or kind refused. | ヘッダが拒否されました（マジック・形式・CRC・種別）。
+ST_BADDEST | BadDest: this board may not write there. | 書き込み先が不正です（この基板では書けない領域）。
+ST_BADLENGTH | BadLength: bad length, or the image is incomplete. | 長さが不正、または送信量が足りません。
+ST_NOHEADER | NoHeader: no header has been accepted yet. | ヘッダがまだ受理されていません。
+ST_OVERRUN | Overrun: too much data, or the transfer stalled. | 送信量が多すぎるか、転送が途中で途切れました。
+ST_FLASHERROR | FlashError: the flash write failed. | フラッシュの書き込みに失敗しました。
+ST_CRCMISMATCH | CrcMismatch: the data in the board does not match the CRC. | 基板側のデータの CRC が合いません。
+ST_BADTARGET | BadTarget: this image is for a different chip. | このイメージはこの基板（チップ）用ではありません。
+ST_LOCKED | Locked: the flash region is locked. | 書き込み先のフラッシュ領域がロックされています。
+ST_BADVECTOR | BadVector: the new vector table was judged unusable. | 新しいベクタテーブルが不正と判断されました。
+ST_NOTVERIFIED | NotVerified: reset refused, nothing verified yet. | 検証が済んでいないためリセットが拒否されました。
+ST_UNKNOWN | Unknown status code. | 不明なステータスコードです。
+IO_TIMEOUT | No answer from the board (timeout). | 基板からの応答がありません（タイムアウト）。
+IO_BUSY | The IDE bus was busy and never became free. | IDE バスが使用中のままでした。
+IO_PROTO | Unexpected IDE phase. | 想定外の IDE の状態です。
+
+# ---- steps ----
+STEP_ARM | Arm the updater (F9/4F) | 更新の準備（F9/4F）
+STEP_ENTER | Enter the updater (F9/53) | 更新プログラムの起動（F9/53）
+STEP_PROBE | Is the updater already running? (F9/57) | 更新プログラムが動作中か確認（F9/57）
+STEP_HEADER | Send the header (F9/55) | ヘッダの送信（F9/55）
+STEP_DATA | Send the data (F9/56) | データの送信（F9/56）
+STEP_VERIFY | Verify and commit (F9/57) | 検証と書き込み確定（F9/57）
+STEP_RESET | Request the reset (F9/58) | リセット要求（F9/58）
+
+# ---- results (one is shown last) ----
+OUT_OK | Update complete. NetGD restarts. Power-cycle the Dreamcast. | 更新が完了しました。NetGD が再起動します。\nDreamcast の電源を入れ直してください。
+OUT_OK_UNCONFIRMED | All images verified and the reset was requested, but the answer was not seen. It most likely restarted. Power-cycle the Dreamcast. | 全イメージの検証に成功し、リセットを要求しました。\n応答は確認できませんでしたが、再起動した可能性が高いです。\nDreamcast の電源を入れ直してください。
+OUT_NO_RESET | All images verified, but the board refused the reset. Run this app again. | 全イメージの検証には成功しましたが、リセットが拒否されました。\nこのアプリをもう一度実行してください。電源は切らないでください。
+OUT_CANCELLED | Cancelled. Nothing was sent. | 中止しました。何も送っていません。
+OUT_NOT_NETGD | The secondary IDE device is not NetGD. Nothing was sent. | セカンダリ IDE が NetGD ではありません。\n何も送っていません。
+OUT_IDENT_FAIL | IDENTIFY of the secondary IDE device failed. Nothing was sent. | セカンダリ IDE の IDENTIFY に失敗しました。\n何も送っていません。
+OUT_REFUSED_START | The update could not be started: a write session is active, or the firmware has no self-update. Nothing was changed. | 更新を開始できませんでした。書き込みセッション中か、\n自己更新に対応していないファームです。何も変更していません。
+OUT_ENTER_FAILED | Switching to the updater failed. Nothing was written. Power-cycle and start again. | 更新プログラムへの移行に失敗しました。何も書き込んでいません。\n電源を入れ直して、最初からやり直してください。
+OUT_REJECTED_CLEAN | The board refused the update. Flash is unchanged. It is waiting in the updater: power-cycle to boot the old firmware. | 基板が更新を拒否しました。フラッシュは書き換わっていません。\n基板は更新プログラムの待機中です。電源を入れ直せば、\n元のファームで起動します。
+OUT_REJECTED_DIRTY | The board refused this image, but an earlier image is already written. Do not power off. Fix the cause and run this app again. | 基板がこの画像を拒否しました（前の画像は書き込み済み）。\n電源を切らずに原因を直して、このアプリを再実行してください。
+OUT_FAILED_DIRTY | The write failed while flash was half-rewritten. Do NOT power off or reset. Run this app again to resend. Cutting power may need SWD. | 書き込み中に失敗しました。フラッシュが途中まで書き換わっています。\n電源を切らず、リセットもせず、このアプリを再実行して\n送り直してください。電源を切ると SWD が必要になることがあります。
+OUT_IO_CLEAN | No answer from the board. Nothing was written. Wait a minute, then power-cycle and start again. | 基板から応答がありません。何も書き込んでいません。\nしばらく待ってから電源を入れ直し、やり直してください。
+OUT_IO_DIRTY | No answer from the board while flash was being rewritten. Do NOT power off. Wait a few minutes and run this app again. If it never answers, SWD is needed. | 書き換え中に基板から応答がなくなりました。\n電源を切らずに数分待ち、このアプリを再実行してください。\nそれでも応答しない場合は SWD が必要です。
+
+# ---- screens ----
+UI_TITLE | NetGD firmware update (netgd-fwupd) | NetGD ファーム更新 (netgd-fwupd)
+UI_NO_DCLOAD | Start this app from dcload-ip (it needs /pc/). | dcload-ip から起動してください（/pc/ が必要です）。
+UI_LOADING | Reading the update image... | 更新イメージを読み込んでいます...
+UI_IMAGE_BAD | The update image was refused on the console: | 更新イメージを受け付けられません：
+UI_CHECKING | Checking the secondary IDE device... | セカンダリ IDE を確認しています...
+UI_DEVICE | Device | 接続先
+UI_FILE | File | ファイル
+UI_TARGET | Target chip | 対象チップ
+UI_IMG_CODE | code (flash plane 0) | コード（フラッシュ プレーン 0）
+UI_IMG_BITSTREAM | bitstream (flash plane 1) | ビットストリーム（プレーン 1）
+UI_VERSION | version | 版
+UI_BYTES | bytes | バイト
+UI_WARN_NO_BITSTREAM | Warning: a 4E image without a bitstream (code only). | 警告：4E 用ですがビットストリームがありません（コードのみ）。
+UI_WARN_POWER | Never power off, reset or unplug the LAN during the transfer. | 転送中は電源を切らない・リセットしない・LAN を抜かない。
+UI_WARN_SWD | A power cut then can leave the board unbootable: only SWD recovers it. | その間に電源が切れると基板が起動しなくなり、SWD でしか戻せません。
+UI_WARN_UNTESTED | Not yet tested on real hardware. | 実機では未検証です。
+UI_CONFIRM_TITLE | Update NetGD with this image? | このイメージで NetGD を更新しますか？
+UI_CONFIRM_HOLD | Hold A + X + START + UP for 3 seconds to begin. | A + X + START + 上 を 3 秒間押し続けると開始します。
+UI_CONFIRM_CANCEL | B: cancel (nothing is sent) | B ボタン：中止（何も送りません）
+UI_HOLDING | Keep holding... | そのまま押し続けてください...
+UI_SENDING | Updating. DO NOT POWER OFF! | 更新中です。電源を切らないでください！
+UI_RESULT | Result | 結果
+UI_RESULT_FILE | Result file | 結果ファイル
+UI_RESULT_FILE_FAIL | The result file could not be written (see the console). | 結果ファイルを書けませんでした（コンソールを見てください）。
+UI_PRESS_START | START: return to dcload | START ボタン：dcload に戻る
+UI_RETRY | Retrying this image | この画像を送り直しています
+UI_PROGRESS | Progress | 進み具合

@@ -642,6 +642,24 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **KOS ビルドの CI も失敗**（run 44684499681）：`netgd-recv` の Makefile の文字列の `-D` 定義の引用符が崩れる（KOS の Makefile.rules 経由）、`%u` と `long` の不一致 → 同じ Sonnet に依頼（gdprobe と同じく、引用符なしで渡して C 側で文字列化する方式に）。
 - 教訓：Windows だけでテストしていると Linux や KOS の環境差を見逃す → CI で両方を回す意味があった。
 
+### R51 さらに追加の並列割り当て（Opus、ユーザーの指示）
+| モデル | 作業 | 担当ファイル |
+|---|---|---|
+| Sonnet | G1：ボード対応の FPGA ローダー（`PsProfile`、再試行、タイムアウト、`board-v55`／`board-v60`）。v5.5 の動作は変えない。偽 FPGA でのホストテストは新クレート `common/psload` | `cyclone.rs`・`main.rs`（FPGA 部分）・`build.rs`・`Cargo.toml` の feature・`common/psload/`・CI |
+| Sonnet | 「NetGD ならこう答える」予測記録ツール（mksdcard のイメージに対する NetGD の応答をプローブ形式で出力。純正の記録とすぐ比較できる） | `common/discimg/examples/expect.rs`、`tools/netgd-expect/` |
+| Fable | 自己更新の対策 B（ロックで守る常駐ブート領域）の設計（2E/4E の配置、ビットストリームの3つの想定、SD から読む案） | `docs/design/fw-bootloader.md` |
+| Haiku | 計画書の「いまの状態」を最新化 | `docs/PLAN.md` の該当節 |
+- 実行中の作業：`netgd-recv` の修正、R45 の修正、`netgd-fwupd`（いずれも Sonnet）。
+
+### R52 BBA 経由のファーム更新アプリ `tools/netgd-fwupd`（Sonnet 実装、Opus がテストを確認）
+- KOS アプリ（`main.c`・`g1dev.c`）＋ホストでテストできる中核（`fwcore.c`：OGFW の検査と `0xF9` の状態遷移、結果の文章）、結果ファイルは 4 KB ずつ＋flush。
+- **手順**（`fwupdate.rs`・`fwupdater/main.rs`・`ide.rs` の `handle_fw_command` に準拠）：セカンダリの IDENTIFY の型番に「OpenGDEMU」か「NetGD」が含まれるときだけ進む（**純正 GDEMU にはセカンダリが無いので何も送らない**）→
+  画面で確認し A+X+START+上 を3秒長押し → arm（feat 0x4F）→ enter（0x53）→ イメージごとに header（0x55）・data（0x56、64 ブロックずつ）・verify（0x57）→ 全部が検証済みのときだけ reset（0x58）。
+  **強制リセット 0x59 は定数すら無く、送らないことをテストで確認**。再試行は Overrun・FlashError・CRC 不一致などだけ（最大2回、ヘッダから）。BadTarget・BadVector・Locked・タイムアウトは再試行しない。
+- 追加：前回の失敗で RAM 上の更新プログラムが残っている場合を検出して続きから送る（arm が拒否されたら verify を送って応答で判別）。完全で未確定のイメージがあれば、その確認で確定する（副作用）。
+- **確認（Opus）**：テスト 872 項目パス（共有のテストベクタ、偽の更新プログラムでの成功・各エラー・タイムアウト・再開、2E/4E の実イメージ）。KOS 部分は構文チェックのみ（KOS CI で初コンパイル）。
+- **未確認**：実機との PIO の手順、enter 直後の状態の取り方、IDENTIFY の型番の判定（改名で型番を変えたら要更新）。転送中の電源断の窓は R46 のとおり残る。
+
 ---
 
 ## 判断の記録（Decisions）

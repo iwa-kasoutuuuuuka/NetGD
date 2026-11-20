@@ -1,0 +1,6 @@
+tests/test_all
+tests/test_all.exe
+*.elf
+*.o
+host/
+__pycache__/
