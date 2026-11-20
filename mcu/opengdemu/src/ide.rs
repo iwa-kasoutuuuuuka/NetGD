@@ -18,8 +18,9 @@
 //!   CD_READ2 from the mounted image (`handle_cd_read`, PIO or DMA, streamed
 //!   from SD), CD_PLAY and CD_SEEK for CD audio (`cdda.rs`), and vendor `0xE0`
 //!   (IMAGE_CTL) to mount an image by folder name. A unit attention left by a
-//!   reset is reported as CHECK CONDITION until the host reads it back with
-//!   REQUEST SENSE.
+//!   reset is reported as CHECK CONDITION once, on the first command after the
+//!   reset other than REQUEST SENSE / REQ_ERROR; the sense key stays pending
+//!   for the REQUEST SENSE that should follow.
 //! - Secondary, `Role::Disk`: a plain ATA disk that exposes the whole SD card,
 //!   MBR included. IDENTIFY DEVICE is answered. READ and WRITE SECTORS, their
 //!   DMA forms and the LBA48 variants go to `handle_disk_read` and

@@ -127,8 +127,42 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   `0x52` の他のサブコマンドと切替後の SENSE の系列、`image_tag` の実在、SD のライトプロテクト検出の有無、
   CDI の `start_lba`・pregap・FAD の関係（11700 と 11702 の差）、BBA 上の KOS TCP 実測値、G1 バスのビット化けの原因。
 
-### R11 ここまでの成果のデバッグ（Fable）
-- 実行中。完了後に結果と Opus の検証をここに追記する。
+### R11 ここまでの成果のデバッグ（Fable、web の一次資料とも照合）
+- **対象**：`main..netgd/foundation` の6コミット。
+- **結論**：**ブランチが持ち込んだ機能的な退行は無い**。discimg への移行は旧実装とバイト一致
+  （差分の読解、既存の 3000 件スイープ、追加の差分ファズ 80 万件 = CDI 40 万・GDI 40 万で不一致ゼロ）。
+- **A：ブランチが導入した問題**
+  - A-1（低、実測）：GDI マウント経路のスタックが約 +64〜140 バイト（`load_by_name` のフレーム 2748 → 2812 バイト、`PoolSink::push` と
+    `strip_quotes` が非インライン化）。2E のスタックは約 7952 バイトで、マウント経路が約 5.1 KB を使う。溢れるかは静的には確定できない。
+    IDE のホットパス（`handle_packet` など）のフレームは不変。
+  - A-2（情報）：`tests/oracle/mod.rs` は逐語コピーではなく意味的に等価な写し（static → 引数、`ShortFileName` → `String<32>` など。ヘッダに明記）。
+    関数単位で旧コードと突き合わせ、算術・分岐・エラー順序は同一 → スイープは有効。ただしオーバーフロー域は比較できていない（コード読解でのみ担保）。
+    80 万件の差分ファズは恒久テストに加える価値がある。
+  - A-3（低、推測）：CI の Python 3.12 で Verilog の再生成結果が 3.10 と同じかは未確認。
+- **B：問題なしと確認**：GDI/CDI パーサのエラー写像と失敗時の部分状態、ATAPI 応答4種、static の寿命、defmt 配線、HAL の feature
+  （`systick::init` の呼び出し側は元から `time-driver` 内、割り込みハンドラは不変）、LF の新規クローンでのファームビルド
+  （相対 `-Map` パス・`xz`・fwupdater の入れ子ビルド含む）、インデックスは全ファイル LF、`OpenGDEMUCore.v` にパス属性なし、
+  `docs/AddressMapMCU.md` のスロット 0〜31 が `ide_device.py` と一致。
+- **C：ドキュメントとコードの食い違い**
+  - C-1（確認済み、**修正**）：`ide.rs` 冒頭の「unit attention は REQUEST SENSE で読まれるまで報告」は誤り。実装は最初の1コマンドに1回だけ返す
+    （`ide.rs` の `state.unit_attention = false`）。Opus が確認してコメントを修正。
+  - C-2（**修正**）：README の「実機で未確認」は、上流のコード中の実機検証の記述（例：`ide.rs` の "Verified via dcload-serial against a stock GDEMU"）と紛らわしい
+    → 「このフォークとしては未確認」に修正。
+  - C-3（未修正、ブランチ以前から）：`mcu/opengdemu/Cargo.toml` の sam3u2e の説明にある `MAX_IMAGES` はソースに存在しない。
+- **D：上流から引き継いだ挙動の疑い**（main でも同じバイト列。参照：Sega SPI 仕様 v1.30 https://segaretro.org/images/7/72/Cdif131e.pdf 、
+  Flycast `core/hw/gdrom/gdromv3.cpp` と `core/imgread/`、KallistiOS `kernel/arch/dreamcast/hardware/cdrom.c`）
+  - D-1（高、確認済み）：トラック2本の CDI（音声 @0、データ @11702）で `REQ_SES(2)` が ABRT。Flycast は `xx 00 02 00 2e 4c` を返す。
+    `prefetch_ip_bin` も範囲外の 45000 を読む。R9 の疑い2・R10 の Flycast の調査と一致。
+  - D-2（中、確認済み・**Opus もコードで確認**）：GET_SCD format 1 が BCD/MSF（`common/discimg/src/atapi.rs` の `bcd`・`put_msf`）。仕様と Flycast はバイナリ FAD。
+  - D-3（中、確認済み）：REQ_STAT のバイト1に Disc Format（上位4ビット）が無い。CDB バイト2の開始アドレスを無視。
+  - D-4（中、推測）：GDI の REQ_SES のセッション数が1（Flycast は2）。コード内コメントは「純正は1」と主張 → 実機で要確認。
+  - D-5（低）：GET_SCD format 0 の R〜W ビット、lead-out の CTRL、REQ_SES のバイト0、CDI の lead-out（1 FAD 差）と pregap の扱い。
+  - 仕様と一致した点：TOC エントリのニブル順、first/last エントリ、CDI の area 1、Standby 時の FAD 0x96、オーディオステータス値。
+- **対応**：D と A-1 は `docs/PLAN.md` に課題として登録。実機と比べるまで挙動は変えない。
+
+### R12 GitHub への公開（Opus）
+- `upstream` = cepawiel/OpenGDEMU、`origin` = https://github.com/iwa-kasoutuuuuuka/NetGD（公開リポジトリ）に設定し、`main` を push。
+- README を NetGD の入口として書き直した（日本語 + 英語の要約）。
 
 ---
 
@@ -143,3 +177,5 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | G2 は「Dreamcast 側アプリが FAT32 を持つ」方式、転送は T1 → T2 | R8 | Fable 設計、Opus 承認 |
 | 2026-11-20 | git の作者は `iwa-kasoutuuuuuka` と GitHub の noreply メール（このリポジトリのみ） | メールアドレスを公開しない | ユーザー |
 | 2026-11-20 | 調査・レビュー・判断はすべて `docs/research/LOG.md` に記録する | ユーザーの指示 | ユーザー |
+| 2026-11-20 | 上流から引き継いだ ATAPI 応答の疑い（R11 の D）は、実機と比べるまで挙動を変えない | 実機の純正 GDEMU が仕様や Flycast と違う応答をしている可能性がある（コード内コメント） | Opus |
+| 2026-11-20 | GitHub の公開先は iwa-kasoutuuuuuka/NetGD（公開）、上流は `upstream` リモートに残す | ユーザーの指示 | ユーザー |

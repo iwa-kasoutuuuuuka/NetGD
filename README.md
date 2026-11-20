@@ -9,7 +9,8 @@ SD card over the Broadband Adapter, and match the original GDEMU's features with
 Nothing is verified on hardware yet.*
 
 > [!WARNING]
-> **開発中です。実機ではまだ一度も動作を確認していません。**
+> **開発中です。このフォーク（NetGD）としては、まだ実機で動作を確認していません。**
+> （コード中のコメントには、上流が実機で確認した事柄も書かれています。）
 > 書き込むと純正ファームウェアは消え、元に戻す方法はありません（純正ファームは吸い出せません）。
 > 壊れても構わない基板以外には書き込まないでください。
 
@@ -39,7 +40,7 @@ docs/               計画・調査・設計・基板の資料
 
 パス名やバイナリ名（`mcu/opengdemu`、`opengdemu.elf`）は上流のままです。改名は後で行います。
 
-## 今のファームウェアにできること（コード上。実機未確認）
+## 今のファームウェアにできること（コード上。NetGD としては実機未確認）
 
 - **起動**：LZMA 圧縮した FPGA ビットストリームを展開しながら FPGA に送り込み、SD カード（MBR + FAT32）を読んで既定のイメージをマウントする。
 - **GD-ROM（プライマリ）**：GDI / CDI イメージから `CD_READ` を PIO・DMA で返す。TOC・セッション情報、CD 音声（CDDA）、`START STOP UNIT` による取り出し。
