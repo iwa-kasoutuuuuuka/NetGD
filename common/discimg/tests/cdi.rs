@@ -116,11 +116,11 @@ fn read_mode_to_sector_size() {
 fn single_session_cooked_data_track() {
     let f = build(
         4096,
-        &[vec![T { name_len: 32, pregap: 0, sector_count: 2, start_lba: 0, total_length: 2, read_mode: 0, control: 4 }]],
+        &[vec![T { name_len: 32, pregap: 0, sector_count: 2, start_lba: 200, total_length: 2, read_mode: 0, control: 4 }]],
     );
     let (s, t) = parse_slice(&f).unwrap();
     assert_eq!(s, 1);
-    assert_eq!(summary(&t), vec![(1, 0, 4, 2048, 2, 0)]);
+    assert_eq!(summary(&t), vec![(1, 50, 4, 2048, 2, 0)]);
 }
 
 #[test]
@@ -166,12 +166,27 @@ fn shorter_pregap_moves_the_data_lba_earlier() {
 }
 
 #[test]
-fn start_lba_before_the_first_fad_saturates_at_zero() {
-    let f = build(
-        100,
-        &[vec![T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 0, total_length: 1, read_mode: 2, control: 0 }]],
-    );
-    assert_eq!(parse_slice(&f).unwrap().1[0].start_lba, 0);
+fn start_lba_before_the_first_fad_skips_the_sectors_below_lba_zero() {
+    // pregap 0, start_lba 0: the data begins at FAD 0, 150 sectors before LBA 0. Those are
+    // skipped (file offset advances, count shrinks) rather than pinning the LBA to 0 with the
+    // offset unchanged, which would serve every sector 150 sectors early.
+    let one = |pregap, count, start| T { name_len: 1, pregap, sector_count: count, start_lba: start, total_length: count, read_mode: 2, control: 0 };
+    let f = build(100, &[vec![one(0, 1000, 0)]]);
+    let t = parse_slice(&f).unwrap().1;
+    assert_eq!((t[0].start_lba, t[0].sector_count, t[0].file_offset), (0, 850, 150 * 2352));
+    // With a pregap: first data sector at FAD 100 (pregap 100, start 0), 50 below LBA 0.
+    let f = build(100, &[vec![one(100, 1000, 0)]]);
+    let t = parse_slice(&f).unwrap().1;
+    assert_eq!((t[0].start_lba, t[0].sector_count, t[0].file_offset), (0, 950, (100 + 50) * 2352));
+    // Exactly at FAD 150 nothing moves.
+    let f = build(100, &[vec![one(100, 1000, 50)]]);
+    let t = parse_slice(&f).unwrap().1;
+    assert_eq!((t[0].start_lba, t[0].sector_count, t[0].file_offset), (0, 1000, 100 * 2352));
+    // A track wholly below LBA 0 has nothing to map.
+    let f = build(100, &[vec![one(0, 150, 0)]]);
+    assert_eq!(parse_slice(&f), Err(Error::BadCdi));
+    let f = build(100, &[vec![one(0, 1, 0)]]);
+    assert_eq!(parse_slice(&f), Err(Error::BadCdi));
 }
 
 #[test]
@@ -205,7 +220,7 @@ fn errors() {
     );
     assert_eq!(parse_slice(&bad), Err(Error::BadCdi));
     // running base overflows on the second track.
-    let t = |total| T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 0, total_length: total, read_mode: 2, control: 0 };
+    let t = |total| T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 200, total_length: total, read_mode: 2, control: 0 };
     let bad = build(64, &[vec![t(0x2000_0000), t(0x2000_0000)]]);
     assert_eq!(parse_slice(&bad), Err(Error::BadCdi));
     // No sessions / no tracks at all.
@@ -219,7 +234,7 @@ fn truncated_descriptor_is_a_read_error() {
     // runs past EOF, which is a reader failure rather than BadCdi.
     let f = build(
         64,
-        &[vec![T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 0, total_length: 1, read_mode: 2, control: 0 }]],
+        &[vec![T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 200, total_length: 1, read_mode: 2, control: 0 }]],
     );
     let mut g = f.clone();
     // Bump the session count so the walk wants a second session header past
@@ -274,7 +289,7 @@ fn sink_sees_header_then_clear_and_its_errors_pass_through() {
 #[test]
 fn too_many_tracks_is_the_sinks_call() {
     // 100 tracks into the 99-entry VecSink.
-    let t = |i: u32| T { name_len: 1, pregap: 0, sector_count: 1, start_lba: i, total_length: 1, read_mode: 2, control: 0 };
+    let t = |i: u32| T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 200 + i, total_length: 1, read_mode: 2, control: 0 };
     let f = build(64, &[(0..100).map(t).collect()]);
     assert_eq!(parse_slice(&f), Err(Error::Sink(Full)));
     let f = build(64, &[(0..99).map(t).collect()]);
@@ -286,7 +301,7 @@ fn agrees_with_the_original_walk() {
     let mut images = vec![mil_cd()];
     images.push(build(
         4096,
-        &[vec![T { name_len: 32, pregap: 0, sector_count: 2, start_lba: 0, total_length: 2, read_mode: 0, control: 4 }]],
+        &[vec![T { name_len: 32, pregap: 0, sector_count: 2, start_lba: 200, total_length: 2, read_mode: 0, control: 4 }]],
     ));
     images.push(build(10, &[]));
     images.push(vec![0u8; 7]);

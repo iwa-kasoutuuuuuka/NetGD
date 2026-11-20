@@ -384,14 +384,14 @@ Note the file name is `GDEMU.CFG`, 8.3 — not `OPENGDEMU.CFG`.
    | key | range (default) | what NetGD does |
    |-----|-----------------|-----------------|
    | `reset_goto` | 0–9999 (0 = off) | When the console is hard-reset (the G1 RSTn line, not a soft SRST), mount image number N. If N has no image the disc is left as it is. If N is already mounted nothing happens. Above 9999 means off. |
-   | `open_time` | 150–5000 ms (500) | After a disc swap (the `0x52` command, the front-panel button), the drive answers NOT READY / MEDIUM NOT PRESENT for this long, then ready. Out-of-range values are clamped. |
-   | `detect_time` | 150–5000 ms (250) | Added to `open_time`: the total NOT READY time after a swap is `open_time + detect_time`. |
+   | `open_time` | 150–5000 ms (500) | **Read but not applied yet.** The NOT READY window after a swap is switched off until stock-GDEMU probe data (the sense sequence and timing after a swap) is available; a half-working window is worse than none. The value is parsed, clamped and logged only. |
+   | `detect_time` | 150–5000 ms (250) | **Read but not applied yet**, same as `open_time`. |
    | `image_tests`, `high_speed`, `read_limit` | | Read and ignored (logged). Not implemented. |
 
-   `open_time` / `detect_time` only take effect for the keys the file sets: with
-   no `GDEMU.INI`, a swap has no extra delay (unlike the original, whose
-   built-in defaults are 500 / 250 ms). A normal LOAD after an eject and the
-   power-on mount are not delayed. Unknown keys are ignored.
+   `open_time` / `detect_time` are read but have no effect for now: a swap has no
+   NOT READY delay, with or without `GDEMU.INI`. The file is parsed completely
+   (any size; CR, LF or CRLF line ends; a UTF-8 BOM and non-ASCII comments are
+   fine). Unknown keys are ignored.
 
    How it combines with `GDEMU.CFG`: `GDEMU.CFG` `image=` still chooses the
    power-on image (then folder `01`); `GDEMU.INI` only adds behaviour. A

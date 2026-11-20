@@ -107,7 +107,7 @@ where
             let ssize = sector_size(read_mode).ok_or(Error::BadCdi)?;
 
             // Data begins past this track's own pregap.
-            let file_offset = base
+            let mut file_offset = base
                 .checked_add(pregap.checked_mul(ssize as u32).ok_or(Error::BadCdi)?)
                 .ok_or(Error::BadCdi)?;
 
@@ -119,7 +119,28 @@ where
             // sector is start_lba + pregap - 150. With the usual 150-sector
             // pregap that is `start_lba` itself; a track with a shorter
             // pregap (DiscJuggler's own images) starts that much earlier.
-            let data_lba = start_lba.saturating_add(pregap).saturating_sub(FAD_OFFSET);
+            //
+            // A track whose data would begin before FAD 150 (LBA < 0) cannot
+            // be addressed from LBA 0. Pinning its LBA to 0 and keeping the
+            // file offset put every sector `shortfall` sectors off, so the
+            // sectors below LBA 0 are skipped instead: the file offset
+            // advances and the count shrinks by the same amount. A track
+            // that lies wholly below LBA 0 has nothing to map: BadCdi.
+            let first_fad = start_lba.saturating_add(pregap);
+            let mut sector_count = sector_count;
+            let data_lba = if first_fad >= FAD_OFFSET {
+                first_fad - FAD_OFFSET
+            } else {
+                let short = FAD_OFFSET - first_fad;
+                if short >= sector_count {
+                    return Err(Error::BadCdi);
+                }
+                file_offset = file_offset
+                    .checked_add(short.checked_mul(ssize as u32).ok_or(Error::BadCdi)?)
+                    .ok_or(Error::BadCdi)?;
+                sector_count -= short;
+                0
+            };
 
             let t = TrackDesc {
                 number,

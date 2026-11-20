@@ -638,6 +638,10 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
     if RSTN_FALLS_SEEN.swap(falls, core::sync::atomic::Ordering::Relaxed) == falls {
         return;
     }
+    // No NOT READY window survives a reset: the host is rebooting and a
+    // stale `READY_AT` (see `APPLY_SWAP_WINDOW`) would keep answering the
+    // booting BIOS with NOT READY on the paths that do not remount.
+    unsafe { READY_AT = None };
     // A write session does not survive a hard reset (never SRST: that does
     // not move the counter). Ending it first leaves the drive ejected, so
     // the remount below is the same one F5 does.
@@ -645,7 +649,10 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
         info!("primary: hard reset ended the write session");
     }
     // GDEMU.INI `reset_goto=N`: a host hard reset switches to image N. An N
-    // with no image leaves the media as it is.
+    // with no image leaves the media as it is. The file may have been
+    // rewritten while the card was ejected for a write session (or by hand,
+    // between boots), and `mount_named` does not re-read it: do it here.
+    crate::gdi::reload_ini(disk_sectors());
     let goto = crate::gdi::ini().reset_goto;
     if goto > 0 {
         if media_present() && crate::gdi::mounted_number() == Some(goto) {
@@ -1119,7 +1126,7 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
         }
     };
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
-    let delay = crate::gdi::ini().swap_delay_ms();
+    let delay = if APPLY_SWAP_WINDOW { crate::gdi::ini().swap_delay_ms() } else { 0 };
     unsafe {
         READY_AT = if ok && delay != 0 {
             Some(Instant::now() + Duration::from_millis(delay as u64))
@@ -1148,8 +1155,27 @@ pub(crate) fn media_present() -> bool {
     MEDIA_PRESENT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether GDEMU.INI `open_time` / `detect_time` open a NOT READY window after
+/// a swap. OFF: the keys are parsed (`gdi::ini()`) but not applied.
+///
+/// The window as written is only half a tray cycle (review R45 item 1), and
+/// half is worse than none: openMenu's `cdrom_reinit` can see OK inside it
+/// and its next CD_READ then fails. It waits for stock-GDEMU probe data --
+/// the SENSE sequence and the timing a real GDEMU shows after a swap. To turn
+/// it on consistently, all of these are needed together:
+///   * gate GET_TOC, REQ_SES, GET_SCD and REQ_STAT as well as TUR, CD_PLAY
+///     and CD_READ;
+///   * SECNR / REQ_STAT report OPEN -> BUSY during the window, not STANDBY;
+///   * one UNIT ATTENTION when the window *ends* (not only before it);
+///   * every gated path sets the sense key, and REQ_ERROR (0x13) reports it;
+///   * also open the window on `swap_media` / `load_media`, not just
+///     `mount_named`.
+/// `service_hard_reset` already clears `READY_AT` on a reset.
+const APPLY_SWAP_WINDOW: bool = false;
+
 /// When a swapped-in disc stops reading NOT READY (GDEMU.INI `open_time` +
-/// `detect_time`, applied only for keys the card set). Only `ide_task` touches
+/// `detect_time`, applied only for keys the card set, and only while
+/// [`APPLY_SWAP_WINDOW`]). Only `ide_task` touches
 /// this. Non-blocking on purpose: the IDE task keeps answering commands during
 /// the window, so the host sees NOT READY rather than a stalled bus.
 static mut READY_AT: Option<Instant> = None;
@@ -1200,12 +1226,14 @@ const SEGA_GET_SCD: u8 = 0x40;
 ///                               configured default if packet[2] = 0xFF or no
 ///                               name is staged. Swaps immediately, no
 ///                               eject/load needed; UNIT ATTENTION follows.
+///                               The staged name is cleared once used.
 ///   packet[1] = 3  VERSION   -> "OGDM", u8 protocol, feature byte
 ///                               (`OGDM_FEATURES`), 3 reserved bytes (zero),
 ///                               24-byte firmware string.
 ///   packet[1] = 5  MOUNT_NAME-> packet[2] = chunk index, packet[3..12] = up
 ///                               to nine bytes of the folder name. Chunk 0
-///                               starts a new name; MOUNT consumes it.
+///                               starts a new name; MOUNT and WSESSION_END 2
+///                               consume it (a BEGIN clears it too).
 ///   packet[1] = 6  WSESSION_BEGIN  packet[2..6] = "NGWS". Eject, start a
 ///                               write session (F7 protected range, F8
 ///                               checksums). Bad key: ILLEGAL REQUEST.
@@ -1998,12 +2026,14 @@ async fn handle_image_ctl(
             // Mount whatever name was staged, or the configured default.
             let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
             if packet[2] == NO_SELECTION || name.is_empty() {
+                clear_mount_name();
                 crate::gdi::select_default();
                 swap_media(state, label).await;
                 finish_ok(dev);
                 return;
             }
             let ok = mount_named(state, label, name.as_str()).await;
+            clear_mount_name();
             if ok {
                 finish_ok(dev);
             } else {
@@ -2021,7 +2051,12 @@ async fn handle_image_ctl(
             // CD_READ_BUF is free to borrow: the drive is about to be ejected.
             let sec: Option<&mut [u8; 512]> = loader_scratch().first_chunk_mut::<512>();
             let part = match sec.map(crate::fat::partition_start) {
-                Some(Ok(p)) => p,
+                Some(Ok(p)) if !gpt_card(p) => p,
+                Some(Ok(_)) => {
+                    warn!("{}: WSESSION_BEGIN refused: GPT card (protective MBR)", label);
+                    finish_illegal(dev, state);
+                    return;
+                }
                 _ => {
                     warn!("{}: WSESSION_BEGIN: cannot read the partition table", label);
                     finish_illegal(dev, state);
@@ -2032,6 +2067,7 @@ async fn handle_image_ctl(
             MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
             invalidate_cd_read_cache();
             unsafe { READY_AT = None };
+            clear_mount_name();
             let _ = wsession().begin(&packet[2..6], part);
             info!("{}: write session begun, protecting LBA < {}", label, part);
             finish_ok(dev);
@@ -2050,16 +2086,23 @@ async fn handle_image_ctl(
                     state.pending_sense_key = 0x06;
                     true
                 }
-                Remount::Default => load_media(state).await,
+                Remount::Default => {
+                    // The write session may have rewritten GDEMU.INI.
+                    crate::gdi::reload_ini(disk_sectors());
+                    load_media(state).await
+                }
                 Remount::Named => {
+                    crate::gdi::reload_ini(disk_sectors());
                     let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
                     // DESIGN-GAP: Named with no name staged = Default (same
                     // as MOUNT's no-name case).
-                    if name.is_empty() {
+                    let ok = if name.is_empty() {
                         load_media(state).await
                     } else {
                         mount_named(state, label, name.as_str()).await
-                    }
+                    };
+                    clear_mount_name();
+                    ok
                 }
             };
             if ok {
@@ -2181,7 +2224,11 @@ async fn handle_gdemu_cmd(
                 return;
             }
             let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
-            if mount_named(state, label, name.as_str()).await {
+            let ok = mount_named(state, label, name.as_str()).await;
+            // `0x52` stages through the same buffer as MOUNT_NAME: leave
+            // nothing behind for a later WSESSION_END 2 to mount.
+            clear_mount_name();
+            if ok {
                 finish_ok(dev);
             } else {
                 finish_illegal(dev, state);
@@ -2202,7 +2249,11 @@ async fn handle_gdemu_cmd(
                 return;
             }
             let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
-            if mount_named(state, label, name.as_str()).await {
+            let ok = mount_named(state, label, name.as_str()).await;
+            // `0x52` stages through the same buffer as MOUNT_NAME: leave
+            // nothing behind for a later WSESSION_END 2 to mount.
+            clear_mount_name();
+            if ok {
                 finish_ok(dev);
             } else {
                 finish_illegal(dev, state);
@@ -2239,8 +2290,28 @@ fn write_session_active() -> bool {
     wsession().active()
 }
 
-/// The folder name staged by [`SUB_MOUNT_NAME`], mounted by [`SUB_MOUNT`].
+/// The folder name staged by [`SUB_MOUNT_NAME`] (or by `0x52` through
+/// `stage_folder`), mounted by [`SUB_MOUNT`] or WSESSION_END 2. Cleared when
+/// consumed and by WSESSION_BEGIN.
 static mut MOUNT_NAME: heapless::String<{ gamecfg::MAX_NEXT }> = heapless::String::new();
+
+/// After `fat::partition_start` filled the loader scratch with sector 0:
+/// whether that is a GPT protective MBR (entry 0 of type 0xEE). The F7
+/// boundary cannot be taken from it, so BEGIN refuses. `part == 0` means no
+/// partition entry or a superfloppy (`partition_start` checked the BPB).
+fn gpt_card(part: u32) -> bool {
+    if part == 0 {
+        return false;
+    }
+    match loader_scratch().first_chunk_mut::<512>() {
+        Some(sec) => discimg::wsession::is_gpt_protective(sec, false),
+        None => false,
+    }
+}
+
+fn clear_mount_name() {
+    unsafe { (*core::ptr::addr_of_mut!(MOUNT_NAME)).clear() };
+}
 
 
 
@@ -3171,8 +3242,13 @@ async fn handle_disk_write(
     dma: bool,
     ext: bool,
 ) {
+    // What STATUS reports for a write refused before `write_begin`: the
+    // request's own LBA (clamped when it does not fit 32 bits) and count.
+    let count = snap.count(ext);
+    let req_lba = u32::try_from(snap.lba(ext)).unwrap_or(u32::MAX);
     if media_present() {
         warn!("{}: disk write refused -- eject the GD-ROM first", label);
+        wsession().write_refused(req_lba, count);
         dev.set_error(ERR_ABRT);
         dev.set_status_intrq(STATUS_IDLE_ERR);
         dev.ack_command();
@@ -3180,6 +3256,7 @@ async fn handle_disk_write(
     }
     if snap.device & 0x40 == 0 {
         warn!("{}: disk write in CHS mode, refusing", label);
+        wsession().write_refused(req_lba, count);
         dev.set_error(ERR_ABRT);
         dev.set_status_intrq(STATUS_IDLE_ERR);
         dev.ack_command();
@@ -3191,16 +3268,17 @@ async fn handle_disk_write(
     // corruption much later.
     let Ok(lba) = u32::try_from(snap.lba(ext)) else {
         warn!("{}: disk write at LBA {} beyond 32-bit block addressing", label, snap.lba(ext));
+        wsession().write_refused(req_lba, count);
         dev.set_error(ERR_ABRT);
         dev.set_status_intrq(STATUS_IDLE_ERR);
         dev.ack_command();
         return;
     };
-    let count = snap.count(ext);
 
     let total = disk_sectors();
     if total == 0 || lba.saturating_add(count) > total {
         warn!("{}: disk write {} sectors at LBA {} past end ({})", label, count, lba, total);
+        wsession().write_refused(lba, count);
         dev.set_error(ERR_ABRT);
         dev.set_status_intrq(STATUS_IDLE_ERR);
         dev.ack_command();

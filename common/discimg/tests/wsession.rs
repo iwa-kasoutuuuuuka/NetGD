@@ -194,3 +194,46 @@ fn partition_start_reading() {
     assert_eq!(partition_start(&sec, false), 8192);
     assert_eq!(partition_start(&sec, true), 0); // superfloppy: LBA 0 is a BPB
 }
+
+#[test]
+fn early_refusals_are_recorded_as_failed_commands() {
+    let mut s = begun(100);
+    assert!(s.write_begin(500, 2));
+    s.write_data(&[9; 1024]);
+    s.write_end(true, 2);
+    let st = s.status(false);
+    assert_ne!(st[4] & FLAG_LAST_OK, 0);
+    assert_eq!(&st[12..16], &0u32.to_le_bytes());
+
+    // A write refused before write_begin (CHS, past the end, ...): STATUS must
+    // describe it, not the earlier success.
+    s.write_refused(u32::MAX, 8);
+    let st = s.status(false);
+    assert_eq!(st[4] & FLAG_LAST_OK, 0, "last_ok cleared");
+    assert_eq!(&st[8..12], &2u32.to_le_bytes(), "sectors untouched");
+    assert_eq!(&st[12..16], &1u32.to_le_bytes(), "counted as failed");
+    assert_eq!(&st[16..20], &u32::MAX.to_le_bytes());
+    assert_eq!(&st[20..24], &8u32.to_le_bytes());
+    assert_eq!(&st[24..28], &FNV_INIT.to_le_bytes(), "checksum restarted");
+    // It also works with no session.
+    let mut n = WriteSession::new();
+    n.write_refused(7, 1);
+    let st = n.status(true);
+    assert_eq!((&st[12..16], &st[16..20]), (&1u32.to_le_bytes()[..], &7u32.to_le_bytes()[..]));
+}
+
+#[test]
+fn gpt_protective_mbr_is_recognised() {
+    let mut sec = [0u8; 512];
+    assert!(!is_gpt_protective(&sec, false)); // no signature
+    sec[510] = 0x55;
+    sec[511] = 0xAA;
+    sec[0x1BE + 4] = 0x0C; // FAT32 LBA
+    assert!(!is_gpt_protective(&sec, false));
+    sec[0x1BE + 4] = MBR_TYPE_GPT_PROTECTIVE;
+    sec[0x1BE + 8..0x1BE + 12].copy_from_slice(&1u32.to_le_bytes());
+    assert!(is_gpt_protective(&sec, false));
+    assert!(!is_gpt_protective(&sec, true), "a boot sector is not an MBR");
+    sec[511] = 0;
+    assert!(!is_gpt_protective(&sec, false));
+}

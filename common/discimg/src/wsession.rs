@@ -151,6 +151,19 @@ impl WriteSession {
         true
     }
 
+    /// A write refused before `write_begin` could run (media present, CHS
+    /// addressing, an address beyond 32 bits or past the end of the card):
+    /// recorded as a failed command with the request's LBA and count, so
+    /// STATUS describes this command and not the last successful one.
+    /// Works outside a session too, like `write_begin`.
+    pub fn write_refused(&mut self, lba: u32, count: u32) {
+        self.last_lba = lba;
+        self.last_count = count;
+        self.last_fnv = FNV_INIT;
+        self.last_ok = false;
+        self.failed = self.failed.wrapping_add(1);
+    }
+
     /// Bytes popped from the FIFO for the current command, in order (any
     /// split, e.g. one 512-byte sector at a time or across F4's runs).
     pub fn write_data(&mut self, data: &[u8]) {
@@ -199,4 +212,17 @@ pub fn partition_start(sec0: &[u8; 512], lba0_is_bpb: bool) -> u32 {
     }
     let o = 0x1BE + 8;
     u32::from_le_bytes([sec0[o], sec0[o + 1], sec0[o + 2], sec0[o + 3]])
+}
+
+/// MBR partition type of a GPT's protective MBR. Its entry 0 spans the whole
+/// card, so `partition_start` would "protect" from LBA 1 only (or nothing),
+/// and the real partitions behind the GPT header are not what entry 0 says:
+/// a session cannot be guarded by it.
+pub const MBR_TYPE_GPT_PROTECTIVE: u8 = 0xEE;
+
+/// Whether sector 0 is a GPT protective MBR (valid signature, entry 0 of
+/// type 0xEE). `lba0_is_bpb` as for [`partition_start`]: a FAT boot sector
+/// is not an MBR whatever its bytes at 0x1C2 happen to be.
+pub fn is_gpt_protective(sec0: &[u8; 512], lba0_is_bpb: bool) -> bool {
+    sec0[510] == 0x55 && sec0[511] == 0xAA && !lba0_is_bpb && sec0[0x1BE + 4] == MBR_TYPE_GPT_PROTECTIVE
 }

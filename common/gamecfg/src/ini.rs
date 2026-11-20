@@ -79,59 +79,135 @@ impl Ini {
 
     /// Parse the contents of a `GDEMU.INI`. Never fails.
     pub fn parse(text: &str) -> Self {
+        Self::parse_bytes(text.as_bytes())
+    }
+
+    /// Parse a whole file held in memory. See [`Ini::parse_reader`] for the
+    /// byte-level rules (line ends, BOM, non-ASCII bytes).
+    pub fn parse_bytes(data: &[u8]) -> Self {
         let mut out = Ini::new();
-        for line in text.lines() {
-            let line = match line.find(['#', ';']) {
-                Some(i) => &line[..i],
-                None => line,
-            }
-            .trim();
-            if line.is_empty() || line.starts_with('[') {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let (key, value) = (key.trim(), value.trim());
-            if key.eq_ignore_ascii_case("open_time") {
-                if let Some(v) = num(value) {
-                    out.open_time = clamp(v, TIME_MIN as i32, TIME_MAX as i32) as u16;
-                    out.open_time_set = true;
-                }
-            } else if key.eq_ignore_ascii_case("detect_time") {
-                if let Some(v) = num(value) {
-                    out.detect_time = clamp(v, TIME_MIN as i32, TIME_MAX as i32) as u16;
-                    out.detect_time_set = true;
-                }
-            } else if key.eq_ignore_ascii_case("image_tests") {
-                if let Some(v) = num(value) {
-                    out.image_tests = v != 0;
-                }
-            } else if key.eq_ignore_ascii_case("high_speed") {
-                if let Some(v) = num(value) {
-                    out.high_speed = v != 0;
-                }
-            } else if key.eq_ignore_ascii_case("reset_goto") {
-                if let Some(v) = num(value) {
-                    out.reset_goto = if (0..=RESET_GOTO_MAX as i32).contains(&v) {
-                        v as u16
-                    } else {
-                        0
-                    };
-                }
-            } else if key.eq_ignore_ascii_case("read_limit") {
-                if let Some(v) = num(value) {
-                    out.read_limit = match v {
-                        0 => 0,
-                        v if v < 0 => -1,
-                        v => clamp(v, READ_LIMIT_MIN as i32, READ_LIMIT_MAX as i32) as i16,
-                    };
-                }
-            } else {
-                out.unknown = out.unknown.saturating_add(1);
-            }
+        let mut first = true;
+        for line in data.split(|&b| b == b'\r' || b == b'\n') {
+            out.line(line, first);
+            first = false;
         }
         out
+    }
+
+    /// Parse a file of any size through `buf`, which is also the line buffer
+    /// (a line longer than `buf` is dropped whole). `read` fills the slice it
+    /// is given and returns how many bytes it wrote; 0 means end of file (or
+    /// an error, which keeps what was read so far).
+    ///
+    /// Byte-level rules, so a card edited on any platform parses the same:
+    /// CR, LF and CRLF all end a line; a UTF-8 BOM at the start of the file
+    /// is skipped; a line whose settings part (before `#` / `;`) holds a
+    /// non-ASCII byte is ignored on its own -- a Shift-JIS comment never
+    /// disables the keys after it.
+    pub fn parse_reader(buf: &mut [u8], mut read: impl FnMut(&mut [u8]) -> usize) -> Self {
+        let mut out = Ini::new();
+        let mut keep = 0usize; // bytes of an unfinished line at buf[..keep]
+        let mut first = true;
+        let mut discarding = false; // inside a line too long for `buf`
+        loop {
+            if keep >= buf.len() {
+                return out;
+            }
+            let n = read(&mut buf[keep..]);
+            let end = keep + n;
+            let mut start = 0usize;
+            let mut i = 0usize;
+            while i < end {
+                if buf[i] == b'\r' || buf[i] == b'\n' {
+                    if discarding {
+                        discarding = false;
+                    } else {
+                        out.line(&buf[start..i], first);
+                    }
+                    first = false;
+                    start = i + 1;
+                }
+                i += 1;
+            }
+            if n == 0 {
+                if !discarding && start < end {
+                    out.line(&buf[start..end], first);
+                }
+                return out;
+            }
+            if start == 0 && end == buf.len() {
+                // No line end in a full buffer: drop this line.
+                discarding = true;
+                first = false;
+                keep = 0;
+            } else {
+                buf.copy_within(start..end, 0);
+                keep = end - start;
+            }
+        }
+    }
+
+    /// One line, without its terminator.
+    fn line(&mut self, mut line: &[u8], first: bool) {
+        if first {
+            if let Some(rest) = line.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+                line = rest;
+            }
+        }
+        let code = match line.iter().position(|&b| b == b'#' || b == b';') {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        if !code.is_ascii() {
+            return;
+        }
+        let Ok(line) = core::str::from_utf8(code) else { return };
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('[') {
+            return;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        let out = self;
+        if key.eq_ignore_ascii_case("open_time") {
+            if let Some(v) = num(value) {
+                out.open_time = clamp(v, TIME_MIN as i32, TIME_MAX as i32) as u16;
+                out.open_time_set = true;
+            }
+        } else if key.eq_ignore_ascii_case("detect_time") {
+            if let Some(v) = num(value) {
+                out.detect_time = clamp(v, TIME_MIN as i32, TIME_MAX as i32) as u16;
+                out.detect_time_set = true;
+            }
+        } else if key.eq_ignore_ascii_case("image_tests") {
+            if let Some(v) = num(value) {
+                out.image_tests = v != 0;
+            }
+        } else if key.eq_ignore_ascii_case("high_speed") {
+            if let Some(v) = num(value) {
+                out.high_speed = v != 0;
+            }
+        } else if key.eq_ignore_ascii_case("reset_goto") {
+            if let Some(v) = num(value) {
+                out.reset_goto = if (0..=RESET_GOTO_MAX as i32).contains(&v) {
+                    v as u16
+                } else {
+                    0
+                };
+            }
+        } else if key.eq_ignore_ascii_case("read_limit") {
+            if let Some(v) = num(value) {
+                out.read_limit = match v {
+                    0 => 0,
+                    v if v < 0 => -1,
+                    v => clamp(v, READ_LIMIT_MIN as i32, READ_LIMIT_MAX as i32) as i16,
+                };
+            }
+        } else {
+            out.unknown = out.unknown.saturating_add(1);
+        }
     }
 
     /// Extra time, in milliseconds, a swapped-in disc is held NOT READY:
@@ -164,7 +240,9 @@ fn num(v: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::{format, vec, vec::Vec};
 
     #[test]
     fn empty_is_the_official_defaults() {
@@ -266,5 +344,98 @@ mod tests {
     fn set_flags_drive_the_swap_delay() {
         assert_eq!(Ini::parse("open_time=500").swap_delay_ms(), 500);
         assert_eq!(Ini::parse("detect_time=250").swap_delay_ms(), 250);
+    }
+
+    /// Feed `data` through `parse_reader` in chunks of at most `chunk`.
+    fn chunked(data: &[u8], bufsize: usize, chunk: usize) -> Ini {
+        let mut buf = vec![0u8; bufsize];
+        let mut pos = 0;
+        Ini::parse_reader(&mut buf, |b| {
+            let n = b.len().min(chunk).min(data.len() - pos);
+            b[..n].copy_from_slice(&data[pos..pos + n]);
+            pos += n;
+            n
+        })
+    }
+
+    #[test]
+    fn utf8_bom_is_skipped() {
+        let i = Ini::parse_bytes(b"\xEF\xBB\xBFopen_time=700\nreset_goto=3\n");
+        assert_eq!((i.open_time, i.reset_goto, i.unknown), (700, 3, 0));
+        assert!(i.open_time_set);
+        let i = chunked(b"\xEF\xBB\xBFreset_goto=3\n", 512, 2);
+        assert_eq!((i.reset_goto, i.unknown), (3, 0));
+    }
+
+    #[test]
+    fn shift_jis_comment_does_not_hide_later_keys() {
+        let data = b"# \x93\xfa\x96\x7b\x8c\xea\nreset_goto=12 # \x82\xa0\nopen_time=600\n";
+        let i = Ini::parse_bytes(data);
+        assert_eq!((i.reset_goto, i.open_time, i.unknown), (12, 600, 0));
+        assert_eq!(chunked(data, 512, 512), i);
+        // A non-ASCII byte in the settings part drops only that line.
+        let i = Ini::parse_bytes(b"open_time=\x82\xa0\nreset_goto=5\n");
+        assert_eq!((i.reset_goto, i.open_time_set), (5, false));
+    }
+
+    #[test]
+    fn cr_only_line_endings() {
+        let i = Ini::parse_bytes(b"open_time=800\rdetect_time=400\rreset_goto=2\r");
+        assert_eq!((i.open_time, i.detect_time, i.reset_goto), (800, 400, 2));
+        let i = Ini::parse_bytes(b"open_time=800\r\n\r\ndetect_time=400\n\rreset_goto=2");
+        assert_eq!((i.open_time, i.detect_time, i.reset_goto), (800, 400, 2));
+        assert_eq!(chunked(b"reset_goto=2\rdetect_time=400", 512, 512).detect_time, 400);
+    }
+
+    #[test]
+    fn key_split_at_the_buffer_boundary() {
+        let mut data = vec![b'#'; 497];
+        data.push(b'\n');
+        data.extend_from_slice(b"reset_goto=12\nopen_time=700\n");
+        assert!(data.len() > 512);
+        for chunk in [1usize, 7, 64, 512] {
+            let i = chunked(&data, 512, chunk);
+            assert_eq!((i.reset_goto, i.open_time, i.unknown), (12, 700, 0), "chunk {chunk}");
+        }
+        // The value's digits straddle byte 512 for some of these paddings.
+        for pad in 480..=512usize {
+            let mut d = vec![b'#'; pad];
+            d.push(b'\n');
+            d.extend_from_slice(b"reset_goto=1234\n");
+            assert_eq!(chunked(&d, 512, 512).reset_goto, 1234, "pad {pad}");
+        }
+    }
+
+    #[test]
+    fn files_over_512_bytes_parse_completely() {
+        let mut data = Vec::new();
+        for n in 0..60 {
+            data.extend_from_slice(format!("# filler line number {n}\r\n").as_bytes());
+        }
+        data.extend_from_slice(b"detect_time=333\r\nread_limit=900");
+        assert!(data.len() > 1024);
+        let i = chunked(&data, 512, 512);
+        assert_eq!((i.detect_time, i.read_limit), (333, 900));
+    }
+
+    #[test]
+    fn overlong_line_is_dropped_not_the_file() {
+        let mut data = b"open_time=700\n".to_vec();
+        data.extend(std::iter::repeat(b'x').take(2000));
+        data.extend_from_slice(b"\nreset_goto=9\n");
+        let i = chunked(&data, 512, 512);
+        assert_eq!((i.open_time, i.reset_goto), (700, 9));
+        assert_eq!(i.unknown, 0, "the overlong line is not counted");
+        let mut data = vec![b'y'; 512];
+        data.extend_from_slice(b"\nreset_goto=4");
+        assert_eq!(chunked(&data, 512, 100).reset_goto, 4);
+    }
+
+    #[test]
+    fn reader_matches_whole_file_parse() {
+        let data = b"[x]\r\nopen_time = 650 ;c\nimage_tests=0\r\nfoo=1\nreset_goto=7";
+        for chunk in [1usize, 3, 512] {
+            assert_eq!(chunked(data, 32, chunk), Ini::parse_bytes(data));
+        }
     }
 }

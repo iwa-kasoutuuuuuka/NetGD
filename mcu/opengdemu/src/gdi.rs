@@ -336,27 +336,28 @@ pub fn ini() -> gamecfg::ini::Ini {
 }
 
 /// Re-read `GDEMU.INI` from the card root. Called whenever the card is
-/// (re)scanned, as the original firmware re-reads it on card detection. A
-/// card without the file leaves the previous settings in place.
-fn reload_ini(num_blocks: u32) {
+/// (re)scanned, as the original firmware re-reads it on card detection, and
+/// by the IDE task before a hard-reset `reset_goto` and a write-session
+/// remount (the file may have changed under it). A card without the file
+/// leaves the previous settings in place.
+///
+/// The whole file is parsed, whatever its size, through the shared `CFG`
+/// buffer: `Ini::parse_reader` keeps the unfinished line at the front of it
+/// and reads on, so no extra stack is needed.
+pub fn reload_ini(num_blocks: u32) {
     let dev = HsmciBlockDevice::new();
     dev.set_num_blocks(num_blocks);
     let mgr = VolumeManager::new(dev, crate::blockdev::DummyClock);
     let Ok(volume) = mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) else { return };
     let Ok(root) = volume.open_root_dir() else { return };
     let Ok(name) = ShortFileName::create_from_str(INI_NAME) else { return };
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG) };
-    let Ok(len) = read_file_to_buf(&root, &name, buf) else {
+    let Ok(f) = root.open_file_in_dir(&name, embedded_sdmmc::Mode::ReadOnly) else {
         info!("gdi: no GDEMU.INI, keeping the previous settings");
         return;
     };
-    // Non-UTF-8 bytes (a Shift-JIS comment) cut the text there rather than
-    // discarding the whole file.
-    let text = match core::str::from_utf8(&buf[..len]) {
-        Ok(t) => t,
-        Err(e) => core::str::from_utf8(&buf[..e.valid_up_to()]).unwrap_or(""),
-    };
-    let ini = gamecfg::ini::Ini::parse(text);
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG) };
+    // A read error ends the file where it stands.
+    let ini = gamecfg::ini::Ini::parse_reader(buf, |b| f.read(b).unwrap_or(0));
     info!(
         "gdi: GDEMU.INI open_time={} detect_time={} reset_goto={} swap_delay={}ms",
         ini.open_time, ini.detect_time, ini.reset_goto, ini.swap_delay_ms()
