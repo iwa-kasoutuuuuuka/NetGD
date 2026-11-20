@@ -17,6 +17,7 @@ pub mod cdi;
 pub mod gdemu;
 pub mod gdi;
 pub mod slot;
+pub mod wsession;
 
 pub use heapless::{String, Vec};
 

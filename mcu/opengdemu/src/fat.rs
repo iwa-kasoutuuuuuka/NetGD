@@ -82,6 +82,14 @@ fn looks_like_bpb(s: &[u8; 512]) -> bool {
     (s[0] == 0xEB || s[0] == 0xE9) && rd16(s, 0x0B) == 512 && s[0x0D] != 0
 }
 
+/// First partition's start LBA (F7's protected boundary), read as `probe`
+/// does: entry 0 of the MBR, 0 for a card whose LBA 0 already is a volume or
+/// that has no MBR. `buf` is the caller's scratch, not a stack frame.
+pub fn partition_start(buf: &mut [u8; 512]) -> Result<u32, ()> {
+    read_block(0, buf)?;
+    Ok(discimg::wsession::partition_start(buf, looks_like_bpb(buf)))
+}
+
 /// Locate the first FAT32 volume on the card.
 pub fn probe() -> Option<Geometry> {
     let mut sec = [0u8; 512];

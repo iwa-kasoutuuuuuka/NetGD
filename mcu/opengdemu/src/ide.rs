@@ -638,6 +638,12 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
     if RSTN_FALLS_SEEN.swap(falls, core::sync::atomic::Ordering::Relaxed) == falls {
         return;
     }
+    // A write session does not survive a hard reset (never SRST: that does
+    // not move the counter). Ending it first leaves the drive ejected, so
+    // the remount below is the same one F5 does.
+    if wsession().hard_reset() {
+        info!("primary: hard reset ended the write session");
+    }
     // GDEMU.INI `reset_goto=N`: a host hard reset switches to image N. An N
     // with no image leaves the media as it is.
     let goto = crate::gdi::ini().reset_goto;
@@ -1200,6 +1206,15 @@ const SEGA_GET_SCD: u8 = 0x40;
 ///   packet[1] = 5  MOUNT_NAME-> packet[2] = chunk index, packet[3..12] = up
 ///                               to nine bytes of the folder name. Chunk 0
 ///                               starts a new name; MOUNT consumes it.
+///   packet[1] = 6  WSESSION_BEGIN  packet[2..6] = "NGWS". Eject, start a
+///                               write session (F7 protected range, F8
+///                               checksums). Bad key: ILLEGAL REQUEST.
+///   packet[1] = 7  WSESSION_END    packet[2] = 0 leave empty, 1 mount the
+///                               selection/default, 2 mount the MOUNT_NAME
+///                               name. Not in a session, bad selector or
+///                               failed mount: ILLEGAL REQUEST.
+///   packet[1] = 8  WSESSION_STATUS data-in, 48 bytes ("NGST"; see
+///                               `discimg::wsession::WriteSession::status`).
 const OGDM_IMAGE_CTL: u8 = 0xE0;
 /// Bumped when the 0xE0 reply layouts or field meanings change.
 ///
@@ -1211,11 +1226,11 @@ const OGDM_IMAGE_CTL: u8 = 0xE0;
 /// 3: VERSION's byte 5 became a feature bitfield (see `OGDM_FEATURES`).
 const OGDM_PROTOCOL_VERSION: u8 = 3;
 /// VERSION reply byte 5: what this firmware can do, one bit each.
-///   bit0 = write session (not implemented, 0)
-///   bit1 = write checksum (not implemented, 0)
-///   bit2 = DMA advertised in the secondary's IDENTIFY DEVICE (1)
+///   bit0 = write session (sub-commands 6/7/8, `discimg::wsession`)
+///   bit1 = write checksum (STATUS reports the FNV-1a of the last write)
+///   bit2 = DMA advertised in the secondary's IDENTIFY DEVICE
 /// Bytes 6..8 stay reserved zeros.
-const OGDM_FEATURES: u8 = 0x04;
+const OGDM_FEATURES: u8 = 0x07;
 /// MOUNT's packet[2], meaning "forget the runtime choice and mount whatever
 /// GDEMU.CFG names" -- what a power cycle would do.
 const NO_SELECTION: u8 = 0xFF;
@@ -1349,6 +1364,12 @@ async fn handle_packet(
             // spin up/down request, which means nothing here.
             let loej = packet[4] & 0x02 != 0;
             let start = packet[4] & 0x01 != 0;
+            if loej && start && write_session_active() {
+                // Only WSESSION_END or a hard reset ends a session.
+                warn!("{}: LOAD refused during a write session", label);
+                finish_illegal(dev, state);
+                return;
+            }
             if loej {
                 if start {
                     // Re-read the card: the whole point of the eject window is
@@ -1969,6 +1990,11 @@ async fn handle_image_ctl(
             finish_ok(dev);
         }
         SUB_MOUNT => {
+            if write_session_active() {
+                warn!("{}: MOUNT refused during a write session", label);
+                finish_illegal(dev, state);
+                return;
+            }
             // Mount whatever name was staged, or the configured default.
             let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
             if packet[2] == NO_SELECTION || name.is_empty() {
@@ -1983,6 +2009,68 @@ async fn handle_image_ctl(
             } else {
                 finish_illegal(dev, state);
             }
+        }
+        discimg::wsession::SUB_WSESSION_BEGIN => {
+            // DESIGN-GAP: a bad key is refused before anything changes; an SD
+            // read error while taking the partition start also refuses the
+            // BEGIN (nothing ejected) -- better than running unprotected.
+            if packet[2..6] != discimg::wsession::BEGIN_KEY[..] {
+                finish_illegal(dev, state);
+                return;
+            }
+            // CD_READ_BUF is free to borrow: the drive is about to be ejected.
+            let sec: Option<&mut [u8; 512]> = loader_scratch().first_chunk_mut::<512>();
+            let part = match sec.map(crate::fat::partition_start) {
+                Some(Ok(p)) => p,
+                _ => {
+                    warn!("{}: WSESSION_BEGIN: cannot read the partition table", label);
+                    finish_illegal(dev, state);
+                    return;
+                }
+            };
+            crate::cdda::stop();
+            MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
+            invalidate_cd_read_cache();
+            unsafe { READY_AT = None };
+            let _ = wsession().begin(&packet[2..6], part);
+            info!("{}: write session begun, protecting LBA < {}", label, part);
+            finish_ok(dev);
+        }
+        discimg::wsession::SUB_WSESSION_END => {
+            use discimg::wsession::Remount;
+            let Ok(how) = wsession().end(packet[2]) else {
+                warn!("{}: WSESSION_END refused (no session or bad selector)", label);
+                finish_illegal(dev, state);
+                return;
+            };
+            info!("{}: write session ended", label);
+            let ok = match how {
+                Remount::None => {
+                    state.unit_attention = true;
+                    state.pending_sense_key = 0x06;
+                    true
+                }
+                Remount::Default => load_media(state).await,
+                Remount::Named => {
+                    let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
+                    // DESIGN-GAP: Named with no name staged = Default (same
+                    // as MOUNT's no-name case).
+                    if name.is_empty() {
+                        load_media(state).await
+                    } else {
+                        mount_named(state, label, name.as_str()).await
+                    }
+                }
+            };
+            if ok {
+                finish_ok(dev);
+            } else {
+                finish_illegal(dev, state);
+            }
+        }
+        discimg::wsession::SUB_WSESSION_STATUS => {
+            let st = wsession().status(media_present());
+            send_alloc(dev, packet, &st).await;
         }
         SUB_VERSION => {
             let mut out = [0u8; 32];
@@ -2073,6 +2161,10 @@ async fn handle_gdemu_cmd(
     packet: &[u8; 12],
 ) {
     match packet[1] {
+        GDEMU_MOUNT | GDEMU_STEP if write_session_active() => {
+            warn!("{}: GDEMU mount refused during a write session", label);
+            finish_illegal(dev, state);
+        }
         GDEMU_MOUNT => {
             let n = (packet[2] as u16) | ((packet[3] as u16) << 8);
             if n == 0 {
@@ -2135,6 +2227,17 @@ async fn handle_gdemu_cmd(
 const SUB_MOUNT: u8 = 2;
 const SUB_VERSION: u8 = 3;
 const SUB_MOUNT_NAME: u8 = 5;
+
+/// The write session (F6-F8). Only `ide_task` touches it.
+static mut WSESSION: discimg::wsession::WriteSession = discimg::wsession::WriteSession::new();
+
+fn wsession() -> &'static mut discimg::wsession::WriteSession {
+    unsafe { &mut *core::ptr::addr_of_mut!(WSESSION) }
+}
+
+fn write_session_active() -> bool {
+    wsession().active()
+}
 
 /// The folder name staged by [`SUB_MOUNT_NAME`], mounted by [`SUB_MOUNT`].
 static mut MOUNT_NAME: heapless::String<{ gamecfg::MAX_NEXT }> = heapless::String::new();
@@ -3030,6 +3133,14 @@ async fn wait_host(dev: &IdeDevice, mut cond: impl FnMut() -> bool, timeout_ms: 
 fn handle_fw_command(dev: &IdeDevice, label: &'static str, snap: &CommandSnapshot) {
     let key = snap.lba(true);
 
+    if write_session_active() {
+        warn!("{}: firmware update refused during a write session", label);
+        dev.set_error(ERR_ABRT);
+        dev.set_status_intrq(STATUS_IDLE_ERR);
+        dev.ack_command();
+        return;
+    }
+
     if crate::fwupdate::should_enter(snap.features, key) {
         warn!("{}: entering the firmware updater -- no further logging, no way back", label);
         // Stop the one thing that keeps running off its own interrupt even
@@ -3095,6 +3206,15 @@ async fn handle_disk_write(
         dev.ack_command();
         return;
     }
+    // F7 (inside a write session, below the first partition) and F8 (the
+    // checksum restarts here).
+    if !wsession().write_begin(lba, count) {
+        warn!("{}: disk write {} sectors at LBA {} refused -- below the first partition", label, count, lba);
+        dev.set_error(ERR_ABRT);
+        dev.set_status_intrq(STATUS_IDLE_ERR);
+        dev.ack_command();
+        return;
+    }
     info!("{}: disk write LBA={} count={} dma={}", label, lba, count, dma);
 
     // DRQ up means "send me a sector". Unlike the read direction there is
@@ -3141,6 +3261,7 @@ async fn handle_disk_write(
     // is still closed.
     let mut reset = false;
     let mut done = 0u32; // sectors completed before the current run
+    let mut fed = 0u32; // sectors the card accepted (F8 statistics)
     for (run_lba, run_n) in discimg::ata::runs(lba, count, WRITE_RUN) {
         let mut mw = match unsafe { embassy_atsam3::hsmci::write_multi_begin(run_lba, run_n) } {
             Ok(mw) => mw,
@@ -3205,11 +3326,14 @@ async fn handle_disk_write(
                 warn!("{}: sector {} of {}: level {} before pop, {} after (short!)",
                       label, sector, count, lvl_before, lvl_after);
             }
+            // F8: the bytes exactly as they left the FIFO.
+            wsession().write_data(&block);
             if let Err(e) = unsafe { mw.feed(&block) } {
                 warn!("{}: SD write failed at block {}: {:?}", label, lba + sector, e);
                 ok = false;
                 break;
             }
+            fed += 1;
         }
         // CMD12 + the last block's program time. A short transfer (host stopped
         // sending) is closed the same way; the card keeps what it got.
@@ -3228,6 +3352,7 @@ async fn handle_disk_write(
     } else {
         dev.set_pio_flow_control(false, false);
     }
+    wsession().write_end(ok && !reset, fed);
     if reset {
         // A completion write now would overwrite status/INTRQ inside the
         // post-reset BSY window.

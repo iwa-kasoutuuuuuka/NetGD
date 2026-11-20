@@ -501,6 +501,16 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **追加の発見**：更新イメージを作って送るホスト側ツールがリポジトリに無く、イメージ形式（"OGFW"）も未定義。
 - **判断（Opus）**：対策 A を入れるまで、**2E で `0xF9` による更新は使わない**（PLAN に登録）。B は G1 のビットストリームの大きさが分かってから決める。
 
+### R38 G2 推奨 F6〜F8 と F13 の機能ビット（Sonnet 実装、Opus がテスト・ビルドを確認）
+- `common/discimg::wsession`（状態遷移、保護範囲、FNV-1a、STATUS の符号化、パーティション開始の解析。テスト 16 件）、`fat.rs` の `partition_start`、`ide.rs` の配線。
+- **コマンド**（プライマリへの `0xE0`）：6 BEGIN（`packet[2..6]="NGWS"`。LBA 0 が読めなければ拒否）／7 END（`packet[2]` = 0 空のまま＋UA、1 `load_media`、2 MOUNT_NAME で指定した名前）／
+  8 STATUS（48 バイト：`"NGST"`、フラグ、受理セクタ数、失敗コマンド数、最後の書き込みの LBA・セクタ数・FNV-1a、保護境界）。
+- F7：セッション中は第1パーティションより前（境界をまたぐものも）への書き込みを ABRT。F8：書き込みコマンドごとに FIFO から取り出した 512 バイトブロックの FNV-1a（F4 の分割をまたいで1つの値）。
+- セッション中は START STOP UNIT のロード、IMAGE_CTL MOUNT、`0x52`、`0xF9` を拒否。ハードリセット（RSTn）でセッションを終えて再マウント、SRST では終えない。F13：機能バイト 0x07。
+- **DESIGN-GAP**：二重 BEGIN は再開扱い、END だけは ILLEGAL REQUEST、名前なしの END 2 は 1 と同じ、LBA 0 が読めないと BEGIN を拒否、END 0 でも UA、タイムアウトなし など（`ide.rs` にコメント）。
+  → 受信アプリ（`netgd-recv`、実装中）の Sonnet に形式を伝えた。
+- **確認（Opus）**：discimg 87・gamecfg 21・lzma 5 件パス、4E・2E とも警告は従来の 13 件。2E の text 117,008（空き 約 13 KB）。IDE のホットパスのフレームは不変。
+
 ---
 
 ## 判断の記録（Decisions）
