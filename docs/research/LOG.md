@@ -543,6 +543,13 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - ヘッダの配置（MCU 横 3 ピン、下辺 5 ピン、SD 横の縦 8 ピン、右上 2 ピン）、ボタン、LED（D1）の位置も手元の基板と同じ。
 - 画像ファイルはリポジトリに保存していない（会話内のみ）。基板メモ `docs/boards/gdemu60/README.md` のチェックリストを更新した。
 
+### R42 SWD プローブに ESP32 は使えるか（ユーザーの質問、Opus が回答）
+- **調べたこと**（web-fetch、各 README）：windowsair/wireless-esp8266-dap は ESP8266/ESP32/ESP32-C3/ESP32-S3 で CMSIS-DAP（SWD/JTAG）を提供するが、**PC との接続は Wi-Fi のみ**（USBIP で仮想 USB、または Keil 用の elaphureLink）。
+  OpenOCD・pyOCD・Keil は対応と明記、**probe-rs は記載なし**。Espressif の esp-usb-bridge は ESP32-S2/S3 の本体 USB で CMSIS-DAP（バルク転送のみ）の SWD を提供（Espressif 以外のチップでの SWD は README で明言なし）。
+- **ユーザーの手持ち**（写真）：無印の **ESP32**（「ESP-32」モジュール、30 ピン DevKit、USB-シリアル変換チップ経由、裏面「ESP32 ESP32S 30P Expansion board」）。ほかに SPI の microSD モジュール。
+- **判断**：無印 ESP32 は本体に USB が無く esp-usb-bridge が使えない。残る wireless-esp8266-dap は無線経由で probe-rs 非対応、fwbackup の安全レビュー（probe-rs 0.32.0 ＋ USB の CMSIS-DAP）の範囲外 → **使わない**。
+  **Raspberry Pi Pico（または Pico 2、公式 Debug Probe）を用意する**。ESP32-S3/S2 なら esp-usb-bridge で使える見込みはある。
+
 ---
 
 ## 判断の記録（Decisions）
