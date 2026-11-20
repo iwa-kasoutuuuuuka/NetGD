@@ -27,6 +27,12 @@ MEMORY
 	nfc   (W!RX) : ORIGIN = 0x20100000, LENGTH = 0x00001080 /* NFC SRAM, 4224 */
 }
 
+/* Stack headroom (computed 2026-11-20 as _stack_start - __sheap in the
+ * `board-v60,resident` release ELF): SRAM0 is 16K, statics (.data + .bss +
+ * .uninit) take 0x2268 = 8,808 bytes, so the stack has 16,384 - 8,808 = 7,576
+ * bytes, about 7.4 KB (not "about 2 KB"). .sram1 and .nfc are separate banks
+ * and do not count against it. The number moves with the feature set. */
+
 /* See link/sam3u4e.x for what each of these sections is for; the only
  * difference here is that .flash1 has no second plane to go to. */
 SECTIONS

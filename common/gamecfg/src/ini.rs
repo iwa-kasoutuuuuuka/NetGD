@@ -162,14 +162,14 @@ impl Ini {
             return;
         }
         let Ok(line) = core::str::from_utf8(code) else { return };
-        let line = line.trim();
+        let line = crate::trim(line);
         if line.is_empty() || line.starts_with('[') {
             return;
         }
         let Some((key, value)) = line.split_once('=') else {
             return;
         };
-        let (key, value) = (key.trim(), value.trim());
+        let (key, value) = (crate::trim(key), crate::trim(value));
         let out = self;
         if key.eq_ignore_ascii_case("open_time") {
             if let Some(v) = num(value) {
@@ -226,7 +226,7 @@ fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
 /// A decimal integer, optionally signed, optionally quoted. Anything else is
 /// not a number (a leading `+` is accepted, hex is not).
 fn num(v: &str) -> Option<i32> {
-    let v = v.trim().trim_matches('"').trim();
+    let v = crate::trim(crate::trim(v).trim_matches('"'));
     let (neg, digits) = match v.strip_prefix('-') {
         Some(r) => (true, r),
         None => (false, v.strip_prefix('+').unwrap_or(v)),

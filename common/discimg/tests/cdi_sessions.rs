@@ -212,3 +212,118 @@ fn track_fad_is_start_plus_pregap_with_odd_pregaps() {
     assert_eq!(&toc[4..8], &[0x01, 0x00, 0x04, 0x7E]); // track 2: FAD 1150
     assert_eq!(&toc[8..12], &[0x41, 0x00, 0x14, 0xB4]); // track 3: FAD 5300
 }
+
+// ---- Which track IP.BIN is looked for in (`ip_bin_candidates`) ----------
+
+fn mk(number: u8, start_lba: u32, ctrl: u8) -> TrackDesc {
+    TrackDesc {
+        number,
+        start_lba,
+        ctrl,
+        sector_size: 2352,
+        sector_count: 1,
+        filename: Default::default(),
+        file_offset: 0,
+        session: 0,
+    }
+}
+
+fn order(tracks: &[TrackDesc], boot: u32) -> Vec<u8> {
+    ip_bin_candidates(tracks, boot).map(|t| t.number).collect()
+}
+
+/// What the firmware's `read_ip_header` did before: data tracks starting at
+/// LBA 11700 or later first, then the rest. Kept here to pin down where the
+/// two agree and where they do not.
+fn old_order(tracks: &[TrackDesc]) -> Vec<u8> {
+    let data = |t: &&TrackDesc| t.ctrl & 4 != 0;
+    tracks
+        .iter()
+        .filter(data)
+        .filter(|t| t.start_lba >= 11700)
+        .chain(tracks.iter().filter(data).filter(|t| t.start_lba < 11700))
+        .map(|t| t.number)
+        .collect()
+}
+
+#[test]
+fn ip_bin_gdi_is_track_3_as_before() {
+    let t = [mk(1, 0, 4), mk(2, 450, 0), mk(3, 45000, 4), mk(4, 60000, 0), mk(5, 70000, 4)];
+    let boot = gdi_boot_area_lba(&t);
+    assert_eq!(order(&t, boot), [3, 5, 1]);
+    assert_eq!(order(&t, boot), old_order(&t));
+    // The first candidate is the track the boot prefetch reads.
+    assert_eq!(ip_bin_candidates(&t, boot).next().unwrap().start_lba, boot);
+
+    // Two tracks, no high-density area: boot area is the 45000 fallback,
+    // nothing is up there, the data track below is the only candidate.
+    let t = [mk(1, 0, 4), mk(2, 450, 0)];
+    assert_eq!(order(&t, gdi_boot_area_lba(&t)), [1]);
+    assert_eq!(old_order(&t), [1]);
+}
+
+#[test]
+fn ip_bin_cdi_cases_that_did_not_change() {
+    // One data track at 0.
+    let (_, _, boot, t) = load(&[vec![(150, 5000, 0, 5150, 1, 4)]]);
+    assert_eq!((boot, order(&t, boot), old_order(&t)), (0, vec![1], vec![1]));
+
+    // Audio + data at 11700.
+    let (_, _, boot, t) = load(&[vec![AUDIO], vec![DATA2]]);
+    assert_eq!((boot, order(&t, boot), old_order(&t)), (11700, vec![2], vec![2]));
+
+    // Audio + data whose descriptor start is 11702 (302-sector first session).
+    let (_, _, boot, t) =
+        load(&[vec![(150, 302, 0, 452, 2, 0)], vec![(150, 20000, 11702, 20150, 1, 4)]]);
+    assert_eq!((boot, order(&t, boot), old_order(&t)), (11702, vec![2], vec![2]));
+
+    // Data + data: the second session first, the first as a fallback.
+    let (_, _, boot, t) = load(&[vec![(150, 3000, 0, 3150, 1, 4)], vec![DATA2]]);
+    assert_eq!((boot, order(&t, boot), old_order(&t)), (11700, vec![2, 1], vec![2, 1]));
+
+    // Three-track MIL-CD, data at 45000.
+    let a2: T = (0, 7000, 11150, 7000, 2, 0);
+    let (_, _, boot, t) = load(&[vec![AUDIO, a2], vec![(150, 20000, 45000, 20150, 1, 4)]]);
+    assert_eq!((boot, order(&t, boot), old_order(&t)), (45000, vec![3], vec![3]));
+
+    // One session, audio audio data: the boot area is the session start (0)
+    // and the only data track is the candidate either way.
+    let a2: T = (150, 1000, 11150, 1150, 2, 0);
+    let (_, _, boot, t) = load(&[vec![AUDIO, a2, (150, 2000, 12300, 2150, 1, 4)]]);
+    assert_eq!((boot, order(&t, boot), old_order(&t)), (0, vec![3], vec![3]));
+}
+
+#[test]
+fn ip_bin_three_sessions_prefers_the_last_not_the_first_above_11700() {
+    let d2: T = (150, 5000, 11700, 5150, 1, 4);
+    let d3: T = (150, 20000, 28250, 20150, 1, 4);
+    let (n, bt, boot, t) = load(&[vec![AUDIO], vec![d2], vec![d3]]);
+    assert_eq!((n, bt, boot), (3, 3, 28250));
+    assert_eq!(order(&t, boot), [3, 2]);
+    // The old rule took the middle session's track if it was signed, while
+    // the BIOS (and the boot prefetch) go to the last.
+    assert_eq!(old_order(&t), [2, 3]);
+}
+
+#[test]
+fn ip_bin_second_session_below_11700_is_still_the_boot_track() {
+    // A first session shorter than the 300 sectors DiscJuggler pads to puts
+    // the second below 11700: 100 + 11400 = 11500.
+    let d1: T = (150, 100, 0, 250, 1, 4);
+    let d2: T = (150, 20000, 11500, 20150, 1, 4);
+    let (_, bt, boot, t) = load(&[vec![d1], vec![d2]]);
+    assert_eq!((bt, boot), (2, 11500));
+    assert_eq!(order(&t, boot), [2, 1]);
+    // The old rule saw no track at 11700 or later and started with track 1.
+    assert_eq!(old_order(&t), [1, 2]);
+}
+
+#[test]
+fn ip_bin_never_offers_an_audio_track() {
+    // A boot area that starts with audio (not bootable, but not a reason to
+    // hand back PCM as a header).
+    let t = [mk(1, 0, 0), mk(2, 11700, 0), mk(3, 20000, 4)];
+    assert_eq!(order(&t, 11700), [3]);
+    assert!(order(&[mk(1, 0, 0)], 0).is_empty());
+    assert!(order(&[], 0).is_empty());
+}

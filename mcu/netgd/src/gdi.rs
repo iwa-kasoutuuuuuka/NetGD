@@ -620,7 +620,7 @@ pub fn folder_for_number(num_blocks: u32, n: u16) -> Option<String<MAX_NAME_CHAR
 /// The number of the mounted folder, if it is a numbered one.
 pub fn mounted_number() -> Option<u16> {
     let name = unsafe { &*core::ptr::addr_of!(SELECTED_NAME) }.as_ref()?;
-    let name = name.as_str().trim().trim_end_matches('/');
+    let name = gamecfg::trim(name.as_str()).trim_end_matches('/');
     if name.contains('/') {
         return None;
     }
@@ -910,11 +910,14 @@ pub const IP_HEADER_BYTES: usize = 256;
 /// signature.
 ///
 /// The BIOS boots from the first track of the last session: track 3 on a
-/// GD-ROM layout, track 2 on a selfboot CDI (whose second session starts
-/// at 11702). Rather than reconstruct sessions, try every data track in
-/// that order and take the first that is signed; a disc with no signed
-/// track yields the first data track's sector unsigned, and `NoIpBin` only
-/// when nothing at all could be read.
+/// GD-ROM layout, the last session's first track on a CDI. That is the
+/// track at `boot_area_lba`, the one decision the TOC, REQ_SES and the boot
+/// prefetch already share, so it is tried first; the other data tracks
+/// follow (`discimg::atapi::ip_bin_candidates`) and the first signed one
+/// wins. A disc with no signed track yields the first readable candidate's
+/// sector unsigned, and `NoIpBin` only when nothing at all could be read.
+/// The returned track number tells the caller whether the header is the
+/// boot track's.
 #[allow(dead_code)]
 pub fn read_ip_header(
     num_blocks: u32,
@@ -927,26 +930,20 @@ pub fn read_ip_header(
     static mut RAW: [u8; 16 + IP_HEADER_BYTES] = [0; 16 + IP_HEADER_BYTES];
     let raw = unsafe { &mut *core::ptr::addr_of_mut!(RAW) };
     let mut fallback: Option<u8> = None;
-    for pass in 0..2 {
-        for t in tracks().iter() {
-            let later_session = t.start_lba >= 11700;
-            if !t.is_data() || later_session != (pass == 0) {
-                continue;
-            }
-            let off = t.user_data_offset();
-            let want = off + IP_HEADER_BYTES;
-            match read_at_lba(&gdi, t.start_lba, &mut raw[..want]) {
-                Ok(n) if n == want => {}
-                _ => continue,
-            }
-            if &raw[off..off + 16] == b"SEGA SEGAKATANA " {
-                out.copy_from_slice(&raw[off..want]);
-                return Ok((t.number, true));
-            }
-            if fallback.is_none() {
-                out.copy_from_slice(&raw[off..want]);
-                fallback = Some(t.number);
-            }
+    for t in discimg::atapi::ip_bin_candidates(tracks(), gdi.boot_area_lba) {
+        let off = t.user_data_offset();
+        let want = off + IP_HEADER_BYTES;
+        match read_at_lba(&gdi, t.start_lba, &mut raw[..want]) {
+            Ok(n) if n == want => {}
+            _ => continue,
+        }
+        if &raw[off..off + 16] == b"SEGA SEGAKATANA " {
+            out.copy_from_slice(&raw[off..want]);
+            return Ok((t.number, true));
+        }
+        if fallback.is_none() {
+            out.copy_from_slice(&raw[off..want]);
+            fallback = Some(t.number);
         }
     }
     fallback.map(|n| (n, false)).ok_or(GdiError::NoIpBin)

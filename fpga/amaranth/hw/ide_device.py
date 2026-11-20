@@ -855,6 +855,19 @@ class IDEDevice(Elaboratable):
         # ----- MCU window --------------------------------------------------
         # MCU window: the 7-bit slot index is mcu_addr. Slot 12 reads the
         # ID value 0xC0DE. The full slot map is in docs/AddressMapMCU.md.
+        # Slots in use (0..31; byte offset = 2 * slot):
+        #    0-8  IDE registers (HW_INFO, STATUS, DEVICE, ERROR, COMMAND,
+        #         SECTOR_COUNT, LBA bytes and the previous-LBA bytes)
+        #    9-11 data FIFO, read FIFO level, write FIFO level
+        #   12-13 ID (0xC0DE), INTRQ_PENDING
+        #   14-18 diagnostics: FREE_RUN, IDE_STROBES, RSTN_EDGES, BUS_STATE,
+        #         AUDIO_ALIVE
+        #   19    DMA_MODE / flow control
+        #   20-21 signal capture control / data (not built in the shipped image)
+        #   22-23 LVL_AT_READ, LVL_READ_COUNT (debug)
+        #   24-28 host access counters and their snapshots at the last Command
+        #   29-31 CDDA control, level, push (primary device only)
+        # Slots 32..127 are unmapped (read 0).
         # The SMC read is a pure combinational cone: MCU_ADDR -> decode -> a
         # 22-way mux -> the data pins, with nothing registered and no timing
         # constraint on any of it (56 unconstrained input ports). Its budget is

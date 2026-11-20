@@ -47,6 +47,33 @@ pub fn cdi_boot_area_lba<T: TrackInfo>(tracks: &[T], boot_track: u8) -> u32 {
         .unwrap_or(0)
 }
 
+/// Tracks to look for IP.BIN in, most likely first, given the image's
+/// `boot_area_lba` (from [`gdi_boot_area_lba`] / [`cdi_boot_area_lba`], the
+/// same value the TOC, REQ_SES and the boot prefetch use).
+///
+/// The first candidate is what the BIOS boots: the first data track at or
+/// above the boot area -- track 3 of a GDI, the first track of a CDI's last
+/// session. The rest are only for a caller that wants *a* header to show
+/// (a title for a menu) from an image whose boot track is unreadable or
+/// unsigned: the remaining data tracks above the boot area, then the data
+/// tracks below it, each in table order. Audio tracks are never candidates.
+///
+/// This replaces a fixed "starts at LBA 11700 or later" test, which guessed
+/// the session of a track from its address: wrong for a CDI whose second
+/// session starts lower, and for one with three sessions, where it preferred
+/// the middle session to the last.
+pub fn ip_bin_candidates<T: TrackInfo>(
+    tracks: &[T],
+    boot_area_lba: u32,
+) -> impl Iterator<Item = &T> {
+    let data = |t: &&T| t.ctrl() & 0x04 != 0;
+    tracks
+        .iter()
+        .filter(data)
+        .filter(move |t| t.start_lba() >= boot_area_lba)
+        .chain(tracks.iter().filter(data).filter(move |t| t.start_lba() < boot_area_lba))
+}
+
 /// Total disc length in LBAs, used as the lead-out address. A CDI knows its
 /// real length (last track's start + sector count); a GDI reports the
 /// pressed-disc capacity.

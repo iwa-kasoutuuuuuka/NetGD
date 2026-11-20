@@ -1,4 +1,4 @@
-# NetGD 計画（2026-11-20 立て直し、R62 まで反映）
+# NetGD 計画（2026-11-20 立て直し、R88 まで反映）
 
 NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。ドリームキャストの GD-ROM ドライブを
 置き換える基板（GDEMU 系）のファームウェアと FPGA コアを、オープンソースで作る。
@@ -13,8 +13,13 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 
 ## いまの状態（実測）
 
-2026-11-20 時点（LOG R1〜R62 を反映）。根拠は `docs/research/LOG.md` の「確認」の項目。
+2026-11-20 時点（LOG R1〜R88 を反映）。根拠は `docs/research/LOG.md` の「確認」の項目。
 **実機での検証はまだ無い。** 下の表の「確認」は、PC 上のビルドとテストの結果だけを指す。
+
+**R88 時点の要約**：CI（`build.yaml`・`kos.yaml`）はコミット 35285878 で全ジョブ成功（R87）。ファームの text（`DEFMT_LOG=off`）は
+4E 120,284 / 2E 120,296 / v60 66,724 / 2E `resident,sd-fast` 122,112（アプリ領域 122,880 B、512 B 丸めと CRC を入れて残り数百 B）。
+`netgd` と `embassy-atsam3` の rustc 警告は 0（R74。残る約 3,100 行は自動生成の PAC の「lifetime elided」）。
+下の表の件数は記録した時点のもの（その後のテストの追加は各 R を参照）。
 
 | 項目 | 状態 | LOG |
 |------|------|-----|
@@ -22,7 +27,9 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 | MCU 2E（`sam3u2e`） | 成功。text 118,312 B、フラッシュの空き 約 13 KB。`resident` 版は 119,296 B で残り 3,584 B | R53, R60 |
 | MCU 6.0 向け `board-v60`（`sam3u2e` + FPGA ローダー） | ビルド成功。`.rbf` を置かないと起動時に `NoBitstream`（LED 5 回点滅）。`resident` 版も成功 | R57, R60 |
 | 自己更新プログラム `mcu/fwupdater` | ビルド成功（888 → 2,188 B、ファームに埋め込み）。純粋ロジックのホストテスト 5 件パス | R46 |
-| 常駐ブート領域 `mcu/bootcore`（対策 B の S0） | ホストテスト 60 件パス。`sizeprobe` 5,902 B（8 KB に収まる） | R58, R61 |
+| 常駐ブート領域 `mcu/bootcore`（対策 B の S0） | ホストテスト 133 件以上パス（本物のフォーマッタの FAT 34 個、電源断、取り決め）。`sizeprobe` 5,902 B（8 KB に収まる） | R58, R61, R67, R70, R83, R86 |
+| `common/fatmap`（VFAT の長い名前・エクステント） | ホストテスト 47 件以上パス | R82, R86 |
+| `common/sdfast`（先読み予測・CMD6・検証） | ホストテストパス | R72, R75 |
 | FPGA ローダー `common/psload` | ホストテスト 17 件パス（偽 FPGA、旧ループとの波形比較） | R57 |
 | ホストテスト `common/lzma` | 5 件パス | R1, R46 |
 | ホストテスト `common/gamecfg`（GDEMU.INI を含む） | 28 件パス | R53 |
@@ -38,15 +45,18 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 | FPGA シミュ（v5.5、Cyclone II の既定） | `test.py` 30・`test_cdda.py` 3・`test_timing.py` 5・`test_top.py` 5 件パス。Verilog はコミット済みと一致 | R1, R3, R25, R39 |
 | FPGA シミュ（AG16K、`NETGD_FPGA_TARGET=ag16k`） | 同じ 4 本がパス。`test_fifo.py` 10 件で旧 FIFO と 1 サイクル単位で一致 | R39 |
 | AG16K 向けブロック RAM FIFO | LUT 2,821（17 %）、M9K 14 個。オープンな Yosys の推論は確認済み、AGM の `synth_agm` では未確認 | R39 |
-| CI `build.yaml` | 5 ジョブ（firmware・host-tests・gdprobe-host・tools-host・fpga-sim）。R50 の実行で、ファーム・FPGA・gdprobe・fwbackup・fwimage・mksdcard は成功。netgd-send の UNC テストは修正済み（`5f4e02d8`）。netgd-recv の Linux 対応は修正済み（`61dc290d`、R62）。その後の GitHub 上の結果は LOG に無い | R35, R50, R62 |
-| CI `kos.yaml`（KallistiOS 2.3.0） | gdprobe の ELF は初回でビルド成功（R35）。netgd-recv の Makefile の引用符は修正済み（`61dc290d`、R62）。修正後の実行は LOG に無い | R35, R50, R62 |
+| CI `build.yaml` | 5 ジョブ（firmware・host-tests・gdprobe-host・tools-host・fpga-sim）。firmware は 4E・`resident`（4E・v60）・2E `resident,sd-fast` をビルド。35285878 で全成功 | R35, R50, R62, R87 |
+| CI `kos.yaml`（KallistiOS 2.3.0） | `netgd-recv`・`netgd-fwupd`・`gdprobe` の ELF をビルド。35285878 で成功（実行 44717854323） | R35, R62, R87 |
 
 **実装済み**（コード上。すべて実機未検証）：
-- **G2（BBA 経由の SD 書き込み）**：F1〜F5・F13（R16）、F6〜F8（書き込みセッション・MBR 保護・FNV-1a。R38）、PC 側 `netgd-send`（R30）、Dreamcast 側 `netgd-recv`（R48。R62 で指摘 11 項目の修正を反映）。マウント時に FAT を読む時間は未解決（下の「進行中」）。
+- **G2（BBA 経由の SD 書き込み）**：F1〜F5・F13（R16）、F6〜F8（書き込みセッション・MBR 保護・FNV-1a。R38）、PC 側 `netgd-send`（R30）、Dreamcast 側 `netgd-recv`（R48。R62 で指摘 11 項目の修正を反映）。マウント時間は FAT のまとめ読み＋2回読みの CRC 照合（R68）と、`f_expand` 用の空き領域の表（R80）で対策済み（実機の `ms=` は未測定）。
 - **G3（本家同等）**：番号フォルダ（`01` = GDmenu）と既定マウント、`0x52`（番号指定・次／前・バージョン応答。R14）、ボタンの番号順送り（R14、R21）、`GDEMU.INI`（`reset_goto`・`open_time`・`detect_time`。R27、R53 で R45 の指摘を修正。open/detect の NOT READY の窓は既定で無効）。CDI のデータ位置の修正（`start_lba + pregap - 150`。R36）。
-- **自己更新（`0xF9`）**：対策 A（CHIPID 照合、ベクタ検査、検証後のみリセット、FWS=6 など。R46）。対策 B の S0〜S2 はホスト側まで実装（R58・R60・R61。下の「自己更新」節）。転送中の電源断などで起動不能になる窓は、対策 B の SD 復旧が実機で動くまで残る。
+  GDI の引用符付き・BOM 付きの名前（R65）と最大 128 バイトの名前（R86）、ファームの VFAT の長い名前の照合（R82）。
+  **D-1（トラック2本の CDI でセッション2が返らない）は修正済み**：CDI のセッション情報で REQ_SES と起動領域を決める（R71）、セッション3つ以上とプリギャップ（R78）、ファームのトラックのセッション番号（R86）。
+- **G3-4 の高速化**（すべて既定ではオフ、feature `sd-fast`）：`fast-complete`・`sd-multiblock`・`sd-highspeed`（R72、R73 のレビュー、R75 で修正）。HSMCI の CRC・タイムアウトの取りこぼしは既定のビルドでも修正済み（R75）。
+- **自己更新（`0xF9`）**：対策 A（CHIPID 照合、ベクタ検査、検証後のみリセット、FWS=6 など。R46）。対策 B の S0〜S2 と、常駐部とアプリの取り決め（世代 1）の両側をホスト側まで実装（R58〜R61、R79、R83〜R86。下の「自己更新」節）。転送中の電源断などで起動不能になる窓は、対策 B の SD 復旧が実機で動くまで残る。
 - **基板ごとの FPGA ローダー**：`common/psload`、feature `board-v55`（既定）／`board-v60`（R57）。6.0 のローダーのピン 5 本は v5.5 の値を仮に使っており未確認。
-- **未修正**（実機と比べるまで挙動を変えない）：上流の ATAPI 応答の疑い D-1〜D-5 のうち、**D-1（トラック 2 本の CDI でセッション 2 が返らない）は未修正**。R36 で直したのは pregap（D-5 の一部）だけ。コードでも `mcu/netgd/src/gdi.rs:835` と `:1073` に、トラック 3 番以降が無いときの LBA 45000 の既定値が残っている。
+- **未修正**（実機と比べるまで挙動を変えない）：上流の ATAPI 応答の疑い D-2〜D-5（下の節）。
 
 **ツール**（一行ずつ）：
 - `tools/gdprobe`：純正 GDEMU と NetGD に読み取り系コマンドだけを送る KOS 製プローブ。PC 側の `compare.py` で比較（R19、R22、R31）。純正での記録はまだ取っていない。
@@ -66,14 +76,15 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 
 **次の山場は実機**：G2 のファームと `netgd-recv` の実機試験、G1 の導通確認（分岐 A の確認）と PS のタイミングの確認、純正の記録（P5.5）。上流の疑い D は純正の実測データ待ち。
 
-**進行中**（R63 の割り当て、2026-11-20。成果はまだ LOG に無い）：
-- AG16K のツールチェーンの実現性（`docs/research/ag16k-toolchain.md`）と、可能な範囲の合成（Sonnet）。
-- 2E でのビットストリームの置き場所（埋め込み／SD の `NETGD.BIT`／併用、圧縮の改善。`docs/design/g1-bitstream-storage.md`、Fable）。
-- G3-4 の SD 読み込みの高速化（`docs/research/g3-read-path.md`、Sonnet）。
-- 常駐部の FAT リーダーを本物のフォーマッタ（mkfs.fat、mtools、mksdcard）のイメージで試験（Sonnet。`src/` は変えず、問題は報告）。
-- GDI の引用符付きファイル名（R9 の疑い 1）への対応（Sonnet）。
-- `netgd-recv` のマウント時間の改善：FAT をまとめて読み、空き数を自分で数えて FatFs に渡す（R62 の懸念、Fable）。
-- 後回し：P3 の警告掃除、P5 の改名（`mcu/` を触る作業が終わってから）。
+**R63・R77 の割り当ての結果**（すべて完了、LOG に記録済み）：AG16K のツールの道筋（R69：この PC では合成できない、Supra が要る）、
+ビットストリームの置き場所（R66：SD の `NETGD.BIT` を既定、Supra の実サイズが約 53 KB 以下なら埋め込みも可。判断は実サイズ待ち）、
+G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名前（R65・R86）、マウント時間（R68・R80）、P3（R74）、P5 改名（R76）。
+
+**ソフト側の残り（実機なしでできるもの）**：
+- R88 で進行中：古いコメントの修正、`read_ip_header` の起動トラックの推定を起動領域の判定にそろえる、`trim` の共用（2E −0.5 KB）。
+- 2E のフラッシュの削減案 2（`opt-level="z"`、約 −7.5 KB）は実機で速度を比べてから（`docs/research/flash-budget-2e.md`）。
+- `embedded_sdmmc` を自前の FAT に置き換える（−4〜−7 KB の見積もり、作業は大きい）。ビットストリームを埋め込むことになった場合に検討。
+- それ以外の大きな課題はすべて実機・Supra・純正の記録が要る（下の P5.5・P6、G1-3）。
 
 ## フェーズ
 
@@ -81,7 +92,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - **P0 ビルド復旧** — 完了。
 - **P1 ドキュメント** — README / AddressMapMCU / `ide.rs` 冒頭を実装に合わせた。FPGA の古い docstring も修正（R25）。完了（レビュー済み）。
 - **P2 CI** — 完了（GitHub 上で稼働。R35・R50。R50 の失敗 2 件は修正済み、R62。修正後の結果は LOG に無い）。
-- **P3 警告掃除** — 未着手（後回し、R63）。`embassy-atsam3` の未使用 import 等は R4 で解消済み。残りは 4E・2E とも 13 件（R53）。ファームのバイナリ不変が条件。
+- **P3 警告掃除** — 完了（R74）。5種類のビルドで警告 0、フラッシュの内容はバイト単位で同一。自動生成の PAC の警告は範囲外。
 - **P4 ホストテスト拡充** — 完了（R9）。ディスクイメージ解析と ATAPI 応答ビルダを `common/discimg` に切り出し済み（現在 89 件。上の表）。
   - 境界：`gdi::parse`（`gdi.rs`）のテキスト解析、`cdi::parse`（`cdi.rs`）の記述子解析、
     `ide.rs` の応答ビルダ（`bcd`・`put_msf`・REQ_SES・GET_SCD・TOC）。グローバルを読まず引数で受ける形に。
@@ -109,7 +120,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - **G1-1 調査** — 済（上記）。6.0 基板の MCU / FPGA / 水晶 / ヘッダ配置を公開情報から洗い出し、v5.5 との差分を表にする。
 - **G1-2 実物確認（ユーザー）** — 部品の写真による確認は済（R6、R41）。導通確認（SWD・UART・ERASE パッドの位置、PA23/24/25・PB1/2 が FPGA の方へ伸びているか）はユーザーの作業待ち（R24、R32）。
 - **G1-3 移植** — 進行中。ボード差分を Cargo feature（`board-v55` / `board-v60`）で切り替え、FPGA ローダーは `common/psload` に切り出し済み（R57、ホストのみ）。FIFO のブロック RAM 対応は実装済み（R39）。
-  AG16K のビットストリームを作る道筋（Supra / `synth_agm`）は未了（進行中）。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。
+  AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。ユーザーが Supra を用意して実サイズを測るまで止める（判断の記録「Supra の実サイズ待ち」）。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。
 - **G1-4 実機起動** — 未。P5 の手順で書き込み → UART ログ → IDE バス動作確認。
 
 ### G2：BBA 経由の SD 書き込み
@@ -121,8 +132,8 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
   F1 書込中はボタン無効、F2 FLUSH CACHE、F3 MWDMA2 の公表、F4 LBA48 の書込の分割、F5 取り出し中のハードリセットで復帰、
   F6 書込セッション（IMAGE_CTL）、F7 MBR 保護、F8 書込データの FNV-1a 照合、F13 機能ビット。
   性能（F9〜F12）は計測後に判断。**未着手**（書込性能、マウント解除・再スキャン、FIFO/DMA の書込経路）。
-- **G2-3 コンソール側アプリ** — 実装済み：`tools/netgd-recv/`（KOS + FatFs、R48。指摘 11 項目の修正は R62）。KOS での実ビルドは `kos.yaml` で初回のみ。
-  マウント時に FAT を 1 セクタずつ 2 回読む件（R62、128 GB 級で約 65,000 回の PIO）は進行中（R63）。
+- **G2-3 コンソール側アプリ** — 実装済み：`tools/netgd-recv/`（KOS + FatFs、R48。指摘 11 項目の修正は R62）。`kos.yaml` で毎回ビルド（R87）。
+  マウント時の FAT の読み取りは R68（まとめ読み）と R80（`f_expand` の空き領域の表）で対策済み。
 - **G2-4 PC 側送信ツール** — 実装済み：`tools/netgd-send`（T1、R30）。dc_auto 用プリセットは `integrations/dcdevtools/netgd.ps1`。
 - **G2-5 実機検証** — 未。送信 → 保存 → 起動。転送速度の計測。
 
@@ -141,12 +152,10 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
   3. ボタンでの切替を番号順送りに（今は `GAME.CFG` の `next` を優先し、無ければ番号順。`button.rs`）。
   4. `GDEMU.ini` への対応（`reset_goto`・`open_time`・`detect_time`。R27、R53 で修正。`GDEMU.CFG` の `image=` は電源投入時のイメージを決める）。
   5. SD カードの活線挿抜と、SD からのファーム更新。SD からの復旧は対策 B（`mcu/bootcore`）で準備中。実機は S3 以降（下の「自己更新」節）。
-  - **P4 のテストで判明（テストで現状の挙動を固定済み、未修正）：トラックが2本の CDI（音声 + データ）でセッション2が返らない**
-    （R11 の D-1 と同じ。`boot_area_lba` がトラック 3 番以降が無いと 45000 を仮定する。`gdi.rs:835`・`:1073`）。
-    R11 の方針は、CDI のセッション情報を `Gdi` に保持して使うこと。ホームブリューの CDI に多い構成なので優先度は高め。純正の応答データ（P5.5）を見て決める。
-  - GDI のファイル名をスペース入りの引用符で書いた場合に対応していない（R9 の疑い 1）。進行中（R63）。
+  - トラックが2本の CDI（音声 + データ）でセッション2が返らない問題（D-1）は修正済み（R71・R78・R86）。
+  - GDI のファイル名をスペース入りの引用符で書いた場合への対応は済み（R65）。
 - **G3-3 性能計測** — 未。起動時間・シーク・読み込みスループットを本家と比較する方法を決め、計測する（純正の記録（P5.5）と実機（P6）が要る）。
-- **G3-4 最適化** — 進行中（R63、`docs/research/g3-read-path.md`。複数ブロック読み出し等を feature の裏で実装）。FIFO 深さ、ATAPI 応答遅延は未着手。
+- **G3-4 最適化** — 実装済み（R72・R75、`docs/research/g3-read-path.md`。feature `sd-fast`、既定ではオフ）。実機で速度と安定を比べてから既定にするか決める。FIFO 深さ、ATAPI 応答遅延は未着手。
 
 ### P5.5：純正 GDEMU の調査（ユーザー + Opus）
 - 手順：`docs/research/stock-gdemu-flow.md`（写真 → `tools/gdprobe` → Dreamcast + BBA で実行 → 記録を比較 → LOG・テストに反映）。
@@ -176,9 +185,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 ## 上流から引き継いだ ATAPI 応答の疑い（Fable のデバッグで判明、`docs/research/LOG.md` R11）
 仕様（Sega SPI v1.30）や Flycast と食い違う点。実機（純正 GDEMU または実ドライブ）と比べるまで挙動は変えない。
 直すときは `common/discimg` のテストを先に更新する。
-- **D-1（高、未修正）**：トラック2本の CDI で REQ_SES(2) が ABRT、`prefetch_ip_bin` も範囲外の LBA 45000 を読む。
-  CDI パーサはセッション境界を知っているのに捨てている → CDI のセッション情報を `Gdi` に保持して使う。MIL-CD / selfboot の起動に直結。
-  R36 の pregap の修正では触っていない。
+- **D-1（高、修正済み）**：トラック2本の CDI で REQ_SES(2) が ABRT していた。CDI のセッション情報で REQ_SES と起動領域を決めるよう修正（R71・R78・R86）。純正の記録で最終確認する。
 - **D-2（中、未修正）**：GET_SCD format 1 を BCD/MSF で返している（仕様はバイナリ FAD）。
 - **D-3（中、未修正）**：REQ_STAT のバイト1に Disc Format が入っていない。CDB のバイト2（開始アドレス）を無視している。
 - **D-4（中、未修正・要実機）**：GDI の REQ_SES がセッション数1（Flycast は2）。コード内コメントは「純正 GDEMU は1を返す」としており、実機で要確認。
@@ -204,6 +211,5 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 ## 将来の地雷メモ（レビューで判明、未修正）
 - slot 19：DMA モードと PIO フロー制御が1語で書かれ、片方の書込でもう片方が消える。今は転送ごとに排他なので無害。
 - slot 5：`set_irr` がセクタカウントの上位バイトを消す。ATAPI 側でのみ使用するので無害。
-- `ide_device.py` 845 行付近の「Layout」コメント（スロット 0〜12 しか挙げていない）と、`ide.rs` の `read_fifo_depth` のコメント（256 と 1024）。R25 で残ったもの。
-- `netgd-recv`：マウントのたびに FAT 全体を 1 セクタずつ 2 回読む（R62）。進行中（R63）。
-- 2E のフラッシュ：常駐版で残りは 3,584 B（R60）。AG16K のビットストリームの置き場は進行中（R63）。
+- `ide_device.py` 845 行付近の「Layout」コメントと、`ide.rs` の `read_fifo_depth` のコメント（256 と 1024）。R88 で修正中。
+- 2E のフラッシュ：`resident,sd-fast` で残りは数百 B（R86）。機能を足すときは `docs/research/flash-budget-2e.md` の削減案から先に入れる。

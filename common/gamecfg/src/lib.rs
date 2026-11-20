@@ -98,15 +98,15 @@ impl Meta {
     pub fn parse(text: &str) -> Self {
         let mut out = Meta::default();
         for line in text.lines() {
-            let line = strip_comment(line).trim();
+            let line = trim(strip_comment(line));
             if line.is_empty() || line.starts_with('[') {
                 continue;
             }
             let Some((key, value)) = line.split_once('=') else {
                 continue;
             };
-            let key = key.trim();
-            let value = value.trim();
+            let key = trim(key);
+            let value = trim(value);
 
             match key {
                 "title" => out.title = unquote(value).and_then(fit),
@@ -129,6 +129,72 @@ impl Meta {
     }
 }
 
+/// `str::trim` for the ASCII whitespace only: space, tab, LF, VT, FF, CR.
+///
+/// One shared, deliberately not inlined copy. `str::trim` decodes UTF-8 and
+/// consults the Unicode `White_Space` table from both ends, and every call
+/// site got its own copy of that; `str::trim_ascii` is small but inlines, so
+/// the call sites of it together came out larger still. This is one loop,
+/// called. The firmware uses it as well (`gdi.rs`), which is why it is public.
+///
+/// What it gives up: a line padded with U+00A0 or U+3000 keeps the padding.
+/// These files are keys, numbers and quoted names; nothing in them is
+/// delimited by such a character.
+#[inline(never)]
+pub fn trim(s: &str) -> &str {
+    let b = s.as_bytes();
+    let ws = |c: u8| c == b' ' || (b'\t'..=b'\r').contains(&c);
+    let mut start = 0;
+    let mut end = b.len();
+    while start < end && ws(b[start]) {
+        start += 1;
+    }
+    while end > start && ws(b[end - 1]) {
+        end -= 1;
+    }
+    // Only ASCII bytes were stepped over, so both ends are char boundaries
+    // and this is always `Some`; `get` rather than indexing keeps the
+    // boundary panic (and its message) out of the firmware.
+    s.get(start..end).unwrap_or(s)
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::trim;
+
+    #[test]
+    fn trims_ascii_whitespace_from_both_ends() {
+        assert_eq!(trim("  a b \t\r\n"), "a b");
+        assert_eq!(trim("\x0b\x0c x \x0c\x0b"), "x");
+        assert_eq!(trim("x"), "x");
+        assert_eq!(trim(""), "");
+        assert_eq!(trim(" \t\r\n"), "");
+    }
+
+    #[test]
+    fn agrees_with_str_trim_on_ascii() {
+        // Every first and last byte, around each kind of middle.
+        for a in 0..128u8 {
+            for b in [b' ', b'\t', b'x', 0x1f, 0x0b] {
+                for c in 0..128u8 {
+                    let buf = [a, b, c];
+                    let s = core::str::from_utf8(&buf).unwrap();
+                    assert_eq!(trim(s), s.trim(), "{:?}", s);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_non_ascii_alone() {
+        // Multi-byte text next to the trimmed whitespace stays whole.
+        assert_eq!(trim(" \u{30b7}\u{30a7}\u{30f3}\u{30e0}\u{30fc} "), "\u{30b7}\u{30a7}\u{30f3}\u{30e0}\u{30fc}");
+        // Unicode whitespace is not trimmed (the documented difference).
+        assert_eq!(trim("\u{3000}a\u{a0}"), "\u{3000}a\u{a0}");
+        assert_eq!(trim(" \u{3000}a\u{a0}\n"), "\u{3000}a\u{a0}");
+    }
+}
+
 /// Drop a trailing `# comment`, but not a `#` inside quotes.
 fn strip_comment(line: &str) -> &str {
     let mut in_quotes = false;
@@ -144,7 +210,7 @@ fn strip_comment(line: &str) -> &str {
 
 /// Take the inside of a quoted string, or a bare word as-is.
 fn unquote(v: &str) -> Option<&str> {
-    let v = v.trim();
+    let v = trim(v);
     if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
         Some(&v[1..v.len() - 1])
     } else if v.is_empty() || v.starts_with('"') {
@@ -222,7 +288,7 @@ next = \"Skies of Arcadia Disc 2\"
 /// Returns `None` when nothing matches, which is the right answer for a
 /// typo: the button does nothing rather than swapping to a surprise.
 pub fn resolve<'a>(names: impl Iterator<Item = &'a str>, want: &str) -> Option<usize> {
-    let want = want.trim().trim_end_matches('/');
+    let want = trim(want).trim_end_matches('/');
     names.enumerate().find_map(|(i, n)| {
         (n.len() == want.len()
             && n.chars()

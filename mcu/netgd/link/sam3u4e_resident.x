@@ -32,6 +32,11 @@ MEMORY
  * FAT call chain was enough to run off the end of it -- which shows up as a
  * HardFault on an undefined instruction inside memset.
  *
+ * Stack headroom now (measured 2026-11-20 as _stack_start - __sheap in the
+ * release ELF, default features): statics are 0x3260 = 12,896 bytes of SRAM0,
+ * so the stack has 32,768 - 12,896 = 19,872 bytes (about 19 KB). The "under
+ * 13K" above is the state before the buffers moved to SRAM1.
+ *
  * NOLOAD: nothing zero-initialises this, so only put buffers here that are
  * always written before they are read.
  */

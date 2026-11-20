@@ -1084,6 +1084,22 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Drive の 4E の .bin は Drive の判定で種類が別の表示になったが、内容（573,920 B）はそのまま。
 - 以後の更新：Drive は自動では同期しない。新しい版を置くときは同じフォルダに上書き（またはコミット名の付いたサブフォルダ）にする。
 
+### R88 実機なしでできる残りの作業（Opus 統括。Fable：`read_ip_header` と `trim`、Sonnet：コメント、Opus：PLAN）
+- 問い：実機・Supra を待たずに今できるソフトの課題は何か、それを片づける。
+- (1) **PLAN.md を最新に**（Opus）：D-1 は R71・R78・R86 で修正済み、マウント時間は R68・R80 で対策済み、P3 は R74 で完了、G3-4 は `sd-fast` で実装済み、CI は 35285878 で全成功（R87）、と書き換え。「進行中」を「ソフト側の残り」に置き換えた。
+- (2) **`read_ip_header` を起動領域の判定にそろえた**（Fable）：独自の「`start_lba >= 11700` を先に」の推定をやめ、新しい純粋関数 `discimg::atapi::ip_bin_candidates(tracks, boot_area_lba)`（起動領域以上のデータトラック → それ未満のデータトラック、音声は除く）を使う。
+  旧と結果が変わるのは「セッション3つの CDI（データ 11700 / 28250）」と「データ＋データで2番目のセッションが 11500」の2例だけで、どちらも新しい第1候補は `prefetch_ip_bin` が読む LBA と一致。GDI は実在の盤では不変。
+  **`read_ip_header` は呼び出し元が無い（`#[allow(dead_code)]`、LTO で消える）**ので、ファームの挙動とサイズは不変。`prefetch_ip_bin`（`ide.rs`）は元から `gdi.boot_area_lba` を使っている。テスト `cdi_sessions.rs` に5件（旧規則を補助関数として残し、一致と差を固定）。
+- (3) **`trim` の共用**（Fable、`flash-budget-2e.md` の案 3）：`gamecfg::trim`（`#[inline(never)]`、空白と 0x09〜0x0D だけ）を `gamecfg` の全 `.trim()` と `gdi.rs:623` で使う。テスト3件。
+  text：4E −200、2E −500、2E `resident,sd-fast` 122,120 → **121,624**（−496）、v60 `resident` −496。**挙動の差：全角スペース（U+3000）や U+00A0 を削らなくなる**。日本語で編集した `GAME.CFG`・`GDEMU.INI` の行の前後にあるとキーが一致しない（実機で1回確認したい）。
+- (4) **古いコメント**（Sonnet、コメントのみ）：`ide_device.py` に `m.Case` と照合したスロット表（0〜31）を追加（「32〜127 は 0」は `mcu_out` の既定値に依存、未確認）。`ide.rs` の FIFO の深さのコメントを主 4096 語・副 1024 語に統一。
+  `link/*.x` に実際のスタックの余裕を追記（`_stack_start - __sheap`、`llvm-nm`：2E 約 7.4 KB、4E 約 19 KB）。「約 2 KB のスタック」は実はリンカスクリプトではなく `cdi.rs:64`・`gdi.rs`・`systick.rs:18`・`ide.rs:2070`・`sdcard.rs` のコメントにあり、未修正（範囲外）。
+  - 警告：`netgd`・`embassy-atsam3` の警告は3種類のビルドとも 0（PAC 以外）。R74 のとおりで直すものなし。
+  - バイト同一性：`DEFMT_LOG=off` の2種類は同一。**既定（defmt あり）の 4E は `ide.rs` のコメント変更だけで 6 バイト変わった**（defmt の文字列番号の入れ替わりとみられる。推測、未確認）。動作には影響しないので受け入れた。
+- 確認（Opus、合わせた状態）：`common/discimg`・`common/gamecfg` の `cargo test` 全通過、`cargo build --release`（4E）と `DEFMT_LOG=off --features sam3u2e,resident,sd-fast` 成功（text 121,624 / data 156）。Fable の報告：netgd-expect 10 件（1 skip）、v60 `resident` もリンク。Sonnet の報告：bootcore 全通過、`main.py` の再生成で `out/` 不変。
+- 信頼度：ビルド・テストは確認済み。実機は未検証。Opus はコードの差分を確認（`gdi.rs`・`atapi.rs`）。
+- 関連：`common/discimg/src/atapi.rs`、`common/discimg/tests/cdi_sessions.rs`、`common/gamecfg/src/{lib,ini}.rs`、`mcu/netgd/src/{gdi,ide}.rs`、`mcu/netgd/link/*.x`、`fpga/amaranth/hw/ide_device.py`、`docs/PLAN.md`。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -1113,3 +1129,5 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | 6.0 のビットストリームの置き場所（SD の `NETGD.BIT` か埋め込みか）は、Supra で実際のサイズを測ってから決める。それまで SD 方式は実装しない | AGM 独自の圧縮で埋め込める大きさになる可能性がある（R66・R69） | ユーザー |
 | 2026-11-20 | 常駐部とアプリの取り決め E1〜E9 を推奨どおり採用（E1 巻き戻しのみ、E2 `handoff()`、E3 GPBR1 と情報ブロックを世代 1 に、E4 V3、E5 `"NGAX"` を今追加、E6 ピン不明のうちは 6.0 の常駐部をロックしない、E7 `RSTC_CR` に統一（S5 で）、E8 LED は D6 と一緒に、E9 `resident` から形式2の更新プログラムを外す） | `docs/design/resident-app-contract.md` §7（R79） | ユーザー（Opus の推奨を承認） |
 | 2026-11-20 | AG16K のビットストリームの埋め込みは、Supra の実サイズ（LZMA）が約 53 KB 以下で、かつ `list_root_dir` の削除と `opt-level="z"` を入れた場合に限って検討する | R81 の上限の表 | Opus |
+| 2026-11-20 | `trim` を ASCII 専用の共用関数にする（全角スペースを削らなくなる差を受け入れる） | 2E のフラッシュ −0.5 KB。INI・GAME.CFG のキーは ASCII（R88） | Opus |
+| 2026-11-20 | コメントだけの変更による defmt ありのビルドの 6 バイト差を受け入れる | defmt の番号の入れ替わりで動作は不変。`DEFMT_LOG=off` のビルドは同一（R88） | Opus |

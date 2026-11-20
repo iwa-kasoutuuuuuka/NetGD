@@ -121,12 +121,12 @@ const STATUS_IDLE_ERR: u8 = STATUS_DRDY | STATUS_DSC | STATUS_ERR;
 pub struct IdeDevice {
     pub(crate) base: *mut u16,
     /// Words this device's read FIFO can hold. The two devices are built with
-    /// different depths (`READ_FIFO_DEPTH` / `SECONDARY_READ_FIFO_DEPTH` in
-    /// hw/ide_device.py) and this used to be one global constant set to the
-    /// primary's 4096. On the secondary -- 256 words, one sector exactly --
-    /// that told `push_buf_to_fifo` there were thousands of words of room, so
-    /// it pushed a whole 512-byte block into a FIFO with less space than that
-    /// and the overflow was dropped on the floor. The host then ran the FIFO
+    /// different depths (`READ_FIFO_DEPTH` = 4096, `SECONDARY_READ_FIFO_DEPTH`
+    /// = 1024 in hw/ide_device.py) and this used to be one global constant set
+    /// to the primary's 4096. The secondary was 256 words then (one sector;
+    /// now four), so that told `push_buf_to_fifo` there were thousands of
+    /// words of room, it pushed a whole 512-byte block into less space than
+    /// that and the overflow was dropped on the floor. The host then ran the FIFO
     /// dry before the end of the sector, read a word that was never serviced,
     /// and every word after it in the transfer was shifted by one.
     read_fifo_depth: u16,
@@ -2878,7 +2878,7 @@ async fn push_buf_to_fifo(dev: &IdeDevice, data: &[u8]) -> usize {
 #[allow(dead_code)]
 async fn stream_pattern(dev: &IdeDevice, byte_count: usize) {
     // Push a sliding incrementing pattern, refilling the FIFO whenever
-    // it has room. The FIFO is 1024 words = 2 KB, so for a single 2 KB
+    // it has room. The primary FIFO is 4096 words = 8 KB, so a single 2 KB
     // sector we fit it all up-front.
     dev.set_atapi_byte_count(byte_count.min(0xFFFF) as u16);
     dev.set_error(0);
@@ -2917,10 +2917,10 @@ async fn stream_pattern(dev: &IdeDevice, byte_count: usize) {
     dev.set_status_intrq(STATUS_IDLE);
 }
 
-/// Words deep in the FPGA read FIFO (MCU→IDE; matches READ_FIFO_DEPTH
-/// in ide_device.py). Deeper is better for DMA: the host can pull at
-/// ~60x the rate the MCU can push, so a deeper FIFO rides out the
-/// gap between push iterations without dropping DMARQ.
+/// Words deep in the FPGA read FIFO (MCU->IDE): primary 4096 (8 KB),
+/// secondary 1024 (2 KB, four sectors). Deeper is better for DMA: the host
+/// can pull at ~60x the rate the MCU can push, so a deeper FIFO rides out
+/// the gap between push iterations without dropping DMARQ.
 /// Mirrors READ_FIFO_DEPTH / SECONDARY_READ_FIFO_DEPTH in
 /// fpga/amaranth/hw/ide_device.py. Keep them in step.
 const PRIMARY_FIFO_DEPTH_WORDS: u16 = 4096;
