@@ -634,6 +634,14 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   現実的な確認は、作業2の導通確認で MCU の PA24/PA23/PA25/PB2/PB1 が FPGA の方へ伸びているかを見ること。決め手は、純正の電源投入時の DCLK/DATA0 をロジアナで見ること（ビット数・ビット順・追加クロック・読み込み時間が全部分かる）。
   AG16K のオープンな JTAG ツールや、AGM 用の MCU からの PS ローダーの公開例は見つからなかった。
 
+### R50 CI の拡充と、Linux で初めて分かった不具合（Opus）
+- `build.yaml` に `tools-host` ジョブ（mksdcard・netgd-send・fwbackup・fwimage・netgd-recv のホストテスト）と fwupdater のホストテストを追加（Haiku）、プローブに CD_READ の読み比べ試験を追加（Sonnet）。
+- **初回の実行（run 44685118507）**：ファーム・ホストテスト・gdprobe・FPGA シミュ・fwbackup・fwimage・mksdcard は成功。**失敗が2つ**：
+  - `netgd-send`：UNC パスのテストは Windows でしか成り立たない → Windows のときだけ試すよう修正（Opus、`5f4e02d8`）。
+  - `netgd-recv`：ホストテストのコードが Windows 専用（`direct.h`）で、`size_t` のヘッダも不足 → Linux でビルドできない。`netgd-recv` の修正を担当している Sonnet に追加で依頼。
+- **KOS ビルドの CI も失敗**（run 44684499681）：`netgd-recv` の Makefile の文字列の `-D` 定義の引用符が崩れる（KOS の Makefile.rules 経由）、`%u` と `long` の不一致 → 同じ Sonnet に依頼（gdprobe と同じく、引用符なしで渡して C 側で文字列化する方式に）。
+- 教訓：Windows だけでテストしていると Linux や KOS の環境差を見逃す → CI で両方を回す意味があった。
+
 ---
 
 ## 判断の記録（Decisions）
