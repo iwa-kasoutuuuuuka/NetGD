@@ -1187,6 +1187,30 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：該当なし（Opus 自身の作業）。
 - 関連：`docs/research/supra-static-analysis.md`、R92、R93。
 
+### R95 Supra 2026.03 の追加の検証：他の脅威情報、深い静的解析、出所（Opus・Fable、R94 の続き）
+
+- 担当：
+  - Opus：ハッシュ照会と出所の確認。
+  - Fable：深い静的解析（サブエージェント）。Opus が要点を逆アセンブルで確認した。
+- ユーザーの指示：「他の方法で検証して」。
+- 問い：VirusTotal に上げられないなら、ほかの方法で安全性をどこまで確かめられるか。
+- 結論：
+  - **Kaspersky OpenTIP** に `af.exe`・`Supra.exe`・`yosys.exe` の記録があった。3つとも、2026-05 から約 10 回観測されていて、未分類で検出名は無い。MD5 も一致した。`Downloader.exe` と zip は登録が無い。
+  - **`Supra.exe` のフックは WH_GETMESSAGE（3）で、Qt のもの**だった。キー入力を記録する種類ではない。
+  - 情報を盗む・遠隔操作する・居座る・解析を妨げる仕組みは見つからなかった。ネットワークのコードは Tcl の `socket` の中だけ。埋め込みのファイルやオーバーレイも無い。
+  - 4つは同じ環境で1時間以内に続けてビルドした形になっている。
+  - 公式の配布物と同じかどうかは、まだ確かめられていない（Web に公式のハッシュが無い）。
+- 根拠：
+  - `docs/research/supra-static-analysis.md` §9。
+  - OpenTIP の結果ページ：`opentip.kaspersky.com/<sha256>/results`。
+  - `objdump -d --start-address=0x1408858b0` の出力：`mov $0x3,%ecx` → `call *0xbfd1e2(%rip) # 0x141482ac8`（SetWindowsHookExW の IAT）。
+  - `md5sum` の結果。
+- 信頼度：
+  - 確認済み：ハッシュ照会、フックの種類、import の参照元。
+  - 推測：TLS コールバックのうち1つが jemalloc のもの、`GetAdaptersInfo` の用途、`Supra.exe` の 16 KB の高エントロピー領域の中身。
+- Opus による検証：あり（フックの呼び出し箇所を逆アセンブルし、MD5 を照合した）。
+- 関連：R92、R93、R94、`docs/research/supra-static-analysis.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -1222,3 +1246,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | `ack_command` の取りこぼし（A-c の残り）は FPGA の変更が要るので保留 | スロット 0 の書き込みで後から来たコマンドも消える（R90） | Opus |
 | 2026-11-20 | Supra は実行せず静的解析だけ。動かすなら隔離した環境で `af.exe`・`yosys.exe` だけ、urjtag（`inpout32` のカーネルドライバ）は使わない | 署名が無く公式の配布物との一致も未確認（R92） | Opus |
 | 2026-11-21 | VirusTotal への Supra のアップロードはユーザーが自分の手で行う | 拡張から shadow DOM のファイル欄に届かず、`yosys.exe` は 10 MB の上限も超える。API キーを Claude が扱うことはできない（R94） | Opus |
+| 2026-11-21 | Supra の安全性は「静的には問題なし、Kaspersky も未検出」で一区切りにする。残りの確認（Tcl から実行時に呼ばれるもの、公式の配布物との一致）は、隔離環境で動かすときか、公式のハッシュが手に入ったときに行う | R95 | Opus |
