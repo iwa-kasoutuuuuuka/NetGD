@@ -1,90 +1,101 @@
 # NetGD
 
-NetGD is a fork of [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski: open-source firmware and FPGA core for GDEMU-style Dreamcast GD-ROM replacement boards. Its goals are:
+**Dreamcast の GD-ROM ドライブを置き換える基板（GDEMU 系）向けの、オープンソースのファームウェアと FPGA コア。**
+[OpenGDEMU](https://github.com/cepawiel/OpenGDEMU)（Colton Pawielski 氏）のフォークです。
 
-1. Run on GDEMU 6.0 boards, which upstream OpenGDEMU does not target.
-2. Write game images to the SD card over the Dreamcast Broadband Adapter, which the original GDEMU cannot do.
-3. Reach feature parity with the original GDEMU, with better performance.
+*Open-source firmware and FPGA core for GDEMU-style Dreamcast GD-ROM replacement boards, forked from
+[OpenGDEMU](https://github.com/cepawiel/OpenGDEMU). Goals: run on GDEMU 6.0 boards, write game images to the
+SD card over the Broadband Adapter, and match the original GDEMU's features with better performance.
+Nothing is verified on hardware yet.*
 
-The plan is in [`docs/PLAN.md`](docs/PLAN.md). None of this has been verified on hardware yet.
+> [!WARNING]
+> **開発中です。実機ではまだ一度も動作を確認していません。**
+> 書き込むと純正ファームウェアは消え、元に戻す方法はありません（純正ファームは吸い出せません）。
+> 壊れても構わない基板以外には書き込まないでください。
 
-### Warning:
-At the moment this is a WIP. DO NOT ATTEMPT to flash unless you are okay with having a non-functional
-GDEMU (or clone) since I do not have a way to revert to the stock firmware. Even the notes aren't going
-to be 100% perfect, I've tried to put little questions when I can't remember perfectly and hope to erase
-some of those questions as time goes on.
+## 目標
 
-### Required Pre-Reqs
-- #### rust
-    - The MCU firmware (`mcu/opengdemu`); `rustup` picks up the toolchain
-        and the thumbv7m-none-eabi target from its rust-toolchain.toml
-- #### podman (or docker)
-    - Generating Verilog from Amaranth
-    - Running Quartus 2
-        - This program is a nightmare to get working locally on any modern
-            linux machine. Lots of broken dependencies and old static libraries,
-            so avoid trying a local install.
-            Open source bitstream generation when :'(
-        - Build the image from `Containers/QuartusII_x64`, then compile with
-            `fpga/build_fpga.sh`. No license file is needed: 13.0.1 Web Edition
-            is the free tier, and Cyclone II is in it.
-        - The installer tarball is gitignored and 4.5 GB. Put it in
-            `Containers/QuartusII_x64/` and the build uses it; leave it out and
-            the build downloads it. Altera's CDN refuses anything that does not
-            look like a browser, so the Containerfile's wget sends a full browser
-            header block -- if you fetch it by hand and get a 403, that is why.
+| # | 目標 | 状況 |
+|---|------|------|
+| **G1** | **GDEMU 6.0 基板で動く**（上流は v5.5 / v5.15b クローンのみ） | 基板を調査済み：MCU は ATSAM3U2E、FPGA は **AGM AG16KDDF256**（v5.5 は Cyclone II）。FPGA の移植が本体 |
+| **G2** | **ブロードバンドアダプタ（BBA）経由で SD カードにゲームイメージを書き込む**（本家 GDEMU では不可） | 設計済み。ファーム側の土台（SD 全体を IDE ディスクとして公開）はある |
+| **G3** | **本家 GDEMU と同等の機能を持ち、より高性能** | 機能差分表を作成済み。GDmenu / openMenu の切替コマンド（`0x52`）の仕様が判明 |
 
-### Current Status
-The MCU firmware is now Rust (`mcu/opengdemu`, embassy). The list below describes what the code does.
-None of it has been checked on a Dreamcast yet; the hardware bring-up plan is in `docs/PLAN.md`.
+詳細な計画（フェーズ、モデルの役割分担、未解決の課題）は [`docs/PLAN.md`](docs/PLAN.md) にあります。
 
-- **Boot:** the FPGA bitstream is LZMA-compressed in flash and unpacked straight into the passive-serial
-  loader, so the FPGA is configured before anything else (`main.rs`). Then the SD card comes up, the MBR and
-  FAT32 volume are read, the default image is mounted, IP.BIN is prefetched, and the single IDE task starts.
-- **GD-ROM (primary device):** an ATAPI packet device. It answers TOC and session queries, serves
-  `CD_READ`/`CD_READ2` from GDI or CDI images on the SD card (PIO and DMA), and plays CD audio through the
-  FPGA's serialiser (`cdda.rs`). Eject and load use the standard `START STOP UNIT` with LoEj. Image parsing is
-  in `gdi.rs` and `cdi.rs`.
-- **Secondary IDE device:** a plain ATA disk that exposes the whole SD card, MBR included
-  (`size_disk_from_mbr`, `handle_disk_read`, `handle_disk_write`). It supports PIO and DMA, LBA28 and LBA48.
-  Writes are refused while a GD-ROM image is mounted, so the host has to eject first.
-- **Image selection:** vendor command `0xE0` (IMAGE_CTL) mounts an image by folder name and reports the
-  firmware version (`handle_image_ctl`). Images are named, not numbered.
-- **Disc swap button:** a press on PA20 follows the `next` link in the mounted folder's `GAME.CFG` and swaps
-  the disc (`button.rs`).
-- **Firmware update:** vendor opcode `0xF9` on the secondary device, behind a two-step key. The firmware copies
-  a RAM-resident updater (`mcu/fwupdater`) into SRAM1 and branches to it (`fwupdate.rs`).
-- **FPGA (`fpga/amaranth`):** two `IDEDevice` instances on the shared G1 bus, plus the CDDA output. Simulation
-  tests are in `fpga/amaranth/test*.py`.
+## 構成
 
-Open question: the bit-flip symptoms on the IDE bus described in the older notes have not been re-tested with
-this firmware.
+```
+mcu/opengdemu/      MCU ファームウェア（Rust + embassy、SAM3U4E / SAM3U2E）
+mcu/embassy-atsam3/ SAM3U 用 HAL
+mcu/fwupdater/      RAM で動くファーム更新プログラム（ファームに埋め込み）
+common/discimg/     GDI / CDI 解析と ATAPI 応答（no_std、ホストでテスト可能）
+common/lzma/        FPGA ビットストリーム用の LZMA 展開
+common/gamecfg/     GAME.CFG の解析
+fpga/amaranth/      FPGA コア（Amaranth HDL）とシミュレーション
+fpga/Quartus/       Cyclone II 用 Quartus プロジェクト（v5.5 クローン向け）
+docs/               計画・調査・設計・基板の資料
+```
 
-### Upstream goals (OpenGDEMU)
-The three goals from the original OpenGDEMU plan, and where each one stands:
+パス名やバイナリ名（`mcu/opengdemu`、`opengdemu.elf`）は上流のままです。改名は後で行います。
 
-1. **Eject a GD-ROM image.** Implemented, but not as a custom command. Eject and load go through the standard
-   ATAPI `START STOP UNIT` with LoEj (`handle_packet` in `ide.rs`). Choosing which image to load is the
-   custom `0xE0` command.
-2. **Secondary IDE disk that exposes the SD card, with write support.** Implemented in the firmware
-   (`ide.rs`: `handle_disk_read`, `handle_disk_write`, `stage_identify_disk`, `size_disk_from_mbr`). Writes are
-   refused while a GD-ROM image is mounted. The disk size comes from the MBR partition table, because the
-   card's CSD value was found to undercount the capacity.
-3. **Custom command to eject and remount an image by path.** Partly implemented, and on a different device than
-   planned. Mounting by folder name is `0xE0` (`handle_image_ctl`), and it is sent as an ATAPI PACKET to the
-   GD-ROM (primary device), not to the secondary disk.
+## 今のファームウェアにできること（コード上。実機未確認）
 
-### Next Steps
-The work list is in `docs/PLAN.md`. Phase 5 (hardware verification) is the one that needs a board.
+- **起動**：LZMA 圧縮した FPGA ビットストリームを展開しながら FPGA に送り込み、SD カード（MBR + FAT32）を読んで既定のイメージをマウントする。
+- **GD-ROM（プライマリ）**：GDI / CDI イメージから `CD_READ` を PIO・DMA で返す。TOC・セッション情報、CD 音声（CDDA）、`START STOP UNIT` による取り出し。
+- **セカンダリ IDE ディスク**：SD カード全体を読み書き可能な ATA ディスクとして見せる（LBA28/48、PIO・DMA）。イメージのマウント中は書き込み禁止。
+- **イメージ選択**：独自コマンド `0xE0`（フォルダ名でマウント）。
+- **ボタン**：`GAME.CFG` の `next` に従ってディスクを切り替える。
+- **ファーム更新**：セカンダリへの独自コマンド `0xF9` で、RAM 上の更新プログラムに切り替えて書き換える。
 
-### Just on the off chance that maybe things go too easily
-- Would be pretty cool to compile the Verilog to C with Verilator and hook up to Lxdream-nitro. 
-Might be too slow, never used Verilator before this just sounded like a good excuse to try and learn it
+本家との差（番号フォルダ方式、`0x52` 切替コマンド、`GDEMU.ini` など）は [`docs/research/gdemu6-and-parity.md`](docs/research/gdemu6-and-parity.md) にあります。
 
+## ビルドとテスト
 
-### Projects in Use
-- [Amaranth](https://github.com/amaranth-lang/amaranth) BSD-2-Clause
-- [embassy](https://github.com/embassy-rs/embassy) (MCU firmware)
-- [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski, GPL-3.0 (see `LICENSE`). NetGD is forked from it.
+必要なもの：Rust（`rustup` が `rust-toolchain.toml` からツールチェーンと `thumbv7m-none-eabi` を入れる）、`xz`、Python 3（FPGA シミュ用）。
 
-Any omissions are not intentional. Please open an issue if you notice any missed attributions.
+```sh
+# ファーム（SAM3U4E、v5.5 クローン）
+cd mcu/opengdemu && cargo build --release
+
+# ファーム（SAM3U2E、GDEMU 6.0 の MCU）
+DEFMT_LOG=off cargo build --release --features sam3u2e
+
+# ホストテスト
+(cd common/discimg && cargo test)
+(cd common/lzma && cargo test)
+(cd common/gamecfg && cargo test)
+
+# FPGA シミュレーション
+cd fpga/amaranth
+python -m venv amaranth_env && amaranth_env/bin/pip install "amaranth==0.5.8" "amaranth-yosys==0.50.0.0.post123"
+amaranth_env/bin/python test.py   # test_cdda.py / test_timing.py / test_top.py も
+```
+
+- `cargo build` で `--target-dir` を変えないでください（リンカの `-Map=target/openmenu.map` が相対パスのため失敗します）。
+- Cyclone II のビットストリームは Quartus II 13.0.1 Web Edition をコンテナで動かして作ります（`Containers/QuartusII_x64`、`fpga/build_fpga.sh`）。
+- CI（`.github/workflows/build.yaml`）が、ファームのビルド、ホストテスト、FPGA シミュ、生成済み Verilog の一致をチェックします。
+
+書き込み手順（SWD プローブの準備、純正ファームの消去、書き込み）は [`INSTALL.md`](INSTALL.md) を参照してください（v5.5 クローン向け）。
+
+## 資料
+
+| 資料 | 内容 |
+|------|------|
+| [`docs/PLAN.md`](docs/PLAN.md) | 計画：目標、フェーズ、役割分担、既知の地雷 |
+| [`docs/research/LOG.md`](docs/research/LOG.md) | **すべての調査・レビュー・判断の記録** |
+| [`docs/research/`](docs/research/) | GDEMU 6.0 と本家機能の調査、web 調査（openMenu の `0x52`、AG16K、KOS g1ata など） |
+| [`docs/design/bba-sd-write.md`](docs/design/bba-sd-write.md) | BBA 経由の SD 書き込みの設計 |
+| [`docs/boards/gdemu60/`](docs/boards/gdemu60/) | GDEMU 6.0 基板の写真と部品 |
+| [`docs/PCB.md`](docs/PCB.md) | v5.5 / v5.15b クローン基板の解析（上流） |
+| [`docs/AddressMapMCU.md`](docs/AddressMapMCU.md) | MCU から見た FPGA レジスタ |
+
+関連：BBA での実機開発ツール [Dreamcast-Dev-Tools-for-BBA](https://github.com/iwa-kasoutuuuuuka/Dreamcast-Dev-Tools-for-BBA)（G2 の PC 側で使う予定）。
+
+## クレジットとライセンス
+
+- [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU)（Colton Pawielski 氏）— NetGD のフォーク元。上流の目標（イメージの取り出し、セカンダリ IDE ディスク、パス指定の再マウント）は実装に引き継いでいます。
+- [Amaranth](https://github.com/amaranth-lang/amaranth)（BSD-2-Clause）
+- [embassy](https://github.com/embassy-rs/embassy)
+
+ライセンスは上流と同じ **GPL-3.0**（[`LICENSE`](LICENSE)）です。帰属表記に漏れがあれば Issue でお知らせください。
