@@ -1100,6 +1100,22 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：ビルド・テストは確認済み。実機は未検証。Opus はコードの差分を確認（`gdi.rs`・`atapi.rs`）。
 - 関連：`common/discimg/src/atapi.rs`、`common/discimg/tests/cdi_sessions.rs`、`common/gamecfg/src/{lib,ini}.rs`、`mcu/netgd/src/{gdi,ide}.rs`、`mcu/netgd/link/*.x`、`fpga/amaranth/hw/ide_device.py`、`docs/PLAN.md`。
 
+### R89 Fable による全体のデバッグ（Fable×3、読むだけ。詳細は `docs/research/fable-debug-2026-11-20.md`）
+- 問い：ユーザーの指示「fable で全体をデバッグ」。HEAD 84a4d180 で、実機なしに見つかるバグを領域別に探す（A ファームの読み込み経路、B 自己更新と起動、C G2 の書き込み経路）。リポジトリは変更なし。
+- 結論：**基板を壊す種類のバグ（B）と、受信の中核のデータ破損（C）は見つからなかった。** 直すべき確認済みのものは次のとおり（重い順、詳細と直し方は別ファイル）。
+  - A1 同じデバイスへの新しいコマンドで、複数チャンクの CD_READ・ディスク読みが止まらず、新しいコマンドの CDB・バイト数を上書きして 5〜10 秒遅れる（高〜中、コードと RTL から）。
+  - C1 送り終わった `put` が `job.ngj` に残り、次の送信で前のイメージを消して送り直す（中〜高、使い捨てテストで確認）。
+  - B1 `fwimage build --target 4e` が 2E の ELF を通す。今の 4E 基板に書くと SWD でしか戻せない（形式2で高）。
+  - A2 DMA の CD_READ が途中の SD 失敗でも成功を返す。C3 v2・v3 の CDI を送れるがファームは v3.5 しか読めない。A3 日本語などの 8.3 別名の長い名前のトラックをマウントできない（中）。
+  - A5 GDI のセクタサイズ 0 で 0 除算のパニック（既定のイメージなら毎回の起動で）。A4 起動時のマウント失敗で `MEDIA_PRESENT` が true のまま。B2 `sd_recover_ex` が FWS を入れずにプレーン1を読む。C2 古い `force.req` が残り保護が無効のまま。C4 ドライブをまたぐ `/pc/` のパスのずれ。A6 `sd-bench`・`fpga-diag` がコンパイルできない。A7 0xA0・0x08 の役割の確認なし。C7 壊れた FAT の値で LBA が桁あふれ。ほか低いもの多数。
+  - 常駐部をロックする前に決めること：B5 EWP のタイムアウトで戻らない、B6 復旧の途中のリセットで REQ のループ防止が消える（GPBR0 の意味）、B7 WDT の巻き戻しと WDT_MR の間隔、B8 書き直しの回数の上限。
+  - 実機が要る疑い：A-a FIFO の量の非同期読み（繰り上がりの途中）、A-c コマンドの取りこぼし、A-d HSMCI（CMD12 の間のエラー、SDSC）、A-e CDI の CDDA とデータの交互読みで FAT のたどり直し、C-A 256 セクタの PIO 書き込みの分割。
+- 根拠：各担当の報告（ファイル:行、使い捨てテストはスクラッチパッド）。テスト：bootcore 133・fwupdater 13・fwimage 48（2 skip）・netgd-recv quick 41・netgd-send 43・discimg・fatmap・sdfast・gamecfg すべて通過。ファジングで GDI 30 万・CDI 20 万・LFN 30 万件、パニックなし。
+  2E `resident,sd-fast` のスタック：使える 7,160 B、静的な最深 約 6.2 KB（`load_by_name` 3,360 B が最大）、割り込み用の残り約 1 KB。
+- Opus の検証：A2（`ide.rs:2547`・`:2677`）、A4（`ide.rs:986`）、A5（`gdi.rs:890`）、B2（`update.rs` の `set_fws` は `ewp_page` の中だけ）、C1（`job.py:233-242`）、C3（`cdi.rs:81-86` と `image.py:227-235`）をコードで確認。その他は担当の報告のまま（未検証）。
+- 信頼度：確認済み（ビルド・テスト・コード）と推測が混在、表ごとに区別。実機は未検証。
+- 関連：`docs/research/fable-debug-2026-11-20.md`。修正はまだしていない。
+
 ---
 
 ## 判断の記録（Decisions）
