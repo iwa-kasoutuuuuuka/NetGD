@@ -5,7 +5,7 @@
 
 /* Why each command is safe:
  *  - The ATAPI/Sega commands below only ask the drive to REPORT something
- *    (status, sense, TOC, session table, sub-code Q, mode page) or to READ
+ *    (status, error/sense, TOC, session table, sub-code Q, mode page) or to READ
  *    data sectors. None of them changes the drive's state, the medium, or the
  *    firmware.
  *  - Never present, on purpose: SET_MODE 0x12, CD_OPEN 0x16, CD_PLAY/SEEK/SCAN
@@ -18,14 +18,12 @@
 const wl_entry wl_table[] = {
     { "TEST_UNIT_READY", 0x00, B(0), 0,
       "ATAPI: reports ready/not ready only; no data, no state change (UNIT ATTENTION is cleared, as for any host)" },
-    { "REQUEST_SENSE", 0x03, B(0) | B(4), 0,
-      "ATAPI: returns the 18-byte sense data of the last command" },
     { "REQ_STAT", 0x10, B(0) | B(2) | B(4), 0,
       "Sega: reads the audio/drive status block (10 bytes)" },
     { "REQ_MODE", 0x11, B(0) | B(2) | B(4), 0,
       "Sega: reads mode data (the BIOS reads this at every boot); this is NOT SET_MODE" },
     { "REQ_ERROR", 0x13, B(0) | B(4), 0,
-      "Sega: reads the extended error code block" },
+      "Sega: reads the 10-byte error/sense block (byte 2 low nibble = sense key, 8 = ASC, 9 = ASCQ); the GD-ROM replacement for REQUEST SENSE, which is not a GD-ROM command" },
     { "GET_TOC", 0x14, B(0) | B(1) | B(3) | B(4), 0,
       "Sega: reads the 408-byte TOC of the SD (0) or HD (1) area" },
     { "REQ_SES", 0x15, B(0) | B(2) | B(4), 0,
@@ -46,7 +44,6 @@ static unsigned be16(const uint8_t *p) { return ((unsigned)p[0] << 8) | p[1]; }
 static int args_ok(const wl_entry *e, const uint8_t *c)
 {
     switch (c[0]) {
-    case 0x03: return c[4] <= 18;
     case 0x10: return c[4] <= 10;
     case 0x11: return (unsigned)c[2] + c[4] <= 32;
     case 0x13: return c[4] <= 10;

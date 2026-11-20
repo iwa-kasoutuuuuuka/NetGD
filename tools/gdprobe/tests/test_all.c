@@ -76,8 +76,9 @@ static void test_whitelist(void)
 
     memset(c, 0, 12);
     CHECK(wl_check(c, 0));                        /* TUR */
-    c[0] = 0x03; c[4] = 18; CHECK(wl_check(c, 0));
-    c[4] = 19; CHECK(!wl_check(c, 0));
+    c[0] = 0x03; c[4] = 18; CHECK(!wl_check(c, 0));   /* REQUEST SENSE is not a GD-ROM command */
+    c[0] = 0x13; c[4] = 10; CHECK(wl_check(c, 0));    /* REQ_ERROR */
+    c[4] = 11; CHECK(!wl_check(c, 0));
     memset(c, 0, 12); c[0] = 0x14; c[1] = 1; c[3] = 0x01; c[4] = 0x98; CHECK(wl_check(c, 0));   /* 408 */
     c[1] = 2; CHECK(!wl_check(c, 0));
     memset(c, 0, 12); c[0] = 0x15; c[2] = 3; c[4] = 6; CHECK(wl_check(c, 0));
@@ -262,6 +263,8 @@ typedef struct {
     int sw_enabled;
     int identify_calls;
     int ua_sense;
+    int ses_fail;            /* REQ_SES(2) returns CHECK */
+    uint32_t toc_fad;        /* FAD of track 3 in the HD-area TOC (0 = 45150) */
 } fake;
 
 static uint8_t pat(uint32_t fad, uint32_t i) { return (uint8_t)(fad * 131u + i * 7u + 3u); }
@@ -291,10 +294,10 @@ static int f_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap
         f->not_ready_forever = (n == f->empty_folder);
         return r->rc;
     }
-    if (cdb[0] == 0x03) {
-        len = 18; d[0] = 0x70;
-        if (f->not_ready_forever || f->now < f->ready_at) { d[2] = 2; d[12] = f->not_ready_forever ? 0x3A : 0x04; d[13] = f->not_ready_forever ? 0 : 1; }
-        else if (f->ua_sense) { d[2] = 6; d[12] = 0x29; f->ua_sense = 0; }
+    if (cdb[0] == 0x13) {
+        len = 10; d[0] = 0xF0;
+        if (f->not_ready_forever || f->now < f->ready_at) { d[2] = 2; d[8] = f->not_ready_forever ? 0x3A : 0x04; d[9] = f->not_ready_forever ? 0 : 1; }
+        else if (f->ua_sense) { d[2] = 6; d[8] = 0x29; f->ua_sense = 0; }
         goto data;
     }
     if (f->not_ready_forever || f->now < f->ready_at) {
@@ -309,20 +312,20 @@ static int f_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap
     case 0x00: break;
     case 0x10: len = 10; d[0] = 2; d[2] = 0x41; break;
     case 0x11: len = cdb[4]; if (cdb[2] == 18) memcpy(d, "Rev 6.42", 8); break;
-    case 0x13: len = 10; break;
     case 0x14:
         len = 408;
         {
             static uint8_t toc[408];
             memset(toc, 0xFF, sizeof(toc));
-            toc[0] = 0x41; toc[1] = 0; toc[2] = 0; toc[3] = 150;
+            if (cdb[1] == 0) { toc[0] = 0x41; toc[1] = 0; toc[2] = 0; toc[3] = 150; }
             toc[404] = 0x41; toc[405] = 0x08; toc[406] = 0x65; toc[407] = 0x1E; /* 549150 */
-            if (cdb[1] == 1) { toc[8] = 0x41; toc[9] = 0; toc[10] = 0xB0; toc[11] = 0x5E; }
+            if (cdb[1] == 1) { uint32_t tf = f->toc_fad ? f->toc_fad : 45150; toc[8] = 0x41; toc[9] = (uint8_t)(tf >> 16); toc[10] = (uint8_t)(tf >> 8); toc[11] = (uint8_t)tf; }
             for (i = 0; i < 408 && i < cap; i++) buf[i] = toc[i];
             r->total = 408; r->stored = cap < 408 ? cap : 408;
             return r->rc;
         }
     case 0x15:
+        if (f->ses_fail && cdb[2] == 2) { r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50; return r->rc; }
         len = 6; d[0] = 1; d[2] = (uint8_t)(cdb[2] + 1);
         { uint32_t fad = cdb[2] == 2 ? 45150 : 150; d[3] = (uint8_t)(fad >> 16); d[4] = (uint8_t)(fad >> 8); d[5] = (uint8_t)fad; }
         break;
@@ -411,7 +414,7 @@ static void test_runner_plain(void)
     CHECK(f.sent_bad == 0 && f.n_mounts == 0);           /* nothing mounted when switch=off */
     CHECK(!find_line("probe=SW_"));
     CHECK(find_line("img=0 probe=TUR_W0 cdb=000000000000000000000000 rc=check status=0x51 err=0x60"));
-    CHECK(find_line("probe=SENSE_W0"));
+    CHECK(find_line("probe=REQ_ERROR_W0"));
     CHECK(find_line("probe=TUR_W1 ") && find_line("probe=WARMUP ready=1"));
     CHECK(find_line("probe=GET_TOC_1 cdb=14010001980000000000"));
     CHECK(find_line("probe=REQ_SES_2 cdb=150002000600"));
@@ -486,6 +489,25 @@ static void test_runner_no_switch_when_off(void)
     CHECK(!find_line("probe=SW_"));
 }
 
+static void test_runner_ip_fallback(void)
+{
+    static fake f;
+    gp_config c;
+    /* REQ_SES(2) unusable: IP_READ uses the first data track of the HD-area TOC */
+    memset(&f, 0, sizeof(f)); f.mounted = 2; f.ses_fail = 1; f.toc_fad = 46000;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0);
+    CHECK(find_line("probe=IP_READ fad=46000 count=7"));
+    /* explicit ip_fad still wins */
+    memset(&f, 0, sizeof(f)); f.mounted = 2; f.ses_fail = 1; f.toc_fad = 46000;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\nip_fad=12345\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(find_line("probe=IP_READ fad=12345 count=7"));
+}
+
 static void test_runner_stuck(void)
 {
     static fake f;
@@ -511,6 +533,7 @@ int main(void)
     test_runner_plain();
     test_runner_switch();
     test_runner_no_switch_when_off();
+    test_runner_ip_fallback();
     test_runner_stuck();
     printf("OK: %d checks passed\n", g_checks);
     return 0;

@@ -419,6 +419,16 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   `src.txt` のパスは `/pc/...`、既定の SD フォルダの決め方、`result.ngr` の行の形式（`NGD:RESUME`・`NGD:FILE`・`NGD:END` などは提案）、
   CDI の末尾の検査は記憶に基づく、設計の `--prepare` フラグをサブコマンドにした。→ Dreamcast 側アプリ（G2-3）を作るときに合わせて確定する。
 
+### R31 `tools/gdprobe` の残りの修正（Sonnet 実装、Opus が確認）
+- `0x03`（REQUEST SENSE）を許可リストと送信経路から削除し、センスは REQ_ERROR（0x13、10 バイト：バイト2下位 = sense key、バイト8 = ASC、バイト9 = ASCQ）で取る。
+  ウォームアップは `REQ_ERROR_W<i>`、切替ループのポーリングも 0x13。**Opus が `probes.c`・`whitelist.c` に 0x03 が残っていないことを grep で確認。**
+- `profiles/gdprobe.ps1`：`-BbaTools $DevkitRoot` を渡す。dc_auto の `-Preset` はフルパスを受け付けるので、コピーの案内を削除。
+- README：CD_READ のバイト1（0x24 は仕様で確認、0x20／0x28 の使い分け、`switch=off` で dcload-ip の CDI を読むなら `cdread_flags=0x20`）、
+  KOS の初期化フラグ、`_g1_ata_sem` を直接使う理由、バイト数レジスタ、IDENTIFY が 80 バイトであることを反映。
+- IP を読む FAD の決め方：設定 `ip_fad` → REQ_SES(2) → GET_TOC の最後の有効な領域の最初のデータトラック → 45150。CDI のセッション境界は TOC に無いので推測であり、複数セッションの CDI では `ip_fad=` の指定を残す。
+- **確認（Opus）**：C 47211 チェック・Python 17 件パス、`gdraw.c`・`main.c` の構文チェック OK。
+- これで R26 の指摘はすべて対応済み。**純正でプローブを動かしてよい状態**（ただし KOS 部分は未ビルドのまま。初回ビルドと `switch=off` の1回目で確かめる）。
+
 ---
 
 ## 判断の記録（Decisions）

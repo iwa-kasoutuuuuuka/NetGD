@@ -22,15 +22,14 @@ Dreamcast（KallistiOS 2.3.0）上で動き、GD-ROM ドライブ（= **純正�
   | コマンド | オペコード | 何をするか |
   |---|---|---|
   | TEST UNIT READY | 0x00 | 準備できているかを聞くだけ |
-  | REQUEST SENSE | 0x03 | 直前のエラーの詳細（18 バイト）を読む |
-  | REQ_STAT / REQ_MODE / REQ_ERROR | 0x10 / 0x11 / 0x13 | 状態・モードデータ・エラーコードを読む（REQ_MODE は SET_MODE ではない） |
+  | REQ_STAT / REQ_MODE / REQ_ERROR | 0x10 / 0x11 / 0x13 | 状態・モードデータ・エラー情報を読む（REQ_MODE は SET_MODE ではない）。REQ_ERROR は 10 バイトで、バイト 2 の下位 4 ビット = センスキー、バイト 8 = ASC、バイト 9 = ASCQ。GD-ROM には ATAPI の REQUEST SENSE（0x03）が無い（SPI 仕様 Table 6.1）ので、これがセンスの読み出しに当たる |
   | GET_TOC | 0x14 | TOC を読む（SD 領域・HD 領域の両方） |
   | REQ_SES | 0x15 | セッション 0〜3 の開始位置を読む |
   | GET_SCD | 0x40 | サブコード Q（形式 0・1）を読む |
   | CD_READ | 0x30 | データセクタを読む（FAD 指定、1 回 64 セクタまで） |
   | GDEMU バージョン | `52 00` | 8 バイトのバージョンを読む |
   | **GDEMU 切替（オプトイン）** | `52 82 n` | フォルダ n のイメージをマウントする。openMenu がゲームを起動するときと同じ。設定で `switch=on` のときだけ許可 |
-  | IDENTIFY PACKET DEVICE（オプトイン） | ATA 0xA1 | 機器の識別文字列。設定で `identify=on` のときだけ |
+  | IDENTIFY PACKET DEVICE（オプトイン） | ATA 0xA1 | 機器の識別文字列（GD-ROM は 80 バイトを返す）。設定で `identify=on` のときだけ |
 
 - **送らないもの**：SET_MODE（0x12）、CD_OPEN（0x16）、CD_PLAY / SEEK / SCAN、書き込み・フォーマット系、`0x70` / `0x71`（セキュリティ）、
   その他すべてのベンダーコマンド、`0x52` の未知のサブコード（`81` 次／前も送らない）、セカンダリの IDE デバイスへの送信
@@ -80,7 +79,8 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
    .\scripts\dc_auto.ps1 -Preset E:\OpenGDEmu\tools\gdprobe\profiles\gdprobe.ps1
    ```
 
-   （`profiles\gdprobe.ps1` を BBA_TOOLS の `profiles\` にコピーすれば `-Preset gdprobe`。）
+   （`-Preset` にはプリセットファイルのフルパスを渡す。`profiles\gdprobe.ps1` を BBA_TOOLS の `profiles\` へコピーする方法は**使わない**：
+   プリセットは自分の置き場所から gdprobe のフォルダを探すため、コピーすると見つからなくなる。）
    または `dc_run.ps1` で `gdprobe.elf` を直接送る。プログラムは終わると `exit(0)` で dcload に戻る（`dc_auto` が終了を検出する）。
 4. コンソールに `[gdprobe] ...` の進捗と、各プローブの行（先頭 150 文字）が出る。記録は
    `host\gdprobe_<label>_<日時>.txt`（Dreamcast に有効な時計が無いときは `seq<番号>`）。
@@ -111,16 +111,16 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 - **`switch=off`**（既定）：いまマウントされているイメージだけを調べる（記録の `img=0`）。
 - **`switch=on` と `images=...`**：
   1. 起動時のイメージ（dcload-ip のディスク）の情報コマンドだけを `img=0` で記録（読み出し試験はしない）。
-  2. `images` の各番号 n について：`52 82 n` を送り、**20 ms ごとに TEST UNIT READY**（失敗なら REQUEST SENSE）を送って
+  2. `images` の各番号 n について：`52 82 n` を送り、**20 ms ごとに TEST UNIT READY**（失敗なら REQ_ERROR）を送って
      状態が変わるたびに `SW_POLL` を記録、READY になるか `switch_timeout_ms` で `SW_RESULT n=.. rc=ok|timeout t_ms=..` を記録する。
      そのあと**読み取り系の試験一式**を実行し、**すべての行に `img=n`** を付ける。
   3. 切替が失敗・タイムアウトしても**記録して次へ進む**（07 のような空フォルダの純正の応答を残すのが目的）。
-     READY にならなかったイメージでは情報コマンド（TUR・SENSE・REQ_STAT・TOC・REQ_SES 等）だけを記録し、読み出し試験は飛ばす。
+     READY にならなかったイメージでは情報コマンド（TUR・REQ_ERROR・REQ_STAT・TOC・REQ_SES 等）だけを記録し、読み出し試験は飛ばす。
   4. 最後に `return_to` が有効ならそのフォルダへ切り替える（`SW_*` が `img=<return_to>` で残る）。
 
 ### 1 つのイメージごとの試験一式
 
-`TUR_W*` / `SENSE_W*`（UNIT ATTENTION を抜けるまで最大 8 回）→ `TUR`、`SENSE`、`REQ_STAT`、`REQ_MODE_0_10`・`_18_8`・`_0_32`、
+`TUR_W*` / `REQ_ERROR_W*`（UNIT ATTENTION を抜けるまで最大 8 回）→ `TUR`、`REQ_STAT`、`REQ_MODE_0_10`・`_18_8`・`_0_32`、
 `REQ_ERROR`、`GET_TOC_0`・`_1`（408 バイト）、`REQ_SES_0〜3`、`GET_SCD_0`・`_1`、`GDEMU_VERSION`（`52 00`）、
 `IP_READ`（IP.BIN の 7 セクタ）、`TP_000〜`（スループット）、`TP_SUMMARY`、`SEEK_00〜`。
 
@@ -191,23 +191,25 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 
 ホストテストは、偽のドライブ（状態遷移を模したもの）に対するロジックの確認で、**実機の G1 バスの挙動は何も確認していない**。
 
-1. **ビルドが通るか**：`gdraw.c` / `main.c` は未コンパイル。KOS 2.3.0 の関数名は fork で確認済み
-   （`g1_ata_mutex_lock/unlock`、`timer_us_gettime64`、`thd_sleep`、`dcload_type`、`KOS_VERSION_STRING`）。
-   `g1_ata_mutex_lock` は `g1ata.c` で `inline` 付きで定義されている。リンクで未定義になったら、`cdrom.c` と同じ `_g1_ata_sem` を
-   `sem_wait` / `sem_signal` で直接使う形に変える。
+1. **ビルドが通るか**：`gdraw.c` / `main.c` は KOS のスタブヘッダに対する構文検査だけで、実際のリンクは未確認。KOS 2.3.0 の関数名は fork で確認済み
+   （`timer_us_gettime64`、`thd_sleep`、`dcload_type`、`KOS_VERSION_STRING`）。G1 バスの排他は `g1_ata_mutex_lock/unlock` ではなく
+   `_g1_ata_sem` を `sem_wait` / `sem_signal` で直接使う（`g1_ata_mutex_unlock` は DEVICE_SELECT に書き込んでしまい、
+   純正のもう一方のデバイスに触れうるため）。リンクで `_g1_ata_sem` が未定義になったら報告する。
 2. **PACKET のシーケンス**：openMenu の `gdemu_sdk.c` と同じ手順（BSY/DRQ 待ち → 0xA0 → DRQ → 6 ワード → 割り込み → ステータス）に、
    タイムアウトと「実行前に STATUS を読んで古い割り込みを消す」を足した。割り込みの待ちは `EXT_INT_STAT` の bit 0。
    **最初の `TUR_W0` が `rc=timeout` なら、この待ちを疑う**（ALTSTATUS の BSY 待ちだけに変える案がある）。
-3. **PIO のバイト数制限**：PACKET の前に LBA Mid/High = 0x0800 を書く（openMenu は書かない）。純正が無視するか、1 セクタずつ DRQ を返すかは未確認。
+3. **PIO のバイト数制限**：PACKET の前に LBA Mid/High = 0x0800 を書く（SPI 仕様どおり。BIOS も書く）。openMenu は書かないが、これは**意図的な違い**。純正が無視するか、1 セクタずつ DRQ を返すかは未確認。
    データ読み出しのループはどちらでも動く作りだが、`rc=proto` が出たらここ。
-4. **CD_READ の CDB**：バイト1 = `0x24`（データ領域・Mode 1 の想定。BIOS が送る値の記憶に基づく推測）。`cdread_flags` で変えられる。
-   `IP_READ` が `rc=check` なら別の値（`0x34`、`0x44` など）を試す。返るバイト数（`bytes=`）が 2048 × 件数か、2352 × 件数かは、**記録を見て決まる**
+4. **CD_READ の CDB**：バイト1 = `0x24` は SPI 仕様で確認済み（bit 5 = Data、bit 3〜1 = 期待セクタ種別 `010` = Mode 1、bit 0 = FAD 指定）。
+   `0x20` = データ・種別を問わない、`0x28` = Mode 2 Form 1（CDI / MIL-CD）。`switch=off` のときの dcload-ip の CDI は Mode 2 Form 1 なので、
+   種別を検査するドライブでは `0x24` が `rc=check` を返しうる。その実行では `cdread_flags=0x20` を指定する。`cdread_flags` で変えられる。
+   `IP_READ` が `rc=check` なら別の値を試す。返るバイト数（`bytes=`）が 2048 × 件数か、2352 × 件数かは、**記録を見て決まる**
    （`HASH` の `ssz` に反映される）。
 5. **REQ_MODE の引数**：NetGD の `ide.rs` は (offset 18, len 8) と (0, 10) だけ受け付ける。純正が他の組を返すかを見るため `(0, 32)` も送る。
-6. **IP.BIN の FAD 自動判定**：REQ_SES(2) の返事から取る。純正の GD-ROM では 45150 のはずだが、D-4 / D-1 の調査対象そのものなので、
+6. **IP.BIN の FAD 自動判定**：REQ_SES(2) の返事から取る。使える値が無ければ、GET_TOC の最後の有効な領域の最初のデータトラックの開始 FAD、それも無ければ 45150（tools/mksdcard の CDI 04/05 など GD-ROM 以外の像向け）。純正の GD-ROM では 45150 のはずだが、D-4 / D-1 の調査対象そのものなので、
    食い違うときは `ip_fad=45150` を指定して再実行する。
-7. **KOS の cdrom ドライバとの競合**：KOS は起動時に `cdrom_init` でドライブを初期化済み（dcload 起動でも）。raw アクセスは `_g1_ata_sem` で直列化しているが、
-   その後 KOS 側のドライブ状態（`cdrom_reinit` なしの SET_MODE 状態など）は触らない。切替後に BIOS 経由の `/cd` を使うことはしていない。
+7. **KOS の cdrom ドライバ**：`main.c` は `KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM)` で、`cdrom_init` も `fs_iso9660` の vblank ポーリングも走らせない
+   （純正ドライブに KOS が勝手にコマンドを送らない）。raw アクセスは `_g1_ata_sem` で直列化している。切替後に BIOS 経由の `/cd` を使うことはしていない。
 8. **時計**：Dreamcast の RTC が正しければファイル名に日時が入る。無ければ `seq<番号>`。
 9. **`/pc/` の書き込み**：4 KB 単位 + `fflush`（ホストテストで確認）。実機で固まったら `PCOUT_CHUNK` を 2048 に下げる。
 

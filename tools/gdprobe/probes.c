@@ -15,7 +15,8 @@ typedef struct {
     int img;
     int abort;
     int consec_timeouts;
-    uint32_t ip_fad;
+    uint32_t ip_fad;     /* from REQ_SES(2) */
+    uint32_t toc_ip;     /* fallback: first data track of the last valid TOC area */
     uint32_t leadout;
     char line[REC_LINE_MAX];
     char extra[160];
@@ -175,9 +176,9 @@ static int warmup(runner *r)
         do_cmd(r, nm, NULL, c, 0, r->cfg->timeout_ms, 0, &res);
         if (res.rc == GD_OK)
             return 1;
-        cdb_simple(c, 0x03, 0, 0, 18);
-        snprintf(nm, sizeof(nm), "SENSE_W%d", i);
-        do_cmd(r, nm, NULL, c, 18, r->cfg->timeout_ms, 1, &res);
+        cdb_simple(c, 0x13, 0, 0, 10);
+        snprintf(nm, sizeof(nm), "REQ_ERROR_W%d", i);
+        do_cmd(r, nm, NULL, c, 10, r->cfg->timeout_ms, 1, &res);
         r->ops->sleep_ms(r->ops->ctx, 100);
     }
     return 0;
@@ -192,8 +193,6 @@ static void battery_info(runner *r, int ready)
 
     memset(c, 0, 12);
     do_cmd(r, "TUR", NULL, c, 0, r->cfg->timeout_ms, 0, &res);
-    cdb_simple(c, 0x03, 0, 0, 18);
-    do_cmd(r, "SENSE", NULL, c, 18, r->cfg->timeout_ms, 1, &res);
     cdb_simple(c, 0x10, 0, 0, 10);
     do_cmd(r, "REQ_STAT", NULL, c, 10, r->cfg->timeout_ms, 1, &res);
     cdb_simple(c, 0x11, 0, 0, 10);
@@ -214,6 +213,17 @@ static void battery_info(runner *r, int ready)
             uint32_t lo = fad3(r->buf + 405);
             if (r->buf[404] != 0xFF && lo && lo != 0xFFFFFF)
                 r->leadout = lo;
+            {   /* first data track (control bit 2) of this area, for the IP_READ fallback */
+                int t;
+                for (t = 0; t < 99; t++) {
+                    const uint8_t *e = r->buf + 4 * t;
+                    uint32_t f = fad3(e + 1);
+                    if (e[0] != 0xFF && (e[0] & 0x40) && f >= 150 && f < 0x00F00000) {
+                        r->toc_ip = f;
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -245,7 +255,7 @@ static void battery_reads(runner *r)
     uint8_t c[12];
     gd_result res;
     char nm[24], ex[96];
-    uint32_t ip = r->cfg->ip_fad ? r->cfg->ip_fad : (r->ip_fad ? r->ip_fad : 45150);
+    uint32_t ip = r->cfg->ip_fad ? r->cfg->ip_fad : (r->ip_fad ? r->ip_fad : (r->toc_ip ? r->toc_ip : 45150));
     int i;
 
     /* IP.BIN: the BIOS reads 7 sectors from here at boot. */
@@ -317,6 +327,7 @@ static void battery(runner *r, int full)
 {
     int ready;
     r->ip_fad = 0;
+    r->toc_ip = 0;
     r->leadout = 0;
     ready = warmup(r);
     event(r, "WARMUP", "ready=%d", ready);
@@ -329,7 +340,7 @@ static void battery(runner *r, int full)
 
 /* ---- image switch -------------------------------------------------------- */
 
-/* `52 82 n`, then TEST UNIT READY / REQUEST SENSE every 20 ms. Only changes of
+/* `52 82 n`, then TEST UNIT READY / REQ_ERROR every 20 ms. Only changes of
  * state are written to the record. A drive that never gets READY (or an empty
  * folder) is a recorded result, not an error. Returns 1 if READY. */
 static int switch_to(runner *r, int n, int tag)
@@ -379,14 +390,15 @@ static int switch_to(runner *r, int n, int tag)
             if (tr.rc == GD_CHECK) {
                 uint8_t sc[12];
                 gd_result sr;
-                cdb_simple(sc, 0x03, 0, 0, 18);
+                cdb_simple(sc, 0x13, 0, 0, 10);
                 memset(&sr, 0, sizeof(sr));
                 if (wl_check(sc, r->cfg->do_switch))
-                    r->ops->packet(r->ops->ctx, sc, r->buf, 18, r->cfg->timeout_ms, &sr);
-                if (sr.rc == GD_OK && sr.stored >= 14) {
+                    r->ops->packet(r->ops->ctx, sc, r->buf, 10, r->cfg->timeout_ms, &sr);
+                if (sr.rc == GD_OK && sr.stored >= 10) {
+                    /* REQ_ERROR (SPI spec): byte 2 low nibble = sense key, 8 = ASC, 9 = ASCQ */
                     sk = r->buf[2] & 0x0F;
-                    asc = r->buf[12];
-                    ascq = r->buf[13];
+                    asc = r->buf[8];
+                    ascq = r->buf[9];
                 }
             }
             if (tr.rc != last_rc || tr.status != last_st || tr.error != last_er || sk != last_sk ||
