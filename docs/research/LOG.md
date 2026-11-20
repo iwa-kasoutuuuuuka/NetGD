@@ -862,6 +862,28 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 未実施：Windows でフォーマットしたカード（管理者権限が無く VHD を作れない）→ オーナーの手作業として残す。WSL に dosfstools・mtools・parted を `apt-get` で入れた（リポジトリ外）。
 - 信頼度：ホストテストで確認済み。
 
+### R68 `netgd-recv` のマウント時間の改善（Fable）
+- 結論：マウント時に FAT 1 を 256 セクタずつまとめて読み（`ngdev` の上限）、空きクラスタを自分で数えて FatFs に渡す（`free_clst`、`fsi_flag |= 1`、FSInfo の手がかりが無ければ `last_clst` も）。`FF_FS_NOFSINFO=1` は維持（数は FAT からだけ）。
+  ビット化け対策：チャンクごとに2回読んで CRC-32 を比較、最大 4 組で一致しなければ `EIO`（セッションを閉じ、何も書かない）。2回読むのは、ファームの STATUS の FNV が書き込みしか保証しないため。
+- 進捗：`NGD:MOUNT pct=NN`（最大で毎秒1行）、HELLO の直前に必ず `NGD:MOUNT pct=100 fat_sectors=N ms=T`（実機ではまず `ms` を見る）。PC 側（netgd-send）は HELLO を待つタイムアウトが無く、未知の `NGD:` 行は無視するので変更不要（テストで確認）。
+- 根拠：模擬ディスク 4,000,000 セクタ・512 B クラスタ（FAT 30,746 セクタ）で、読み取りコマンドが **61,500 回 → 250 回**（読むセクタ数は同じ 61,500）。
+  テスト 33 件（新規 4：空き数が FAT から直接数えた値と一致、1回のビット化けは再読みで回復、持続するビット化けは `EIO` でイメージ不変、大きな FAT でコマンド数と進捗行）。
+  Windows quick 35 秒・full 49 秒、WSL（gcc 13.3）警告 0・quick 17 秒・full 21 秒、netgd-send 42 件 OK。
+- 実機の見積もり（未測定）：128 GB・32 KiB で 31 MiB を読む。2 MB/s なら約 16 秒、1 MB/s で約 31 秒、PIO 0.5 MB/s で約 60 秒（以前は推定 1.5〜5 分）。32 GB なら約 1/4。
+- オーナーの判断（実機の `ms=` を見てから）：2回読みをやめればマウント時間は半分。代わりに1ビットの化けで空き数が1クラスタずれうる（ENOSPC の事前確認は 16 MiB の余裕があり、実際の割り当ては2回読みの `get_fat` を通る）。
+- 残り：256 セクタの読み取りを KOS の g1ata とファームが PIO・DMA の両方で通すか未確認（KOS の PIO が 255+1 に分ける可能性）。**`f_expand`（連続領域の検索）はまだ1セクタずつの遅い経路**で、断片化したカードでは最大約 61,000 回になりうる（後続の課題）。
+- 関連：`tools/netgd-recv/src/{ngfs,ngblk,recv_core}.c`・`ngdev.h`・`ng.h`、`test/`、`README_ja.md`。
+
+### R69 AG16K のビットストリームを作る道筋（Sonnet、`docs/research/ag16k-toolchain.md`）
+- 結論：**この PC では合成もビットストリームの生成もできない**。`amaranth_env` の Yosys（0.50、wasm）は最小構成で `read_verilog`・`synth*` が無い。Windows・WSL とも yosys・nextpnr・quartus・docker は無く、`sudo` にはパスワードが要る。
+  `pip install yowasp-yosys` は権限の判定で拒否されたので中止（入っても R39 の `synth_intel` の再現までで、`synth_agm` は無い）。
+- オープンな道：nextpnr は AG1KLPQ48 だけ（作業中）、AG16K の配置配線は無い。`synth_agm` は Supra 同梱の Yosys の派生版にしか無い。
+- Supra の道（一次・二次資料）：(1) `yosys synth_agm -vqm` → Supra `af`（rodinia の例は AG1K/AG10K、AG16K の記録は見つからず）、(2) AGM の DDF256 の手引き：Quartus で EP4CE15F23 として合成 → `.ve` でピン → Supra の Prepare/Migrate（Quartus 13.1 と 24.1 Standard で動いた報告）。
+  Supra 2026.03 の win64 zip の一覧に `bin/af.exe`・`etc/AG16KDDF256.pinmap` がある（DDF256 を知っている）。ライセンスは「Trialware」の表示、再配布は不可とみられ CI には入れられない。
+  配布元：AGM 公式 https://www.agm-micro.com/solutions.aspx?id=77&p=61 、archive.org のミラー（Windows 163 MB、Linux 179 MB、未取得）。フォーラムに不正なソフトの警告があり、取得するなら隔離した環境で。
+- サイズ：非圧縮 552,366 B（rodinia の `blinky16k.bin`、DDF256 で同じかは未確認）、LZMA は見積もり 55〜75 KB のまま（R66 の結論は変わらない）。
+- オーナーの判断：(1) WSL の venv に `yowasp-yosys` を入れてよいか（R39 の再現と Amaranth 側の確認だけ）、(2) Supra をオーナー側で取得するか（入れば基板なしで blinky → `fpga/agm/` → `synth_agm` → `af` → サイズ測定まで進められる）。
+
 ---
 
 ## 判断の記録（Decisions）

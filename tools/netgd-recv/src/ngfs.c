@@ -68,7 +68,43 @@ static uint32_t clst2lba(DWORD clst)
 
 /* ------------------------------------------------------------------ volume */
 
-ng_err_t ngfs_mount(char *why, size_t whyn)
+/* The free-cluster count, from the FAT itself.  FatFs would do this in f_getfree through its
+   one-sector window (= one double-read command pair per FAT sector: about 61,000 commands for the
+   30,500 FAT sectors of a 128 GB card with 32 KiB clusters).  Here: NGFS_SCAN_SECTORS per command,
+   each chunk read twice and compared by CRC-32 (ngblk_read_twice), 4 tries, then EIO.
+   Both reads are needed: nothing on the firmware side vouches for the bytes of a READ (the FNV-1a
+   of STATUS covers writes only), so a flip on the G1 bus can only be seen by reading again; and one
+   flipped bit can turn a used entry into 0 (= one cluster too many reported free) or drop the
+   only free cluster of a full card.  The second FAT copy is no substitute: it costs the same read
+   and may legitimately differ after a power cut.
+   Seeds FatFs exactly as its own f_getfree scan does (free_clst valid, fsi_flag |= 1); FatFs keeps
+   the count up to date from there on.  If FSInfo gave no usable "next free" hint, the allocation
+   search starts at the first free cluster instead of walking the used front of the FAT a sector at
+   a time. */
+#define NGFS_SCAN_SECTORS 256
+static int scan_fat(ngfs_scan_tick tick, void *ctx)
+{
+    static uint8_t chunk[NGFS_SCAN_SECTORS * 512] __attribute__((aligned(32)));
+    uint32_t nent = (uint32_t)g_fs.n_fatent;                  /* entries 0 .. nent-1; 0 and 1 are not clusters */
+    uint32_t total = (uint32_t)(((uint64_t)nent * 4 + 511) / 512);
+    uint32_t nfree = 0, first_free = 0, ent = 0;
+    for (uint32_t done = 0; done < total;) {
+        uint32_t n = total - done > NGFS_SCAN_SECTORS ? NGFS_SCAN_SECTORS : total - done;
+        if (ngblk_read_twice((uint32_t)g_fs.fatbase + done, n, chunk)) return -1;
+        for (const uint8_t *e = chunk, *end = chunk + (size_t)n * 512; e < end && ent < nent; e += 4, ent++) {
+            if (ent < 2 || (e[0] | e[1] | e[2] | (e[3] & 0x0F))) continue;
+            if (!nfree++) first_free = ent;
+        }
+        done += n;
+        if (tick) tick(ctx, done, total);
+    }
+    g_fs.free_clst = nfree;
+    g_fs.fsi_flag |= 1;
+    if (first_free && (g_fs.last_clst < 2 || g_fs.last_clst >= nent)) g_fs.last_clst = first_free - 1;
+    return 0;
+}
+
+ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx)
 {
     uint32_t start;
     FRESULT r;
@@ -86,6 +122,11 @@ ng_err_t ngfs_mount(char *why, size_t whyn)
         snprintf(why, whyn, "volume is not FAT32 in the first partition");
         f_mount(NULL, "0:", 0);
         return NG_E_FS;
+    }
+    if (scan_fat(tick, ctx)) {
+        snprintf(why, whyn, "cannot read the FAT (no two reads agree)");
+        f_mount(NULL, "0:", 0);
+        return NG_E_IO;
     }
     g_mounted = 1;
     return NG_OK;

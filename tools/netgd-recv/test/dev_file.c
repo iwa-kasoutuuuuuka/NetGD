@@ -16,6 +16,10 @@ int64_t sim_flip_cmd = -1;
 int64_t sim_rflip_cmd = -1;
 int sim_rflip_every;
 static uint64_t rd1_count;
+uint64_t sim_cmd_reads, sim_sector_reads;
+int64_t sim_rflipn_cmd = -1;
+int sim_rflipn_every;
+static uint64_t rdn_count;
 uint32_t sim_part_off, sim_protect_lba;
 uint64_t sim_violations;
 uint32_t sim_last_lba, sim_last_n, sim_last_fnv;
@@ -61,6 +65,14 @@ int ngdev_read(uint32_t lba, uint32_t n, void *buf)
     fseek(img, (long)(((uint64_t)lba + sim_part_off) * 512), SEEK_SET);
     got = fread(buf, 1, (size_t)n * 512, img);
     if (got < (size_t)n * 512) memset((uint8_t *)buf + got, 0, (size_t)n * 512 - got);   /* beyond EOF = zeros */
+    sim_cmd_reads++;
+    sim_sector_reads += n;
+    if (n > 1) {                                                    /* the same for multi-sector reads */
+        size_t len = (size_t)n * 512;
+        rdn_count++;
+        if (sim_rflipn_cmd > 0 && (int64_t)rdn_count == sim_rflipn_cmd) ((uint8_t *)buf)[len / 2 + 5] ^= 0x01;
+        if (sim_rflipn_every) ((uint8_t *)buf)[(rdn_count * 4099) % len] ^= (uint8_t)(1u << (rdn_count % 8));
+    }
     if (n == 1) {                                                   /* G1 read bit flips (only in what the app sees) */
         rd1_count++;
         if (sim_rflip_cmd > 0 && (int64_t)rd1_count == sim_rflip_cmd) ((uint8_t *)buf)[100] ^= 0x04;

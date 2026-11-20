@@ -28,6 +28,19 @@ int ngblk_read(uint32_t lba, uint32_t n, void *buf)
     return -1;
 }
 
+int ngblk_read_twice(uint32_t lba, uint32_t n, void *buf)
+{
+    for (int attempt = 0; attempt < NGBLK_READ_TRIES; attempt++) {
+        uint32_t first;
+        if (ngdev_read(lba, n, buf) != 0) { ngblk_stats.io_retries++; continue; }
+        first = ng_crc32(0, buf, (size_t)n * 512);
+        if (ngdev_read(lba, n, buf) != 0) { ngblk_stats.io_retries++; continue; }
+        if (ng_crc32(0, buf, (size_t)n * 512) == first) return 0;
+        ngblk_stats.read_mismatches++;
+    }
+    return -1;
+}
+
 int ngblk_write(uint32_t lba, uint32_t n, const void *buf)
 {
     uint32_t fnv = 0;

@@ -39,7 +39,12 @@ typedef struct {
 } ng_probe_t;
 
 /* ---- volume ---- */
-ng_err_t ngfs_mount(char *why, size_t whyn);   /* first partition, FAT32 only */
+/* First partition, FAT32 only.  Mounting counts the free clusters itself: the whole FAT is read in
+   256-sector commands, each one twice (ngblk_read_twice), and the count is handed to FatFs, so that
+   neither f_getfree nor FSInfo is ever the source of the free space (FF_FS_NOFSINFO stays 1).
+   tick (may be NULL) is called after every command pair with the FAT sectors done / to do. */
+typedef void (*ngfs_scan_tick)(void *ctx, uint32_t done, uint32_t total);
+ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx);
 void ngfs_unmount(void);
 int ngfs_statfs(uint64_t *free_bytes, uint64_t *total_bytes, uint32_t *cluster_bytes);
 FATFS *ngfs_volume(void);

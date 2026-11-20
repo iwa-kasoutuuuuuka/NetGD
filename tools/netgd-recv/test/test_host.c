@@ -7,7 +7,8 @@
      test_host mkdirs <img> <sectors> <prefix> <count>
      test_host hang                       (never returns: for the time-limit test of run_tests.py)
    options: --cut N --ckp N --read N --readback 0|1 --slow --flip K --caps C --frag --force
-            --stopafter N --pollms N --quiet --rflip K --rflip-all --ua --failend2 */
+            --stopafter N --pollms N --quiet --rflip K --rflip-all --rflipn K --rflipn-all --mountms N
+            --ua --failend2 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +33,7 @@
 extern void (*ng_pc_cfg_hook)(void);
 extern ngblk_stats_t ngblk_stats;
 
-static struct { long ckp, read; int readback, slow, frag, force; } opt = { -1, -1, -1, 0, 0, 0 };
+static struct { long ckp, read; int readback, slow, frag, force; long mountms; } opt = { -1, -1, -1, 0, 0, 0, -1 };
 
 static void cfg_hook(void)
 {
@@ -42,6 +43,7 @@ static void cfg_hook(void)
     if (opt.slow) ng_cfg.force_slow = 1;
     if (opt.frag) ng_cfg.allow_frag = 1;
     if (opt.force) ng_cfg.force = 1;
+    if (opt.mountms >= 0) ng_cfg.mount_line_ms = (uint32_t)opt.mountms;
 }
 
 static void phase_hook(const char *p) { printf("PHASE %s %llu\n", p, (unsigned long long)sim_sector_writes); }
@@ -167,7 +169,7 @@ static int fragment(const char *img, uint32_t sectors, uint32_t fsz)
     int n = 0;
     if (fsz > sizeof buf) return 1;
     if (sim_open(img, sectors)) return 1;
-    if (ngfs_mount(why, sizeof why)) { printf("MOUNT FAILED %s\n", why); return 1; }
+    if (ngfs_mount(why, sizeof why, NULL, NULL)) { printf("MOUNT FAILED %s\n", why); return 1; }
     for (;;) {
         FIL f;
         UINT bw = 0;
@@ -200,7 +202,7 @@ static int addfile(const char *img, uint32_t sectors, const char *fspath, const 
     UINT bw;
     if (!in) return 1;
     if (sim_open(img, sectors)) return 1;
-    if (ngfs_mount(why, sizeof why)) { printf("MOUNT FAILED %s\n", why); return 1; }
+    if (ngfs_mount(why, sizeof why, NULL, NULL)) { printf("MOUNT FAILED %s\n", why); return 1; }
     snprintf(path, sizeof path, "0:%s", fspath);
     if (strrchr(path, '/') > path + 2) {
         char dir[300];
@@ -222,7 +224,7 @@ static int mkdirs(const char *img, uint32_t sectors, const char *prefix, int cou
 {
     char why[96], path[300];
     if (sim_open(img, sectors)) return 1;
-    if (ngfs_mount(why, sizeof why)) { printf("MOUNT FAILED %s\n", why); return 1; }
+    if (ngfs_mount(why, sizeof why, NULL, NULL)) { printf("MOUNT FAILED %s\n", why); return 1; }
     for (int i = 0; i < count; i++) {
         snprintf(path, sizeof path, "0:/%s%03d", prefix, i);
         if (f_mkdir(path) != FR_OK) { printf("mkdir %s failed\n", path); return 1; }
@@ -237,7 +239,7 @@ static int dump(const char *img, uint32_t sectors, const char *outdir)
 {
     char why[96];
     if (sim_open(img, sectors)) return 1;
-    if (ngfs_mount(why, sizeof why)) { printf("MOUNT FAILED %s\n", why); return 1; }
+    if (ngfs_mount(why, sizeof why, NULL, NULL)) { printf("MOUNT FAILED %s\n", why); return 1; }
     ng_mkdir(outdir);
     walk("0:/", outdir);
     ngfs_unmount();
@@ -282,6 +284,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--quiet")) sim_quiet = 1;
         else if (!strcmp(argv[i], "--rflip")) sim_rflip_cmd = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
+        else if (!strcmp(argv[i], "--rflipn")) sim_rflipn_cmd = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--rflipn-all")) sim_rflipn_every = 1;
+        else if (!strcmp(argv[i], "--mountms")) opt.mountms = atol(argv[++i]);
         else if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
         else if (!strcmp(argv[i], "--failend2")) sim_fail_end2 = 1;
     }
@@ -291,12 +296,13 @@ int main(int argc, char **argv)
     ng_phase_hook = phase_hook;
     rc = ng_pc_run(argv[5], NULL);
     printf("SIM rc=%d writes=%llu cmds=%llu violations=%llu unsess=%d fnvbad=%u retries=%u unverified=%u begin=%d end=%d "
-           "endmode=%d endname=%s dead=%d rdmis=%u ua=%d defmounts=%d namedmounts=%d polls=%d\n",
+           "endmode=%d endname=%s dead=%d rdmis=%u ua=%d defmounts=%d namedmounts=%d polls=%d rcmds=%llu rsecs=%llu\n",
            rc, (unsigned long long)sim_sector_writes, (unsigned long long)sim_cmd_writes,
            (unsigned long long)sim_violations, sim_unsessioned_writes, (unsigned)ngblk_stats.fnv_mismatches,
            (unsigned)ngblk_stats.io_retries, (unsigned)ngblk_stats.unverified, sim_begin_calls, sim_end_calls,
            sim_end_mode, sim_end_name, sim_dead, (unsigned)ngblk_stats.read_mismatches, sim_ua_served,
-           sim_default_mounts, sim_named_mounts, sim_polls);
+           sim_default_mounts, sim_named_mounts, sim_polls, (unsigned long long)sim_cmd_reads,
+           (unsigned long long)sim_sector_reads);
     sim_close();
     return rc;
 }

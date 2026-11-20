@@ -801,6 +801,142 @@ class TestHardening(Base):
         self.assertEqual(self.file_hash(img), before)
         self.assertEqual((run.n("begin"), run.n("end")), (1, 1))
 
+    # --- mount-time FAT scan: 256-sector double reads instead of FatFs's one-sector window
+    def fat_ref(self, img):
+        """(free bytes, FAT sectors the scan has to read): counted straight from FAT 1 of the image"""
+        import array
+        with open(img, "rb") as f:
+            mbr = f.read(512)
+            pstart = struct.unpack_from("<I", mbr, 446 + 8)[0]
+            f.seek(pstart * 512)
+            bpb = f.read(512)
+            spc, rsv, nfats = struct.unpack_from("<BHB", bpb, 13)
+            tot, fatsz = struct.unpack_from("<I", bpb, 32)[0], struct.unpack_from("<I", bpb, 36)[0]
+            ncl = (tot - rsv - nfats * fatsz) // spc
+            f.seek((pstart + rsv) * 512)
+            raw = f.read((ncl + 2) * 4)
+        a = array.array("I")
+        self.assertEqual(a.itemsize, 4)
+        a.frombytes(raw + b"\0" * ((ncl + 2) * 4 - len(raw)))
+        if sys.byteorder != "little":
+            a.byteswap()
+        free = sum(1 for v in a[2:] if not v & 0x0FFFFFFF)
+        return free * spc * 512, ((ncl + 2) * 4 + 511) // 512
+
+    def poke_fat(self, img, first, values):
+        """overwrite FAT entries first.. in every FAT copy"""
+        with open(img, "r+b") as f:
+            pstart = struct.unpack_from("<I", f.read(512), 446 + 8)[0]
+            f.seek(pstart * 512)
+            bpb = f.read(512)
+            rsv, nfats = struct.unpack_from("<HB", bpb, 14)
+            fatsz = struct.unpack_from("<I", bpb, 36)[0]
+            blob = struct.pack("<%dI" % len(values), *values)
+            for c in range(nfats):
+                f.seek((pstart + rsv + c * fatsz) * 512 + first * 4)
+                f.write(blob)
+
+    def statfs(self, img, *opts, sectors=None):
+        self.write_job("sj", "NETGD-JOB 1\nstatfs\nfinish none\n")
+        return self.run_app(img, "sj", *opts, sectors=sectors)
+
+    def free_of(self, run):
+        hello = re.search(r"^NGD:HELLO .* free=(\d+) ", run.text, re.M)
+        st = re.search(r"^NGD:STATFS free=(\d+) ", run.text, re.M)
+        self.assertTrue(hello and st, run.text)
+        self.assertEqual(hello.group(1), st.group(1), run.text)
+        return int(st.group(1))
+
+    def test_mount_free_count_equals_the_fat(self):
+        sectors = 40 * 2048
+        # fragmented: free space only in holes
+        img = self.mkimage("frag.img", sectors=sectors, cluster=512)
+        r = run_child([EXE, "fragment", img, str(sectors), "65536"])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        ref = self.fat_ref(img)[0]
+        self.assertGreater(ref, 0)
+        self.assertEqual(self.free_of(self.statfs(img, sectors=sectors)), ref)
+        # leaked clusters, a pattern of holes and odd values, the last cluster free and the one before it
+        # used; FSInfo knows nothing of any of it
+        img = self.mkimage("leak.img", sectors=sectors, cluster=512)
+        n = self.fs(img).ncl
+        self.poke_fat(img, 100, [0x0FFFFFFF] * int(n * 0.6))
+        self.poke_fat(img, 100 + int(n * 0.7), [0x0FFFFFFF, 0, 0, 0x0FFFFFF7, 0xF0000000, 0x00000100, 1] * 500)
+        self.poke_fat(img, n, [0x0FFFFFFF, 0])                 # entries ncl and ncl + 1: the last two clusters
+        ref = self.fat_ref(img)[0]
+        run = self.statfs(img, sectors=sectors)
+        self.assertEqual(self.free_of(run), ref, run.text)
+        # a card of the usual shape with an image on it
+        img = self.card_with("GAMEA", seed=1)
+        self.assertEqual(self.free_of(self.statfs(img)), self.fat_ref(img)[0])
+
+    def test_mount_fat_chunk_bit_flip_is_reread(self):
+        img = self.mkimage()                                    # 1 GiB, 4 KiB clusters: 2048 FAT sectors = 8 chunks
+        self.poke_fat(img, 5000, [0x0FFFFFFF, 0, 0] * 30000)
+        ref, scan = self.fat_ref(img)
+        chunks = (scan + 255) // 256
+        self.assertGreaterEqual(chunks, 8)
+        base = self.file_hash(img)
+        clean = self.statfs(img)
+        self.assertEqual(clean.n("rdmis"), 0)
+        self.assertEqual(self.free_of(clean), ref)
+        self.assertEqual(self.file_hash(img), base, "statfs writes nothing")
+        for k in (1, 2, 3, 2 * chunks - 1, 2 * chunks):
+            run = self.statfs(img, "--rflipn", str(k))
+            self.assertEqual(run.rc, 0, "rflipn %d\n%s" % (k, run.text))
+            self.assertEqual(run.n("rdmis"), 1, "flip in multi-sector read %d was not noticed\n%s" % (k, run.text))
+            self.assertEqual(self.free_of(run), ref, "rflipn %d" % k)
+            self.assertEqual(run.n("rcmds"), clean.n("rcmds") + 2, "one mismatch: that chunk is read twice again")
+
+    def test_mount_fat_persistent_flip_is_eio(self):
+        img = self.mkimage()
+        base = self.file_hash(img)
+        gdi = self.make_gdi("s")
+        self.prepare(gdi, "j", "NOFAT")
+        run = self.run_app(img, "j", "--rflipn-all")           # no two reads of a FAT chunk ever agree
+        self.assertEqual(run.rc, 1, run.text)
+        self.assertTrue(run.has("NGD:ERROR session code=EIO"), run.text)
+        self.assertEqual(run.has("NGD:HELLO"), [], run.text)
+        self.assertEqual(run.n("rdmis"), 4, run.text)           # NGBLK_READ_TRIES pairs, then give up
+        self.assertEqual((run.n("begin"), run.n("end")), (1, 1), run.text)
+        self.assertEqual(self.file_hash(img), base, "a card whose FAT cannot be read must not be written")
+
+    def test_mount_read_commands_on_a_large_fat(self):
+        # as many clusters as a 128 GB card with 32 KiB clusters has (3.9 million: a FAT of 15 MiB = 30,500 sectors),
+        # in an image file that stays below 2 GiB: 512-byte clusters
+        sectors = 4000000
+        img = self.mkimage("big.img", sectors=sectors, cluster=512)
+        scan = self.fat_ref(img)[1]
+        self.assertGreater(scan, 30000)
+        n = scan * 128 - 5000
+        self.poke_fat(img, 1000, ([0x0FFFFFFF, 0, 0, 0x0FFFFFFF, 0x0FFFFFFF, 0, 0x0FFFFFFF] * (n // 7 + 1))[:n])
+        ref = self.fat_ref(img)[0]
+        run = self.statfs(img, "--mountms", "0", sectors=sectors)
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertEqual(self.free_of(run), ref)
+        chunks = (scan + 255) // 256
+        # two reads per 256-sector chunk, plus the single-sector double reads of the MBR, the boot sector
+        # and FSInfo.  With FatFs's own scan: two commands per FAT SECTOR (2 * scan, 60,000 and more).
+        self.assertGreaterEqual(run.n("rcmds"), 2 * chunks)
+        self.assertLess(run.n("rcmds"), 2 * chunks + 40, run.text)
+        self.assertLess(run.n("rcmds") * 100, 2 * scan)
+        print("large FAT: %d sectors to scan, %d read commands in the whole run (one-sector double reads: %d)"
+              % (scan, run.n("rcmds"), 2 * scan), file=sys.stderr)
+        # progress: always a closing line; pct lines in between (here not spaced out), rising, before HELLO
+        self.assertTrue(run.has("NGD:MOUNT pct=100 fat_sectors=%d ms=" % scan), run.text)
+        pcts = [int(m) for m in re.findall(r"^NGD:MOUNT pct=(\d+)$", run.text, re.M)]
+        self.assertEqual(len(pcts), chunks - 1)
+        self.assertEqual(pcts, sorted(pcts))
+        self.assertTrue(pcts[0] >= 0 and pcts[-1] < 100)
+        self.assertLess(run.ngd.index(run.has("NGD:MOUNT pct=100")[0]), run.ngd.index(run.has("NGD:HELLO")[0]))
+        # with the default spacing (1 s) a scan this quick prints the closing line only
+        run = self.statfs(img, sectors=sectors)
+        self.assertEqual(len(run.has("NGD:MOUNT")), 1, run.text)
+        # netgd-send takes the new lines as chatter
+        res = jobmod.parse_result(run.text)
+        self.assertEqual(res.malformed, [])
+        self.assertEqual(int(res.hello["free"]), ref)
+
     # --- 9. cancel during the read-back
     def test_cancel_during_readback_then_resume(self):
         gdi = self.make_gdi("s", sizes=(300 * 2352, 61 * 2352, 130 * 2048))

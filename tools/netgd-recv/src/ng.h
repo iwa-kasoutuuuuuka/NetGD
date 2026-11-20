@@ -31,6 +31,7 @@ typedef struct {
     int force;              /* may overwrite / delete protected folders (5.5) */
     int force_slow;         /* tests: use the FatFs write path even when the allocation is contiguous */
     uint32_t headroom;      /* free space kept beyond the need; design: 16 MiB */
+    uint32_t mount_line_ms; /* least time between two NGD:MOUNT progress lines; 1000 */
 } ng_cfg_t;
 
 extern ng_cfg_t ng_cfg;

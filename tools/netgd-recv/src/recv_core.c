@@ -18,6 +18,7 @@ void ng_cfg_defaults(void)
     ng_cfg.force = 0;
     ng_cfg.force_slow = 0;
     ng_cfg.headroom = 16u * 1024 * 1024;
+    ng_cfg.mount_line_ms = 1000;
 }
 
 const char *ng_err_name(ng_err_t e)
@@ -64,10 +65,32 @@ static uint32_t now(const ng_sink_t *sk) { return sk->millis ? sk->millis(sk->ct
 
 /* ------------------------------------------------------------------ session */
 
+/* Mounting reads the whole FAT (ngfs_mount): seconds on a large card.  One "NGD:MOUNT pct=NN" line
+   a second while it runs (droppable chatter), and always one closing line with the size and the time. */
+typedef struct {
+    const ng_sink_t *sk;
+    uint32_t t0, tlast, total;
+} mount_prog_t;
+
+static void mount_tick(void *ctx, uint32_t done, uint32_t total)
+{
+    mount_prog_t *p = (mount_prog_t *)ctx;
+    uint32_t t = now(p->sk);
+    p->total = total;
+    if (done >= total || t - p->tlast < ng_cfg.mount_line_ms) return;
+    p->tlast = t;
+    ng_emitf(p->sk, 1, "NGD:MOUNT pct=%u", (unsigned)((uint64_t)done * 100 / total));
+    if (p->sk->ui) {
+        ng_ui_t u = { "mount", "reading the FAT (free space)", 0, 0, done, total, 0 };
+        p->sk->ui(p->sk->ctx, &u);
+    }
+}
+
 ng_err_t ng_session_open(const ng_sink_t *sk)
 {
     char why[96] = "";
     uint64_t fr = 0, tot = 0;
+    mount_prog_t mp;
     ng_err_t e;
 
     if (fw_version(&g_fw) != 0) {
@@ -92,12 +115,14 @@ ng_err_t ng_session_open(const ng_sink_t *sk)
         return NG_E_FW;
     }
     g_session = 1;
-    e = ngfs_mount(why, sizeof why);
+    mp.sk = sk; mp.total = 0; mp.t0 = mp.tlast = now(sk);
+    e = ngfs_mount(why, sizeof why, mount_tick, &mp);
     if (e) {
         ng_emit_error(sk, "session", e, 0, 0, why);
         ng_session_close(sk, 1, NULL, 1);           /* the session is open: always end it (default image back) */
         return e;
     }
+    ng_emitf(sk, 0, "NGD:MOUNT pct=100 fat_sectors=%u ms=%u", (unsigned)mp.total, (unsigned)(now(sk) - mp.t0));
     ngfs_statfs(&fr, &tot, NULL);
     ng_emitf(sk, 0, "NGD:HELLO app=%s fw=OGDM/%d caps=%d free=%llu total=%llu", NG_APP_VERSION, g_fw.proto, g_fw.caps,
              (unsigned long long)fr, (unsigned long long)tot);

@@ -6,7 +6,8 @@
 /   FF_USE_EXPAND=1 (f_expand: contiguous pre-allocation), FF_CODE_PAGE=437,
 /   FF_USE_LFN=2 (LFN on the stack), FF_USE_MKFS=NG_FF_MKFS (host tests only;
 /   NG_FF_MKFS is 1 when built with -DNG_HOST). Everything else is stock:
-/   FF_FS_NOFSINFO=1 (do not trust the FSInfo free-cluster count: f_getfree scans the FAT once per mount),
+/   FF_FS_NOFSINFO=1 (do not trust the FSInfo free-cluster count: ngfs.c counts the FAT itself at every mount
+/   and hands FatFs the result, so the one-sector scan of f_getfree never runs),
 /   FF_MULTI_PARTITION=0, FF_MAX_SS=512, FF_FS_EXFAT=0.
 /   The real-time clock comes from get_fattime() (ng_plat). */
 #ifdef NG_HOST

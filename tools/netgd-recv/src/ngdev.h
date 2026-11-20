@@ -24,7 +24,7 @@ typedef struct {
     uint32_t io_retries;        /* a command failed and was repeated */
     uint32_t fnv_mismatches;    /* F8 check failed and the LBA was rewritten */
     uint32_t unverified;        /* write commands that had no firmware check */
-    uint32_t read_mismatches;   /* a single-sector read differed from the one right after it */
+    uint32_t read_mismatches;   /* a double read (one sector, or one ngblk_read_twice chunk) did not agree */
 } ngblk_stats_t;
 extern ngblk_stats_t ngblk_stats;
 extern int ngblk_check_fnv;     /* 1 when the firmware offers FW_CAP_CHECKSUM */
@@ -33,6 +33,11 @@ extern int ngblk_check_fnv;     /* 1 when the firmware offers FW_CAP_CHECKSUM */
    compare, repeat up to NGBLK_READ_TRIES times, -1 if never two identical reads (G1 read bit flips,
    design 8).  n > 1 (bulk data, checked by the readback CRC): one read. */
 int ngblk_read(uint32_t lba, uint32_t n, void *buf);
+/* n <= 256 sectors of metadata in ONE command, read twice into the same buffer: the CRC-32 of the two
+   reads must agree (the mount-time FAT scan, ngfs.c).  Same tries and result as the n == 1 case above.
+   CRC-32 instead of a second buffer + memcmp: two reads that differ in one bit, or in one burst of up
+   to 32 bits, always have different CRC-32s; any other difference slips through with probability 2^-32. */
+int ngblk_read_twice(uint32_t lba, uint32_t n, void *buf);
 int ngblk_write(uint32_t lba, uint32_t n, const void *buf);     /* 0 ok, -1 EIO, -2 EBUS */
 
 #endif
