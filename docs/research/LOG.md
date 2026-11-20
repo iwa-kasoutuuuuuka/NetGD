@@ -1162,6 +1162,14 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 勧め：動かすならネットワークを切った VM か別の Windows で、`af.exe`・`yosys.exe` だけを使う。次は小さな設計を通して通信が出ないかを見てから、NetGD の AG16K 版でビットストリームの実サイズを測る（実行はユーザーの判断）。
 - 信頼度：ハッシュ・署名・インポート・文字列・ESET の結果は確認済み。用途の解釈（Tcl・ライセンス・Qt）は推測。Opus 単独で、Fable の検証なし。ファイルはスクラッチパッドにあり、リポジトリには入れていない（再配布にあたりうるため）。
 
+### R93 Supra 2026.03 のハッシュを VirusTotal に照会（Opus、R92 の続き）
+- ユーザーの許可「VirusTotal に照会してよい」により、内蔵ブラウザで `virustotal.com/gui/file/<SHA-256>` を開いた。送ったのは SHA-256 だけで、ファイル本体は送っていない（アップロードはしていない）。
+- 結果：
+  - **未登録（Item not found）**：zip（`81819687…5e2c4`）、`af.exe`、`Supra.exe`、`Downloader.exe`、`yosys.exe`、`openocd.exe`、`agrv32flash.exe`。**AGM 製の主な実行ファイルは、誰も VirusTotal に出したことが無い**ので、VirusTotal からは判断材料が得られない。
+  - 登録あり・検出 0：`python_dist/python.exe`（約 70 エンジン中 0、照会の仕組みが働いていることの確認）、`urjtag/inpout32.dll`（71 中 0、「File distributed by Tenasoft SRL」）、`urjtag/jtag.exe`（約 70 中 0、2年前の解析）。
+- 結論：R92 の判断は変わらない（静的にはマルウェアの兆候なし、言い切れない）。AGM 製のファイルの評判は VirusTotal に無い。ファイルをアップロードすれば約 70 のエンジンで調べられるが、ファイルが公開され VirusTotal の提携先に共有される（AGM のソフトの再配布にもあたりうる）ので、しないままにした（ユーザーの判断事項）。
+- 信頼度：照会結果は画面で確認済み（分母の数は画面の読み取り）。
+
 ---
 
 ## 判断の記録（Decisions）
