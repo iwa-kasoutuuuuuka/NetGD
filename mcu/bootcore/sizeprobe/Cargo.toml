@@ -1,0 +1,19 @@
+[package]
+name = "sizeprobe"
+description = "Measures the code size of bootcore on thumbv7m (not part of any build; see ../README note in docs). Never run on a board."
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace root so that the parent crate and CI do not see it.
+[workspace]
+
+[dependencies]
+bootcore = { path = ".." }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false

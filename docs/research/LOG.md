@@ -704,6 +704,25 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - CI：`host-tests` に `common/psload` を追加。
 - 関連：`mcu/opengdemu/src/cyclone.rs`・`main.rs`・`build.rs`・`Cargo.toml`、`docs/research/ag16k-config.md` §6。
 
+### R58 S0：常駐部の純粋ロジック `mcu/bootcore`（Sonnet 実装、Opus は報告を確認、Fable のレビュー待ち）
+- 問い：対策 B の常駐部（SD 復旧）のロジックを、実機なしで電源断まで含めて検証できるか。8 KB に収まるか。
+- 結論：依存なしの `no_std` クレート。モジュールは `crc`（4ビット表 64 B、残差 `0x2144DF1C`）・`part`・`app`（`APP_BASE`、最大 0x1E000、記述子・トレーラ・ベクタ検査）・
+  `fcr`（EEFC コマンドは EWP・GLB・SLB だけ。プレーン0の EWP はページ 32〜511、SLB は許可フラグ付きでページ 0〜31）・`flash`（トレイト）・`fat`（FAT32 リーダー、512 B バッファ1つ、Brent の循環検出）・
+  `ogfw`（形式3専用、ヘッダ CRC はバイト 0..31 と 36..39）・`update`（`sd_recover`）・`boot`（`decide`、GPBR の合図 `"NGRC"`）。
+- S1 との整合：`FORMAT.md` の形式3と共通ベクタ（`header3`・`desc`・`trailer`・`image3`・`vtable`・`crc32`）をすべて bootcore でも検査し一致。形式2の行はすべて `BadHeader`。
+- テスト 54 件すべて通過（`basics` 19・`fat` 17・`update` 11・`power_cut` 7）。
+  - `fcr_word` を全コマンド×引数で総当たり：プレーン0（SLB なし）で作れる語は 481 個（EWP 480＋GLB 1）だけで、SGPB・CGPB・CLB・EA・WP の語やセキュリティビットの語 `0x5A00000B` は作れない。
+  - 電源断の総当たり：すべての EWP で「未開始・消去済み・k バイトまで書込み・消去途中・ゴミ」を試し、起動判定が受け入れるのは旧イメージか新イメージそのものだけ。2E 空フラッシュで 17,442 通り、新旧入れ替えで約 46,000 通りなど。再開時の二度目の断も 1,000 通り超。
+  - SD の読み取り失敗・1バイト破損をすべての読み取り位置に入れても「正しく見えて中身が違うアプリ」は残らない。
+- サイズ（thumbv7m、opt s、LTO、`sizeprobe`）：全体 約 5.4 KB（memcpy 等 1.2 KB を含む）、ロジック 約 4.0 KB。HSMCI の SD 読み取りと起動コードはこれに加わるが、8 KB に余裕あり（見積もり）。
+- 実装上の判断：(1) 最初のチャンクを最後に書くため SD を3回目に読む、(2) `fcr_word` はプレーンを取る（EEFC1 はページ0の EWP が必要。EEFC1 に GPNVM は無いので害なし）、
+  (3) ビットストリームだけのファイルは `NoApp` で拒否、(4) FAT は MBR の種別 0x0B/0x0C のみ、0xEE（GPT）は拒否、BPB の矛盾も拒否。
+- 未確定：GPBR の合図 `"NGRC"` は Sonnet の提案、EWP とポーリングは実機では RAM から実行する必要がある（`sizeprobe` の実装は寸法用で未実行）、LED の表示は保留（D6）。
+  テスト用の FAT32 イメージは自作の生成器によるもので、独立したフォーマッタとの照合はしていない。
+- 信頼度：ホストテストで確認済み（Opus は報告とファイル構成を確認、テストの再実行は CI に任せる）。実機では未検証。
+- CI：`host-tests` に `mcu/bootcore` を追加。
+- 関連：`mcu/bootcore/`、`docs/design/fw-bootloader.md`、`tools/fwimage/FORMAT.md`。
+
 ---
 
 ## 判断の記録（Decisions）

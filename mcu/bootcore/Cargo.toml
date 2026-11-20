@@ -1,0 +1,23 @@
+[package]
+name = "bootcore"
+description = "Pure logic for the resident boot region (B-SD, docs/design/fw-bootloader.md): app validation, CRC, EEFC command allowlist, read-only FAT32 reader, OGFW format 3, SD-recovery state machine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "bootcore"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+# The resident has no unwinder and no room for one.
+panic = "abort"
+
+# The power-cut sweeps boot tens of thousands of flash images.
+[profile.dev]
+opt-level = 2
