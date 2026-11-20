@@ -13,6 +13,7 @@ import sys
 
 from amaranth.sim import Simulator
 
+from hw.fifo import resolve_target
 from hw.ide_device import IDEDevice
 
 
@@ -1146,6 +1147,9 @@ def run_one(name, tb, primary):
 
 
 def main() -> None:
+    # Which FIFO memory style is under test: set NETGD_FPGA_TARGET=ag16k
+    # to run the same suite against the block-RAM build (hw/fifo.py).
+    print(f"FPGA target: {resolve_target()}")
     failures = 0
     for name, tb, primary in TESTBENCHES:
         try:

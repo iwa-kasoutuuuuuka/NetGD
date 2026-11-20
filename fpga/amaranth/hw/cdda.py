@@ -37,8 +37,8 @@ output disabled SDAT carries zeros.
 """
 
 from amaranth import *
-from amaranth.hdl.xfrm import ResetInserter
-from amaranth.lib.fifo import SyncFIFO
+
+from .fifo import make_fifo, resolve_target
 
 
 # 3 M4Ks worth of 16-bit words (768 x 16 = 12288 bits): 384 stereo pairs,
@@ -48,8 +48,11 @@ AUDIO_FIFO_DEPTH = 768
 
 
 class CDDAOutput(Elaboratable):
-    def __init__(self, depth: int = AUDIO_FIFO_DEPTH):
+    def __init__(self, depth: int = AUDIO_FIFO_DEPTH,
+                 target: str | None = None):
         self.depth = depth
+        # FIFO memory style; see hw/fifo.py. None = $NETGD_FPGA_TARGET.
+        self.target = resolve_target(target)
 
         # MCU side (sync domain).
         self.ctrl_we = Signal()
@@ -76,9 +79,8 @@ class CDDAOutput(Elaboratable):
         uf_count = Signal(8)
         clear = Signal()
 
-        m.submodules.fifo = fifo = ResetInserter(clear)(
-            SyncFIFO(width=16, depth=self.depth)
-        )
+        fifo = make_fifo(m, "fifo", width=16, depth=self.depth,
+                         clear=clear, target=self.target)
         m.d.comb += [
             fifo.w_en.eq(self.push),
             fifo.w_data.eq(self.push_data),

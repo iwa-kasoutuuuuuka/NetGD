@@ -1,6 +1,7 @@
 from amaranth import *
 
 from .cdda import CDDAOutput
+from .fifo import resolve_target
 from .ide_device import IDEDevice
 
 
@@ -26,7 +27,12 @@ class OpenGDEMUCore(Elaboratable):
     MCU registers sit at slots 29..31 of the primary window.
     """
 
-    def __init__(self):
+    def __init__(self, target: str | None = None):
+        # FIFO memory style: "cyclone2" (asynchronous read, the v5.5
+        # board) or "ag16k" (registered read, block RAM on the 6.0 board).
+        # None = $NETGD_FPGA_TARGET, else "cyclone2". See hw/fifo.py.
+        self.target = resolve_target(target)
+
         # MCU SMC bus.
         self.io_MCU_CS = Signal()
         self.io_MCU_BS = Signal(2)
@@ -67,8 +73,8 @@ class OpenGDEMUCore(Elaboratable):
 
         # Built here rather than in elaborate() so testbenches can reach the
         # per-device debug ports.
-        self.dev0 = IDEDevice(primary=True)
-        self.dev1 = IDEDevice(primary=False)
+        self.dev0 = IDEDevice(primary=True, target=self.target)
+        self.dev1 = IDEDevice(primary=False, target=self.target)
 
     def ports(self):
         return [
@@ -98,7 +104,7 @@ class OpenGDEMUCore(Elaboratable):
         # (enable, FIFO) is what actually resets.
         m.domains.audio = cd_audio = ClockDomain("audio", reset_less=True)
         m.d.comb += cd_audio.clk.eq(self.io_AUDIO_CLK)
-        m.submodules.cdda = cdda = CDDAOutput()
+        m.submodules.cdda = cdda = CDDAOutput(target=self.target)
 
         # IDE bus is shared by both devices.
         for dev in (dev0, dev1):

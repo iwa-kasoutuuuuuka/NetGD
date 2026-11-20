@@ -511,6 +511,17 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   → 受信アプリ（`netgd-recv`、実装中）の Sonnet に形式を伝えた。
 - **確認（Opus）**：discimg 87・gamecfg 21・lzma 5 件パス、4E・2E とも警告は従来の 13 件。2E の text 117,008（空き 約 13 KB）。IDE のホットパスのフレームは不変。
 
+### R39 G1：FIFO をブロック RAM に乗る形に（Fable 実装、Opus が確認）
+- `fpga/amaranth/hw/fifo.py`：`SyncReadFIFO`（登録読み出しのメモリ上の先読み FIFO。読み出しアドレスを1サイクル前に決め、同じアドレスへの書き込みは 17 ビットのバイパスで補う）と `make_fifo`。
+  `--target cyclone2`（既定）は従来の `ResetInserter(SyncFIFO)` をそのまま、`--target ag16k` は `SyncReadFIFO`。AG16K 向けは `out/OpenGDEMUCore_ag16k.v` に出力。
+- **確認（Opus）**：既定（v5.5）の Verilog はコミット済みのものと**バイト一致**、ag16k の生成は決定的、ag16k の `test_top`・`test_timing` がパス。
+- **Fable の検証**：両ターゲットで 30/3/5/5 件パス。`test_fifo.py`（10 件）で旧 FIFO と1サイクル単位の一致（7 種類の深さで 2〜6 万サイクルのランダム試験、コア全体を2つ並べて 6 万サイクル×3）。
+  バイパスを外すと即座に失敗することも確認（ミューテーション試験）。
+- **資源**（YoWASP Yosys 0.71、Cyclone IV の規則）：LUT 97,839 → **2,821**（AG16K の 17 %）、FF 103,924 → **1,097**、ブロック RAM 0/5 → **5/5（14 M9K、25 %）**。
+  代償は FF +85、LUT 約 +170。Yosys の M9K の techmap が途中で止まるため、その段だけ飛ばして集計した（スクリプトはスクラッチパッド）。
+- **残るリスク**：AGM の `synth_agm` で同じように推論されるかは未確認（初回の Supra で `alta_bram9k` が 14 個あるか見る）、メモリの初期化、タイミング未解析。
+- CI（`build.yaml`）に ag16k のシミュ、`test_fifo.py`、ag16k の Verilog 一致検査を追加。
+
 ---
 
 ## 判断の記録（Decisions）

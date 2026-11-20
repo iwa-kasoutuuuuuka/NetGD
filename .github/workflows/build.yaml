@@ -116,3 +116,27 @@ jobs:
         run: |
           python main.py
           git diff --exit-code -- out/OpenGDEMUCore.v
+
+      # AG16K (GDEMU 6.0) target: same simulations against the block-RAM
+      # FIFOs, the lockstep equivalence test, and the generated Verilog check.
+      - name: Simulations (ag16k target)
+        env:
+          AMARANTH_USE_YOSYS: builtin
+          NETGD_FPGA_TARGET: ag16k
+        run: |
+          python test.py
+          python test_cdda.py
+          python test_timing.py
+          python test_top.py
+
+      - name: FIFO equivalence (cyclone2 vs ag16k)
+        env:
+          AMARANTH_USE_YOSYS: builtin
+        run: python test_fifo.py
+
+      - name: Regenerate ag16k Verilog and check it is committed
+        env:
+          AMARANTH_USE_YOSYS: builtin
+        run: |
+          python main.py --target ag16k
+          git diff --exit-code -- out/OpenGDEMUCore_ag16k.v

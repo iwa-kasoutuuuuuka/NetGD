@@ -1,7 +1,7 @@
 from amaranth import *
-from amaranth.hdl.xfrm import ResetInserter
-from amaranth.lib.fifo import SyncFIFO
 from amaranth.lib.memory import Memory
+
+from .fifo import make_fifo, resolve_target
 
 from .ide_decode import IDEAddressDecode
 
@@ -66,7 +66,10 @@ class IDEDevice(Elaboratable):
     def __init__(self, *, primary: bool = True, post_reset_count_bits: int = 24,
                  read_fifo_depth: int | None = None,
                  write_fifo_depth: int | None = None,
-                 capture: bool = False):
+                 capture: bool = False,
+                 target: str | None = None):
+        # FIFO memory style; see hw/fifo.py. None = $NETGD_FPGA_TARGET.
+        self.target = resolve_target(target)
         self.primary = primary
         # In-fabric signal capture on MCU slots 20/21. Off by default: it is a
         # debug instrument, and adding it moved the fitter enough to break
@@ -239,12 +242,16 @@ class IDEDevice(Elaboratable):
         # leftover bytes from a previous command can't bleed into the
         # next one.
         fifo_clear = Signal()
-        m.submodules.read_fifo = read_fifo = ResetInserter(fifo_clear)(
-            SyncFIFO(width=16, depth=self.read_fifo_depth)
-        )
-        m.submodules.write_fifo = write_fifo = ResetInserter(fifo_clear)(
-            SyncFIFO(width=16, depth=self.write_fifo_depth)
-        )
+        #
+        # `self.target` picks the memory style (hw/fifo.py): asynchronous
+        # read for the Cyclone II build, registered read for block RAM on
+        # the AG16K. Both behave identically cycle for cycle.
+        read_fifo = make_fifo(m, "read_fifo", width=16,
+                              depth=self.read_fifo_depth,
+                              clear=fifo_clear, target=self.target)
+        write_fifo = make_fifo(m, "write_fifo", width=16,
+                               depth=self.write_fifo_depth,
+                               clear=fifo_clear, target=self.target)
         # Defaults each cycle — overridden below when an actual push/pop
         # event fires.
         m.d.comb += [
