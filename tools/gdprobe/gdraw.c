@@ -1,13 +1,17 @@
 /* gdprobe: raw G1 ATAPI access. KOS 2.3.0 APIs used (checked against the fork):
- *   g1_ata_mutex_lock/unlock   include/dc/g1ata.h  (cdrom.c serialises on the same
- *                              _g1_ata_sem; unlock re-selects the master device)
+ *   _g1_ata_sem                kernel/arch/dreamcast/hardware/cdrom.c:57, the
+ *                              semaphore cdrom.c itself serialises the G1 bus on
+ *                              (sem_wait / sem_signal, include/kos/sem.h)
  *   timer_us_gettime64         include/kos/timer.h
  *   thd_sleep                  include/kos/thread.h
- * Register addresses are the ones g1ata.c and the openMenu gdemu_sdk.c use.
- * Only the primary (GD-ROM) device is ever addressed: DEVICE_SELECT is never
- * written here. */
+ * g1_ata_mutex_lock/unlock are deliberately NOT used: unlock calls
+ * g1_ata_select_device(G1_ATA_MASTER) (g1ata.c:216-222), i.e. it writes the
+ * DEVICE_SELECT register after every command -- something neither KOS's cdrom
+ * driver nor openMenu does to a GDEMU. Taking the semaphore directly keeps the
+ * only register writes the ones below: FEATURES, byte count, COMMAND, DATA.
+ * Register addresses are the ones g1ata.c and the openMenu gdemu_sdk.c use. */
 #include <kos.h>
-#include <dc/g1ata.h>
+#include <kos/sem.h>
 #include <kos/timer.h>
 #include <stdio.h>
 #include <string.h>
@@ -35,6 +39,12 @@
  * a real GD-ROM. The data loop handles any block size the drive really uses. */
 #define BYTE_LIMIT 0x0800
 #define MAX_TOTAL  (8u * 1024 * 1024)   /* a drive that streams more than this is broken */
+
+/* Defined in cdrom.c; g1ata.c declares it the same way. */
+extern semaphore_t _g1_ata_sem;
+
+static int bus_lock(void) { return sem_wait(&_g1_ata_sem); }
+static void bus_unlock(void) { sem_signal(&_g1_ata_sem); }
 
 #define OUT8(a, v)  (*(volatile uint8_t *)(a) = (v))
 #define IN8(a)      (*(volatile uint8_t *)(a))
@@ -69,6 +79,22 @@ static int wait_drq(uint64_t deadline)
     }
 }
 
+/* After writing PACKET: wait for BSY=0 && DRQ=1 (1), or timeout (0). ERR is
+ * ignored on purpose: until the device raises BSY, the status still shows the
+ * previous command's CHECK bit, and PACKET itself never ends in ERR before the
+ * CDB phase. Treating that stale ERR as a failure would leave the device
+ * waiting for a CDB that never comes. openMenu also waits for DRQ only. */
+static int wait_pkt_drq(uint64_t deadline)
+{
+    for (;;) {
+        uint8_t s = IN8(GD_ALTSTATUS);
+        if (!(s & SR_BSY) && (s & SR_DRQ))
+            return 1;
+        if (now_us() >= deadline)
+            return 0;
+    }
+}
+
 static int wait_irq(uint64_t deadline)
 {
     for (;;) {
@@ -93,10 +119,10 @@ static int gd_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     uint64_t t0, deadline;
     uint8_t st = 0;
     uint32_t total = 0;
-    int i, d;
+    int i;
     (void)ctx;
     memset(r, 0, sizeof(*r));
-    if (g1_ata_mutex_lock()) {
+    if (bus_lock()) {
         r->rc = GD_BUSY;
         return r->rc;
     }
@@ -115,9 +141,7 @@ static int gd_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     OUT8(GD_COMMAND, ATAPI_PACKET);
     settle();
 
-    d = wait_drq(deadline);
-    if (d == 0) { r->rc = GD_TIMEOUT; r->status = IN8(GD_ALTSTATUS); goto done; }
-    if (d < 0)  { r->status = IN8(GD_STATUS); r->error = IN8(GD_ERROR); r->rc = GD_CHECK; goto done; }
+    if (!wait_pkt_drq(deadline)) { r->rc = GD_TIMEOUT; r->status = IN8(GD_ALTSTATUS); goto done; }
 
     (void)IN32(GD_STATUS);
     for (i = 0; i < 6; i++)
@@ -159,12 +183,13 @@ done:
     r->total = total;
     r->stored = total < cap ? total : cap;
     r->us = now_us() - t0;
-    g1_ata_mutex_unlock();
+    bus_unlock();
     return r->rc;
 }
 
-/* ATA IDENTIFY PACKET DEVICE (0xA1): 512 bytes of identify data. Standard,
- * read-only; still opt-in (config identify=on) because it is not something
+/* ATA IDENTIFY PACKET DEVICE (0xA1). The GD-ROM answers 80 bytes (SPI spec
+ * table 3.5, 00h-4Fh), not ATA's 512: read words only while DRQ is up.
+ * Read-only; still opt-in (config identify=on) because it is not something
  * the BIOS is known to send to a GDEMU. */
 static int gd_identify(void *ctx, uint8_t *buf, uint32_t timeout_ms, gd_result *r)
 {
@@ -172,7 +197,7 @@ static int gd_identify(void *ctx, uint8_t *buf, uint32_t timeout_ms, gd_result *
     int d, w;
     (void)ctx;
     memset(r, 0, sizeof(*r));
-    if (g1_ata_mutex_lock()) {
+    if (bus_lock()) {
         r->rc = GD_BUSY;
         return r->rc;
     }
@@ -186,6 +211,10 @@ static int gd_identify(void *ctx, uint8_t *buf, uint32_t timeout_ms, gd_result *
     OUT8(GD_COMMAND, ATA_IDENTIFY_PACKET);
     settle();
     d = wait_drq(deadline);
+    /* A stale CHECK bit from the previous command can show before the device
+     * raises BSY: only believe ERR once the command has had 1 ms. */
+    while (d < 0 && now_us() - t0 < 1000u)
+        d = wait_drq(deadline);
     if (d == 0) {
         r->rc = GD_TIMEOUT;
     } else if (d < 0) {
@@ -193,19 +222,19 @@ static int gd_identify(void *ctx, uint8_t *buf, uint32_t timeout_ms, gd_result *
         r->status = IN8(GD_STATUS);
         r->rc = GD_CHECK;
     } else {
-        for (w = 0; w < 256; w++) {
+        for (w = 0; w < 256 && (IN8(GD_ALTSTATUS) & SR_DRQ); w++) {
             uint16_t v = IN16(GD_DATA);
             buf[2 * w] = (uint8_t)v;
             buf[2 * w + 1] = (uint8_t)(v >> 8);
         }
-        r->total = r->stored = 512;
+        r->total = r->stored = 2u * (uint32_t)w;
         r->status = IN8(GD_STATUS);
         r->rc = GD_OK;
     }
 done:
     r->irr = IN8(GD_IRQ_REASON);
     r->us = now_us() - t0;
-    g1_ata_mutex_unlock();
+    bus_unlock();
     return r->rc;
 }
 

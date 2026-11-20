@@ -13,6 +13,14 @@
 #include "probes.h"
 #include "record.h"
 
+/* Leave the drive to gdraw alone. Without INIT_CDROM, KOS skips cdrom_init
+ * (which sends its own INIT commands through the BIOS) and fs_iso9660 (whose
+ * vblank handler calls cdrom_get_status every frame, i.e. a BIOS check-drive
+ * between our commands). INIT_DEFAULT includes INIT_CDROM via
+ * INIT_DEFAULT_ARCH (kos/init.h:141, arch/init_flags.h:79,90). /pc/ (dcload)
+ * does not need it. */
+KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
+
 /* Folder on the PC as seen through dc-tool-ip's /pc/ (the build tooling sets
  * HOST_DIR_RAW, e.g. /pc/work/OpenGDEmu/tools/gdprobe/host). No spaces. */
 #define STR_(x) #x
