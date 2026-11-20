@@ -1,0 +1,13 @@
+[package]
+name = "psload"
+description = "Board-aware FPGA passive-serial (PS) loader logic: profiles, state machine, retries. Pure logic over pin/clock traits, so it runs in host tests against a simulated FPGA"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Let the firmware log these types. Off by default so the host tests do not
+# need defmt.
+defmt = ["dep:defmt"]
+
+[dependencies]
+defmt = { version = "0.3", optional = true }

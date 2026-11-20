@@ -50,7 +50,7 @@ jobs:
           if-no-files-found: error
 
   host-tests:
-    name: Host tests (lzma, gamecfg, discimg, fwupdater)
+    name: Host tests (lzma, gamecfg, discimg, psload, fwupdater)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -59,6 +59,7 @@ jobs:
           - crate: common/lzma
           - crate: common/gamecfg
           - crate: common/discimg
+          - crate: common/psload
           # .cargo/config.toml defaults to thumbv7m-none-eabi, so the host
           # target has to be named explicitly.
           - crate: mcu/fwupdater

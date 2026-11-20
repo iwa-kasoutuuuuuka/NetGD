@@ -1,5 +1,9 @@
 //! Compress the FPGA bitstream into the firmware image.
 //!
+//! Which bitstream depends on the board feature: the Cyclone II `.rbf` for
+//! `board-v55`, the AG16K `.rbf` for `board-v60` (optional -- see `RBF_V60`).
+//! What follows was written for the Cyclone II.
+//!
 //! The .rbf is already Quartus-compressed about 2:1 (the EP2C5's raw
 //! configuration stream is 158,224 bytes), but it is still the single
 //! largest thing in flash. Running LZMA over it takes it from ~73.8 KB to
@@ -23,51 +27,86 @@ use std::process::Command;
 /// Must match `lzma::DICT_SIZE` and the constants baked into the decoder.
 const XZ_FILTER: &str = "preset=9e,dict=4KiB,lc=0,lp=0,pb=0";
 
-const RBF: &str = "../../fpga/Quartus/output_files/OpenGDEMU.rbf";
+/// board-v55 (Cyclone II). Required: a missing file fails the build.
+const RBF_V55: &str = "../../fpga/Quartus/output_files/OpenGDEMU.rbf";
+
+/// board-v60 (AG16K). Optional: until the first AG16K bitstream exists the
+/// firmware is built without one and the loader reports `NoBitstream` at
+/// boot. Must be the `.rbf` (bit 0 first on the wire, the loader's default),
+/// not the `.bin` -- see `ps-msb-first` in Cargo.toml.
+const RBF_V60: &str = "../../fpga/agm/output/OpenGDEMU_ag16k.rbf";
 
 /// The one target both this firmware and the updater are built for.
 const TARGET: &str = "thumbv7m-none-eabi";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={RBF}");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
     select_linker_script(&out_dir);
 
-    let raw = std::fs::read(RBF)
-        .unwrap_or_else(|e| panic!("cannot read {RBF}: {e} -- build the Quartus project first"));
+    let v60 = std::env::var_os("CARGO_FEATURE_BOARD_V60").is_some();
+    let rbf = if v60 { RBF_V60 } else { RBF_V55 };
+    // Also for a file that does not exist (yet): cargo then reruns this
+    // script on every build, which is how the AG16K bitstream gets picked up
+    // the moment it appears.
+    println!("cargo:rerun-if-changed={rbf}");
 
-    let out = Command::new("xz")
-        .args(["--format=raw", &format!("--lzma1={XZ_FILTER}"), "-c", RBF])
-        .output()
-        .expect("`xz` must be on PATH to build the firmware");
-    assert!(
-        out.status.success(),
-        "xz failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let packed = out.stdout;
+    let raw = match std::fs::read(rbf) {
+        Ok(raw) => Some(raw),
+        Err(e) if v60 && e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => panic!("cannot read {rbf}: {e} -- build the FPGA project first"),
+    };
+
+    let (packed, raw_len) = match raw {
+        Some(raw) => {
+            if v60 && raw.starts_with(&[0xff, 0x55]) {
+                println!(
+                    "cargo:warning=board-v60: {rbf} starts with ff 55, which is how a .bin starts (a .rbf has the bits of each byte reversed: ff aa). The loader sends LSB first; use the .rbf, or build with `ps-msb-first` for a .bin"
+                );
+            }
+            let out = Command::new("xz")
+                .args(["--format=raw", &format!("--lzma1={XZ_FILTER}"), "-c", rbf])
+                .output()
+                .expect("`xz` must be on PATH to build the firmware");
+            assert!(
+                out.status.success(),
+                "xz failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            println!(
+                "cargo:warning=bitstream: {} -> {} bytes LZMA ({:.2}:1)",
+                raw.len(),
+                out.stdout.len(),
+                raw.len() as f64 / out.stdout.len() as f64
+            );
+            (out.stdout, raw.len())
+        }
+        None => {
+            println!(
+                "cargo:warning=board-v60: no FPGA bitstream at {RBF_V60}; building a firmware that reports `NoBitstream` at boot (LED: 5 blinks) instead of configuring the FPGA"
+            );
+            (Vec::new(), 0)
+        }
+    };
 
     std::fs::write(out_dir.join("bitstream.lzma"), &packed).expect("write bitstream.lzma");
     std::fs::write(
         out_dir.join("bitstream_len.rs"),
         format!(
-            "/// Decompressed size of the bitstream, in bytes. The LZMA1 stream is raw\n\
-             /// (no container, no length field), so the decoder is told when to stop.\n\
-             pub const BITSTREAM_RAW_LEN: usize = {};\n",
-            raw.len()
+            concat!(
+                "/// Decompressed size of the bitstream, in bytes. The LZMA1 stream is raw\n",
+                "/// (no container, no length field), so the decoder is told when to stop.\n",
+                "pub const BITSTREAM_RAW_LEN: usize = {};\n",
+                "/// False only for a board-v60 build with no bitstream file (see `RBF_V60`).\n",
+                "pub const BITSTREAM_PRESENT: bool = {};\n",
+            ),
+            raw_len,
+            raw_len != 0
         ),
     )
     .expect("write bitstream_len.rs");
-
-    println!(
-        "cargo:warning=bitstream: {} -> {} bytes LZMA ({:.2}:1)",
-        raw.len(),
-        packed.len(),
-        raw.len() as f64 / packed.len() as f64
-    );
 
     build_updater(&out_dir);
 }

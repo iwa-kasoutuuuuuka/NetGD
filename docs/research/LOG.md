@@ -687,6 +687,23 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 使い方：純正の記録が届いたら `compare.py --only-common <純正> <予測>` → 差分がそのまま D-1〜D-5 などの判断材料になる（README に対応表）。
 - 前提：UA の出方、切替後2回目の TUR で READY、ABRT 時の irr など、HEAD の `ide.rs` の読解に基づく。`ide.rs` が変わったら例の中の定数（版 5.20.0、REQ_MODE）を更新する。
 
+### R56 対策 B の方針決定と S0〜S2 の割り当て
+- ユーザーが Opus の推奨（下の判断の表 D1〜D7）を受け入れ、実機の要らない段階 S0〜S2 の並列実施を指示。
+- 割り当て：Sonnet = **S0** `mcu/bootcore`（純粋ロジック、FAT32 リーダー、形式3の解析、SD 復旧の状態遷移、ロックビットと「書き込み中は読めない」を持つフラッシュの模型で電源断を総当たり）／
+  Sonnet = **S1** OGFW 形式3（`fwimage`・`fwupdater` の `logic.rs`・`netgd-fwupd` の `fwcore.c` に共通ベクタで。今の基板は形式2のまま、形式3は feature `resident` のときだけ）。
+- **S2（アプリを 0x82000 にリンク、VTOR、クロック初期化の冪等化、CI で両配置）は、FPGA ローダーの作業（`main.rs`・`Cargo.toml`・`build.rs`・CI を編集中）が終わってから**割り当てる（ファイルが重なるため）。
+
+### R57 基板ごとの FPGA ローダー `common/psload`（Sonnet 実装、Opus がテストと3種のビルドで確認）
+- 問い：AG16K（6.0）でも v5.5 の Cyclone II でも同じコードで FPGA を設定できるか。電源が入らない FPGA で固まらないか。
+- 結論：受動シリアルの手順を純粋ロジックのクレート `common/psload` に切り出し、ピンと時間はトレイト（`PsPins`・`PsClock`）で渡す。基板ごとの差は `PsProfile`（タイミング・ビット順）。
+  タイムアウトでエラーを返し、再試行の方針もクレート側。`cyclone.rs` はこれを呼ぶだけになった。
+- feature：`board-v55`（既定）／`board-v60`（= `sam3u2e`、ビットストリームは任意の `fpga/agm/output/OpenGDEMU_ag16k.rbf`、無ければビルドは通り起動時に `NoBitstream`、LED 5回点滅）／`ps-msb-first`（AG16K のビット順は推測のため切替用）。
+- 根拠：`common/psload/src/lib.rs`、`tests/equivalence.rs`（旧ループを文字どおり移植して波形を比較）、`tests/sim.rs`。
+  Opus の実行結果：`psload: 17 passed, 0 failed`、4E・2E・v60 のビルドすべて exit=0（警告 12 件は既存のもの）。
+- 信頼度：ホストで確認済み。**6.0 のローダーのピン5本は v5.5 のものを仮に使っており未確認**（`cyclone::pinmap`）。実機では未検証。
+- CI：`host-tests` に `common/psload` を追加。
+- 関連：`mcu/opengdemu/src/cyclone.rs`・`main.rs`・`build.rs`・`Cargo.toml`、`docs/research/ag16k-config.md` §6。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -700,6 +717,7 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | G2 は「Dreamcast 側アプリが FAT32 を持つ」方式、転送は T1 → T2 | R8 | Fable 設計、Opus 承認 |
 | 2026-11-20 | git の作者は `iwa-kasoutuuuuuka` と GitHub の noreply メール（このリポジトリのみ） | メールアドレスを公開しない | ユーザー |
 | 2026-11-20 | 調査・レビュー・判断はすべて `docs/research/LOG.md` に記録する | ユーザーの指示 | ユーザー |
+| 2026-11-20 | 対策 B：D1 復旧は SD だけ／D2 常駐部 8 KB（FPGA ローダーは入れない）／D3 当面は SWD で導入（移行イメージは作らない）／D4 常駐部が自己ロック（実機確認までは開発用ビルドでロックしない）／D5 SD 更新はアプリ無効・ボタン・アプリの要求のときだけ／D6 ファイル名 `NETGD.OGF`・`NETGD.BIT`、LED の表示は 6.0 の LED のピンが分かるまで保留／D7 S0〜S2 は今すぐ、S3 以降は実機の後 | `docs/design/fw-bootloader.md` §6-2（R54）。8 KB は、未確定の AG16K ローダーをロック領域に凍結しないため | ユーザー（Opus の推奨を承認） |
 | 2026-11-20 | 上流から引き継いだ ATAPI 応答の疑い（R11 の D）は、実機と比べるまで挙動を変えない | 実機の純正 GDEMU が仕様や Flycast と違う応答をしている可能性がある（コード内コメント） | Opus |
 | 2026-11-20 | GitHub の公開先は iwa-kasoutuuuuuka/NetGD（公開）、上流は `upstream` リモートに残す | ユーザーの指示 | ユーザー |
 | 2026-11-20 | 番号フォルダ方式を採用し、設定が無ければフォルダ 01 をマウント。`0x52` で番号指定・次／前に対応 | 本家と GDmenu / openMenu との互換（R13・R14） | ユーザー（G3 を選択）、Opus 設計 |

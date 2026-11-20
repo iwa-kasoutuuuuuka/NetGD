@@ -71,36 +71,67 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
     // Don't introduce *anything* (LED setup, log banner, timers) before
     // this point that we don't strictly need.
     let t_fpga = embassy_time::Instant::now();
-    let mut fpga = cyclone::PSLoader::new(
+    let mut fpga = cyclone::McuPins::new(
         p.nconfig,
         p.clk,
         p.data,
         p.nstatus,
         p.done,
     );
-    // The decoder's working memory (a 4 KiB window plus the probability
-    // model, ~7.6 KB) is carved out of the CD_READ staging buffer. That
-    // buffer is 14 KB of SRAM1 that nothing touches until the first CD_READ,
-    // which cannot arrive before the FPGA is even configured — so the
-    // compression costs no static RAM at all.
-    let scratch = lzma::Scratch::from_buf(ide::loader_scratch())
-        .expect("CD_READ_BUF too small for the LZMA scratch");
-    let mut dec = lzma::Decoder::new(&BITSTREAM_LZMA, BITSTREAM_RAW_LEN, scratch);
-    fpga.load_from(&mut dec).await;
-    // The PS loader stops early once CONF_DONE rises, so a short decode is
-    // only a problem if the decoder itself failed.
-    if dec.error().is_some() {
-        defmt::panic!(
-            "bitstream decode failed after {} of {} bytes",
-            dec.produced(),
-            BITSTREAM_RAW_LEN
-        );
-    }
+    // Only set up on the failure path below; `main_task` needs it later in
+    // any case.
+    let mut led_pin = Some(p.led);
+    let mut led = None;
 
-    let mut led = Output::new(p.led, Level::High);
+    let stats = loop {
+        let r = if !BITSTREAM_PRESENT {
+            Err(psload::LoadFailure { error: psload::PsError::NoBitstream, attempts: 0 })
+        } else {
+            // The decoder's working memory (a 4 KiB window plus the
+            // probability model, ~7.6 KB) is carved out of the CD_READ
+            // staging buffer. That buffer is 14 KB of SRAM1 that nothing
+            // touches until the first CD_READ, which cannot arrive before
+            // the FPGA is even configured -- so the compression costs no
+            // static RAM at all. Every attempt re-borrows it and starts the
+            // decoder over; the previous attempt's decoder is gone by then.
+            cyclone::load(&mut fpga, || {
+                let scratch = lzma::Scratch::from_buf(ide::loader_scratch())
+                    .expect("CD_READ_BUF too small for the LZMA scratch");
+                cyclone::LzSource(lzma::Decoder::new(&BITSTREAM_LZMA, BITSTREAM_RAW_LEN, scratch))
+            })
+        };
+        let f = match r {
+            Ok(s) => break s,
+            Err(f) => f,
+        };
+
+        // The FPGA is not there, and no IDE task is worth running without
+        // it: every register the IDE task serves lives in the FPGA, the DC
+        // would see a dead GD-ROM bus either way, and a half-configured part
+        // may drive the bus with garbage. So halt here -- but not for good:
+        // the MCU stays up with the debug port usable (SWD reflash works),
+        // the LED says why, and a failure that might be transient (the
+        // FPGA's rail or POR came up late) is retried after each blink code.
+        // A broken or missing bitstream cannot get better by itself, so
+        // those just blink.
+        error!("FPGA load failed after {} attempt(s): {}", f.attempts, f.error);
+        let l = led.get_or_insert_with(|| Output::new(led_pin.take().unwrap(), Level::High));
+        cyclone::blink_code(l, &f.error).await;
+        while !f.error.retryable() {
+            cyclone::blink_code(l, &f.error).await;
+        }
+    };
+
+    let mut led = led.unwrap_or_else(|| Output::new(led_pin.take().unwrap(), Level::High));
     // Worth watching: LZMA decoding is interleaved with the bit-bang, so it
     // adds directly to the window where the DC sees a dead GD-ROM bus.
-    info!("FPGA Loaded! ({} ms)", t_fpga.elapsed().as_millis());
+    info!(
+        "FPGA Loaded! ({} ms, {} bytes, {} attempt(s), early done: {})",
+        t_fpga.elapsed().as_millis(),
+        stats.bytes,
+        stats.attempts,
+        stats.early_done
+    );
 
     // Cyclone II runs internal init after CONF_DONE rises before user
     // logic is live. Without this slack, the post-load probe floats and
