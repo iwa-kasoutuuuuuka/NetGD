@@ -312,6 +312,25 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **スタック（要注意）**：`load_by_name` の中から `walk_to`（0xfc）を呼ぶようになったため、マウント経路の最深部が約 +200 バイト
   （2E で推定 約 5.3 KB / 7.9 KB）。R11 の A-1 と合わせて、実機またはスタック解析での確認が必要。
 
+### R22 `tools/gdprobe` の実装（Sonnet 実装、Opus がレビュー）と実機作業ガイド
+- **実装（Sonnet）**：KOS 専用 `main.c`・`gdraw.c`、純 C（ホストテスト済み）`probes.c`・`whitelist.c`・`record.c`・`pcout.c`・`hash.c`（CRC-32）・`cfg.c`、
+  `Makefile`・`build.ps1`（`$env:BBA_TOOLS` が必要）・`profiles/gdprobe.ps1`（dc_auto 用）・`gdprobe.cfg.example`、PC 側 `compare.py`、`README_ja.md`。
+  設定：`label`、`switch`（既定 off）、`images=3,4,5,6,7`（範囲指定も可）、`return_to`、`switch_timeout_ms`（既定 15000）など。
+  切替ループ：`52 82 n` → 20 ms ごとに TEST UNIT READY（失敗時は REQUEST SENSE、変化したときだけ記録）→ READY なら読み取り試験一式、ならなければ記録して次へ。
+  記録は `gdprobe_<label>_<日時>.txt`。`identify=on`（0xA1）は既定 off。
+- **ホストテスト（Opus が実行して確認）**：C 45061 チェック・`compare.py` 14 件パス。許可リストは禁止コマンド（0x12、0x16、0x20〜0x22、0x70、0x71、0xF9、`52 81`、00/82 以外の `52`）、
+  ランダム 30 万 CDB、全オペコードを検査。偽ドライブ相手に UA・遅い再マウント・空フォルダ・応答停止（3回連続の時間切れで打ち切り）を試験。4 KB 以下＋毎回 flush も検査。
+- **Opus のレビュー（確認済み）**：`gdraw.c` が書き込むレジスタは FEATURES・バイト数（LBA Mid/High）・COMMAND（0xA0、オプトインの 0xA1）・DATA（CDB）だけで、
+  デバイス制御（SRST）やデバイス選択には書かない。すべての送信（切替ループ内の TUR・REQUEST SENSE を含む）が `wl_check` を通る。
+- **未検証（KOS 部分は一度もビルドしていない）**：G1 の手順（openMenu の方式＋タイムアウト、バイト数上限 0x0800 を追加）、`g1_ata_mutex_lock` のリンク
+  （`g1ata.c` で inline 定義。未定義なら `_g1_ata_sem` に切り替え）、**CD_READ の CDB バイト1 = 0x24 は記憶に基づく値で未確認**（設定 `cdread_flags` で変更可。web 調査で確認中）、
+  返るセクタのサイズ（2048 / 2352。記録の `ssz=` で分かる）。
+- **実機作業ガイド**：https://claude.ai/artifact/9gr3qLhDo54ME1XmiXuyDN （非公開の Artifact。同じものを `docs/research/user-tasks.html` に置いた）。
+  作業1（プローブ）、作業2（導通確認。SAM3U の LQFP-144 のピン番号はデータシート Atmel-6430G の表 4-1 から：SWDIO 7、SWCLK 9、NRST 11、TDI 1、TDO 4、
+  PA11 133、PA12 134、ERASE 137、PA23/24/25 = 103/105/106、PB1/PB2 = 55/57、PA20 101、PB18 25、GND 18/52/60/90/126、VDDIO 17/51/85/104/127）、
+  作業3（SWD プローブの準備と、読み取りだけの CHIPID 確認）。チェックと記入はブラウザに保存され、「結果をコピー」で Claude に渡せる。
+- ユーザーの依頼で、これらの作業に関する事前の web 調査を Sonnet に依頼中（結果は `docs/research/web-prep-user-tasks.md` と次の項目に記録する）。
+
 ---
 
 ## 判断の記録（Decisions）

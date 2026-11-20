@@ -1,0 +1,416 @@
+<title>NetGD 実機タスク</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; each task is a numbered step list (a real sequence), with a status chip and a fill-in table where the user records results. */
+:root {
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --ink: #17202a;
+  --muted: #5a6673;
+  --line: #d9dfe5;
+  --accent: #e2561b;      /* Dreamcast swirl orange */
+  --accent-soft: #fde9df;
+  --ok: #1f7a4d;
+  --ok-soft: #dff2e8;
+  --wait: #8a5a00;
+  --wait-soft: #fbefd2;
+  --danger: #b42318;
+  --danger-soft: #fde4e1;
+  --code-bg: #eef1f4;
+  --font-body: "IBM Plex Sans JP", "Hiragino Sans", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161b; --surface: #1a2027; --ink: #e6ebf0; --muted: #9aa6b2; --line: #2c353f;
+    --accent: #ff7a3d; --accent-soft: #3a2116; --ok: #5fd39a; --ok-soft: #13301f;
+    --wait: #f2c45c; --wait-soft: #33290f; --danger: #ff8a7a; --danger-soft: #3a1714; --code-bg: #232b33;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161b; --surface: #1a2027; --ink: #e6ebf0; --muted: #9aa6b2; --line: #2c353f;
+  --accent: #ff7a3d; --accent-soft: #3a2116; --ok: #5fd39a; --ok-soft: #13301f;
+  --wait: #f2c45c; --wait-soft: #33290f; --danger: #ff8a7a; --danger-soft: #3a1714; --code-bg: #232b33;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-body);
+  font-size: 15px; line-height: 1.75;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+.wrap { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
+h1, h2, h3 { line-height: 1.35; text-wrap: balance; margin: 0; }
+h1 { font-size: 1.75rem; font-weight: 700; }
+h2 { font-size: 1.3rem; font-weight: 700; }
+h3 { font-size: 1.02rem; font-weight: 700; }
+p { margin: 0; }
+a { color: var(--accent); }
+code, kbd, .mono { font-family: var(--font-mono); font-size: 0.9em; }
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; margin: 0; font-size: 0.85rem; line-height: 1.6; }
+pre code { background: none; padding: 0; }
+.lede { color: var(--muted); max-width: 65ch; }
+.eyebrow { font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
+
+/* overview */
+.overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.ov { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; text-decoration: none; color: inherit; }
+.ov:hover, .ov:focus-visible { border-color: var(--accent); }
+.ov .n { font-family: var(--font-mono); color: var(--accent); font-weight: 500; }
+.ov .t { font-weight: 700; }
+.ov .d { color: var(--muted); font-size: 0.88rem; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+@media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+
+/* task sections */
+section.task { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 22px 22px 24px; display: flex; flex-direction: column; gap: 16px; scroll-margin-top: 16px; }
+.task-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.task-head .num { font-family: var(--font-mono); font-size: 1.4rem; color: var(--accent); font-weight: 500; }
+.chip { font-size: 0.78rem; font-weight: 700; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+.chip.wait { background: var(--wait-soft); color: var(--wait); }
+.chip.go { background: var(--ok-soft); color: var(--ok); }
+.chip.after { background: var(--code-bg); color: var(--muted); }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 0.88rem; }
+.meta b { color: var(--ink); font-weight: 500; }
+
+.note { border-radius: 6px; padding: 10px 14px; font-size: 0.92rem; display: flex; flex-direction: column; gap: 4px; }
+.note.danger { background: var(--danger-soft); color: var(--ink); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); }
+.note.danger strong { color: var(--danger); }
+.note.info { background: var(--accent-soft); }
+
+ol.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; counter-reset: step; }
+ol.steps > li { counter-increment: step; display: grid; grid-template-columns: 26px 1fr; gap: 4px 10px; align-items: start; }
+ol.steps > li > input[type=checkbox] { width: 18px; height: 18px; margin-top: 5px; accent-color: var(--accent); cursor: pointer; }
+ol.steps > li > div { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+ol.steps > li > div > label { font-weight: 500; cursor: pointer; }
+ol.steps > li > div > label::before { content: counter(step) ". "; font-family: var(--font-mono); color: var(--muted); }
+ol.steps > li.done > div > label { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+.sub { color: var(--muted); font-size: 0.9rem; }
+ul.plain { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 2px; }
+
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { background: var(--code-bg); font-weight: 700; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td input[type=text] { width: 100%; min-width: 120px; font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--ink); }
+td input[type=text]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.answers { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; }
+.answers div { border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; font-size: 0.9rem; min-width: 0; }
+
+.btnrow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+button { font: inherit; font-weight: 500; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.status { font-size: 0.85rem; color: var(--muted); }
+textarea#out { width: 100%; min-height: 120px; font-family: var(--font-mono); font-size: 0.82rem; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+footer { color: var(--muted); font-size: 0.85rem; display: flex; flex-direction: column; gap: 4px; }
+@media (max-width: 480px) { section.task { padding: 16px; } h1 { font-size: 1.45rem; } }
+</style>
+
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:10px">
+    <div class="eyebrow">NetGD · GDEMU 6.0</div>
+    <h1>あなたにお願いしたい実機作業</h1>
+    <p class="lede">NetGD は、まだ実機で一度も動作を確かめていません。ここから先に進むには、手元の GDEMU 6.0 と Dreamcast を使った作業が必要です。
+      上から順に進めてください。チェックと記入した内容はこのブラウザに保存されます。最後に「結果をコピー」で Claude に渡してください。</p>
+  </header>
+
+  <nav class="overview" aria-label="作業の一覧">
+    <a class="ov" href="#task1"><span class="n">1</span><span class="t">純正 GDEMU をプローブで調べる</span><span class="d">配線なし。Dreamcast + BBA だけ</span><span class="bar"><i id="bar-1"></i></span></a>
+    <a class="ov" href="#task2"><span class="n">2</span><span class="t">テスターで導通を確認する</span><span class="d">電源を切った基板で。G1 の進め方が決まる</span><span class="bar"><i id="bar-2"></i></span></a>
+    <a class="ov" href="#task3"><span class="n">3</span><span class="t">SWD プローブを用意する</span><span class="d">最初の書き込み用。2 の結果が必要</span><span class="bar"><i id="bar-3"></i></span></a>
+  </nav>
+
+  <div class="note danger" role="note">
+    <strong>3つの作業すべてに共通する注意</strong>
+    <span>純正ファームは吸い出せず、消えたら元に戻せません。<b>ERASE パッド（MCU の 137 番ピン）に電圧をかけない</b>こと、純正に未知のコマンドを送らないことを守ってください。この3つの作業は、どれも純正ファームを消さずにできます。</span>
+  </div>
+
+  <!-- ===================== TASK 1 ===================== -->
+  <section class="task" id="task1" data-task="1">
+    <div class="task-head">
+      <span class="num">1</span>
+      <h2>純正 GDEMU をプローブで調べる</h2>
+      <span class="chip go">ツールあり（初回ビルドが検証）</span>
+    </div>
+    <div class="meta"><span>所要 <b>約 1〜2 時間</b>（初回）</span><span>場所 <b>DreamSDK のある PC + Dreamcast</b></span><span>手順書 <code>docs/research/stock-gdemu-flow.md</code></span></div>
+    <p>純正ファームの GDEMU が返す応答の「正解データ」を集めます。Dreamcast 上の小さなプログラム（<code>tools/gdprobe</code>）が GD-ROM に読み取り系のコマンドだけを送り、結果を BBA 経由で PC に保存します。</p>
+
+    <div class="answers" aria-label="この作業で分かること">
+      <div><b>応答の食い違い D-1〜D-5</b><br>NetGD が仕様や Flycast と違う5点を、純正に合わせるべきか決められる</div>
+      <div><b>2トラック CDI のセッション2</b><br>selfboot の CDI が起動するかに関わる（D-1）</div>
+      <div><b><code>0x52</code> の実際の挙動</b><br>バージョン応答、切替後のエラーの並び、READY までの時間</div>
+      <div><b>本家の性能の基準値</b><br>読み込み速度、シーク時間（G3 の比較相手）</div>
+    </div>
+
+    <h3>準備するもの</h3>
+    <ul class="plain">
+      <li>DreamSDK が入った PC と、あなたの <a href="https://github.com/iwa-kasoutuuuuuka/Dreamcast-Dev-Tools-for-BBA" target="_blank" rel="noopener">Dreamcast-Dev-Tools-for-BBA</a></li>
+      <li>Dreamcast、ブロードバンドアダプタ（HIT-0400 / 0401）、LAN ケーブル</li>
+      <li>GDEMU 6.0（純正ファームのまま）</li>
+      <li><b>調査用の SD カードを別に1枚</b>（MBR パーティションありの FAT32。普段使いのカードは変えない）</li>
+    </ul>
+
+    <h3>調査用 SD カードの中身</h3>
+    <div class="tbl"><table>
+      <thead><tr><th class="num">フォルダ</th><th>中身</th><th>分かること</th></tr></thead>
+      <tbody>
+        <tr><td class="num">01</td><td>GDmenu か openMenu</td><td>メニュー</td></tr>
+        <tr><td class="num">02</td><td>dcload-ip のディスク（固定 IP 版。<code>make_dcload_disc.ps1</code> で作れる）</td><td>プローブを送り込むため</td></tr>
+        <tr><td class="num">03</td><td>GD-ROM のゲーム（GDI）</td><td>セッション数（D-4）、速度、シーク時間</td></tr>
+        <tr><td class="num">04</td><td><b>トラック2本の CDI</b>（音声 + データ。selfboot のホームブリューなど）</td><td>セッション2を返すか（D-1）</td></tr>
+        <tr><td class="num">05</td><td>トラック3本以上の CDI</td><td>D-1 の対照、lead-out（D-5）</td></tr>
+        <tr><td class="num">06</td><td>CD 音声トラックのある GDI（あれば）</td><td>GET_SCD の形式（D-2）、REQ_STAT（D-3）</td></tr>
+        <tr><td class="num">07</td><td><b>空のフォルダ</b></td><td>イメージが無いとき純正がどう応答するか</td></tr>
+      </tbody>
+    </table></div>
+    <p class="sub">イメージは自分で所有するディスクから作ったもの、または配布が許されたホームブリューだけを使ってください。SD に入れたのと同じファイルを PC にも残しておくと、読み出したデータの照合ができます。</p>
+
+    <ol class="steps">
+      <li><input type="checkbox" id="t1-1"><div><label for="t1-1">調査用 SD カードを上の表のとおりに用意する</label></div></li>
+      <li><input type="checkbox" id="t1-2"><div><label for="t1-2">DreamSDK の PC で NetGD を最新にする</label><pre><code>git clone https://github.com/iwa-kasoutuuuuuka/NetGD.git
+# すでにある場合は
+git pull</code></pre></div></li>
+      <li><input type="checkbox" id="t1-3"><div><label for="t1-3"><code>tools/gdprobe</code> をビルドして <code>gdprobe.elf</code> を作る</label><pre><code>$env:BBA_TOOLS = 'H:\DC\tools\dc-bba-tools'   # Dreamcast-Dev-Tools-for-BBA の場所
+.\tools\gdprobe\build.ps1                      # gdprobe.elf と host\gdprobe.cfg ができる</code></pre><span class="sub">詳しくは <code>tools/gdprobe/README_ja.md</code>。<b>エラーが出たら、出力を全部 Claude に貼ってください</b>。このリポジトリの PC では KOS をビルドできないため、初回のビルドがそのまま検証になります。</span></div></li>
+      <li><input type="checkbox" id="t1-4"><div><label for="t1-4">設定ファイル <code>tools\gdprobe\host\gdprobe.cfg</code> を書く</label><span class="sub"><b>1回目は切替なし</b>で、プローブが正しく動くかだけを確かめます。</span><pre><code>label=stock          # 機器の名前（純正は stock、NetGD は netgd）
+switch=off           # 1回目は切替なし（dcload-ip のディスクだけを調べる）</code></pre><span class="sub">1回目の記録がおかしくなければ、2回目は <code>switch=on</code>・<code>images=3</code> だけで切替を試し、3回目に <code>images=3,4,5,6,7</code>・<code>return_to=2</code> に広げます。</span></div></li>
+      <li><input type="checkbox" id="t1-5"><div><label for="t1-5">PC と Dreamcast を BBA で直結し、ネットワークを設定する</label><span class="sub">初回だけ、管理者の PowerShell で <code>scripts\setup_pc_network.ps1</code>（あなたのツール）。</span></div></li>
+      <li><input type="checkbox" id="t1-6"><div><label for="t1-6">Dreamcast を起動 → メニューで <code>02</code>（dcload-ip）を選ぶ → 画面に IP が出るまで待つ</label><span class="sub">前に別のプログラムを途中で止めていた場合は、電源を5秒以上切ってから始めてください（dcload-ip の noexec 対策）。</span></div></li>
+      <li><input type="checkbox" id="t1-7"><div><label for="t1-7"><code>dc_auto</code> でプローブを実行する</label><pre><code>.\dc_auto.bat -Preset gdprobe</code></pre><span class="sub">プリセットは <code>tools/gdprobe/profiles/gdprobe.ps1</code> をあなたのツールの <code>profiles\</code> にコピーして使います。<code>dc_run</code> で <code>gdprobe.elf</code> を直接送っても構いません。</span></div></li>
+      <li><input type="checkbox" id="t1-8"><div><label for="t1-8">記録ファイル（<code>tools\gdprobe\host\gdprobe_stock_&lt;日時&gt;.txt</code>）を Claude に渡す</label><span class="sub">NetGD の <code>docs/research/probe-records/</code> に置いて push するか、チャットに貼ってください。イメージそのものは置かないでください。</span></div></li>
+    </ol>
+  </section>
+
+  <!-- ===================== TASK 2 ===================== -->
+  <section class="task" id="task2" data-task="2">
+    <div class="task-head">
+      <span class="num">2</span>
+      <h2>テスターで導通を確認する</h2>
+      <span class="chip go">いつでもできる</span>
+    </div>
+    <div class="meta"><span>所要 <b>約 1 時間</b></span><span>道具 <b>導通ブザー付きテスター、先の細いプローブ、ルーペ</b></span><span>写真 <code>docs/boards/gdemu60/top.jpg</code></span></div>
+    <p>基板の表記が無いヘッダが、MCU（U1：ATSAM3U2E）のどのピンにつながっているかを調べます。これで SWD（書き込み）・UART（ログ）・ERASE パッドの場所と、FPGA の起動方式の手がかりが分かり、GDEMU 6.0 対応（G1）の進め方が決まります。</p>
+
+    <div class="note danger" role="note">
+      <strong>電源を切った状態でだけ測る</strong>
+      <span>GDEMU を Dreamcast から外し、電源が入っていない状態で測ってください。ERASE につながるパッドが見つかっても、<b>そこに電圧をかけない</b>でください（純正ファームが消えます）。</span>
+    </div>
+
+    <h3>MCU のピン番号の数え方</h3>
+    <p>U1 は 144 ピンの LQFP です。チップの角にある丸いくぼみ（写真 <code>top.jpg</code> では U1 の右下、白い点の近く）の隣が <b>1 番</b>で、上から見て<b>反時計回り</b>に 1 辺 36 本ずつ数えます（1〜36、37〜72、73〜108、109〜144）。</p>
+
+    <h3>調べる MCU のピン</h3>
+    <p class="sub">ピン番号は SAM3U のデータシート（Atmel-6430G、表 4-1「144-lead LQFP Pinout」）から取りました。v5.5 クローンでの接続は上流の <code>docs/PCB.md</code> の記録です。</p>
+    <div class="tbl"><table>
+      <thead><tr><th class="num">ピン</th><th>信号</th><th>v5.5 での接続</th><th>何が分かるか</th></tr></thead>
+      <tbody>
+        <tr><td class="num">7</td><td>TMS / SWDIO</td><td>H1 の 4 番</td><td>SWD の場所</td></tr>
+        <tr><td class="num">9</td><td>TCK / SWCLK</td><td>H1 の 5 番</td><td>SWD の場所</td></tr>
+        <tr><td class="num">11</td><td>NRST</td><td>H1 の 6 番</td><td>リセット線</td></tr>
+        <tr><td class="num">1 / 4</td><td>TDI / TDO</td><td>H1 の 2 / 3 番</td><td>JTAG ヘッダかどうか</td></tr>
+        <tr><td class="num">133</td><td>PA11（UART 受信）</td><td>H4 の 1 番</td><td>ログの出口</td></tr>
+        <tr><td class="num">134</td><td>PA12（UART 送信）</td><td>H4 の 2 番</td><td>ログの出口</td></tr>
+        <tr><td class="num">137</td><td>ERASE</td><td>テストパッド</td><td>消去パッドの場所（<b>測るだけ</b>）</td></tr>
+        <tr><td class="num">103 / 105 / 106</td><td>PA23 / PA24 / PA25</td><td>FPGA の DATA0 / DCLK / nCONFIG</td><td>MCU が FPGA を起動しているか</td></tr>
+        <tr><td class="num">55 / 57</td><td>PB1 / PB2</td><td>FPGA の CONF_DONE / nSTATUS</td><td>同上</td></tr>
+        <tr><td class="num">101</td><td>PA20</td><td>ボタン</td><td>ピン配置が v5.5 と同じかの目安</td></tr>
+        <tr><td class="num">25</td><td>PB18</td><td>LED</td><td>同上</td></tr>
+        <tr><td class="num">18, 52, 60, 90, 126</td><td>GND</td><td>—</td><td>ヘッダの GND を見分ける</td></tr>
+        <tr><td class="num">17, 51, 85, 104, 127</td><td>VDDIO（3.3 V）</td><td>H1 の 1 番</td><td>ヘッダの 3.3 V を見分ける</td></tr>
+      </tbody>
+    </table></div>
+
+    <ol class="steps">
+      <li><input type="checkbox" id="t2-1"><div><label for="t2-1">GDEMU を Dreamcast から外し、電源が入っていないことを確かめる</label></div></li>
+      <li><input type="checkbox" id="t2-2"><div><label for="t2-2">U1 の 1 番ピンの位置を確かめる（ルーペで丸いくぼみを探す）</label></div></li>
+      <li><input type="checkbox" id="t2-3"><div><label for="t2-3">各ヘッダの各ピンについて、上の表のどの MCU ピンとつながるかをブザーで調べ、下の表に書く</label><span class="sub">ヘッダの 1 番は、写真 <code>top.jpg</code> の向き（「GDEMU 6.0」の文字が右）で、横に並ぶものは左端、縦に並ぶものは上端とします。どれにもつながらなければ「なし」と書いてください。</span></div></li>
+      <li><input type="checkbox" id="t2-4"><div><label for="t2-4">ERASE（137 番）とつながるパッドを両面から探し、場所を書く（電圧はかけない）</label></div></li>
+      <li><input type="checkbox" id="t2-5"><div><label for="t2-5">FPGA 起動用のピン（103・105・106・55・57）が、どこかにつながっているかを見る</label><span class="sub">FPGA（U2）は BGA なので、ボールに直接は当てられません。MCU のピンから出た配線やビア（小さな穴）がどこへ向かうかを、ルーペと写真で追ってください。<b>どこにもつながっていなければ、FPGA は内蔵メモリから自分で起動している</b>可能性が高くなります。分かった範囲で構いません。</span></div></li>
+      <li><input type="checkbox" id="t2-6"><div><label for="t2-6">「結果をコピー」を押して Claude に貼る</label></div></li>
+    </ol>
+
+    <h3>記入表</h3>
+    <div class="tbl"><table id="pins">
+      <thead><tr><th>ヘッダ</th><th class="num">ピン</th><th>つながる先（例：7 SWDIO / GND / 3.3V / なし）</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <div class="tbl"><table>
+      <thead><tr><th>項目</th><th>結果</th></tr></thead>
+      <tbody>
+        <tr><td>ERASE（137）のパッドの場所</td><td><input type="text" id="r-erase" placeholder="例：U1 の左下、表面の丸いパッド"></td></tr>
+        <tr><td>PA23 / PA24 / PA25 / PB1 / PB2 のつながり</td><td><input type="text" id="r-fpga" placeholder="例：5本とも U2 の方へビアで潜る / 未接続に見える"></td></tr>
+        <tr><td>PA20（ボタン）・PB18（LED）</td><td><input type="text" id="r-misc" placeholder="例：101 番がボタンにつながる"></td></tr>
+        <tr><td>その他、気づいたこと</td><td><input type="text" id="r-note" placeholder="例：8ピンの列は SD スロットにつながっている"></td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- ===================== TASK 3 ===================== -->
+  <section class="task" id="task3" data-task="3">
+    <div class="task-head">
+      <span class="num">3</span>
+      <h2>SWD プローブを用意する</h2>
+      <span class="chip after">2 の後</span>
+    </div>
+    <div class="meta"><span>所要 <b>約 30 分</b></span><span>費用 <b>Raspberry Pi Pico 1枚（数百円）とジャンパー線</b></span><span>詳細 <code>INSTALL.md</code> §2・§5</span></div>
+    <p>NetGD の最初の書き込みには SWD プローブが要ります（2回目以降は BBA 経由で更新できます）。ここでは準備と、<b>純正ファームを消さずにできる確認</b>までを行います。</p>
+
+    <div class="note danger" role="note">
+      <strong>この段階では ERASE をしない</strong>
+      <span>INSTALL.md の §6（純正ファームの消去）は、NetGD を書き込むと決めるまで行いません。ここで行う CHIPID の読み出しは、読み取りだけなので純正ファームには影響しません。</span>
+    </div>
+
+    <ol class="steps">
+      <li><input type="checkbox" id="t3-1"><div><label for="t3-1">Raspberry Pi Pico（または Pico 2、公式 Debug Probe）とメス‐メスのジャンパー線を用意する</label></div></li>
+      <li><input type="checkbox" id="t3-2"><div><label for="t3-2">Pico に debugprobe のファームを書き込む（2.2.0 以降）</label><span class="sub"><a href="https://github.com/raspberrypi/debugprobe/releases" target="_blank" rel="noopener">raspberrypi/debugprobe のリリース</a>から <code>debugprobe_on_pico.uf2</code>（Pico 2 は <code>_on_pico2</code>）を取得 → BOOTSEL を押しながら USB を挿す → 出てきたドライブにコピー。古い <code>picoprobe.uf2</code> は使えません。</span></div></li>
+      <li><input type="checkbox" id="t3-3"><div><label for="t3-3">PC に probe-rs を入れて、プローブが見えるか確かめる</label><span class="sub"><a href="https://github.com/probe-rs/probe-rs/releases" target="_blank" rel="noopener">probe-rs のリリース</a>から Windows 用の <code>probe-rs-tools</code> を取得して PATH に置きます。</span><pre><code>probe-rs list</code></pre></div></li>
+      <li><input type="checkbox" id="t3-4"><div><label for="t3-4">（2 で SWD の場所が分かったら）SWDIO・SWCLK・GND の3本をつなぐ</label><span class="sub">Pico の GP3 = SWDIO、GP2 = SWCLK、GND。<b>3.3 V はつながない</b>（基板の電源は Dreamcast から取る。INSTALL.md §4）。</span></div></li>
+      <li><input type="checkbox" id="t3-5"><div><label for="t3-5">Dreamcast の電源を入れ、CHIPID を読んでみる（読み取りだけ）</label><pre><code>probe-rs read --chip ATSAM3U4E --protocol swd b32 0x400e0740 1</code></pre><span class="sub"><b>どちらの結果でも分かることがあります。</b>ID（<code>0x281…</code>）が返れば、純正はフラッシュをロックしていません。「locked / not responding」なら、純正はロックしており、書き込みには ERASE が必要です。結果をそのまま Claude に貼ってください。</span></div></li>
+    </ol>
+  </section>
+
+  <!-- ===================== RESULT ===================== -->
+  <section class="task" id="result">
+    <div class="task-head"><h2>結果を Claude に渡す</h2></div>
+    <p>チェックの状況と記入表の内容をまとめた文章を作ります。コピーしてチャットに貼ってください。</p>
+    <div class="btnrow">
+      <button type="button" id="copy">結果をコピー</button>
+      <button type="button" class="ghost" id="reset">記入をすべて消す</button>
+      <span class="status" id="status" aria-live="polite"></span>
+    </div>
+    <div id="confirm" class="note danger" hidden>
+      <span>チェックと記入をすべて消します。元に戻せません。</span>
+      <div class="btnrow"><button type="button" id="reset-yes">消す</button><button type="button" class="ghost" id="reset-no">やめる</button></div>
+    </div>
+    <textarea id="out" readonly aria-label="Claude に渡す結果"></textarea>
+  </section>
+
+  <footer>
+    <span>NetGD — <a href="https://github.com/iwa-kasoutuuuuuka/NetGD" target="_blank" rel="noopener">github.com/iwa-kasoutuuuuuka/NetGD</a></span>
+    <span>ピン番号：Atmel SAM3U Series Datasheet（6430G）表 4-1。v5.5 の接続：<code>docs/PCB.md</code>。安全のルールと流れ：<code>docs/research/stock-gdemu-flow.md</code>。</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var KEY = "netgd-tasks-v1";
+  var HEADERS = [
+    { name: "上辺の 5 ピン", n: 5 },
+    { name: "MCU 上の 3 ピン", n: 3 },
+    { name: "SD 横の縦 8 ピン", n: 8 },
+    { name: "左の 2 ピン", n: 2 }
+  ];
+
+  // Build the header fill-in rows.
+  var tbody = document.querySelector("#pins tbody");
+  HEADERS.forEach(function (h, hi) {
+    for (var p = 1; p <= h.n; p++) {
+      var tr = document.createElement("tr");
+      var th = document.createElement("td");
+      th.textContent = p === 1 ? h.name : "";
+      var pn = document.createElement("td");
+      pn.className = "num";
+      pn.textContent = p;
+      var td = document.createElement("td");
+      var inp = document.createElement("input");
+      inp.type = "text";
+      inp.id = "h" + hi + "-" + p;
+      inp.setAttribute("aria-label", h.name + " " + p + " 番");
+      td.appendChild(inp);
+      tr.appendChild(th); tr.appendChild(pn); tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+  });
+
+  var fields = Array.prototype.slice.call(document.querySelectorAll("input[type=checkbox], input[type=text]"));
+
+  function load() {
+    var s = {};
+    try { s = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { s = {}; }
+    fields.forEach(function (f) {
+      if (!(f.id in s)) return;
+      if (f.type === "checkbox") f.checked = !!s[f.id]; else f.value = s[f.id];
+    });
+  }
+  function save() {
+    var s = {};
+    fields.forEach(function (f) { s[f.id] = f.type === "checkbox" ? f.checked : f.value; });
+    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { /* storage unavailable: page still works */ }
+  }
+  function refresh() {
+    document.querySelectorAll("section.task[data-task]").forEach(function (sec) {
+      var boxes = sec.querySelectorAll("ol.steps input[type=checkbox]");
+      var done = 0;
+      boxes.forEach(function (b) {
+        b.closest("li").classList.toggle("done", b.checked);
+        if (b.checked) done++;
+      });
+      var bar = document.getElementById("bar-" + sec.dataset.task);
+      if (bar) bar.style.width = (boxes.length ? Math.round(done / boxes.length * 100) : 0) + "%";
+    });
+    document.getElementById("out").value = summary();
+  }
+  function summary() {
+    var lines = ["NetGD 実機作業の結果", ""];
+    document.querySelectorAll("section.task[data-task]").forEach(function (sec) {
+      var title = sec.querySelector("h2").textContent;
+      var boxes = sec.querySelectorAll("ol.steps input[type=checkbox]");
+      var done = Array.prototype.filter.call(boxes, function (b) { return b.checked; }).length;
+      lines.push("[" + sec.dataset.task + "] " + title + "：" + done + "/" + boxes.length + " 完了");
+    });
+    lines.push("", "ヘッダの導通：");
+    HEADERS.forEach(function (h, hi) {
+      var vals = [];
+      for (var p = 1; p <= h.n; p++) {
+        var v = document.getElementById("h" + hi + "-" + p).value.trim();
+        vals.push(p + "=" + (v || "未記入"));
+      }
+      lines.push("- " + h.name + "：" + vals.join(", "));
+    });
+    [["r-erase", "ERASE パッド"], ["r-fpga", "FPGA 起動用ピン"], ["r-misc", "ボタン・LED"], ["r-note", "その他"]].forEach(function (r) {
+      lines.push("- " + r[1] + "：" + (document.getElementById(r[0]).value.trim() || "未記入"));
+    });
+    return lines.join("\n");
+  }
+
+  load();
+  refresh();
+  fields.forEach(function (f) {
+    f.addEventListener(f.type === "checkbox" ? "change" : "input", function () { save(); refresh(); });
+  });
+
+  var status = document.getElementById("status");
+  document.getElementById("copy").addEventListener("click", function () {
+    var text = summary();
+    var out = document.getElementById("out");
+    out.value = text;
+    var done = function () { status.textContent = "コピーしました。チャットに貼ってください。"; };
+    var fallback = function () { out.focus(); out.select(); status.textContent = "自動コピーできませんでした。選択された文章を Ctrl+C でコピーしてください。"; };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+      else fallback();
+    } catch (e) { fallback(); }
+  });
+  var confirmBox = document.getElementById("confirm");
+  document.getElementById("reset").addEventListener("click", function () { confirmBox.hidden = false; });
+  document.getElementById("reset-no").addEventListener("click", function () { confirmBox.hidden = true; });
+  document.getElementById("reset-yes").addEventListener("click", function () {
+    fields.forEach(function (f) { if (f.type === "checkbox") f.checked = false; else f.value = ""; });
+    save(); refresh();
+    confirmBox.hidden = true;
+    status.textContent = "記入を消しました。";
+  });
+})();
+</script>

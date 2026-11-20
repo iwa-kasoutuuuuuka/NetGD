@@ -44,7 +44,9 @@ flowchart LR
 ## ② プローブツールのビルド（DreamSDK のある PC）
 
 - ソース：`tools/gdprobe/`。KallistiOS 2.3.0 に合わせてある（ユーザーのフォーク KallistiOS-VisualNovel と同じ版）。
-- ビルド方法・設定ファイルの書き方：`tools/gdprobe/README_ja.md`。
+- ビルド方法・設定ファイルの書き方：`tools/gdprobe/README_ja.md`（設定の雛形は `gdprobe.cfg.example`）。
+- 作業の詳しい手順とチェック表：実機作業ガイド（Artifact）https://claude.ai/artifact/9gr3qLhDo54ME1XmiXuyDN （非公開。リポジトリにも `docs/research/user-tasks.html` として同じものを置く）。
+- `$env:BBA_TOOLS` に Dreamcast-Dev-Tools-for-BBA の場所を入れてから `.\tools\gdprobe\build.ps1`（`gdprobe.elf` と `host\gdprobe.cfg` ができる）。
 - このリポジトリの PC では KOS をビルドできないので、**初回のビルドでエラーが出たら、そのまま全文を Claude に渡す**。
 
 ## ③ SD カードの用意
@@ -84,7 +86,8 @@ flowchart LR
   「切替 → READY を待つ → 読み取り系の試験一式」を繰り返す。切替を無効にすると、dcload-ip のディスクだけを調べる。
 - 最後に `02`（dcload-ip のディスク）へ切り替えて戻しておくと、次の実行の準備になる。
 - 記録は `/pc/` 経由で PC のフォルダに保存される（4 KB ずつ書くので dcload-ip は固まらない）。
-- 記録ファイルの名前に、**機器（`stock` / `netgd`）・イメージ（フォルダ番号）・日付**が入るように設定する。
+- 記録は `tools\gdprobe\host\gdprobe_<label>_<日時>.txt`（時計が無ければ `seq<番号>`）。`label=stock` / `label=netgd` で機器を区別する。
+- **段階的に広げる**：1回目は `switch=off`（dcload-ip のディスクだけ）→ 2回目は `switch=on`・`images=3` → 3回目に `images=3,4,5,6,7`・`return_to=2`。
 
 ## ⑥ 記録の回収と比較
 
