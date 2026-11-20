@@ -19,6 +19,7 @@ static uint64_t rd1_count;
 uint64_t sim_cmd_reads, sim_sector_reads;
 int64_t sim_rflipn_cmd = -1;
 int sim_rflipn_every;
+int64_t sim_rflipn_from = -1;
 static uint64_t rdn_count;
 uint32_t sim_part_off, sim_protect_lba;
 uint64_t sim_violations;
@@ -71,6 +72,7 @@ int ngdev_read(uint32_t lba, uint32_t n, void *buf)
         size_t len = (size_t)n * 512;
         rdn_count++;
         if (sim_rflipn_cmd > 0 && (int64_t)rdn_count == sim_rflipn_cmd) ((uint8_t *)buf)[len / 2 + 5] ^= 0x01;
+        if (sim_rflipn_from > 0 && (int64_t)rdn_count >= sim_rflipn_from) ((uint8_t *)buf)[(rdn_count * 4099) % len] ^= (uint8_t)(1u << (rdn_count % 8));
         if (sim_rflipn_every) ((uint8_t *)buf)[(rdn_count * 4099) % len] ^= (uint8_t)(1u << (rdn_count % 8));
     }
     if (n == 1) {                                                   /* G1 read bit flips (only in what the app sees) */

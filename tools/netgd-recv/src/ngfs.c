@@ -82,25 +82,69 @@ static uint32_t clst2lba(DWORD clst)
    search starts at the first free cluster instead of walking the used front of the FAT a sector at
    a time. */
 #define NGFS_SCAN_SECTORS 256
-static int scan_fat(ngfs_scan_tick tick, void *ctx)
+
+/* The free-run table (see "run finder" below): the NGFS_NRUNS longest runs of free clusters seen by
+   the last full scan, kept up to date by the claims.  Filled by the same pass that counts. */
+#define NGFS_NRUNS 64
+typedef struct { uint32_t start, len; } run_t;
+static run_t g_runs[NGFS_NRUNS];
+static int g_nruns;
+static uint32_t g_runs_evicted;     /* the longest free run that is NOT in the table (0: the table is complete) */
+static int g_runs_stale;            /* clusters were freed since the scan: the table may lack runs */
+static ngfs_scan_tick g_alloc_tick;
+static void *g_alloc_ctx;
+
+static void runs_stale(void);
+static void note_overwrite(const char *path);
+static void runs_reset(void) { g_nruns = 0; g_runs_evicted = 0; g_runs_stale = 0; }
+
+static void runs_add(uint32_t start, uint32_t len)
+{
+    int mi = 0;
+    if (!len) return;
+    if (g_nruns < NGFS_NRUNS) { g_runs[g_nruns].start = start; g_runs[g_nruns].len = len; g_nruns++; return; }
+    for (int i = 1; i < g_nruns; i++) if (g_runs[i].len < g_runs[mi].len) mi = i;
+    if (len > g_runs[mi].len) {
+        if (g_runs[mi].len > g_runs_evicted) g_runs_evicted = g_runs[mi].len;
+        g_runs[mi].start = start; g_runs[mi].len = len;
+    } else if (len > g_runs_evicted) {
+        g_runs_evicted = len;
+    }
+}
+
+static inline int fat_free(const uint8_t *e) { return !(e[0] | e[1] | e[2] | (e[3] & 0x0F)); }
+
+/* mount: count = 1 seeds FatFs (free_clst, last_clst); a later rescan (the table ran dry) leaves
+   FatFs's own, always-current count alone.  Both rebuild the run table. */
+static int scan_fat(ngfs_scan_tick tick, void *ctx, int mount)
 {
     static uint8_t chunk[NGFS_SCAN_SECTORS * 512] __attribute__((aligned(32)));
     uint32_t nent = (uint32_t)g_fs.n_fatent;                  /* entries 0 .. nent-1; 0 and 1 are not clusters */
     uint32_t total = (uint32_t)(((uint64_t)nent * 4 + 511) / 512);
-    uint32_t nfree = 0, first_free = 0, ent = 0;
+    uint32_t nfree = 0, first_free = 0, ent = 0, rs = 0, rl = 0;
+    runs_reset();
+    if (!mount && tick) tick(ctx, 0, total);
     for (uint32_t done = 0; done < total;) {
         uint32_t n = total - done > NGFS_SCAN_SECTORS ? NGFS_SCAN_SECTORS : total - done;
-        if (ngblk_read_twice((uint32_t)g_fs.fatbase + done, n, chunk)) return -1;
+        if (ngblk_read_twice((uint32_t)g_fs.fatbase + done, n, chunk)) { runs_reset(); g_runs_stale = 1; return -1; }
         for (const uint8_t *e = chunk, *end = chunk + (size_t)n * 512; e < end && ent < nent; e += 4, ent++) {
-            if (ent < 2 || (e[0] | e[1] | e[2] | (e[3] & 0x0F))) continue;
-            if (!nfree++) first_free = ent;
+            if (ent >= 2 && fat_free(e)) {
+                if (!nfree++) first_free = ent;
+                if (!rl++) rs = ent;
+            } else if (rl) {
+                runs_add(rs, rl);
+                rl = 0;
+            }
         }
         done += n;
         if (tick) tick(ctx, done, total);
     }
-    g_fs.free_clst = nfree;
-    g_fs.fsi_flag |= 1;
-    if (first_free && (g_fs.last_clst < 2 || g_fs.last_clst >= nent)) g_fs.last_clst = first_free - 1;
+    if (rl) runs_add(rs, rl);
+    if (mount) {
+        g_fs.free_clst = nfree;
+        g_fs.fsi_flag |= 1;
+        if (first_free && (g_fs.last_clst < 2 || g_fs.last_clst >= nent)) g_fs.last_clst = first_free - 1;
+    }
     return 0;
 }
 
@@ -123,7 +167,7 @@ ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx)
         f_mount(NULL, "0:", 0);
         return NG_E_FS;
     }
-    if (scan_fat(tick, ctx)) {
+    if (scan_fat(tick, ctx, 1)) {
         snprintf(why, whyn, "cannot read the FAT (no two reads agree)");
         f_mount(NULL, "0:", 0);
         return NG_E_IO;
@@ -136,6 +180,8 @@ void ngfs_unmount(void)
 {
     if (g_mounted) f_mount(NULL, "0:", 0);
     g_mounted = 0;
+    g_alloc_tick = NULL;
+    g_alloc_ctx = NULL;
     ngdev_flush();
 }
 
@@ -334,6 +380,7 @@ ng_err_t ngfs_ckp_create(const char *dir, const ng_ckp_t *c)
     uint8_t b[512];
     snprintf(path, sizeof path, "%s/NETGD.CKP", dir);
     ckp_encode(c, b);
+    note_overwrite(path);
     r = f_open(&fp, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (r == FR_OK) r = f_write(&fp, b, 512, &bw);
     if (r == FR_OK && bw != 512) r = FR_DISK_ERR;
@@ -356,6 +403,7 @@ ng_err_t ngfs_ckp_delete(const char *dir)
     char path[NG_PATH_BUF];
     FRESULT r;
     snprintf(path, sizeof path, "%s/NETGD.CKP", dir);
+    note_overwrite(path);
     r = f_unlink(path);
     return (r == FR_OK || r == FR_NO_FILE) ? NG_OK : ngfs_map(r);
 }
@@ -367,6 +415,7 @@ ng_err_t ngfs_write_mf(const char *dir, const void *text, size_t n)
     UINT bw = 0;
     FRESULT r;
     snprintf(path, sizeof path, "%s/NETGD.MF", dir);
+    note_overwrite(path);
     r = f_open(&fp, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (r == FR_OK) r = f_write(&fp, text, (UINT)n, &bw);
     if (r == FR_OK && bw != n) r = FR_DENIED;
@@ -484,6 +533,7 @@ ng_err_t ngfs_delete_contents(const char *dir)
         while ((rc = find_entry(dir, order[i], name, sizeof name)) == 1) {
             FRESULT r;
             snprintf(path, sizeof path, "%s/%s", dir, name);
+            note_overwrite(path);
             r = f_unlink(path);
             if (r != FR_OK) return ngfs_map(r);
         }
@@ -497,7 +547,9 @@ ng_err_t ngfs_delete_image(const char *dir, int remove_dir)
     ng_err_t e = ngfs_delete_contents(dir);
     if (e) return e;
     if (remove_dir) {
-        FRESULT r = f_unlink(dir);
+        FRESULT r;
+        note_overwrite(dir);
+        r = f_unlink(dir);
         if (r != FR_OK) return ngfs_map(r);
     }
     return NG_OK;
@@ -579,13 +631,118 @@ ng_err_t ngfs_list(const char *folder, ng_list_cb cb, void *ctx)
 
 /* ------------------------------------------------------------------ allocation + data */
 
+/* ---- run finder -------------------------------------------------------------------------------
+   f_expand (FatFs's search for one contiguous run) walks the FAT from last_clst through get_fat and
+   FatFs's one-sector window: two read commands per FAT sector, up to ~61,000 on a large fragmented
+   or nearly full card, and no output.  So the search is done here, in bulk, and FatFs is only asked
+   to allocate at a place we know is free:
+     1. the mount scan leaves a table of the NGFS_NRUNS longest free runs (scan_fat);
+     2. a candidate run (best fit: the shortest one that is long enough) is CLAIMED: its FAT sectors
+        are read again, 256 per command, each read twice and CRC-compared (ngblk_read_twice), and the
+        first `need` consecutive free clusters in it are located (FatFs may have taken a cluster of it
+        since the scan: a directory, NETGD.MF ...); what is left of the run goes back into the table;
+     3. last_clst is set to that cluster and f_expand is called: it finds the run at once (it reads the
+        same entries once more through its own window: about two commands per 128 clusters of the file),
+        marks the chain, and keeps free_clst / last_clst / the FAT copies the way FatFs always does.
+        FatFs does the allocation, so nothing here writes the FAT;
+     4. no candidate: if nothing was freed since the scan (g_runs_stale) and every run the table does not
+        hold is shorter than `need`, there is no run: NG_E_FRAG without touching FatFs.  Otherwise the
+        table is rebuilt by a full bulk scan (progress lines through ngfs_set_scan_progress) and 2. is
+        tried once more; a table that still holds no run is final.
+   The table is only a hint: a wrong entry costs a bulk read, never a wrong allocation (claims read the
+   FAT again; f_expand reads it again).  Entries are exact or too optimistic, never pessimistic, until a
+   cluster is freed: unlink / truncation set g_runs_stale. */
+
+void ngfs_set_scan_progress(ngfs_scan_tick tick, void *ctx) { g_alloc_tick = tick; g_alloc_ctx = ctx; }
+
+static void runs_stale(void) { g_runs_stale = 1; }
+
+/* The first `need` consecutive free clusters inside the table entry `idx`.  The entry leaves the table;
+   the free pieces of it that were looked at and are not the answer, and the unread rest, go back.
+   1 found (*at), 0 none in it, -1 read error. */
+static int claim_in_run(int idx, uint32_t need, uint32_t *at)
+{
+    static uint8_t chunk[NGFS_SCAN_SECTORS * 512] __attribute__((aligned(32)));
+    uint32_t cl = g_runs[idx].start, end = g_runs[idx].start + g_runs[idx].len;
+    uint32_t cs = 0, cn = 0;                       /* the free piece in progress */
+    int found = 0;
+    g_runs[idx] = g_runs[--g_nruns];
+    while (cl < end && !found) {
+        uint32_t s0 = cl / 128, s1 = (end - 1) / 128;
+        uint32_t n = s1 - s0 + 1 > NGFS_SCAN_SECTORS ? NGFS_SCAN_SECTORS : s1 - s0 + 1;
+        uint32_t lim = (s0 + n) * 128 < end ? (s0 + n) * 128 : end;
+        if (ngblk_read_twice((uint32_t)g_fs.fatbase + s0, n, chunk)) { runs_stale(); return -1; }
+        for (; cl < lim; cl++) {
+            if (fat_free(chunk + (size_t)(cl - s0 * 128) * 4)) {
+                if (!cn++) cs = cl;
+                if (cn == need) { found = 1; cl++; break; }
+            } else if (cn) {
+                runs_add(cs, cn);
+                cn = 0;
+            }
+        }
+    }
+    if (found) { *at = cs; runs_add(cl, end - cl); }
+    else if (cn) runs_add(cs, cn);
+    return found;
+}
+
+/* the table entry to try: the shortest one with len >= need; -1 none */
+static int best_run(uint32_t need)
+{
+    int bi = -1;
+    for (int i = 0; i < g_nruns; i++)
+        if (g_runs[i].len >= need && (bi < 0 || g_runs[i].len < g_runs[bi].len)) bi = i;
+    return bi;
+}
+
+/* Where a run of `need` clusters is free: 1 *at, 0 there is none, -1 error, -2 unknown (use FatFs). */
+static int find_run(uint32_t need, uint32_t *at)
+{
+    int rescanned = 0;
+    for (;;) {
+        int i = best_run(need);
+        if (i >= 0) {
+            int r = claim_in_run(i, need, at);
+            if (r) return r;
+            continue;
+        }
+        if (!g_runs_stale && g_runs_evicted < need) return 0;
+        if (rescanned) return g_runs_evicted >= need ? -2 : 0;
+        if (scan_fat(g_alloc_tick, g_alloc_ctx, 0)) return -1;
+        rescanned = 1;
+    }
+}
+
+/* a file or folder that exists is about to lose its clusters (overwrite / truncate / delete) */
+static void note_overwrite(const char *path)
+{
+    FILINFO fno;
+    if (f_stat(path, &fno) == FR_OK && (fno.fsize || (fno.fattrib & AM_DIR))) runs_stale();
+}
+
 ng_err_t ngfs_alloc_file(const char *path, uint32_t size, int allow_frag, int *fragmented)
 {
     FIL fp;
-    FRESULT r = f_open(&fp, path, FA_CREATE_ALWAYS | FA_WRITE);
+    FRESULT r;
+    note_overwrite(path);
+    r = f_open(&fp, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (r != FR_OK) return ngfs_map(r);
     if (size) {
-        r = f_expand(&fp, size, 1);
+        uint32_t cb = (uint32_t)g_fs.csize * 512;
+        uint32_t need = (uint32_t)(((uint64_t)size + cb - 1) / cb), at = 0;
+        DWORD hint = g_fs.last_clst;
+        int f = find_run(need, &at);
+        if (f < 0 && f != -2) { f_close(&fp); return ng_diskio_bus_error ? NG_E_BUS : NG_E_IO; }
+        if (f == 1) {
+            g_fs.last_clst = at;                           /* f_expand starts its search here */
+            r = f_expand(&fp, size, 1);
+            if (r != FR_OK) g_fs.last_clst = hint;
+        } else if (f == 0) {
+            r = FR_DENIED;                                 /* no run on the card: what f_expand would say, after minutes */
+        } else {
+            r = f_expand(&fp, size, 1);                    /* the table gave out: FatFs's own search */
+        }
         if (r == FR_DENIED) {
             if (!allow_frag) { f_close(&fp); return NG_E_FRAG; }
             r = f_lseek(&fp, size);                         /* chain by chain: fragmented */

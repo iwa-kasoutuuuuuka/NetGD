@@ -8,7 +8,7 @@
      test_host hang                       (never returns: for the time-limit test of run_tests.py)
    options: --cut N --ckp N --read N --readback 0|1 --slow --flip K --caps C --frag --force
             --stopafter N --pollms N --quiet --rflip K --rflip-all --rflipn K --rflipn-all --mountms N
-            --ua --failend2 */
+            --ua --failend2 --rflipn-from K --headroom BYTES */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +33,7 @@
 extern void (*ng_pc_cfg_hook)(void);
 extern ngblk_stats_t ngblk_stats;
 
-static struct { long ckp, read; int readback, slow, frag, force; long mountms; } opt = { -1, -1, -1, 0, 0, 0, -1 };
+static struct { long ckp, read; int readback, slow, frag, force; long mountms; long headroom; } opt = { -1, -1, -1, 0, 0, 0, -1, -1 };
 
 static void cfg_hook(void)
 {
@@ -43,6 +43,7 @@ static void cfg_hook(void)
     if (opt.slow) ng_cfg.force_slow = 1;
     if (opt.frag) ng_cfg.allow_frag = 1;
     if (opt.force) ng_cfg.force = 1;
+    if (opt.headroom >= 0) ng_cfg.headroom = (uint32_t)opt.headroom;
     if (opt.mountms >= 0) ng_cfg.mount_line_ms = (uint32_t)opt.mountms;
 }
 
@@ -286,6 +287,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
         else if (!strcmp(argv[i], "--rflipn")) sim_rflipn_cmd = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--rflipn-all")) sim_rflipn_every = 1;
+        else if (!strcmp(argv[i], "--rflipn-from")) sim_rflipn_from = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--headroom")) opt.headroom = atol(argv[++i]);
         else if (!strcmp(argv[i], "--mountms")) opt.mountms = atol(argv[++i]);
         else if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
         else if (!strcmp(argv[i], "--failend2")) sim_fail_end2 = 1;

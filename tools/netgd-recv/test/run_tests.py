@@ -1019,6 +1019,196 @@ class TestHardening(Base):
         self.assertEqual(names, ["D%03d" % i for i in range(40)], run.text)
 
 
+
+class TestRunFinder(Base):
+    """The search for a contiguous free run (ngfs.c "run finder"): bulk reads of the FAT, not FatFs's
+    one-sector window.  Cards here are built by writing the FAT directly: every cluster used except the
+    free ranges asked for (clusters nobody references: only the app's own view of the card matters)."""
+
+    sectors = 400000                    # 195 MiB, 512-byte clusters: 390,000 clusters, a FAT of 3,050 sectors
+    cluster = 512
+    HEAD = ("--headroom", "0", "--readback", "0")
+    fat_ref = TestHardening.fat_ref
+    poke_fat = TestHardening.poke_fat
+    statfs = TestHardening.statfs
+    write_job = TestHardening.write_job
+
+    def layout(self, free_ranges):
+        """a card whose only free clusters are the (first, count) ranges; returns (img, ncl)"""
+        img = self.mkimage("run.img")
+        ncl = self.fs(img).ncl
+        used = [0x0FFFFFFF] * (ncl + 2 - 3)
+        for first, cnt in free_ranges:
+            assert 3 <= first and first + cnt <= ncl + 2, (first, cnt, ncl)
+            for c in range(first, first + cnt):
+                used[c - 3] = 0
+        self.poke_fat(img, 3, used)
+        return img, ncl
+
+    def sizes(self):
+        """the test image and the clusters each file needs (descriptor first)"""
+        sz = (300 * 2352, 100 * 2352, 100 * 2048)
+        gdi = self.make_gdi("s", sizes=sz)
+        want = [os.path.getsize(gdi)] + list(sz)
+        return gdi, [(w + 511) // 512 for w in want]
+
+    def put(self, img, gdi, name, *opts, job="j"):
+        self.prepare(gdi, job, name)
+        return self.run_app(img, job, *(self.HEAD + opts))
+
+    def base_cmds(self, img):
+        return self.statfs(img).n("rcmds")
+
+    def probe_ncl(self):
+        return self.fs(self.mkimage("probe.img")).ncl
+
+    def cluster_ok(self, fc, folder, lo, hi):
+        files = fc.folder_files("/" + folder)
+        self.assertEqual(sorted(n.lower() for n in files),
+                         ["disc.gdi", "netgd.mf", "track01.bin", "track02.raw", "track03.bin"])
+        for n in files:
+            if n.lower() == "netgd.mf":
+                continue
+            p = "/%s/%s" % (folder, n)
+            self.assertEqual(fc.runs(p), 1, p + " is not one run")
+            ch = fc.files[p]["chain"]
+            if n.lower() != "disc.gdi":
+                self.assertTrue(lo <= ch[0] and ch[-1] < hi,
+                                "%s at %d..%d outside the run %d..%d" % (p, ch[0], ch[-1], lo, hi))
+
+    def test_run_far_into_the_fat(self):
+        gdi, need = self.sizes()
+        total = sum(need[1:])
+        ncl = self.probe_ncl()
+        holes = [(3 + 7 * i, 3) for i in range(100)]                 # small holes in the front: no use
+        run_at = int(ncl * 0.85)
+        img, ncl = self.layout(holes + [(run_at, total + 4)])
+        base = self.base_cmds(img)
+        run = self.put(img, gdi, "FAR")
+        self.assertEqual(run.rc, 0, run.text)
+        fc = self.fs(img)
+        self.assertEqual(fc.errors, [])
+        self.cluster_ok(fc, "FAR", run_at, run_at + total + 4)
+        delta = run.n("rcmds") - base
+        print("\nrun far in the FAT (%d FAT sectors): %d read commands for the put beyond the mount scan"
+              % (self.fat_ref(img)[1], delta), file=sys.stderr)
+        self.assertLess(delta, 400, run.text)
+        self.assertEqual(run.has("NGD:ALLOC"), [], "the mount scan's table answers: no second scan")
+        self.assertEqual(run.n("rdmis"), 0)
+
+    def test_nearly_full_card_has_no_run(self):
+        gdi, need = self.sizes()
+        total = sum(need)
+        holes = [(3 + 9 * i, 4) for i in range(total // 4 + 200)]  # plenty of free space, in pieces of 4
+        img, ncl = self.layout(holes)
+        base = self.base_cmds(img)
+        run = self.put(img, gdi, "FULL")
+        self.assertEqual(run.rc, 1, run.text)
+        self.assertTrue(run.has("NGD:ERROR 0001 code=EFRAG"), run.text)
+        delta = run.n("rcmds") - base
+        print("\nnearly full card (%d FAT sectors): EFRAG after %d read commands beyond the mount scan"
+              % (self.fat_ref(img)[1], delta), file=sys.stderr)
+        self.assertLess(delta, 200, run.text)          # the folder, NETGD.MF, NETGD.CKP made and removed again
+        self.assertLess(delta * 20, 2 * self.fat_ref(img)[1])
+        self.assertEqual(run.has("NGD:ALLOC"), [])
+        fc = self.fs(img)
+        self.assertEqual(fc.errors, [])
+        self.assertEqual(fc.visible_images(), {})
+        self.assertNotIn("/FULL", fc.dirs, "the folder made for the attempt is removed again")
+        # fragments allowed: the same card takes the image in pieces
+        self.set_mode("j", "resume")
+        open(os.path.join(self.jobdir("j"), "fragok.req"), "w").close()
+        run = self.run_app(img, "j", *self.HEAD)
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertEqual(self.fs(img).errors, [])
+
+    def test_run_exactly_at_the_end(self):
+        gdi, need = self.sizes()
+        total = sum(need[1:])
+        last = self.probe_ncl() + 2                                 # one past the last cluster
+        # a front hole for the folder, NETGD.MF, NETGD.CKP and disc.gdi; the tracks fit the end exactly
+        img, ncl = self.layout([(3, need[0] + 8), (last - total, total)])      # free space = exactly what is needed
+        run = self.put(img, gdi, "END")
+        self.assertEqual(run.rc, 0, run.text)
+        fc = self.fs(img)
+        self.assertEqual(fc.errors, [])
+        self.cluster_ok(fc, "END", last - total, last)
+        ends = sorted(fc.files["/END/" + n]["chain"][-1] for n in ("track01.bin", "track02.raw", "track03.bin"))
+        self.assertEqual(ends[-1], last - 1, "the last file ends at the last cluster of the volume")
+        self.assertEqual(run.has("NGD:ALLOC"), [], run.text)
+
+    def test_run_one_cluster_too_short_at_the_end(self):
+        gdi, need = self.sizes()
+        total = sum(need[1:])
+        last = self.probe_ncl() + 2
+        # enough free clusters in all (single ones scattered about), but no run of `total`
+        img, ncl = self.layout([(3, need[0] + 8), (last - total + 1, total - 1)] + [(1000 + 1000 * i, 1) for i in range(5)])
+        run = self.put(img, gdi, "SHORT")
+        self.assertEqual(run.rc, 1, run.text)
+        self.assertTrue(run.has("NGD:ERROR 0001 code=EFRAG"), run.text)
+
+    def test_bit_flip_during_the_run_search(self):
+        gdi, need = self.sizes()
+        total = sum(need[1:])
+        run_at = int(self.probe_ncl() * 0.6)
+        img, ncl = self.layout([(3, 12), (run_at, total + 4)])
+        chunks = (self.fat_ref(img)[1] + 255) // 256
+        clean = self.put(img, gdi, "FL0")
+        self.assertEqual(clean.rc, 0, clean.text)
+        self.assertEqual(clean.n("rdmis"), 0)
+        # a flip in each of the first reads after the mount scan: the claim's double read sees it, reads again
+        for k in (2 * chunks + 1, 2 * chunks + 2, 2 * chunks + 3, 2 * chunks + 4):
+            img, ncl = self.layout([(3, 12), (run_at, total + 4)])
+            run = self.put(img, gdi, "FL%d" % k, "--rflipn", str(k), job="jf%d" % k)
+            self.assertEqual(run.rc, 0, "rflipn %d\n%s" % (k, run.text))
+            self.assertEqual(run.n("rdmis"), 1, "flip %d not seen\n%s" % (k, run.text))
+            fc = self.fs(img)
+            self.assertEqual(fc.errors, [])
+            self.cluster_ok(fc, "FL%d" % k, run_at, run_at + total + 4)
+            self.assertEqual(run.n("rcmds"), clean.n("rcmds") + 2, "one mismatch: one chunk read twice again")
+
+    def test_persistent_flip_during_the_run_search_is_eio(self):
+        gdi, need = self.sizes()
+        total = sum(need[1:])
+        ncl = self.probe_ncl()
+        img, ncl = self.layout([(3, 12), (int(ncl * 0.6), total + 4)])
+        chunks = (self.fat_ref(img)[1] + 255) // 256
+        run = self.put(img, gdi, "PERS", "--rflipn-from", str(2 * chunks + 1))     # the mount scan is clean
+        self.assertEqual(run.rc, 1, run.text)
+        self.assertTrue(run.has("NGD:ERROR 0001 code=EIO"), run.text)
+        fc = self.fs(img)
+        self.assertEqual(fc.errors, [])
+        self.assertEqual(fc.visible_images(), {})
+        self.assertEqual((run.n("begin"), run.n("end")), (1, 1))
+
+    def test_space_freed_by_an_overwrite_is_found_by_a_second_scan(self):
+        # the whole free space is the old image: after the delete the mount's table knows nothing of it
+        gdi, need = self.sizes()
+        total = sum(need)
+        img, ncl = self.layout([(3, 24), (5000, total)])
+        run = self.put(img, gdi, "OLDIMG")
+        self.assertEqual(run.rc, 0, run.text)
+        fc = self.fs(img)
+        self.assertEqual(fc.errors, [])
+        free_left = sum(1 for c in range(2, ncl + 2) if fc.fat[c] == 0)
+        self.assertLess(free_left, 24, "the card must be full for this test")
+        gdi2 = self.make_gdi("s2", sizes=(300 * 2352, 100 * 2352, 100 * 2048), seed=9)
+        self.prepare(gdi2, "j2", "OLDIMG", mode="overwrite")
+        run = self.run_app(img, "j2", *self.HEAD)
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertTrue(run.has("NGD:ALLOC pct=100 fat_sectors="), run.text)
+        fc = self.fs(img)
+        self.assertEqual(fc.errors, [])
+        self.assertEqual(set(fc.visible_images()), {"/OLDIMG"})
+        for n in ("track01.bin", "track02.raw", "track03.bin"):
+            self.assertEqual(fc.runs("/OLDIMG/" + n), 1)
+
+    def test_alloc_lines_are_chatter_for_netgd_send(self):
+        res = jobmod.parse_result("NGD:HELLO app=1 fw=OGDM/1 caps=7 free=1 total=2\n"
+                                  "NGD:ALLOC pct=50\nNGD:ALLOC pct=100 fat_sectors=3050 ms=12\n")
+        self.assertEqual(res.malformed, [])
+
+
 if __name__ == "__main__":
     if "--full-sweep" in sys.argv:
         sys.argv.remove("--full-sweep")

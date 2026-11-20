@@ -86,6 +86,31 @@ static void mount_tick(void *ctx, uint32_t done, uint32_t total)
     }
 }
 
+/* The search for a contiguous run (ngfs_alloc_file) normally answers from the table the mount scan left,
+   and prints nothing.  When it has to read the whole FAT again (space was freed by an overwrite, or the
+   table ran out): "NGD:ALLOC pct=NN" like the MOUNT lines, and a closing "NGD:ALLOC pct=100
+   fat_sectors=N ms=T". */
+static mount_prog_t g_alloc_prog;
+
+static void alloc_tick(void *ctx, uint32_t done, uint32_t total)
+{
+    mount_prog_t *p = (mount_prog_t *)ctx;
+    uint32_t t = now(p->sk);
+    p->total = total;
+    if (!done) { p->t0 = p->tlast = t; return; }
+    if (done >= total) {
+        ng_emitf(p->sk, 0, "NGD:ALLOC pct=100 fat_sectors=%u ms=%u", (unsigned)total, (unsigned)(t - p->t0));
+        return;
+    }
+    if (t - p->tlast < ng_cfg.mount_line_ms) return;
+    p->tlast = t;
+    ng_emitf(p->sk, 1, "NGD:ALLOC pct=%u", (unsigned)((uint64_t)done * 100 / total));
+    if (p->sk->ui) {
+        ng_ui_t u = { "alloc", "searching the FAT for a free run", 0, 0, done, total, 0 };
+        p->sk->ui(p->sk->ctx, &u);
+    }
+}
+
 ng_err_t ng_session_open(const ng_sink_t *sk)
 {
     char why[96] = "";
@@ -362,6 +387,8 @@ ng_err_t ng_put(const ng_sink_t *sk, const char *tag, const ng_manifest_t *m, co
         e = ngfs_ckp_create(dir, &ck);
         if (e) goto fail_new;
         if (ng_phase_hook) ng_phase_hook("ckp_created");
+        g_alloc_prog.sk = sk;
+        ngfs_set_scan_progress(alloc_tick, &g_alloc_prog);
         for (int i = 0; i < n; i++) {
             int frag = 0;
             file_path(path, sizeof path, dir, m, i, ngp, 1);

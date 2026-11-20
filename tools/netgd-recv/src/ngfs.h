@@ -44,6 +44,10 @@ typedef struct {
    neither f_getfree nor FSInfo is ever the source of the free space (FF_FS_NOFSINFO stays 1).
    tick (may be NULL) is called after every command pair with the FAT sectors done / to do. */
 typedef void (*ngfs_scan_tick)(void *ctx, uint32_t done, uint32_t total);
+/* The same kind of callback for the search for a contiguous free run (ngfs_alloc_file): called only when
+   the run table from the mount scan cannot answer and the FAT is scanned again; (0, total) first, then
+   after every command pair, the last call has done == total.  NULL = silent. */
+void ngfs_set_scan_progress(ngfs_scan_tick tick, void *ctx);
 ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx);
 void ngfs_unmount(void);
 int ngfs_statfs(uint64_t *free_bytes, uint64_t *total_bytes, uint32_t *cluster_bytes);

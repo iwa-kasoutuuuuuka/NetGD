@@ -19,6 +19,7 @@ extern int64_t sim_rflip_cmd;        /* flip one bit in this (1-based) SINGLE-se
 extern int sim_rflip_every;         /* every single-sector read returns a different flipped bit (never stable) */
 extern int64_t sim_rflipn_cmd;      /* the same for the (1-based) MULTI-sector read command */
 extern int sim_rflipn_every;        /* every multi-sector read returns a different flipped bit */
+extern int64_t sim_rflipn_from;     /* the same, from this (1-based) multi-sector read on; <0 = never */
 extern uint64_t sim_cmd_reads, sim_sector_reads;   /* read commands / sectors read, of any size */
 extern uint64_t sim_violations;     /* refused writes */
 extern uint32_t sim_last_lba, sim_last_n, sim_last_fnv;
