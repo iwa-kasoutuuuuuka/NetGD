@@ -188,7 +188,8 @@ git pull</code></pre></div></li>
 switch=off           # 1回目は切替なし（dcload-ip のディスクだけを調べる）</code></pre><span class="sub">1回目の記録がおかしくなければ、2回目は <code>switch=on</code>・<code>images=3</code> だけで切替を試し、3回目に <code>images=3,4,5,6,7</code>・<code>return_to=2</code> に広げます。</span></div></li>
       <li><input type="checkbox" id="t1-5"><div><label for="t1-5">PC と Dreamcast を BBA で直結し、ネットワークを設定する</label><span class="sub">初回だけ、管理者の PowerShell で <code>scripts\setup_pc_network.ps1</code>（あなたのツール）。</span></div></li>
       <li><input type="checkbox" id="t1-6"><div><label for="t1-6">Dreamcast を起動 → メニューで <code>02</code>（dcload-ip）を選ぶ → 画面に IP が出るまで待つ</label><span class="sub">前に別のプログラムを途中で止めていた場合は、電源を5秒以上切ってから始めてください（dcload-ip の noexec 対策）。</span></div></li>
-      <li><input type="checkbox" id="t1-7"><div><label for="t1-7"><code>dc_auto</code> でプローブを実行する</label><pre><code>.\dc_auto.bat -Preset gdprobe</code></pre><span class="sub">プリセットは <code>tools/gdprobe/profiles/gdprobe.ps1</code> をあなたのツールの <code>profiles\</code> にコピーして使います。<code>dc_run</code> で <code>gdprobe.elf</code> を直接送っても構いません。</span></div></li>
+      <li><input type="checkbox" id="t1-7"><div><label for="t1-7"><code>dc_auto</code> でプローブを実行する</label><pre><code>cd $env:BBA_TOOLS
+.\dc_auto.bat -Preset E:\path\to\NetGD\tools\gdprobe\profiles\gdprobe.ps1</code></pre><span class="sub">プリセットは<b>コピーせず、フルパスで指定</b>してください（コピーするとプリセット内のパスがずれます）。<code>dc_run</code> で <code>gdprobe.elf</code> を直接送っても構いません。1回目（<code>switch=off</code>）は、dcload-ip の CDI を読むので設定に <code>cdread_flags=0x20</code> も書いておくと確実です。</span></div></li>
       <li><input type="checkbox" id="t1-8"><div><label for="t1-8">記録ファイル（<code>tools\gdprobe\host\gdprobe_stock_&lt;日時&gt;.txt</code>）を Claude に渡す</label><span class="sub">NetGD の <code>docs/research/probe-records/</code> に置いて push するか、チャットに貼ってください。イメージそのものは置かないでください。</span></div></li>
     </ol>
   </section>
