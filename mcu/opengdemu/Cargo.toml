@@ -61,6 +61,19 @@ ps-msb-first = []
 # logging code is part of what has to come out to fit.
 sam3u2e = ["embassy-atsam3/sam3u2e"]
 
+# Link the application for the resident boot region (design: docs/design/
+# fw-bootloader.md 2-5, option B-SD; format: tools/fwimage/FORMAT.md "Format
+# 3"): at 0x00082000 behind the 8 KB resident instead of at 0x00080000, with
+# the "NGAP" descriptor `.app_desc` at 0x00082100, the 4-byte `.image_crc`
+# trailer ending the image on a 512-byte boundary, VTOR written before `main`,
+# and clock init that accepts the clocks the resident already set up.
+# Selects `link/<part>_resident.x`. Without it the image is byte-for-byte the
+# one built before this feature existed. Works with every other feature:
+#   cargo build --release --features resident
+#   DEFMT_LOG=off cargo build --release --no-default-features --features board-v60,resident
+# Seal for flashing with `python tools/fwimage/fwimage.py seal <elf> -o <elf>`.
+resident = ["embassy-atsam3/resident"]
+
 # SD throughput benchmark at boot. Off by default: it takes ~6 s, which
 # delays the IDE task spawn past the point the DC starts issuing ATAPI
 # commands, and the console times out with a CDB-DRQ error.

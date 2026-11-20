@@ -750,6 +750,22 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：コードを読んだ結果とホストテスト（確認済み）／実機の挙動は一次資料の読解（未確認）。
 - 関連：`mcu/bootcore/`、`docs/design/fw-bootloader.md`。
 
+### R60 S2：アプリを 0x82000 にリンクする feature `resident`（Sonnet 実装、Opus が差分を確認）
+- 問い：常駐部の後ろ（0x82000）にアプリを置き、S1 の封印の約束（`.app_desc`・`.image_crc`）を満たし、既定のビルドを変えずにできるか。
+- 結論：できた。feature `resident` のときだけ `link/<part>_resident.x` を使う（既定の `link/*.x` は変更なし。設計書 2-5 は「その場で編集」と書いていたが、既定を変えないため別ファイルにした）。
+  - リンカスクリプト：FLASH は 0x82000〜（長さ 0x1E000）、`.app_desc` を 0x82100、`.image_pad`（0xFF で埋める）＋4 バイトの `.image_crc` で 512 バイト境界に終わる。ASSERT 4 つ（ベクタ表 ≤ 0x100、記述子 32 B、トレーラ 4 B、終わりが 512 の倍数）。
+  - `src/resident.rs`：`#[pre_init]` で VTOR = 0x82000（`.data`/`.bss` の初期化前。常駐部も書くが、プローブから直接起動しても動くよう二重に書く）、`global_asm!` で記述子（"NGAP"、版 1、長さと CRC は 0 で `fwimage` が埋める、ビットストリームの番地・長さ、種別と版）。
+  - クロック（`embassy-atsam3/src/clocks.rs`、`resident` のときだけ）：すでに同じ設定なら何もしない。PLLA か UPLL で動いていれば、PLLA を書き換える前に MCK を主発振に切り替える。`efc::init`（FWS=4）は繰り返しても無害なのでそのまま。
+  - CI：ファームのジョブに `resident`（4E）と `board-v60,resident`（2E、`DEFMT_LOG=off`）のビルドを追加（成果物は既定の ELF のまま）。
+- 根拠（Sonnet の測定、`llvm-nm`/`llvm-objdump`）：既定の 4E・2E・v60 はフラッシュの内容が変更前とバイト単位で同一。4E resident：ベクタ表 0x82000、`.app_desc` 0x82100、Reset 0x82121、`.image_crc` 0x92ffc（イメージ 69,632 B）、ビットストリームは 0x100000。
+  2E resident：ビットストリームはイメージ内（`.flash1` 0x92ee0）、イメージ 119,296 B（上限 122,880 B まで残り **3,584 B しかない**）。v60 resident（.rbf なし）：65,536 B、記述子のビットストリーム番地 0・種別 0。
+  `fwimage seal` が3つとも成功、4E は `fwimage build --format 3` → `inspect` が更新プログラムの検査を全部通過。`mcu/bootcore/examples/check_sealed_elf.rs` が3つとも OK（1ビット反転で失敗することも確認）。
+- Opus の追加：`resident` のビルドでは今のアプリ内更新（形式2、0x80000 から書く）が常駐部を消してしまうため、`fwupdate::handle` が武装を常に拒否するようにした（S5 まで）。
+- 指摘された設計上の点：(1) 4E では記述子の CRC とトレーラはプレーン0（コード）だけを覆い、プレーン1のビットストリームは覆わない（LZMA の展開と FPGA 自身の CRC だけが頼り）、
+  (2) `WDT_MR` は一度しか書けないので、常駐部が書いたらアプリの `wdt::disable()` は無視される。常駐部とアプリで合わせる必要がある、(3) 2E は空きが 3.5 KB しかない。
+- 信頼度：ビルドと ELF・`fwimage`・bootcore の検査で確認済み。**実機では未検証**（VTOR を移した状態での embassy の割り込み、クロックの早道、常駐部からのジャンプ）。CI はまだ GitHub で走らせていない。
+- 関連：`mcu/opengdemu/link/*_resident.x`・`src/resident.rs`・`src/fwupdate.rs`・`build.rs`・`Cargo.toml`、`mcu/embassy-atsam3/src/clocks.rs`、`.github/workflows/build.yaml`。
+
 ---
 
 ## 判断の記録（Decisions）

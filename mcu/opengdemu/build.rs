@@ -128,12 +128,16 @@ fn select_linker_script(out_dir: &Path) {
     } else {
         "sam3u4e"
     };
-    let src = format!("link/{part}.x");
+    // `resident`: the application behind the resident boot region, see
+    // link/<part>_resident.x. A different file, so the default layout cannot
+    // be touched by it.
+    let resident = std::env::var_os("CARGO_FEATURE_RESIDENT").is_some();
+    let src = if resident { format!("link/{part}_resident.x") } else { format!("link/{part}.x") };
     println!("cargo:rerun-if-changed={src}");
     let script = std::fs::read(&src).unwrap_or_else(|e| panic!("cannot read {src}: {e}"));
     std::fs::write(out_dir.join("memory.x"), script).expect("write memory.x");
     println!("cargo:rustc-link-search={}", out_dir.display());
-    println!("cargo:warning=part: {part}");
+    println!("cargo:warning=part: {part}{}", if resident { " (resident layout, app at 0x00082000)" } else { "" });
 
     // defmt's formatting is not free on a part with 28 KB less flash, and
     // DEFMT_LOG is read by defmt's own build script, so it cannot be set from

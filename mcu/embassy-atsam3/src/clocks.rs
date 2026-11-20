@@ -15,6 +15,17 @@ impl PowerManagementController {
     pub unsafe fn init(config: ClockConfig) {
         Self::disable_wp();
 
+        // Started by the resident boot region, which has already brought the
+        // clocks up (docs/design/fw-bootloader.md 2-5): if PLLA, MCK and the
+        // main oscillator are already what `config` asks for, there is nothing
+        // to do, and in particular PLLA must not be rewritten while MCK runs
+        // from it (a rewrite drops LOCKA and costs PLLACOUNT again).
+        #[cfg(feature = "resident")]
+        if Self::already_configured(&config) {
+            debug!("Clocks already set up");
+            return;
+        }
+
         pmc().ckgr_mor.modify(| _, w| { 
             // register "password"
             w.key().bits(0x37)   
@@ -53,6 +64,17 @@ impl PowerManagementController {
         // debug!("Waiting for MCK");
         while pmc().pmc_sr.read().moscsels().bit_is_clear() {}
 
+        // The clocks are not as wanted but MCK may be running from PLLA
+        // (a resident with other settings): move it to the main oscillator
+        // before PLLA is reprogrammed. Source first, prescaler afterwards, as
+        // for any switch to a slower clock; the main oscillator is running
+        // and selected by this point.
+        #[cfg(feature = "resident")]
+        if !pmc().pmc_mckr.read().css().is_slow_clk() && !pmc().pmc_mckr.read().css().is_main_clk() {
+            pmc().pmc_mckr.modify(|_, w| w.css().main_clk());
+            while pmc().pmc_sr.read().mckrdy().bit_is_clear() {}
+        }
+
         pmc().ckgr_pllar.modify(|_, w| unsafe {
             // required 1
             w.one().set_bit()
@@ -72,6 +94,26 @@ impl PowerManagementController {
         while pmc().pmc_sr.read().mckrdy().bit_is_clear() {}
 
         print_clock_info();
+    }
+
+    /// Main crystal running and selected, PLLA locked with the multiplier and
+    /// divider `config` asks for, MCK from PLLA with no prescaler.
+    #[cfg(feature = "resident")]
+    fn already_configured(config: &ClockConfig) -> bool {
+        let mor = pmc().ckgr_mor.read();
+        let sr = pmc().pmc_sr.read();
+        let pllar = pmc().ckgr_pllar.read();
+        let mckr = pmc().pmc_mckr.read();
+        mor.moscxten().bit_is_set()
+            && mor.moscsel().bit_is_set()
+            && sr.moscxts().bit_is_set()
+            && sr.moscsels().bit_is_set()
+            && sr.locka().bit_is_set()
+            && pllar.mula().bits() == config.plla.mul - 1
+            && pllar.diva().bits() == config.plla.div
+            && mckr.css().is_plla_clk()
+            && mckr.pres().bits() == 0
+            && sr.mckrdy().bit_is_set()
     }
 
     pub unsafe fn disable_wp() {

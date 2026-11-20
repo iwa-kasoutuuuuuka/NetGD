@@ -49,6 +49,19 @@ jobs:
           path: mcu/opengdemu/target/thumbv7m-none-eabi/release/opengdemu
           if-no-files-found: error
 
+      # The resident-boot layout (app linked at 0x82000, `.app_desc`,
+      # `.image_crc`) must keep linking on both parts. After the upload above:
+      # these overwrite the ELF in the shared target directory.
+      - name: Build opengdemu (resident layout, 4E)
+        working-directory: mcu/opengdemu
+        run: cargo build --release --features resident
+
+      - name: Build opengdemu (resident layout, 2E / board-v60)
+        working-directory: mcu/opengdemu
+        env:
+          DEFMT_LOG: "off"
+        run: cargo build --release --no-default-features --features board-v60,resident
+
   host-tests:
     name: Host tests (lzma, gamecfg, discimg, psload, bootcore, fwupdater)
     runs-on: ubuntu-latest

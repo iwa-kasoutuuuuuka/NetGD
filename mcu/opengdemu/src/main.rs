@@ -26,6 +26,8 @@ mod fwupdate;
 mod gdi;
 mod ide;
 mod sdcard;
+#[cfg(feature = "resident")]
+mod resident;
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 

@@ -96,6 +96,17 @@ static mut ARMED: bool = false;
 /// aborted. The enter step does not return at all.
 pub fn handle(features: u8, key: u64, label: &'static str) -> bool {
     let armed = unsafe { ARMED };
+    // Behind the resident boot region the embedded updater is still format 2
+    // with dest 0x80000: it would erase the resident. Never arm it until the
+    // updater learns format 3 (stage S5, docs/design/fw-bootloader.md 6-1).
+    #[cfg(feature = "resident")]
+    {
+        unsafe { ARMED = false };
+        warn!("{}: firmware update refused in the resident layout (step {:#04x}, armed={})", label, features, armed);
+        let _ = key;
+        return false;
+    }
+    #[allow(unreachable_code)]
     match features {
         FEAT_ARM if key == MAGIC_ARM => {
             unsafe { ARMED = true };
