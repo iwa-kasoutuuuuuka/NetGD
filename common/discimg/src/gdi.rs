@@ -8,9 +8,12 @@ use crate::{Error, Full, String, TrackDesc, TrackSink, Vec, VecSink, MAX_TRACKS}
 /// The sink is cleared first, so a failed parse cannot leave the previous
 /// image's tail behind. The first line (the track count) must be a number but
 /// is otherwise ignored; blank lines are skipped; the pregap column and
-/// anything after it is ignored.
+/// anything after it is ignored. A leading UTF-8 BOM is skipped. The file
+/// name is either a bare token or a double-quoted string, which may contain
+/// spaces (`"Track 01.bin"`); the quotes are not part of the name.
 pub fn parse<S: TrackSink>(data: &[u8], sink: &mut S) -> Result<(), Error<S::Error>> {
     sink.clear();
+    let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
     let mut lines = SplitLines::new(data);
 
     let header = lines.next().ok_or(Error::Parse)?;
@@ -26,7 +29,7 @@ pub fn parse<S: TrackSink>(data: &[u8], sink: &mut S) -> Result<(), Error<S::Err
         let start_lba = num(&mut fields)?;
         let ctrl = num(&mut fields)? as u8;
         let sector_size = num(&mut fields)? as u16;
-        let filename_raw = fields.next().ok_or(Error::Parse)?;
+        let filename_raw = fields.next_name().ok_or(Error::Parse)?;
         let _ = fields.next(); // pregap, ignored
 
         let filename = strip_quotes(filename_raw).ok_or(Error::Parse)?;
@@ -147,5 +150,25 @@ impl<'a> SplitWS<'a> {
             self.i += 1;
         }
         Some(&self.data[start..self.i])
+    }
+
+    /// The file-name field. A name that starts with `"` runs to the closing
+    /// quote (or the end of the line if there is none) and may hold blanks;
+    /// the returned slice excludes both quotes. Otherwise it is an ordinary
+    /// whitespace-delimited token (with any inner quotes still in it).
+    fn next_name(&mut self) -> Option<&'a [u8]> {
+        while self.i < self.data.len() && (self.data[self.i] == b' ' || self.data[self.i] == b'\t') {
+            self.i += 1;
+        }
+        if self.data.get(self.i) != Some(&b'"') {
+            return self.next();
+        }
+        let start = self.i + 1;
+        let mut end = start;
+        while end < self.data.len() && self.data[end] != b'"' {
+            end += 1;
+        }
+        self.i = if end < self.data.len() { end + 1 } else { end };
+        Some(&self.data[start..end])
     }
 }

@@ -824,6 +824,17 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   → GDI の書式対応の作業（同じ `gdi.rs` を触る可能性がある）が終わってから修正を割り当てる。
 - 信頼度：コードで確認済み（Opus が該当行を確認）。
 
+### R65 GDI の書式の違いへの対応（Sonnet、Opus は差分の範囲を確認）
+- 結論：`common/discimg/src/gdi.rs` で、`"` で始まるファイル名は閉じる `"` まで1つの名前（空白・タブを保持）、閉じない引用符は行末まで、空の `""` は空の名前、先頭の UTF-8 BOM を読み飛ばす。
+  引用符なしの名前、32 バイトの上限、エラー、プリギャップの扱いは不変。CRLF/LF・タブ・行末の空白・余分な欄・大文字小文字はもともと許容しており、テストで固定。`discimg` のテストはすべて通過。
+- 根拠：Flycast の `core/imgread/gdi.cpp`（引用符の中は空白を保持、エスケープなし、閉じない引用符はエラー）https://raw.githubusercontent.com/flyinghead/flycast/master/core/imgread/gdi.cpp 、
+  実在の GDI の例 https://forums.libretro.com/t/dreamcast-gdi-file/17787 、列の構成 https://multimedia.cx/eggs/?p=4745 （二次資料）。
+- **ファームは 8.3 の名前しか開けない**（`mcu/opengdemu/src/gdi.rs` の `Gdi::push` が `ShortFileName::create_from_str` を使い、空白や 8.3 に収まらない名前は `BadFilename`。カード上の `Track 01.bin` は `TRACK0~1.BIN` のような別名になり、GDI の文字列から導けない）。
+  → 今回の修正はホストのツールにだけ効く。ファームで長い名前を扱うには、ディレクトリ走査で LFN を照合する必要がある（小さな変更ではない、後続の課題）。`netgd-send` は改名して `disc.gdi` を書き直すので、BBA 経由で書いたカードは問題ない。
+- `tools/netgd-send/netgd_send/image.py`：引用符付きの名前は正規表現で対応済みだったが、BOM で `int()` が失敗していた → BOM を除去（3 行）、`TestParseGdi` を追加（7 件通過）。mksdcard は GDI を書くだけで読まない。
+- 未確認：netgd-send と mksdcard の全テストはこの PC では待ちきれず、CI に任せる。
+- 関連：`common/discimg/src/gdi.rs`・`tests/gdi.rs`、`tools/netgd-send/netgd_send/image.py`・`tests/test_netgd_send.py`。
+
 ---
 
 ## 判断の記録（Decisions）

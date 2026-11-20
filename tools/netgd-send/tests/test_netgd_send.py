@@ -98,6 +98,16 @@ class TestChunking(Tmp):
         self.assertEqual(table, {(1, 1024): 5, (3, 1024): 6, (3, 2048): 7})
 
 
+class TestParseGdi(unittest.TestCase):
+    def test_quoted_names_bom_crlf_tabs(self):
+        text = "ï»¿2 \r\n1 0 4 2352 \"Track 01.bin\" 0 \r\n\r\n2\t450\t0\t2352\ttrack02.raw\t0\r\n"
+        count, rows, nl = imgmod.parse_gdi(text)
+        self.assertEqual(count, 2)
+        self.assertEqual(rows[0][4], "Track 01.bin")
+        self.assertEqual(rows[1][4], "track02.raw")
+        self.assertEqual(nl, "\r\n")
+
+
 class TestNames(unittest.TestCase):
     def test_is_dos83(self):
         for ok in ("track01.bin", "DISC.GDI", "A", "a.b", "12345678.123", "T_1-2.raw"):

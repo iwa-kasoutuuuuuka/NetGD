@@ -113,6 +113,8 @@ class GdiImage(object):
 
 def parse_gdi(text):
     """Return (declared_count, [(number, lba, ctrl, sector, filename, offset)], newline)."""
+    if text.startswith("ï»¿"):  # UTF-8 BOM, read as latin-1
+        text = text[3:]
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = [l for l in text.splitlines() if l.strip()]
     if not lines:

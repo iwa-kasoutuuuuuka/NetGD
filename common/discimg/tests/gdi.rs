@@ -89,13 +89,49 @@ fn quoted_filename_without_spaces_loses_its_quotes() {
 }
 
 #[test]
-#[allow(non_snake_case)]
-fn quoted_filename_with_spaces_is_NOT_supported() {
-    // Fields split on whitespace before the quotes are looked at, so the
-    // name is cut at the first space and the rest lands in the (ignored)
-    // pregap column. Real GDIs from some dumpers do quote names with spaces.
-    let txt = "1\n1 0 4 2352 \"track 01.bin\" 0\n";
-    assert_eq!(parse_vec(txt.as_bytes()).unwrap()[0].filename.as_str(), "track");
+fn quoted_filename_with_spaces_is_one_name() {
+    // Some dumpers quote names that contain blanks.
+    let txt = "1\n1 0 4 2352 \"Track 01.bin\" 0\n";
+    assert_eq!(parse_vec(txt.as_bytes()).unwrap()[0], tr(1, 0, 4, 2352, "Track 01.bin"));
+    // Several blanks, a tab, no pregap column.
+    let t = parse_vec(b"1\n1 0 4 2352 \"a  b\tc.bin\"\n").unwrap();
+    assert_eq!(t[0].filename.as_str(), "a  b\tc.bin");
+    // Blanks inside the quotes are kept, even at the ends.
+    let t = parse_vec(b"1\n1 0 4 2352 \" x.bin \" 0\n").unwrap();
+    assert_eq!(t[0].filename.as_str(), " x.bin ");
+    // Extra trailing fields (quoted too) are ignored.
+    let t = parse_vec(b"1\n1 0 4 2352 \"T 1.bin\" 150 junk \"more junk\"\n").unwrap();
+    assert_eq!(t[0].filename.as_str(), "T 1.bin");
+}
+
+#[test]
+fn unterminated_and_empty_quoted_names() {
+    // No closing quote: the name runs to the end of the line (CR trimmed).
+    let t = parse_vec(b"1\r\n1 0 4 2352 \"Track 01.bin\r\n").unwrap();
+    assert_eq!(t[0].filename.as_str(), "Track 01.bin");
+    // An empty name is passed on as is; the sink decides what to do with it.
+    let t = parse_vec(b"1\n1 0 4 2352 \"\" 0\n").unwrap();
+    assert_eq!(t[0].filename.as_str(), "");
+}
+
+#[test]
+fn quoted_name_over_the_length_limit_fails() {
+    let long = format!("1\n1 0 4 2352 \"{} x\" 0\n", "a".repeat(31));
+    assert_eq!(parse_vec(long.as_bytes()), Err(Error::Parse));
+}
+
+#[test]
+fn bom_trailing_blanks_and_mixed_line_endings() {
+    let mut txt = b"\xEF\xBB\xBF3 \t\r\n".to_vec();
+    txt.extend_from_slice(b"1 0 4 2352 \"track01.bin\" 0 \t\r\n2 450 0 2352 track02.raw 0\n");
+    txt.extend_from_slice(b"3 45000 4 2352 \"track03.bin\" 0\r\n\r\n");
+    assert_eq!(parse_vec(&txt), parse_vec(GDI3.as_bytes()));
+}
+
+#[test]
+fn name_case_is_preserved() {
+    let t = parse_vec(b"1\n1 0 4 2352 TRACK01.BIN 0\n").unwrap();
+    assert_eq!(t[0].filename.as_str(), "TRACK01.BIN");
 }
 
 #[test]
@@ -202,7 +238,6 @@ fn agrees_with_the_original_parser_on_a_corpus() {
         b"\n",
         b"1\n",
         b"1\r\n1 0 4 2352 \"a.bin\" 0\r\n",
-        b"1\n1 0 4 2352 \"a b.bin\" 0\n",
         b"2\n  1 0 4 2352 a.bin\n\t2 5 0 2336 b.bin 0 x\n",
         b"1\n1 0 4 2352 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0\n",
         b"1\n1 99999999999 4 2352 a.bin 0\n",
