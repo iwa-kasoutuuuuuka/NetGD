@@ -235,8 +235,13 @@ class TestManifest(Tmp):
     def test_pc_path(self):
         p = jobmod.to_pc_path(self.path("a", "b.bin"))
         self.assertTrue(p.startswith("/pc/") and ":" not in p and "\\" not in p, p)
-        for bad in ("E:\\my games\\a.bin", "E:\\\u30b2\\a.bin", "\\\\srv\\share\\a.bin"):
-            with self.assertRaises(jobmod.JobError):
+        bads = ["E:\\my games\\a.bin", "E:\\\u30b2\\a.bin"]
+        # UNC paths only exist on Windows (dc-tool-ip's /pc/ is a Windows drive);
+        # on POSIX "\\srv\share" is just an odd relative file name.
+        if os.name == "nt":
+            bads.append("\\\\srv\\share\\a.bin")
+        for bad in bads:
+            with self.assertRaises(jobmod.JobError, msg=bad):
                 jobmod.to_pc_path(bad)
 
 
