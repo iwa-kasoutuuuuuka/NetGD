@@ -1116,6 +1116,31 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み（ビルド・テスト・コード）と推測が混在、表ごとに区別。実機は未検証。
 - 関連：`docs/research/fable-debug-2026-11-20.md`。修正はまだしていない。
 
+### R90 R89 の指摘の修正（ユーザー「全部」。Fable×2・Sonnet×2 を worktree で並列、Opus が統合）
+- 問い：R89（`fable-debug-2026-11-20.md`）の確認済みの指摘をすべて直す。担当ごとにファイルを分け、各自の worktree のブランチで作業→Opus が main にマージ（衝突なし）。
+- **ファーム `ide.rs`（Fable、573e95e5）**：
+  - A1 `wait_host` に自デバイスの新コマンドで抜ける `Stall::OwnCommand`。`aborted()`（リセット、または opcode ≠ 0 の pend）と `disarm()`（スロット 19 に 0）を足し、`stream_from_sd`・`stream_pio_from_sd`・`handle_disk_read`・`handle_disk_write`・`send_data_in` で状態・バイト数・IRR を書く前に確かめる。中断時は何も返さず次のコマンドへ。
+  - A2 DMA の CD_READ の途中の SD 失敗はエラー。**SD の失敗は両方の CD_READ で Error 0x34（MEDIUM ERROR、sense key 3＋ABRT）に**（従来 0x04。ホストの停止による失敗は 0x04 のまま）。
+  - A4 `ide_task` の開始時に `MEDIA_PRESENT = gdi_ref().is_some()`（起動時にイメージが無ければ NOT READY、ディスクへの書き込みは受け付ける）。A7 0x08・0xA0 は `Role::Packet` だけ。
+  - A8 書き込み FIFO の量が足りなければ CMD25 に流さず失敗／長さ 0 のデータ段階は DRQ なしで完了1回／`size_disk_from_mbr` に BPB の確認／既定のマウントの失敗（SUB_MOUNT の NO_SELECTION、`52 82 00 00`）は ILLEGAL REQUEST（GDmenu・openMenu には新しい挙動）。
+  - A-a FIFO の量を2回読み（書き込みは小さい方、`room()` は大きい方）。A-b リセット・新コマンドの後に状態・INTRQ を書かない。A-c `ide_task` は両デバイスに pend が無くなるまで見直す。**`ack_command` の取りこぼしは未修正**（スロット 0 が「1 を書く」レジスタで、FPGA の変更が要る）。
+- **ファームのそれ以外・discimg・fatmap（Sonnet、805f8c6f）**：A3 `resolve_long` は項目の生の 11 バイトを返す（`short_from_raw`、embedded-sdmmc 0.9.0 の `ShortFileName { contents: [u8; 11] }` への `transmute_copy`、サイズと整列をコンパイル時に確認。**クレートの版を上げるときは要確認**）。非 ASCII の名前は長い名前の照合を先に。
+  A5 セクタサイズは 2048/2336/2352 だけ（discimg とファーム）、0 除算なし。A6 `sd-bench`・`fpga-diag` がコンパイル可。A8 `MAX_GDI_BYTES` 4 KB → 12 KB（既存の 14 KB の `loader_scratch` から、RAM 増加なし）、溢れたら Parse／`lookup` の循環の上限／非 ASCII のフォルダ名の照合 `widened_eq`。
+  C3 CDI の版：v3.5 は末尾から、v3（0x80000005）は先頭から、v2 などは BadCdi（根拠は Flycast `cdipsr.cpp`、二次資料、実物の v3 では未確認）。C6 GDI の数値の範囲検査と先頭の空行。C7 `fat_next` はクラスタ数で範囲検査、`cluster_lba` は `Option`、fatmap の `checked_cluster_lba` と `Walk::Broken`。
+- **自己更新（Fable、4dc49750）**：B1 `fwimage build` は SP が対象の SRAM0 の終わりと一致しなければ `BadTarget`（`--any-sp`）、プレーン1の無い 4E は `NoBitstream`（`--code-only`）。B2 `sd_recover*` の最初に `set_fws(FWS_RUN)`、模型は FWS 未設定から。B3 プレーン1の最後の語も比較（`bitstream_is`）。B4 参照の修正。
+  B5 EWP のタイムアウトは戻らない（RAM のルーチンが `RSTC_CR`）。B6 GPBR0 の第2の値 `0xBCADB8B1`（復旧中）、見つけたら復旧せず REQ＋`RESULT_INTERRUPTED`(10)。B7 引き渡しで WDT_CR の巻き戻しを最初に（ジャンプの 100 µs 以上前）。B8 書いた復旧の失敗は1回の起動で3回まで（`Fallback::GiveUp`）。
+  B9 sizeprobe は FCR の前に毎回 FSR、`lock_bits` は FCMDE で None（sizeprobe 6,674 → 7,034 B、8 KB 以内）。B10 fwupdater の `resident`：ビット0を見ない、ページ 0〜31 の EWP なし、`RSTC_CR` でリセット（形式2は不変、2,188 → 2,196 B）。B11 FORMAT.md に 4E 形式2の2イメージの窓。B12 GLB の失敗は `LOCK_UNKNOWN`（GPBR1 ビット14）、アプリが有効なら今回の復旧は `LockUnknown`(6)。
+  取り決めの変更は `resident-app-contract.md` §10 の表。**`IFACE_GEN`・`DESC_VERSION` は 1 のまま**（常駐部もロックされた基板もまだ無く、区別すべき旧世代 1 が存在しないため）。
+- **G2 ツール（Sonnet、f51b58a9）**：C1 前回の `result.ngr` で `DONE ok` の put を `job.ngj` から外す（警告つき）。C2 古い `reload/force/fragok.req` を `prepare` で消す、`force.req` は止められなかった実行の後にアプリが消す。C3 `check_cdi` は v3・v3.5 だけ。C4 ドライブが違えば `JobError`（`--placement copy`）。C5 .gdi は `
+` で分け UTF-8→ANSI→latin-1。
+  C6 サイズの上限 0xFFFFFFFE と `ngfs.c` の 64 ビット計算。C8 空のファイルの直後での再開。C10 `f_expand` の失敗で領域を表に戻す。C11 GDEMU.CFG を最大 64 KiB まで全部読む。C12 名前のバッファ 256、入らなければ NG_E_IO。C13 ヒントなしの `f_expand` を呼ばず EFRAG。C-A 書き込みは1コマンド 128 セクタまで。
+- 確認（Opus、4つを合わせた main）：host テストは discimg・fatmap・gamecfg・sdfast・psload・lzma・bootcore（143）・fwupdater（15、`resident` も 15）・fwimage（55、3 skip）・netgd-recv（47）・netgd-send（52）・netgd-expect（10、1 skip）・gdprobe すべて通過。
+  ファームのビルドはすべて成功（text+data）：4E 162,548+144、4E `resident` 161,900+332、2E 122,244+156、v60 68,696+156、v60 `resident` 66,568+408、**2E `resident,sd-fast` 122,112+156 = 122,268（上限 122,368 まで残り 100 B）**。`cargo check` で `sd-fast,fpga-diag`・`sd-bench`・`sd-list` もエラー 0。
+- 注意：2E `resident,sd-fast` の残りは 100 B。次に機能を足すときは `flash-budget-2e.md` の案 2（`opt-level="z"`）か `handle`・`handle_packet` の `#[inline(never)]` を先に。`ide.rs` の修正は関数のインライン化の偶然で増減が隠れている（実費 約 +400 B）。
+- 信頼度：ビルドとホストテストは確認済み。実機は未検証。**実機で見ること**：転送中の新しいコマンドで止まる（A1）、CD_READ の失敗時の 0x34 への BIOS の反応、起動時にイメージが無いときの NOT READY、既定のマウントの失敗での GDmenu・openMenu の反応、副への 0x08 の ABRT。
+- Opus の検証：各ブランチの差分の範囲とマージ結果、全テスト・全ビルドを確認。`short_from_raw` の前提（embedded-sdmmc 0.9.0 の構造体）を確認。個々のロジックは担当の報告のまま。
+- 関連：`mcu/netgd/src/{ide,fat,gdi,sdcard,main,resident}.rs`、`common/{discimg,fatmap}`、`mcu/{bootcore,fwupdater}`、`tools/{fwimage,netgd-send,netgd-recv}`、`docs/design/resident-app-contract.md`、`tools/fwimage/FORMAT.md`。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -1147,3 +1172,7 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | AG16K のビットストリームの埋め込みは、Supra の実サイズ（LZMA）が約 53 KB 以下で、かつ `list_root_dir` の削除と `opt-level="z"` を入れた場合に限って検討する | R81 の上限の表 | Opus |
 | 2026-11-20 | `trim` を ASCII 専用の共用関数にする（全角スペースを削らなくなる差を受け入れる） | 2E のフラッシュ −0.5 KB。INI・GAME.CFG のキーは ASCII（R88） | Opus |
 | 2026-11-20 | コメントだけの変更による defmt ありのビルドの 6 バイト差を受け入れる | defmt の番号の入れ替わりで動作は不変。`DEFMT_LOG=off` のビルドは同一（R88） | Opus |
+| 2026-11-20 | R89 の確認済みの指摘をすべて直す（4並列、worktree） | ユーザーの指示「全部」（R90） | ユーザー |
+| 2026-11-20 | CD_READ の SD 失敗は Error 0x34（MEDIUM ERROR）、既定のマウントの失敗は ILLEGAL REQUEST、副への 0x08・0xA0 は ABRT | 仕様に合わせる。実機で BIOS・メニューの反応を確認する（R90） | Fable 提案、Opus 承認 |
+| 2026-11-20 | 取り決めに GPBR0 の「復旧中」の値・`LOCK_UNKNOWN`・書き直しの上限3回を追加し、`IFACE_GEN` は 1 のまま | 常駐部もロック済みの基板もまだ無い（R90、契約 §10） | Fable 提案、Opus 承認 |
+| 2026-11-20 | `ack_command` の取りこぼし（A-c の残り）は FPGA の変更が要るので保留 | スロット 0 の書き込みで後から来たコマンドも消える（R90） | Opus |
