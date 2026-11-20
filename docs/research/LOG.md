@@ -550,6 +550,14 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **判断**：無印 ESP32 は本体に USB が無く esp-usb-bridge が使えない。残る wireless-esp8266-dap は無線経由で probe-rs 非対応、fwbackup の安全レビュー（probe-rs 0.32.0 ＋ USB の CMSIS-DAP）の範囲外 → **使わない**。
   **Raspberry Pi Pico（または Pico 2、公式 Debug Probe）を用意する**。ESP32-S3/S2 なら esp-usb-bridge で使える見込みはある。
 
+### R43 `tools/fwbackup` の安全修正（Sonnet、Opus がテストを確認）→ 使用可
+- R40 の指摘 1〜10 をすべて反映：probe-rs の設定ファイル（`.probe-rs.{toml,json,yaml,yml}`、カレント・ホーム・%USERPROFILE%・実行ファイルの場所）があれば何も起動せずに拒否し、probe-rs は空の一時ディレクトリをカレントにして起動／
+  「read は接続ごとに数 ms halt する」と正しく記述（BIOS メニューで実行）／古い probe-rs 向けの自動検出フォールバックを削除／**probe-rs は 0.32.0 ちょうどだけ許可**（上書き手段なし）／
+  「応答なし」でもロックの可能性があると明記／テスト用の JSON 形式は `FWBACKUP_TEST_WRAPPER=1` のときだけ／値の検証を厳格化／`.bin` は `.part` に書いて fsync・再ハッシュしてから改名（上書きしない）／
+  全プローブが使用不可なら NO_PROBE、`--chunk` の事前検証、2E の別リビジョンは別表示（dump は拒否）、JSON に実際のプローブを記録。README に条件（0.32.0、設定ファイルなし、3本の配線、BIOS メニュー、改名しない、クラウド同期フォルダに置かない、法的助言ではない、ロックを破らない、GPNVM などは含まない、`download`・`erase`・`reset` を手で使わない）。
+- **確認（Opus）**：テスト 59 件パス、`.gitignore` が `.bin`・`.part`・`gdemu60_flash_*` を除外することを `git check-ignore` で確認。
+- これで **fwbackup は使用可**（`check` → ロックなし 2E なら `dump`）。実機と実物の probe-rs では未検証。
+
 ---
 
 ## 判断の記録（Decisions）

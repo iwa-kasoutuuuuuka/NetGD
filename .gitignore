@@ -56,3 +56,11 @@ dc/apps/linuxboot/
 # svdtools htmlcompare output: a review aid for svd/patch.yml, not a
 # build input. Regenerate with gen.sh.
 mcu/atsam3u4e-pac/html/
+
+# fwbackup: dumps of the stock GDEMU 6.0 firmware are the vendor's copyrighted
+# work. Private personal backup only; never commit or upload.
+tools/fwbackup/out/
+tools/fwbackup/**/*.bin
+tools/fwbackup/**/*.sha256
+tools/fwbackup/**/*.part
+gdemu60_flash_*
