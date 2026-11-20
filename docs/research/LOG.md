@@ -565,6 +565,21 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   3V3・VSYS・VBUS はつながない（電源は Dreamcast から）。**6.0 のヘッダは穴だけでピンが無い** → ピンヘッダのはんだ付けを推奨。信号は双方 3.3 V。
 - ガイドの作業3に `fwbackup` の手順（`check` → ロックなし 2E なら `dump` → `inspect`）と条件を追加。
 
+### R45 GDEMU.INI・CDI 修正・F6〜F8 のデバッグ（Fable、読むだけ）
+- 重大な欠陥なし。中〜低 9 件（テスト・ビルドは HEAD の別作業ツリーで確認、4E・2E とも成功）：
+  1. **（中）open/detect の NOT READY の窓が TUR・CD_PLAY・CD_READ にしか効かない**。GET_TOC・REQ_SES・GET_SCD・REQ_STAT は通り、SECNR も STANDBY のまま。UA は窓の前に1回だけ、CD_READ の経路はセンスを設定せず、
+     REQ_ERROR（0x13）は常にゼロ。窓が付くのは `mount_named` 経由だけで、`swap_media`／`load_media` 経由は窓なし。→ openMenu の `cdrom_reinit` が窓の中で OK になり、直後の CD_READ が失敗しうる（INI にキーがあるときだけ）。
+  2. **（中）GDEMU.INI の読み込み**：512 バイトで黙って切れる（値の途中で切れると `reset_goto=12` が 1 になる）、UTF-8 BOM で1行目が未知キー、**Shift-JIS のコメント以降が全部捨てられる**、CR だけの改行も不可（すべてテストで確認）。
+  3. （中〜低）`reset_goto` と END 2 のマウントが古い INI を使う（`mount_named` 経路は INI を読み直さない）。
+  4. （低〜中）END 2 が `0x52` の残した古い `MOUNT_NAME` をマウントしうる（使った後も BEGIN でも消さない）。
+  5. （低）CDI：`start_lba + pregap < 150` のとき LBA だけ 0 に張り付き、ファイル位置がずれる（壊れた／特殊なイメージのみ）。
+  6. （低）F8/STATUS：`write_begin` より前で拒否された書き込みが記録されず、STATUS が直前の成功を返す。
+  7. （低）ハードリセットで再マウントしない経路では `READY_AT` が残り、起動中の BIOS に NOT READY が返り続けうる。
+  8. （記録の訂正）R36 の「lead-out は変更なし」は不正確：`start_lba` の意味が変わったので、最終トラックの pregap が 150 以外だと lead-out と REQ_SES(0) が `150 - pregap` だけ前に動く。Flycast との関係は pregap 150 のときと同じ（+1）で、方向としては改善。
+  9. （低）保護境界は MBR のエントリ 0 を無条件に信じる（GPT の保護 MBR では守れない）→ 種別 0xEE なら BEGIN を拒否。
+- **判断（Opus）**：1 は、純正のプローブ記録（切替後の SENSE の並びと時間）が取れるまで**窓を既定で無効にする**（INI の値は読むが適用しない）。中途半端に効くより安全。
+  2〜7・9 は Sonnet に修正させる（`ide.rs` の自己更新部分を編集中の作業が終わってから）。8 は LOG の訂正のみ。
+
 ---
 
 ## 判断の記録（Decisions）
