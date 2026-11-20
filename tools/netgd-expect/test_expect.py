@@ -86,9 +86,9 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(self.one(3, 'REQ_ERROR')['data'], '00' * 10)
         self.assertEqual(self.one(3, 'GDEMU_VERSION')['data'], '0000000000002005')
 
-    def test_cdi_with_two_tracks_has_no_req_ses_2(self):
-        # D-1: a two-track CDI puts everything in area 0 and REQ_SES(2) aborts; IP.BIN falls back to the TOC
-        self.assertEqual(self.one(4, 'REQ_SES_2')['rc'], 'check')
+    def test_cdi_with_two_tracks_has_req_ses_2(self):
+        # D-1 (fixed, R65): REQ_SES(2) is the first track of the last session; it used to abort (boot area guessed as 45000)
+        self.assertEqual(self.one(4, 'REQ_SES_2')['rc'], 'ok')
         self.assertEqual(self.one(4, 'REQ_SES_0')['data'][4:6], '02')       # CDI: session count 2 in the track byte
         self.assertEqual(self.one(4, 'IP_READ')['fad'], '11852')
 

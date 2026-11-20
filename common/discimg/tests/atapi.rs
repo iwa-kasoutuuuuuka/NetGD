@@ -182,13 +182,15 @@ fn req_ses_mil_cd() {
 }
 
 #[test]
-fn req_ses_two_track_cdi_has_no_session_2() {
-    // Suspicious but pinned: with only tracks 1 and 2 the firmware's
-    // boot_area_lba falls back to 45000, and a data track below that is not
-    // found by session 2's "first track at or above boot_area_lba".
+fn req_ses_two_track_cdi_session_2_is_the_data_track() {
+    // This used to pin ABRT (the firmware fell back to boot_area_lba = 45000
+    // for a CDI with fewer than 3 tracks, so the data track at 11700 was not
+    // "at or above" it). The firmware now passes the start of the last
+    // session's first track (11700); with a stale 45000 the lookup still
+    // finds nothing, which is why the caller must not guess.
     let c = vec![t(1, 0, 0, 11000), t(2, 11700, 4, 20000)];
     assert_eq!(req_ses_reply(&c, true, 45000, 2, 2), None);
-    // ... whereas boot_area_lba = the data track's start finds it.
+    // boot_area_lba = the data track's start finds it.
     assert_eq!(req_ses_reply(&c, true, 11700, 2, 2), Some([0x01, 0x00, 0x02, 0x00, 0x2E, 0x4A]));
 }
 
@@ -375,7 +377,14 @@ fn sweep_matches_the_original_code() {
             assert_eq!(toc(&new, is_cdi, boot, area), o);
         }
         for s in 0..5u8 {
-            assert_eq!(req_ses_reply(&new, is_cdi, boot, sessions, s), oracle::build_req_ses_reply(Some(&og), s));
+            // The oracle is the ORIGINAL code, which is wrong for CDI sessions
+            // 1 and 2 (it keyed both on `boot_area_lba` alone, so a CDI whose
+            // data track sits below it, or a single-session CDI, got ABRT).
+            // CDI session 0 and all GDI replies must still match; the CDI
+            // cases are pinned in tests/cdi_sessions.rs.
+            if !is_cdi || s == 0 {
+                assert_eq!(req_ses_reply(&new, is_cdi, boot, sessions, s), oracle::build_req_ses_reply(Some(&og), s));
+            }
         }
         assert_eq!(leadout_lba(&new, is_cdi), og.leadout_lba());
 

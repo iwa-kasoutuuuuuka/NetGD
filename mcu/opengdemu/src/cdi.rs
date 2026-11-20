@@ -66,7 +66,7 @@ pub fn find_cdi(dir: &Dir<'_>) -> Result<ShortFileName, GdiError> {
 /// Returns the number of sessions the descriptor declares. A MIL-CD has two
 /// (audio, then the bootable data track), and the host is told that count via
 /// REQ_SES(0) -- it is how the BIOS learns session 2 exists at all.
-pub fn parse(dir: &Dir<'_>, name: &ShortFileName) -> Result<u8, GdiError> {
+pub fn parse(dir: &Dir<'_>, name: &ShortFileName) -> Result<discimg::cdi::CdiInfo, GdiError> {
     let f = dir
         .open_file_in_dir(name, embedded_sdmmc::Mode::ReadOnly)
         .map_err(|_| GdiError::OpenGdiFile)?;
@@ -92,7 +92,7 @@ pub fn parse(dir: &Dir<'_>, name: &ShortFileName) -> Result<u8, GdiError> {
 
     // Cleared by the parser once it has the descriptor header, so a parse
     // that fails part way cannot leave the previous image's tail behind.
-    discimg::cdi::parse(file_len, read_at, &mut PoolSink { cdi: Some(name.clone()) }).map_err(|e| match e {
+    discimg::cdi::parse_info(file_len, read_at, &mut PoolSink { cdi: Some(name.clone()) }).map_err(|e| match e {
         discimg::Error::Sink(e) => e,
         discimg::Error::Read => GdiError::ReadGdiFile,
         _ => GdiError::BadCdi,

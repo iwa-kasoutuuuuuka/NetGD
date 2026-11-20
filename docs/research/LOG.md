@@ -891,6 +891,19 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - サイズ：`sizeprobe` で 5,902 B → 6,104 B（+202 B）。
 - CI：61dc290d で Build and Test と KallistiOS の両方が成功（**KOS の本物のコンパイラでの初めてのビルド成功**、`fwxfer_kos.c` を含む）。
 
+### R71 トラックが2本の CDI でセッション2が返らない問題の修正（Sonnet、R64 の訂正への対応）
+- 原因：`mcu/opengdemu/src/gdi.rs:831-835`（CDI）と `:1069-1072`（GDI）が `boot_area_lba` を「番号 3 以上の最初のトラック、無ければ 45000」としていた（GD-ROM の配置の前提）。
+  `discimg::atapi::req_ses_reply` はセッション1＝それより前の最初のトラック、セッション2＝以降の最初のトラック。音声 LBA 0＋データ 11700 の CDI は 45000 になり、REQ_SES(2) はトラックが見つからず中断、`prefetch_ip_bin`（`ide.rs:2372`）はイメージ外の LBA 45000 を読んでいた。データ1本の CDI も 45000。
+- 根拠：Flycast `core/hw/gdrom/gdromv3.cpp`（`SPI_REQ_SES` → `libGDR_GetSessionInfo`）と `core/imgread/common.h` の `Disc::GetSessionInfo`（セッション0＝セッション数、N＝`sessions[N-1]` の最初のトラックと StartFAD、GDI はセッション1＝トラック1・セッション2＝トラック3 に固定、CDI は記述子のセッションごと）。
+  `docs/research/web-findings-2026-11.md` §5 と同じ結論（起動領域は最後のセッションの最初のトラック）。（一次資料、取得は抜粋）
+- 修正：`common/discimg/src/cdi.rs` に `parse_info`（`CdiInfo { sessions, boot_track }`、boot_track＝最後のセッションの最初のトラック）。`atapi.rs` に `cdi_boot_area_lba` と `gdi_boot_area_lba`（GDI は従来の規則のまま、2トラックの GDI も 45000）。
+  CDI のセッション1は常に最初のトラック、セッション2はセッションが2つ以上のときだけ。`req_ses_reply` の形は不変で `ide.rs` は変更なし。ファームの `cdi.rs`・`gdi.rs`、`examples/expect.rs` を合わせた。
+- テスト：新規 `common/discimg/tests/cdi_sessions.rs`（データ1本、音声＋データの2セッション＝起動 11700・REQ_SES(2) はトラック2 FAD 11850、データ＋データ、3トラックの MIL-CD＝45000、1セッション3トラック、CDI の TOC、GDI の補助関数）。
+  バグを固定していた `tests/atapi.rs` と `tools/netgd-expect/test_expect.py` のテストを正しい期待値に変更。`discimg` 全通過、netgd-expect 10 件（1 skip）、ファーム 4E・2E のビルド成功。
+- 限界：CDI のセッションが3つ以上だと REQ_SES(2) は最後のセッションの最初のトラックを返す（起動には正しいが中間のセッションとしては違う）。`gdi.rs` の `read_ip_header` は独自の `start_lba >= 11700` の推定のまま。
+  Flycast のトラックの FAD は `start_lba + pregap`、NetGD は `data_lba + 150`。特殊なプリギャップの CDI でだけ差が出る（未変更、要確認）。
+- 信頼度：ホストテストとビルドで確認済み。実機では未検証。
+
 ---
 
 ## 判断の記録（Decisions）

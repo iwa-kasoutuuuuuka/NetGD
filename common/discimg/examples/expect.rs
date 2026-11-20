@@ -180,13 +180,13 @@ fn load_disc(path: &Path) -> Result<Disc, String> {
             t.sector_count = (size / t.sector_size as u64) as u32;
         }
         // gdi.rs `parse`: HDA = first track numbered 3 or above, else 45000; one session.
-        let boot = tracks.iter().find(|t| t.number >= 3).map(|t| t.start_lba).unwrap_or(45000);
+        let boot = atapi::gdi_boot_area_lba(&tracks[..]);
         Ok(Disc { tracks, is_cdi: false, boot_area_lba: boot, sessions: 1, dir, cdi_file: None })
     } else if lower.ends_with(".cdi") {
         let mut f = File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
         let len = f.metadata().map_err(|e| e.to_string())?.len() as u32;
         let mut sink = VecSink::new();
-        let sessions = cdi::parse(
+        let info = cdi::parse_info(
             len,
             |off, buf| {
                 f.seek(SeekFrom::Start(off as u64)).map_err(|_| ())?;
@@ -196,8 +196,8 @@ fn load_disc(path: &Path) -> Result<Disc, String> {
         )
         .map_err(|e| format!("cdi parse error: {:?}", e))?;
         let tracks: Vec<TrackDesc> = sink.0.iter().cloned().collect();
-        let boot = tracks.iter().find(|t| t.number >= 3).map(|t| t.start_lba).unwrap_or(45000);
-        Ok(Disc { tracks, is_cdi: true, boot_area_lba: boot, sessions, dir, cdi_file: Some(path.to_path_buf()) })
+        let boot = atapi::cdi_boot_area_lba(&tracks[..], info.boot_track);
+        Ok(Disc { tracks, is_cdi: true, boot_area_lba: boot, sessions: info.sessions, dir, cdi_file: Some(path.to_path_buf()) })
     } else {
         Err("unknown extension (want .gdi or .cdi)".into())
     }

@@ -43,12 +43,31 @@ pub fn sector_size(read_mode: u32) -> Option<u16> {
     }
 }
 
+/// What the descriptor says about sessions, beyond the track table itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CdiInfo {
+    /// Session count.
+    pub sessions: u8,
+    /// Number of the first track of the last (non-empty) session: where the
+    /// Dreamcast looks for IP.BIN.
+    pub boot_track: u8,
+}
+
 /// Parse the descriptor of a CDI file of `file_len` bytes into `sink`,
 /// returning the session count.
 ///
 /// `read_at(offset, buf)` must fill `buf` from file offset `offset`, or
 /// fail (including on EOF before `buf` is full).
-pub fn parse<S, R>(file_len: u32, mut read_at: R, sink: &mut S) -> Result<u8, Error<S::Error>>
+pub fn parse<S, R>(file_len: u32, read_at: R, sink: &mut S) -> Result<u8, Error<S::Error>>
+where
+    S: TrackSink,
+    R: FnMut(u32, &mut [u8]) -> Result<(), ()>,
+{
+    parse_info(file_len, read_at, sink).map(|i| i.sessions)
+}
+
+/// [`parse`], also returning where the last session starts.
+pub fn parse_info<S, R>(file_len: u32, mut read_at: R, sink: &mut S) -> Result<CdiInfo, Error<S::Error>>
 where
     S: TrackSink,
     R: FnMut(u32, &mut [u8]) -> Result<(), ()>,
@@ -77,6 +96,7 @@ where
     let mut cursor = desc_start.wrapping_add(1);
     let mut number: u8 = 1;
     let mut count = 0usize;
+    let mut boot_track: u8 = 1;
 
     for _ in 0..session_count {
         let mut sh = [0u8; SESSION_HDR_LEN as usize];
@@ -85,6 +105,9 @@ where
         cursor = cursor.wrapping_add(SESSION_HDR_LEN);
 
         for ti in 0..track_count {
+            if ti == 0 {
+                boot_track = number;
+            }
             // Header: read up to the length byte, then skip the name.
             let mut head = [0u8; HDR_BEFORE_NAME as usize];
             rd(cursor, &mut head)?;
@@ -168,7 +191,7 @@ where
     if count == 0 {
         return Err(Error::BadCdi);
     }
-    Ok(session_count)
+    Ok(CdiInfo { sessions: session_count, boot_track })
 }
 
 /// Convenience for host use: parse a CDI held entirely in memory.

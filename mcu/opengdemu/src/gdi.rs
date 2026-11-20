@@ -824,15 +824,12 @@ pub fn parse_image(num_blocks: u32, which: &ImageRef) -> Result<Gdi, GdiError> {
         {
             let cdi_name = image_file.clone();
             info!("cdi: parsing '{}'", show_sfn(&cdi_name));
-            let sessions = crate::cdi::parse(&image_dir, &cdi_name)?;
-            // Same rule as the GDI path: the High Density Area begins at the
-            // first track numbered 3 or above (45000 on a Sega layout, which
-            // is exactly where a GD-ROM-shaped CDI puts its second session).
-            let hda = tracks()
-                .iter()
-                .find(|t| t.number >= 3)
-                .map(|t| t.start_lba)
-                .unwrap_or(45000);
+            let info = crate::cdi::parse(&image_dir, &cdi_name)?;
+            let sessions = info.sessions;
+            // The BIOS boots the first track of the LAST session, wherever
+            // that is (11700 for audio+data, 45000 for a GD-shaped CDI, 0 for
+            // a single data track). Not "track >= 3": see LOG R65.
+            let hda = discimg::atapi::cdi_boot_area_lba(tracks(), info.boot_track);
             Gdi {
                 boot_area_lba: hda,
                 image_dir: image_path.clone(),
@@ -1066,10 +1063,7 @@ fn parse(data: &[u8]) -> Result<Gdi, GdiError> {
     })?;
     let tracks = tracks_mut();
 
-    let boot_area_lba = tracks.iter()
-        .find(|t| t.number >= 3)
-        .map(|t| t.start_lba)
-        .unwrap_or(45000);
+    let boot_area_lba = discimg::atapi::gdi_boot_area_lba(&tracks[..]);
 
     let gdi = Gdi {
         boot_area_lba,

@@ -29,6 +29,24 @@ pub fn track_for_lba<T: TrackInfo>(tracks: &[T], lba: u32) -> Option<&T> {
     tracks.iter().rfind(|t| t.start_lba() <= lba)
 }
 
+/// `boot_area_lba` of a GDI: the first track numbered 3 or above (the High
+/// Density Area), else the conventional 45000 (a two-track GDI has no HDA).
+pub fn gdi_boot_area_lba<T: TrackInfo>(tracks: &[T]) -> u32 {
+    tracks.iter().find(|t| t.number() >= 3).map(|t| t.start_lba()).unwrap_or(45000)
+}
+
+/// `boot_area_lba` of a CDI: the start of `boot_track`, the first track of
+/// the LAST session (what the BIOS boots; Flycast's `GetSessionInfo` reports
+/// the same per-session first track). Falls back to the first track's start.
+pub fn cdi_boot_area_lba<T: TrackInfo>(tracks: &[T], boot_track: u8) -> u32 {
+    tracks
+        .iter()
+        .find(|t| t.number() == boot_track)
+        .or_else(|| tracks.first())
+        .map(|t| t.start_lba())
+        .unwrap_or(0)
+}
+
 /// Total disc length in LBAs, used as the lead-out address. A CDI knows its
 /// real length (last track's start + sector count); a GDI reports the
 /// pressed-disc capacity.
@@ -182,8 +200,11 @@ pub fn put_msf(out: &mut [u8], blk: u32) {
 /// the history of why each subcommand reports what it does).
 ///   byte 0 = 0x01 (ready), byte 1 = 0, byte 2 = track, bytes 3..6 = FAD BE
 ///   session 0: session count + lead-out FAD
-///   session 1: first track below `boot_area_lba` + its FAD
-///   session 2 (CDI only): first track at/above `boot_area_lba` + its FAD
+///   session 1: GDI: first track below `boot_area_lba`; CDI: the first track
+///   session 2 (CDI with `sessions >= 2` only): first track at/above
+///     `boot_area_lba` (= the first track of the last session, see
+///     [`cdi_boot_area_lba`]); with 3+ sessions the middle ones are not
+///     distinguished
 ///   anything else, or no such track: `None` (caller aborts)
 pub fn req_ses_reply<T: TrackInfo>(
     tracks: &[T],
@@ -197,10 +218,15 @@ pub fn req_ses_reply<T: TrackInfo>(
     let (track, fad) = match session {
         0 => (sessions, leadout_lba(tracks, is_cdi).wrapping_add(150)),
         1 => {
-            let t = tracks.iter().find(|t| t.start_lba() < boot_area_lba)?;
+            let t = if is_cdi {
+                // The boot area of a CDI may be track 1 itself (one session).
+                tracks.first()?
+            } else {
+                tracks.iter().find(|t| t.start_lba() < boot_area_lba)?
+            };
             (t.number(), t.start_lba().wrapping_add(150))
         }
-        2 if is_cdi => {
+        2 if is_cdi && sessions >= 2 => {
             let t = tracks.iter().find(|t| t.start_lba() >= boot_area_lba)?;
             (t.number(), t.start_lba().wrapping_add(150))
         }
