@@ -11,6 +11,7 @@
 //! over [`TrackInfo`], so the firmware's own track pool is used in place.
 #![cfg_attr(not(test), no_std)]
 
+pub mod ata;
 pub mod atapi;
 pub mod cdi;
 pub mod gdi;

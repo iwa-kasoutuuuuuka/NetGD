@@ -62,6 +62,11 @@ const REG_INTRQ_PENDING: usize = 13;
 /// 0 once the host has finished draining. Without this the FPGA's DMARQ
 /// stays low and the host's DMA controller waits forever.
 const REG_DMA_MODE: usize = 19;
+/// Hard-reset (RSTn) edge counters, read-only: low byte rises, high byte
+/// falls. Driven by the G1 RSTn line alone -- SRST (Device Control bit 2)
+/// never moves them, which is how a hard reset is told from SRST
+/// (`fpga/amaranth/hw/ide_device.py`, `rstn_fall_evt`).
+const REG_RSTN_EDGES: usize = 16;
 /// In-fabric signal capture (opt-in in the FPGA). Slot 20 arms and reports,
 /// slot 21 is write-index / read-value.
 const REG_CAP_CTRL: usize = 20;
@@ -105,6 +110,8 @@ const CMD_PACKET: u8 = 0xA0;
 const CMD_IDENTIFY_PACKET: u8 = 0xA1;
 const CMD_IDENTIFY: u8 = 0xEC;
 const CMD_SET_FEATURES: u8 = 0xEF;
+const CMD_FLUSH_CACHE: u8 = 0xE7;
+const CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 
 const STATUS_IDLE: u8 = STATUS_DRDY | STATUS_DSC;
 const STATUS_IDLE_ERR: u8 = STATUS_DRDY | STATUS_DSC | STATUS_ERR;
@@ -155,6 +162,12 @@ impl IdeDevice {
     #[inline]
     fn write(&self, reg: usize, val: u16) {
         unsafe { write_volatile(self.base.add(reg), val) }
+    }
+
+    /// RSTn falling edges seen since the FPGA came up, modulo 256. Slot 16
+    /// is the same on either device; only a hard reset moves it.
+    fn rstn_falls(&self) -> u8 {
+        (self.read(REG_RSTN_EDGES) >> 8) as u8
     }
 
     fn command_pending(&self) -> bool {
@@ -586,6 +599,7 @@ pub async fn ide_task(
 
     let mut primary_state = DeviceState::new();
     let mut secondary_state = DeviceState::new();
+    RSTN_FALLS_SEEN.store(primary.rstn_falls(), core::sync::atomic::Ordering::Relaxed);
 
     // Always do a sweep at startup in case the FPGA already had
     // `command_pend` set when we attached (e.g. host issued a command
@@ -598,10 +612,38 @@ pub async fn ide_task(
         // the same waker rather than having this loop poll, so an idle bus
         // stays idle and a swap still lands immediately.
         let _ = embassy_atsam3::gpio::pioa_wait_irq().await;
+        service_hard_reset(&primary, &mut primary_state).await;
         sweep(&primary, &mut primary_state, "primary", Role::Packet).await;
         sweep(&secondary, &mut secondary_state, "secondary", Role::Disk).await;
         service_swap_request(&mut primary_state, "primary").await;
     }
+}
+
+/// RSTn falling edges already accounted for (low 8 bits of slot 16's high byte).
+static RSTN_FALLS_SEEN: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// After a *hard* reset (the G1 RSTn line, not SRST) while the media is
+/// ejected, mount it again so the console can reboot to the menu without a
+/// power cycle.
+///
+/// The hard reset is told from SRST by the RSTn falling-edge counter: SRST,
+/// which KOS's `g1_ata_init` issues to both devices, never moves it, and
+/// remounting then would re-mount the GD image under a write app that has
+/// just initialised the disk. The counter is a free-running 8-bit count, so
+/// a reset cannot be missed between two looks (only 256 of them could).
+/// Runs before the sweeps so their reset handling re-asserts the disc format
+/// of the freshly mounted image.
+async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
+    let falls = primary.rstn_falls();
+    if RSTN_FALLS_SEEN.swap(falls, core::sync::atomic::Ordering::Relaxed) == falls {
+        return;
+    }
+    if media_present() {
+        return;
+    }
+    info!("primary: hard reset while ejected -- mounting the selected image again");
+    let ok = load_media(state).await;
+    info!("primary: remounted after hard reset (mounted: {})", ok);
 }
 
 /// Which kind of device an `IdeDevice` presents itself as.
@@ -698,6 +740,14 @@ async fn handle(
             // ATA NOP. Real-world drives just succeed; the BIOS issues
             // it as a kind of "are you alive" probe. Returning ABRT
             // makes the BIOS retry forever.
+            dev.set_error(0);
+            dev.set_status_intrq(STATUS_IDLE);
+            dev.ack_command();
+        }
+        // The secondary only: every write command finishes its CMD25 and the
+        // card's busy wait before it completes, so there is nothing to flush.
+        // Mirrors NOP. The primary keeps ABRTing these, as before.
+        CMD_FLUSH_CACHE | CMD_FLUSH_CACHE_EXT if role == Role::Disk => {
             dev.set_error(0);
             dev.set_status_intrq(STATUS_IDLE);
             dev.ack_command();
@@ -999,6 +1049,15 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
     if !SWAP_PENDING.swap(false, core::sync::atomic::Ordering::Acquire) {
         return;
     }
+    // Ejected means the host is (or may be) writing the card: `handle_disk_write`
+    // holds a CMD25 open across its waits, and a swap would both read the card
+    // under it and set MEDIA_PRESENT mid-transfer so the next write ABRTs. The
+    // button is dead while ejected (`button::on_press`); a request that slipped
+    // in just before the eject is dropped here.
+    if !media_present() {
+        info!("{}: button swap dropped -- media is ejected", label);
+        return;
+    }
     let name = unsafe { &*core::ptr::addr_of!(SWAP_NAME) };
     let ok = mount_named(state, label, name.as_str()).await;
     info!("{}: button swapped to '{}' (mounted: {})", label, name.as_str(), ok);
@@ -1045,7 +1104,7 @@ async fn swap_media(state: &mut DeviceState, label: &'static str) -> bool {
 }
 
 
-fn media_present() -> bool {
+pub(crate) fn media_present() -> bool {
     MEDIA_PRESENT.load(core::sync::atomic::Ordering::Relaxed)
 }
 // Sega GD-ROM ATAPI extensions.
@@ -1091,7 +1150,15 @@ const OGDM_IMAGE_CTL: u8 = 0xE0;
 ///    The firmware keeps no catalog -- it mounts by name, opening one
 ///    directory -- so none of the three described anything. The reply is the
 ///    same 32 bytes; only the meaning of 5..8 changed.
-const OGDM_PROTOCOL_VERSION: u8 = 2;
+///
+/// 3: VERSION's byte 5 became a feature bitfield (see `OGDM_FEATURES`).
+const OGDM_PROTOCOL_VERSION: u8 = 3;
+/// VERSION reply byte 5: what this firmware can do, one bit each.
+///   bit0 = write session (not implemented, 0)
+///   bit1 = write checksum (not implemented, 0)
+///   bit2 = DMA advertised in the secondary's IDENTIFY DEVICE (1)
+/// Bytes 6..8 stay reserved zeros.
+const OGDM_FEATURES: u8 = 0x04;
 /// MOUNT's packet[2], meaning "forget the runtime choice and mount whatever
 /// GDEMU.CFG names" -- what a power cycle would do.
 const NO_SELECTION: u8 = 0xFF;
@@ -1852,7 +1919,9 @@ async fn handle_image_ctl(
             let mut out = [0u8; 32];
             out[..4].copy_from_slice(b"OGDM");
             out[4] = OGDM_PROTOCOL_VERSION;
-            // Bytes 5..8 are reserved, and zero. They used to carry an
+            out[5] = OGDM_FEATURES;
+            // Bytes 6..8 are reserved, and zero (byte 5 is the feature bits
+            // above). They used to carry an
             // image limit, a count and a selected index -- all three
             // describing a catalog the firmware kept. It does not keep one:
             // it mounts by name, opening the one directory it needs, so
@@ -2980,85 +3049,93 @@ async fn handle_disk_write(
     // plus a full program-busy wait on every block, which capped writes at
     // ~340 KB/s whatever the IDE side did. Opened after DRQ so the CMD25
     // setup overlaps the host's first sector instead of delaying it.
+    //
+    // `write_multi_begin` refuses more than 0xFFFF blocks and an LBA48 count
+    // of 0 is 65536, so the command is cut into CMD25 runs of WRITE_RUN
+    // sectors while the host-side transfer carries on unbroken. A command of
+    // at most WRITE_RUN sectors is still exactly one CMD25.
     const WORDS: usize = 256;
+    const WRITE_RUN: u32 = 32768;
     let mut block = [0u8; 512];
     let mut ok = true;
-    let mut mw = match unsafe { embassy_atsam3::hsmci::write_multi_begin(lba, count) } {
-        Ok(mw) => Some(mw),
-        Err(e) => {
-            warn!("{}: CMD25 at block {} failed: {:?}", label, lba, e);
-            ok = false;
-            None
+    let mut done = 0u32; // sectors completed before the current run
+    for (run_lba, run_n) in discimg::ata::runs(lba, count, WRITE_RUN) {
+        let mut mw = match unsafe { embassy_atsam3::hsmci::write_multi_begin(run_lba, run_n) } {
+            Ok(mw) => mw,
+            Err(e) => {
+                warn!("{}: CMD25 at block {} failed: {:?}", label, run_lba, e);
+                ok = false;
+                break;
+            }
+        };
+        for i in 0..run_n {
+            let sector = done + i;
+            // PIO flow control is DRQ, per sector. Leaving it asserted for the
+            // whole command gives the host no reason to pause, and since the FPGA
+            // asserts w_en regardless of w_rdy a host that runs ahead of our SD
+            // writes silently overruns the 512-word FIFO and loses data. Dropping
+            // DRQ while we program the card is what makes it wait.
+            //
+            // DMA needs none of this: DMARQ is driven from write-FIFO room, so
+            // the flow control is in the FPGA and the host is already paced.
+            if !dma && sector > 0 {
+                dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
+            }
+
+            if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
+                if why == Stall::Timeout {
+                    // Sample what the FPGA holds while the host is polling. If
+                    // this shows 0x58 while the DC reads 0xd8 off the bus, the
+                    // two read paths genuinely disagree. COMMAND_PEND
+                    // distinguishes the two things that can set BSY: an IDE
+                    // command write sets both, an MCU status write sets only BSY.
+                    warn!("{}: host stopped sending at sector {}: wfifo={} lvl_at_read={} reads={} status={:#04x} hw={:#06x}",
+                          label, sector, dev.write_fifo_level(), dev.read(22), dev.read(23),
+                          dev.read(REG_STATUS) & 0xFF, dev.read(REG_HW_INFO));
+                    dev.capture_dump(label);
+                }
+                ok = false;
+                break;
+            }
+
+            // DRQ down *and BSY up*: the host must not start the next sector --
+            // or the next command -- while we drain the FIFO and program the
+            // card. Dropping to a plain idle status here left BSY clear, so a
+            // host that had just sent its last word saw the command as complete
+            // and issued the next one, whose `fifo_clear` wiped the block out
+            // from under this loop; the rest of the drain then returned the
+            // FIFO's stale last word and that garbage reached the card.
+            dev.set_status(STATUS_BSY | STATUS_DRDY | STATUS_DSC);
+            // The tail of a sector came back as one repeated word, which is what
+            // popping a drained FIFO yields. Check the level actually covers the
+            // block before and after draining it.
+            let lvl_before = dev.write_fifo_level();
+            for i in 0..WORDS {
+                let w = dev.pop_write_fifo();
+                block[i * 2] = (w & 0xFF) as u8;
+                block[i * 2 + 1] = (w >> 8) as u8;
+            }
+            let lvl_after = dev.write_fifo_level();
+            if lvl_before < WORDS as u16 {
+                warn!("{}: sector {} of {}: level {} before pop, {} after (short!)",
+                      label, sector, count, lvl_before, lvl_after);
+            }
+            if let Err(e) = unsafe { mw.feed(&block) } {
+                warn!("{}: SD write failed at block {}: {:?}", label, lba + sector, e);
+                ok = false;
+                break;
+            }
         }
-    };
-    for sector in 0..count {
+        // CMD12 + the last block's program time. A short transfer (host stopped
+        // sending) is closed the same way; the card keeps what it got.
+        if let Err(e) = unsafe { mw.end() } {
+            warn!("{}: CMD12 after block {} failed: {:?}", label, run_lba + run_n - 1, e);
+            ok = false;
+        }
         if !ok {
             break;
         }
-        // PIO flow control is DRQ, per sector. Leaving it asserted for the
-        // whole command gives the host no reason to pause, and since the FPGA
-        // asserts w_en regardless of w_rdy a host that runs ahead of our SD
-        // writes silently overruns the 512-word FIFO and loses data. Dropping
-        // DRQ while we program the card is what makes it wait.
-        //
-        // DMA needs none of this: DMARQ is driven from write-FIFO room, so
-        // the flow control is in the FPGA and the host is already paced.
-        if !dma && sector > 0 {
-            dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
-        }
-
-        if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
-            if why == Stall::Timeout {
-                // Sample what the FPGA holds while the host is polling. If
-                // this shows 0x58 while the DC reads 0xd8 off the bus, the
-                // two read paths genuinely disagree. COMMAND_PEND
-                // distinguishes the two things that can set BSY: an IDE
-                // command write sets both, an MCU status write sets only BSY.
-                warn!("{}: host stopped sending at sector {}: wfifo={} lvl_at_read={} reads={} status={:#04x} hw={:#06x}",
-                      label, sector, dev.write_fifo_level(), dev.read(22), dev.read(23),
-                      dev.read(REG_STATUS) & 0xFF, dev.read(REG_HW_INFO));
-                dev.capture_dump(label);
-            }
-            ok = false;
-            break;
-        }
-
-        // DRQ down *and BSY up*: the host must not start the next sector --
-        // or the next command -- while we drain the FIFO and program the
-        // card. Dropping to a plain idle status here left BSY clear, so a
-        // host that had just sent its last word saw the command as complete
-        // and issued the next one, whose `fifo_clear` wiped the block out
-        // from under this loop; the rest of the drain then returned the
-        // FIFO's stale last word and that garbage reached the card.
-        dev.set_status(STATUS_BSY | STATUS_DRDY | STATUS_DSC);
-        // The tail of a sector came back as one repeated word, which is what
-        // popping a drained FIFO yields. Check the level actually covers the
-        // block before and after draining it.
-        let lvl_before = dev.write_fifo_level();
-        for i in 0..WORDS {
-            let w = dev.pop_write_fifo();
-            block[i * 2] = (w & 0xFF) as u8;
-            block[i * 2 + 1] = (w >> 8) as u8;
-        }
-        let lvl_after = dev.write_fifo_level();
-        if lvl_before < WORDS as u16 {
-            warn!("{}: sector {} of {}: level {} before pop, {} after (short!)",
-                  label, sector, count, lvl_before, lvl_after);
-        }
-        let mw = mw.as_mut().unwrap();
-        if let Err(e) = unsafe { mw.feed(&block) } {
-            warn!("{}: SD write failed at block {}: {:?}", label, lba + sector, e);
-            ok = false;
-            break;
-        }
-    }
-    // CMD12 + the last block's program time. A short transfer (host stopped
-    // sending) is closed the same way; the card keeps what it got.
-    if let Some(mw) = mw.take() {
-        if let Err(e) = unsafe { mw.end() } {
-            warn!("{}: CMD12 after block {} failed: {:?}", label, lba + count - 1, e);
-            ok = false;
-        }
+        done += run_n;
     }
 
     if dma {
@@ -3222,7 +3299,7 @@ fn stage_identify_disk(dev: &IdeDevice) {
     put_ata_string(&mut buf[23..27], b"1.0     ");                // firmware
     put_ata_string(&mut buf[27..47], b"OpenGDEMU SD Disk                       ");
     buf[47] = 0x8001;  // max sectors per READ/WRITE MULTIPLE
-    buf[49] = 0x0200;  // capabilities: LBA supported
+    buf[49] = discimg::ata::WORD49_LBA;  // capabilities: LBA supported
     buf[53] = 0x0007;  // words 54-58, 64-70 and 88 are valid
     let sectors = disk_sectors();
     // Words 60/61 are the LBA28 capacity and the spec caps them at the
@@ -3240,7 +3317,11 @@ fn stage_identify_disk(dev: &IdeDevice) {
     buf[83] = 0x4400;
     // Word 86 bit 10: and it is enabled. Hosts check this one, not 83.
     buf[86] = 0x0400;
-    buf[88] = 0x0000;  // no UDMA advertised -- PIO first, DMA once proven
+    buf[88] = 0x0000;  // no UDMA advertised
+    // Word 49 bit 8 (DMA) and word 63 = 0x0407 (MWDMA 0-2, mode 2 selected).
+    // KOS's g1ata only uses DMA when word 63 bit 2 is set. SET FEATURES
+    // (0x03, set transfer mode) is accepted as-is by `handle`.
+    discimg::ata::advertise_mwdma(&mut buf);
     // Words 100-103: the real capacity, as a 48-bit little-endian count.
     buf[100] = (sectors & 0xFFFF) as u16;
     buf[101] = (sectors >> 16) as u16;

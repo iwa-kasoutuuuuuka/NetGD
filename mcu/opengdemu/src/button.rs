@@ -61,6 +61,12 @@ pub async fn button_task() {
 }
 
 fn on_press() {
+    // Ejected: the host owns the card (a write may hold a CMD25 open across its
+    // waits), and a swap would remount mid-transfer. Do nothing, SD included.
+    if !crate::ide::media_present() {
+        info!("button: ignored while the media is ejected");
+        return;
+    }
     // Read the mounted folder's `next` now rather than having remembered it.
     // This is the shallowest caller in the firmware, which is where the work
     // of opening the card belongs.
