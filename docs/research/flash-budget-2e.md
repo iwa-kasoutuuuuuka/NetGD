@@ -113,3 +113,82 @@ llvm-nm -C -S --size-sort -td target/thumbv7m-none-eabi/release/netgd           
 ```
 
 信頼度：サイズは確認済み（ビルド成果物）。削減案 9・11 と `z` のときのローダーの縮みは推測／未測定。速度への影響は未測定。Opus による検証：なし。
+
+## 7. オプトインの削減手段（実装済み、既定のビルドは変えていない）
+
+2026-11-21、Sonnet（実装担当）。**実機では何も確かめていない**。測ったのはサイズだけで、速度・タイミングは未測定。
+ソースは現行の `mcu/netgd`（LFN 対応など 1〜6 節の測定より後の状態）。測定は `llvm-size`（text＋data）と `llvm-objcopy -O binary`、`--target-dir` なし。
+
+### 7.1 追加したもの
+
+| 手段 | 有効にする方法 | 内容 |
+|---|---|---|
+| プロファイル `release-z` | `cargo build --profile release-z ...` | `release` を継承して `opt-level = "z"` にしただけ（案 2）。出力は `target/thumbv7m-none-eabi/release-z/netgd` |
+| プロファイル `release-z-hot-s` | `cargo build --profile release-z-hot-s ...` | `release-z` のうち `lzma`・`embassy-atsam3`・`psload` だけ `s` に戻す（LZMA 展開＝FPGA 立ち上がり、CDDA の tick・DMA を守る妥協案） |
+
+どちらも `mcu/netgd/Cargo.toml` の `[profile.*]` だけの変更で、feature もソースも触っていない。
+`cargo build --release` は **何も変わらない**（7.4 のハッシュ）。
+
+- `.cargo/config.toml` の `-Map=target/openmenu.map` は相対パスで、プロファイルが変わっても `mcu/netgd/target/openmenu.map` に出る（リンクは成功した。マップは最後に作ったものが上書きされる）。
+- `tools/fwimage/fwimage.py seal` は ELF のパスを引数に取るだけでプロファイル名に依存しない。`release-z`・`release-z-hot-s` の `sam3u2e,resident,sd-fast` を seal して成功を確認した
+  （イメージ長 114,688 / 115,200）。ただし `fwimage.py distribution` は「release ビルド」を要求する（`fwimage.py:736` のコメント）。`distribution` にこれらを使えるかは未確認で、使うなら実機の評価が済んでから確かめる。
+- CI（`build.yaml`）は `release` の ELF パス（`target/thumbv7m-none-eabi/release/netgd`）を決め打ちなので、`release-z` を CI に載せるときはパスの変更が要る。今回は触っていない。
+- `profile.release-z-hot-s` は `package.*` の上書きがあるため、**初回は全依存をコンパイルし直す**（目安：1 構成あたり十数分かかった。実際はこのマシンの負荷にも依る）。
+
+### 7.2 測定（text＋data、バイト）
+
+上限は 122,368 B（`resident` 配置のアプリ領域 122,880 B から seal の分を引いた値。2E 出荷の `sam3u2e,resident,sd-fast`）。
+
+| ビルド | 基準 `release`（s） | `release-z` | Δ | `release-z-hot-s` | Δ |
+|---|---:|---:|---:|---:|---:|
+| 4E 既定（defmt info） | 163,112 | 147,468 | −15,644 | 147,756 | −15,356 |
+| 4E `resident`（info） | 162,716 | 146,868 | −15,848 | 146,860 | −15,856 |
+| 2E `sam3u2e`（`DEFMT_LOG=off`） | 122,400 | 114,256 | −8,144 | 114,572 | −7,828 |
+| 2E `sam3u2e,resident,sd-fast`（`DEFMT_LOG=off`） | 122,268 | 114,588 | −7,680 | 115,104 | −7,164 |
+| `board-v60`（`--no-default-features`、`DEFMT_LOG=off`） | 68,852 | 60,840 | −8,012 | 61,144 | −7,708 |
+
+- 2E の `resident,sd-fast` は基準で上限 122,368 に対して 100 B しか余りが無かったが、`release-z` で **約 7.8 KB**、`release-z-hot-s` で約 7.3 KB の余裕ができる。
+- 2 節の測定（−7,680 / −7,168）とほぼ同じ。`hot-s` と `z` の差は 516 B（2 節では +536 B）で一致する。
+- 4E は容量に困っていないので、4E の `z` は参考値（4E では使う理由がない）。
+
+### 7.3 オプトインにしなかったもの（理由）
+
+- **案 1（`list_root_dir` の削除）**：すでに feature `sd-list` の裏にあり、既定では入っていない（`main.rs:213-215`、`Cargo.toml` の `sd-list`）。1 節・2 節の −2.5 KB は、この feature が入る前のソースでの数字。現行の基準には既に反映されている。追加作業なし。
+- **案 3（`trim` の共有化）**：`gamecfg` と `gdi.rs` の挙動（Unicode 空白の扱い）を feature で分けると、既定ビルドの生成コードが変わりうる。−0.5 KB と小さいため見送り。
+- **案 d（LZMA の辞書 8 KiB）**：辞書を大きくすると `lzma` の作業メモリ（`State::dict`）が **4 KiB 増える**。2E の SRAM は 16 KiB で（`bss` は既に 27 KB 台は別の領域）、RAM 側の余裕を確認せずに入れるべきでない。`build.rs` の `XZ_FILTER` と `lzma::DICT_SIZE` の両方を同時に変える必要があり、
+  ビットストリームの再圧縮（約 −2 %、1.2〜1.4 KB）と引き換えになる。サイズ以外の影響が大きいので今回は実装せず、必要になったら RAM 配置を調べてから。
+- **`ide.rs` に関わるもの**：触っていない（別のエージェントが編集中）。`fast-complete` など既存の feature 以外に、ここで追加できる削減は無い。
+- 案 4・5・6（outliner、`icf`、`panic-probe`）：5 節のとおり採らない。案 9（`embedded_sdmmc` の置き換え）、11（nightly）は feature では表せない。
+
+### 7.4 既定のビルドが変わっていないことの確認
+
+変更前（未変更のツリー）と変更後（`Cargo.toml` にプロファイルを足した後）で、5 構成の ELF と `llvm-objcopy -O binary` の SHA-256（先頭 16 桁）が **全て一致**した。
+
+| 構成 | bin の SHA-256 | ELF の SHA-256 |
+|---|---|---|
+| 4E 既定 | e329627c5e24efd2 | 1953068ab9cace67 |
+| 4E `resident` | 540176702f4f3985 | 52d7c1741057019e |
+| 2E `sam3u2e` | 3b2961f6f8b54111 | 75338a7e4855dd7b |
+| 2E `sam3u2e,resident,sd-fast` | 518a32f445bee4f5 | 83b2d3c0a4f9fc81 |
+| `board-v60`（`sam3u2e` を含む） | 849a6452e3ee5be8 | 01fbefacee4f9dd2 |
+
+（ELF が一致するのは、このツリーのパスから作ったビルド同士だから。パスが違えば debug 情報で変わる。）
+
+### 7.5 実機で必要なこと（未実施）
+
+`z` を使うかどうかは、次を実機で比べて決める（`s` との速度差）。悪ければ `release-z-hot-s`、それでも悪ければ `s` のまま。
+
+- IDE のコマンド応答（ホストの BSY 待ちの限り）、CD_READ の DMA（`stream_from_sd`）、`push_buf_to_fifo`
+- CDDA の `on_tick`
+- FPGA の立ち上がり時間（LZMA 展開、Cyclone の PS 書き込み。v5.5 のみ）
+- SD の読み出し速度（`sd-fast` 込み）
+
+使い方（2E に載せる場合）：
+
+```
+cd mcu/netgd
+DEFMT_LOG=off cargo build --profile release-z --features sam3u2e,resident,sd-fast
+python ../../tools/fwimage/fwimage.py seal target/thumbv7m-none-eabi/release-z/netgd -o <出力>
+```
+
+信頼度：サイズ・ハッシュは確認済み（ビルド成果物）。速度への影響は未測定。Opus による検証：なし。
