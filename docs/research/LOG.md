@@ -1141,6 +1141,14 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus の検証：各ブランチの差分の範囲とマージ結果、全テスト・全ビルドを確認。`short_from_raw` の前提（embedded-sdmmc 0.9.0 の構造体）を確認。個々のロジックは担当の報告のまま。
 - 関連：`mcu/netgd/src/{ide,fat,gdi,sdcard,main,resident}.rs`、`common/{discimg,fatmap}`、`mcu/{bootcore,fwupdater}`、`tools/{fwimage,netgd-send,netgd-recv}`、`docs/design/resident-app-contract.md`、`tools/fwimage/FORMAT.md`。
 
+### R91 Google Drive の成果物を R90 の版に更新（Opus）
+- ユーザーの問い「成果物は Google Drive に up した？」→ R87 の版（35285878）のままだったので更新。Drive の `NetGD` フォルダで、旧版の `firmware/`・`dreamcast/`・`docs/`・`はじめに読む.txt` を新しいフォルダ `old-35285878/` に移し（削除はしていない）、同じ構成で新しい版を置いた。
+  - `firmware/`：e9df6141 をこの PC で `DEFMT_LOG=off` のリリースビルド。`netgd-v55-4e`（bin 573,920 B）、`netgd-v55-2e`（bin 122,400 B）、`netgd-v60-2e-nobitstream`（bin 68,852 B）の `.bin` と `.elf`。resident 版は常駐部本体が未完成のため入れていない（R87 と同じ）。
+  - `dreamcast/`：KOS の CI 実行 44751974784（e9df6141、成功）の成果物 `dreamcast-elfs`（`netgd-recv.elf`・`netgd-fwupd.elf`・`gdprobe.elf`）。
+  - `docs/`：README.md・PLAN.md・LOG.md（R91 まで）・user-tasks.html・fable-debug-2026-11-20.md。最上位に新しい `はじめに読む.txt`（R90 で変わった挙動を追記）。
+- 確認：Drive が返したファイルサイズがローカルと一致。2E の .bin は Drive の判定で種類が別の表示になる（R87 と同じ、内容はそのまま）。
+- 以後：新しい版を置くときは同じやり方（旧版を `old-<コミット>/` に移す）。
+
 ---
 
 ## 判断の記録（Decisions）
