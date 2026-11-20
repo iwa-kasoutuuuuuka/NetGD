@@ -13,22 +13,50 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 
 ## いまの状態（実測）
 
-| 項目 | 状態 |
-|------|------|
-| MCUファーム `mcu/opengdemu` | `cargo build --release` 成功（rustc 1.100 で削除された `-C inline-threshold` を外して復旧） |
-| アップデータ `mcu/fwupdater` | ビルド成功（888 B、ファームに埋め込み） |
-| `common/lzma` / `common/gamecfg` | ホストテスト 5 / 9 件パス |
-| FPGA Amaranth シミュ | `test.py` 30・`test_cdda.py` 3・`test_timing.py` 5・`test_top.py` 5 件、全パス |
-| 生成 Verilog | `main.py` で再生成するとコミット済み `OpenGDEMUCore.v` とバイト一致 |
-| CI | `.github/workflows/build.yaml` を追加（ファーム・ホストテスト・FPGAシミュ・Verilog一致検査）。GitHub 上では未実行 |
-| 実機 | このPCには probe-rs / podman が無く、ボード検証は未実施 |
+2026-11-20 時点。根拠は `docs/research/LOG.md`（R1〜R50）の「確認」の項目。実機での検証はまだ無い。
 
-実装済み（コード上。実機未検証）：GDI/CDI、CDDA、START STOP UNIT による取り出し、`0xE0` IMAGE_CTL での
-フォルダ名マウント、セカンダリ IDE で SD 全体を読み書き可能なディスクとして公開、ボタンでのディスク切替、
-RAM 実行のファーム更新（`0xF9`）。
+| 項目 | 状態 | LOG |
+|------|------|-----|
+| MCU 4E（`mcu/opengdemu`、`cargo build --release`） | 成功。警告は従来どおり 13 件 | R21, R46 |
+| MCU 2E（`sam3u2e`） | 成功。text 118,304 B、フラッシュの空き 約 13 KB | R46 |
+| 自己更新プログラム `mcu/fwupdater` | ビルド成功（888 → 2,188 B、ファームに埋め込み）。純粋ロジックのホストテスト 5 件パス | R46 |
+| ホストテスト `common/lzma` | 5 件パス | R1, R46 |
+| ホストテスト `common/gamecfg`（GDEMU.INI を含む） | 21 件パス | R27 |
+| ホストテスト `common/discimg`（GDI/CDI・ATAPI・ATA・書き込みセッション） | 87 件パス | R38, R46 |
+| ホストテスト `tools/gdprobe` | C 47,211 チェック、compare.py 17 件パス。KOS 部分は CI でだけビルド | R31, R35 |
+| ホストテスト `tools/mksdcard` | 17 件パス | R28 |
+| ホストテスト `tools/netgd-send` | 42 件パス | R30 |
+| ホストテスト `tools/fwbackup` | 59 件パス（probe-rs はラッパー経由のみ） | R43 |
+| ホストテスト `tools/fwimage` | 17 件パス（実際の 4E・2E の ELF を使用） | R46 |
+| ホストテスト `tools/netgd-recv` | 14 件パス（Windows）。Linux でのビルド不具合を修正中 | R48, R50 |
+| FPGA シミュ（v5.5、Cyclone II の既定） | `test.py` 30・`test_cdda.py` 3・`test_timing.py` 5・`test_top.py` 5 件パス。Verilog はコミット済みと一致 | R1, R3, R25 |
+| FPGA シミュ（AG16K、`NETGD_FPGA_TARGET=ag16k`） | 同じ 4 本がパス。`test_fifo.py` 10 件で旧 FIFO と 1 サイクル単位で一致 | R39 |
+| AG16K 向けブロック RAM FIFO | LUT 2,821（17 %）、M9K 14 個。オープンな Yosys の推論は確認済み、AGM の `synth_agm` では未確認 | R39 |
+| CI `build.yaml` | 5 ジョブ（firmware・host-tests・gdprobe-host・tools-host・fpga-sim）。R50 の実行で、ファーム・FPGA・gdprobe・fwbackup・fwimage・mksdcard は成功。netgd-send は修正済み（`5f4e02d8`）、netgd-recv の Linux 対応は修正中 | R35, R39, R50 |
+| CI `kos.yaml`（KallistiOS 2.3.0） | gdprobe の ELF は初回でビルド成功。netgd-recv は Makefile の引用符と書式指定の不一致で失敗（run 44684499681）→ 修正中 | R35, R50 |
 
-**G2 の土台はすでにある**：セカンダリ IDE ディスクが SD を丸ごと見せるので、残りの主な作業は
-コンソール側（BBA で受信して IDE ディスクの FAT32 に書くホームブリュー）と、その運用の詰め。
+**実装済み**（コード上。すべて実機未検証）：
+- **G2（BBA 経由の SD 書き込み）**：F1〜F5・F13（R16）、F6〜F8（書き込みセッション・MBR 保護・FNV-1a。R38）、PC 側 `netgd-send`（R30）、Dreamcast 側 `netgd-recv`（R48）。
+- **G3（本家同等）**：番号フォルダ（`01` = GDmenu）と既定マウント、`0x52`（番号指定・次／前・バージョン応答。R14）、ボタンの番号順送り、`GDEMU.INI`（`reset_goto`・`open_time`・`detect_time`。R27）。CDI のデータ位置の修正（`start_lba + pregap - 150`。R36）。
+- **自己更新（`0xF9`）の対策 A**：CHIPID 照合、ベクタ検査、検証後のみリセット、FWS=6 など（R46）。転送中の電源断で起動不能になる窓は残るので、対策 B が要る。
+- **未変更**：上流の ATAPI 応答の疑い D-1〜D-5 は、純正 GDEMU の実測待ち（R11、R36）。R45 の指摘の一部（`0xEE` の拒否など）はコードに入っているが、修正の記録は LOG に無い。
+
+**ツール**（一行ずつ）：
+- `tools/gdprobe`：純正 GDEMU と NetGD に読み取り系コマンドだけを送る KOS 製プローブ。PC 側の `compare.py` で比較（R19、R22、R31）。
+- `tools/mksdcard`：調査用 SD（`03`〜`06`）を決定的に生成（R28）。
+- `tools/fwbackup`：SWD で 6.0 の純正フラッシュを読む（`check` / `dump` / `inspect`。probe-rs 0.32.0 のみ）（R33、R43）。
+- `tools/fwimage`：自己更新用の OGFW v2 イメージを作る（R46）。
+- `tools/netgd-send`：PC 側の送信（`prepare` / `collect` / `status`）（R30）。
+- `tools/netgd-recv`：Dreamcast 側の受信（KOS + FatFs、チェックポイント、FNV-1a 照合）（R48）。
+- `tools/netgd-fwupd`：BBA 経由でファームを更新する KOS アプリ。作業中（未コミット、LOG に記録なし）（R47）。
+
+**ハードウェア**：
+- 実機で確かめたことはまだ無い（G1〜G3 とも P6 の実機検証待ち）。
+- GDEMU 6.0 は MCU が ATSAM3U2E、FPGA が AGM AG16KDDF256（型番末尾に「M」なし、外付けフラッシュなし）。MCU から FPGA をパッシブシリアルで起動する方式が最有力（R6、R41、R49）。PS のタイミングは公開されていない（R49）。
+- SWD には Raspberry Pi Pico（Debug Probe）を使う。ESP32 は不可（R42）。6.0 のヘッダは穴だけでピンが無いので、はんだ付けが要る（R44）。SAM3U2E の CHIPID の期待値は `0x281A0761`（R24）。
+- オーナーの作業（待ち）：純正 GDEMU での gdprobe 試験（R20、R22）、導通確認（R24、R32）、SWD で CHIPID を読み、ロックが無ければ `fwbackup dump`（R29、R43）。
+
+**次の山場は実機**：G2 のファームと `netgd-recv` の実機試験、G1 の導通確認（分岐 A の確認）と PS のタイミングの確認。上流の疑い D は純正の実測データ待ち。
 
 ## フェーズ
 

@@ -147,18 +147,18 @@ def ratio(a, b):
     return b / a
 
 
-def compare_records(ea, eb, ratio_limit=TIMING_RATIO_DEFAULT, ignore_timing=False):
-    """Return (diffs, timing_notes). Each is a list of strings."""
+def compare_records(ea, eb, ratio_limit=TIMING_RATIO_DEFAULT, ignore_timing=False, only_common=False):
+    """Return (diffs, timing_notes). Each is a list of strings.
+    only_common: skip probes present in just one record (a predicted record from tools/netgd-expect has no
+    img=0 lines, and a real run may have used other tp_*/seek_* settings)."""
     ia, ib = index_entries(ea), index_entries(eb)
     diffs, notes = [], []
     for key in sorted(set(ia) | set(ib), key=sort_key):
         a, b = ia.get(key), ib.get(key)
         name = key_name(key)
-        if a is None:
-            diffs.append('%s: only in B' % name)
-            continue
-        if b is None:
-            diffs.append('%s: only in A' % name)
+        if a is None or b is None:
+            if not only_common:
+                diffs.append('%s: only in %s' % (name, 'B' if a is None else 'A'))
             continue
         if key[1] == 'HASH':
             if a.get('crc') != b.get('crc') or a.get('ssz') != b.get('ssz'):
@@ -198,7 +198,7 @@ def compare_records(ea, eb, ratio_limit=TIMING_RATIO_DEFAULT, ignore_timing=Fals
 def cmd_compare(args):
     ha, ea = parse_record(read_text(args.a))
     hb, eb = parse_record(read_text(args.b))
-    diffs, notes = compare_records(ea, eb, args.ratio, args.ignore_timing)
+    diffs, notes = compare_records(ea, eb, args.ratio, args.ignore_timing, args.only_common)
     print('A: %s  (%d probes) %s' % (args.a, len(ea), '; '.join(h for h in ha[:1])))
     print('B: %s  (%d probes) %s' % (args.b, len(eb), '; '.join(h for h in hb[:1])))
     print()
@@ -412,6 +412,8 @@ def main(argv=None):
     ap.add_argument('--img', type=int, help='check only HASH lines tagged with this image number')
     ap.add_argument('--ratio', type=float, default=TIMING_RATIO_DEFAULT, help='timing ratio worth a note (default 1.5)')
     ap.add_argument('--ignore-timing', action='store_true')
+    ap.add_argument('--only-common', action='store_true',
+                    help='ignore probes that appear in only one of the two records (e.g. stock vs the predicted record of tools/netgd-expect)')
     ap.add_argument('--max-report', type=int, default=20)
     args = ap.parse_args(argv)
     try:
