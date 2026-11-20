@@ -70,12 +70,14 @@ fn mil_cd() -> Vec<u8> {
 
 fn mil_cd_expected() -> Vec<(u8, u32, u8, u16, u32, u32)> {
     // (number, start_lba, ctrl, sector_size, sector_count, file_offset)
+    // start_lba is the first DATA sector's LBA = descriptor start_lba + pregap - 150:
+    // track 2 (descriptor 3150, pregap 0) follows track 1's 3000 data sectors at 3000.
     // base1 = 0                      offset1 = 150*2352                   = 352_800
     // base2 = 3150*2352 = 7_408_800  offset2 = base2 (no pregap)          = 7_408_800
     // base3 = base2 + 7000*2352      = 23_872_800; offset3 = base3 + 150*2336 = 24_223_200
     vec![
         (1, 0, 0, 2352, 3000, 352_800),
-        (2, 3150, 0, 2352, 7000, 7_408_800),
+        (2, 3000, 0, 2352, 7000, 7_408_800),
         (3, 45000, 4, 2336, 20000, 24_223_200),
     ]
 }
@@ -124,11 +126,52 @@ fn single_session_cooked_data_track() {
 #[test]
 fn mixed_name_lengths_do_not_misalign_later_tracks() {
     // 0 and 255-byte names (255 is the u8 maximum) around a normal one.
-    let mk = |n| T { name_len: n, pregap: 0, sector_count: 10, start_lba: n as u32, total_length: 10, read_mode: 2, control: 0 };
+    let mk = |n| T { name_len: n, pregap: 0, sector_count: 10, start_lba: n as u32 + 150, total_length: 10, read_mode: 2, control: 0 };
     let f = build(100, &[vec![mk(0), mk(255), mk(1), mk(56)]]);
     let (_, t) = parse_slice(&f).unwrap();
     assert_eq!(t.iter().map(|t| t.start_lba).collect::<Vec<_>>(), vec![0, 255, 1, 56]);
     assert_eq!(t.iter().map(|t| t.file_offset).collect::<Vec<_>>(), vec![0, 23520, 47040, 70560]);
+}
+
+#[test]
+fn start_lba_is_the_first_data_sector_not_the_pregap() {
+    // mkdcdisc layout (image 05 of tools/mksdcard): three tracks, pregap 150 each, descriptor
+    // start_lba = running sum of pregap+data+postgap. With pregap 150 the descriptor value is
+    // already the data LBA (FAD 150 + LBA), so nothing moves.
+    let t = |start, count, mode| T { name_len: 32, pregap: 150, sector_count: count, start_lba: start, total_length: count + 150, read_mode: mode, control: 0 };
+    let f = build(10_000, &[vec![t(0, 302, 2), t(452, 402, 2)], vec![t(12254, 1102, 1)]]);
+    let (_, tr) = parse_slice(&f).unwrap();
+    assert_eq!(tr.iter().map(|t| t.start_lba).collect::<Vec<_>>(), vec![0, 452, 12254]);
+    assert_eq!(tr.iter().map(|t| t.file_offset).collect::<Vec<_>>(), vec![352_800, 1_415_904, 2_711_808]);
+    // File offsets: track 2's data sits (452 - 302 - ... ) sectors after track 1's data; consecutive
+    // data LBAs differ by pregap + count exactly as the file offsets do.
+    assert_eq!(tr[1].file_offset - tr[0].file_offset, (150 + 302) * 2352);
+}
+
+#[test]
+fn shorter_pregap_moves_the_data_lba_earlier() {
+    // pregap 0 on track 2: its data begins where its (zero-length) pregap does, FAD start_lba,
+    // i.e. LBA start_lba - 150. Flycast: track FAD = start_lba + pregap_length.
+    let f = build(
+        10_000,
+        &[vec![
+            T { name_len: 1, pregap: 150, sector_count: 1000, start_lba: 0, total_length: 1150, read_mode: 2, control: 0 },
+            T { name_len: 1, pregap: 0, sector_count: 500, start_lba: 1150, total_length: 500, read_mode: 2, control: 0 },
+        ]],
+    );
+    let (_, t) = parse_slice(&f).unwrap();
+    assert_eq!(t[0].start_lba, 0);
+    assert_eq!(t[1].start_lba, 1000); // directly after track 1's 1000 data sectors
+    assert_eq!(t[1].file_offset, 1150 * 2352);
+}
+
+#[test]
+fn start_lba_before_the_first_fad_saturates_at_zero() {
+    let f = build(
+        100,
+        &[vec![T { name_len: 1, pregap: 0, sector_count: 1, start_lba: 0, total_length: 1, read_mode: 2, control: 0 }]],
+    );
+    assert_eq!(parse_slice(&f).unwrap().1[0].start_lba, 0);
 }
 
 #[test]
@@ -259,10 +302,17 @@ fn agrees_with_the_original_walk() {
                 assert_eq!(s, os);
                 assert_eq!(t.len(), ot.len());
                 for ((a, b), off) in t.iter().zip(ot.iter()).zip(offs.iter()) {
+                    // INTENTIONAL DIFFERENCE (R28/D-5): the old walk reported the descriptor's
+                    // start_lba (the PREGAP start) as the data LBA; the new parser reports
+                    // start_lba + pregap - 150 (saturating). Everything else must be identical;
+                    // start_lba is checked against the old value mapped through that rule, with
+                    // the pregap re-read by an independent reader (`pregap_adjust`). They are
+                    // equal wherever the pregap is 150, so only mil_cd()'s track 2 differs.
                     assert_eq!(
-                        (a.number, a.start_lba, a.ctrl, a.sector_size, a.sector_count, a.file_offset),
-                        (b.number, b.start_lba, b.ctrl, b.sector_size, b.sector_count, *off)
+                        (a.number, a.ctrl, a.sector_size, a.sector_count, a.file_offset),
+                        (b.number, b.ctrl, b.sector_size, b.sector_count, *off)
                     );
+                    assert_eq!(a.start_lba, pregap_adjust(f, a.number, b.start_lba));
                 }
             }
             (Err(Error::BadCdi), Err("BadCdi")) => {}
@@ -270,4 +320,26 @@ fn agrees_with_the_original_walk() {
             (n, o) => panic!("mismatch: {:?} vs {:?}", n, o),
         }
     }
+}
+
+/// The old walk's `start_lba` mapped through the new rule (`+ pregap - 150`, saturating at 0),
+/// re-reading the pregap of track `number` from the descriptor with an independent reader.
+fn pregap_adjust(file: &[u8], number: u8, old_start: u32) -> u32 {
+    let rd = |at: usize| u32::from_le_bytes([file[at], file[at + 1], file[at + 2], file[at + 3]]);
+    let desc_start = file.len() - rd(file.len() - 4) as usize;
+    let mut cur = desc_start + 1;
+    let mut n = 0u8;
+    for _ in 0..file[desc_start] {
+        let tc = u16::from_le_bytes([file[cur + 1], file[cur + 2]]);
+        cur += 7;
+        for ti in 0..tc {
+            let td = cur + 25 + file[cur + 24] as usize + 31;
+            n += 1;
+            if n == number {
+                return old_start.saturating_add(rd(td + 2)).saturating_sub(150);
+            }
+            cur = td + if ti + 1 == tc { 188 } else { 180 };
+        }
+    }
+    unreachable!()
 }

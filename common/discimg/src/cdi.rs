@@ -16,6 +16,9 @@ const HDR_AFTER_NAME: u32 = 31;
 const TRACK_DATA_LEN: u32 = 188;
 const SESSION_HDR_LEN: u32 = 7;
 
+/// FAD of LBA 0 (the 2-second pregap of the first track).
+const FAD_OFFSET: u32 = 150;
+
 const OFF_PREGAP: usize = 2;
 const OFF_SECTOR_COUNT: usize = 6;
 const OFF_START_LBA: usize = 32;
@@ -108,9 +111,19 @@ where
                 .checked_add(pregap.checked_mul(ssize as u32).ok_or(Error::BadCdi)?)
                 .ok_or(Error::BadCdi)?;
 
+            // The descriptor's `start_lba` is where the track's *pregap*
+            // begins, counted from the first pregap sector of the disc
+            // (mkdcdisc: running sum of earlier tracks' pregap+data+postgap,
+            // plus whole earlier sessions; Flycast: track FAD = start_lba +
+            // pregap_length). FAD = LBA + 150, so the LBA of the first data
+            // sector is start_lba + pregap - 150. With the usual 150-sector
+            // pregap that is `start_lba` itself; a track with a shorter
+            // pregap (DiscJuggler's own images) starts that much earlier.
+            let data_lba = start_lba.saturating_add(pregap).saturating_sub(FAD_OFFSET);
+
             let t = TrackDesc {
                 number,
-                start_lba,
+                start_lba: data_lba,
                 ctrl: (control & 0x0F) as u8,
                 sector_size: ssize,
                 sector_count,
