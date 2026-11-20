@@ -17,6 +17,7 @@
 | [../design/g1-ag16k-port.md](../design/g1-ag16k-port.md) | G1 設計：GDEMU 6.0（AG16K）への FPGA 移植（設計のみ） |
 | [ag16k-config.md](ag16k-config.md) | AG16K のコンフィグ方式（PS、ビット順、ローダーの変更設計） |
 | [ag16k-toolchain.md](ag16k-toolchain.md) | AG16K のビットストリームを作る道筋（Supra、オープンなツールの状況）（R69） |
+| [flash-budget-2e.md](flash-budget-2e.md) | 2E のフラッシュの使い道と削減案、埋め込みのビットストリームの上限（R81） |
 | [g3-read-path.md](g3-read-path.md) | SD 読み込み経路の調査と高速化の feature（R72・R75） |
 | [../design/fw-bootloader.md](../design/fw-bootloader.md) | 自己更新の安全対策 B：ロックした常駐ブート領域（R54） |
 | [../design/resident-app-contract.md](../design/resident-app-contract.md) | 常駐部とアプリの引き渡しの取り決め（世代 1）（R79） |
