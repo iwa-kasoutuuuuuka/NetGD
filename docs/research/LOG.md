@@ -204,6 +204,38 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   LFN だけの `01 Title` のような名前は番号として扱わない。`52 82` は `0xE0` の名前の受け渡し用バッファ `MOUNT_NAME` を共用する
   （`0xE0` の名前を分割送信している途中に `0x52` が来ると上書きされるが、現実には起きないと判断）。
 
+### R15 G2：ファーム必須修正 F1〜F5・F13 の方針（Opus、Sonnet 実装中）
+- 設計書（`docs/design/bba-sd-write.md` §4.1）どおり F1〜F5 と F13 を実装する。Opus が補足した点：
+  - **F5 はハードリセット（G1 の RSTn）のときだけ**メディアを戻す。SRST（Device Control）は KOS の `g1ata` 初期化で出うるうえ、同じバスの両デバイスに効く。
+    SRST で戻すと、書き込みアプリが初期化した直後に GD イメージが再マウントされ、以後の書き込みが全部 ABRT になる。
+    FPGA が見分けられる情報（RSTn のエッジ数 slot 16、`HW_IN_RESET`）で区別できなければ実装しない。
+  - **F13** の機能ビットは実装済みのものだけを立てる（bit2 = DMA の公表）。bit0（書き込みセッション）と bit1（検査値）は 0。
+  - IDENTIFY のワードと 65535 セクタ以下への分割は、`common/discimg::ata` の純粋関数にしてホストテストする。
+
+### R16 G2：F1〜F5・F13 の実装（Sonnet 実装、Opus がレビュー）
+- **実装**：
+  - F1：`button.rs` の `on_press` は `!media_present()` なら何もしない（SD に触らない）。`service_swap_request` も取り出し中は要求を捨てる。
+    `0x52` と IMAGE_CTL のマウントは取り出し中も許可（ホスト自身の操作のため）。
+  - F2：Disk 役の `handle` に FLUSH CACHE（0xE7）・FLUSH CACHE EXT（0xEA）を追加。`CMD_NOP` と同じ完了（エラー 0、DRDY|DSC、INTRQ）。Packet 役は従来どおり ABRT。
+  - F3：`stage_identify_disk` でワード 49 = 0x0300（LBA + DMA）、ワード 63 = 0x0407（MWDMA 0〜2 対応、2 を選択）。SET FEATURES 0x03 は元から受理。
+  - F4：`handle_disk_write` を `discimg::ata::runs(lba, count, 32768)` で CMD25 の区間に分割。32768 セクタ以下は従来どおり1回の CMD25。
+    読み出し側は `fetch_run` が小さい区間しか渡さないので同じ不具合は無い（報告どおり）。
+  - F5：**RSTn の立ち下がりカウンタ（slot 16 の上位バイト）が前回から変わり、かつ取り出し中**のときだけ `load_media` でプライマリにメディアを戻す
+    （`ide.rs` の `service_hard_reset`、`ide_task` のループで毎回呼ぶ）。
+  - F13：`OGDM_PROTOCOL_VERSION` 2 → 3。VERSION 応答のバイト5 = 機能ビット 0x04（bit2 = DMA の公表のみ）。
+  - `common/discimg::ata`（`advertise_mwdma`、`runs`）とテスト9件。
+- **Opus の確認（確認済み）**：
+  - F5 の区別の根拠：`fpga/amaranth/hw/ide_device.py:227` で `in_reset = ~ide_rstn | srst`（HW_RESET_SEEN / HW_IN_RESET は SRST と区別できない）。
+    一方、`ide_device.py:897-910` の `diag_rstn_falls` は `ide_rstn` を2段の同期化 FF に通したものだけを数え、SRST は数えない。
+  - F4 のエラー処理：区間内の失敗は `break` → その区間を `end()`（CMD12）で閉じる → 外側も抜ける。正しい。
+  - テスト discimg 62 / lzma 5 / gamecfg 9 件パス。4E・2E とも警告は従来の 13 件のみ。
+    サイズ（text）：4E 153352 → 153620（+268）、2E 113200 → 113124（-76）。`.bss` +24 バイト（タスクの future が大きくなった）。
+    IDE タスクのホットパスのフレームは不変。ボタンタスクのフレームが +8 バイト。
+- **未確認・リスク**：すべて実機未検証（KOS が DMA を使うか、`g1_ata_flush` の成功、65536 セクタの分割、ハードリセット後の再マウント）。
+  **F5 の前提**：書き込みアプリの実行中に Dreamcast 側が RSTn を動かさないこと。KOS の `cdrom_init` などが RSTn を出す場合でも、
+  それがアプリの「取り出し」より前なら影響しないが、取り出し後に出すと書き込み中に再マウントされる。実機の UART ログ
+  （`service_hard_reset` のログ）で確認が必要（設計書 11 章の質問4と同じ）。リセット処理は IDE タスクが起きたとき（コマンドやボタン）にだけ走る。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -221,3 +253,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | GitHub の公開先は iwa-kasoutuuuuuka/NetGD（公開）、上流は `upstream` リモートに残す | ユーザーの指示 | ユーザー |
 | 2026-11-20 | 番号フォルダ方式を採用し、設定が無ければフォルダ 01 をマウント。`0x52` で番号指定・次／前に対応 | 本家と GDmenu / openMenu との互換（R13・R14） | ユーザー（G3 を選択）、Opus 設計 |
 | 2026-11-20 | `0x52 82` で番号が見つからないときは、今のディスクを外さずにエラーを返す | openMenu はエラーを見ずに READY を待つため | Opus |
+| 2026-11-20 | F5（リセット後の再マウント）は RSTn の立ち下がりカウンタで判定し、SRST では動かさない | SRST は KOS の `g1ata` 初期化で出て両デバイスに効くため、再マウントすると書き込みが全部拒否される（R15・R16） | Opus |
