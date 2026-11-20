@@ -1250,6 +1250,39 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：一部（CI の範囲、ブランチの差分が設計書と索引の2ファイルだけであること）。
 - 関連：R8（G2 設計）、R13・R14（`0x52`）、R48・R62（netgd-recv）、`docs/design/menu-app.md`。
 
+### R98 2E のフラッシュ削減をオプトインで用意（Sonnet、Opus が差分を確認）
+
+- 担当：Sonnet（実装）。
+- 問い：2E の `resident,sd-fast` は余りが約 100 B しかない。既定の挙動を変えずに、削減案をすぐ使える形にできるか。
+- 結論：
+  - `mcu/netgd/Cargo.toml` にプロファイルを2つ足した（3c80ad3c・a4a20688）。ソースと feature は変えていない。
+    - `release-z`：`opt-level="z"`。
+    - `release-z-hot-s`：`release-z` のうち、`lzma`・`embassy-atsam3`・`psload` だけを `s` に戻す。
+  - 使い方：`DEFMT_LOG=off cargo build --profile release-z --features sam3u2e,resident,sd-fast`。出力は `target/thumbv7m-none-eabi/release-z/netgd`。
+  - 大きさ（text+data、`llvm-size`）：
+
+    | ビルド | `release` | `release-z` | `release-z-hot-s` |
+    |---|---:|---:|---:|
+    | 2E `resident,sd-fast` | 122,268 | 114,588（−7,680） | 115,104（−7,164） |
+    | 2E `sam3u2e` | 122,400 | 114,256 | 114,572 |
+    | 4E 既定 | 163,112 | 147,468 | 147,756 |
+    | board-v60 | 68,852 | 60,840 | 61,144 |
+
+    2E の `resident,sd-fast` の余りは、約 7.3〜7.8 KB に増える。
+  - 見送った案：
+    - 案 3（`trim` の共用）：既定のビルドの生成コードが変わりうる。
+    - 案 d（LZMA の辞書 8 KiB）：作業メモリが +4 KiB 増え、2E の SRAM0（16 KiB）を圧迫する。
+    - 案 1（`list_root_dir`）：すでに feature `sd-list` の裏にあって、既定では入っていない。
+  - `fwimage.py seal` は、両プロファイルの ELF で成功した。CI は `release` のパスを決め打ちしているので、CI では作らない。
+- 根拠：
+  - `docs/research/flash-budget-2e.md` §7。
+  - 既定の5つの構成で、変更前後の bin と ELF の SHA-256 が一致した（同じ §7.4）。
+  - `git diff main...` で、変更は `Cargo.toml` のプロファイル 24 行と文書だけ（Opus が確認）。
+- 信頼度：大きさとバイト一致は確認済み。速度は未測定で、実機での比較が要る（IDE の応答、CD_READ の DMA、CDDA、FPGA の起動）。
+- 注：4E の基準値（163,112）は R90 の値（162,692）と少し違う。測り方（`DEFMT_LOG` の有無など）の違いとみられる（推測）。2E と v60 は一致している。
+- Opus による検証：差分の確認だけ。ビルドはし直していない。
+- 関連：R81、R86、`docs/research/flash-budget-2e.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -1287,3 +1320,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-21 | VirusTotal への Supra のアップロードはユーザーが自分の手で行う | 拡張から shadow DOM のファイル欄に届かず、`yosys.exe` は 10 MB の上限も超える。API キーを Claude が扱うことはできない（R94） | Opus |
 | 2026-11-21 | Supra の安全性は「静的には問題なし、Kaspersky も未検出」で一区切りにする。残りの確認（Tcl から実行時に呼ばれるもの、公式の配布物との一致）は、隔離環境で動かすときか、公式のハッシュが手に入ったときに行う | R95 | Opus |
 | 2026-11-21 | NetGD 専用メニュー（`netgd-menu`）を作る。一覧はアプリが SD を読み、起動は `52 82` と BIOS への引き渡しで行う。ファームは変えない | 2E のフラッシュに余裕が無く、ファームに一覧を持たせない（R97） | ユーザー（実施）、Fable 設計 |
+| 2026-11-21 | 2E の削減案 2 は、オプトインのプロファイル（`release-z`・`release-z-hot-s`）として入れる。既定にするかは実機で速度を比べてから | 既定のビルドを変えずに 7 KB 以上の余りを用意できる（R98） | Opus |
