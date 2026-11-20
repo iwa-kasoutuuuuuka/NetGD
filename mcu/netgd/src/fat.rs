@@ -55,11 +55,19 @@ pub struct Geometry {
     data_lba: u32,
     blocks_per_cluster: u32,
     pub root_cluster: u32,
+    /// Data clusters on the volume: valid cluster numbers are `2..clusters + 2`.
+    /// Bounded by the volume's size and by what one FAT can hold.
+    clusters: u32,
 }
 
 impl Geometry {
-    pub fn cluster_lba(&self, cluster: u32) -> u32 {
-        self.data_lba + (cluster - 2) * self.blocks_per_cluster
+    /// First block of `cluster`, `None` outside the volume (a damaged FAT
+    /// value must not become a block number).
+    pub fn cluster_lba(&self, cluster: u32) -> Option<u32> {
+        if cluster < 2 || cluster - 2 >= self.clusters {
+            return None;
+        }
+        self.cluster_geom().checked_cluster_lba(cluster)
     }
 
     fn cluster_geom(&self) -> ClusterGeom {
@@ -124,6 +132,8 @@ pub fn probe() -> Option<Geometry> {
         start
     };
     let blocks_per_cluster = sec[0x0D] as u32;
+    let total16 = rd16(&sec, 0x13);
+    let total = if total16 != 0 { total16 } else { rd32(&sec, 0x20) };
     let reserved = rd16(&sec, 0x0E);
     let num_fats = sec[0x10] as u32;
     let root_entries = rd16(&sec, 0x11);
@@ -134,12 +144,26 @@ pub fn probe() -> Option<Geometry> {
         warn!("fat: volume at {} is not FAT32", base);
         return None;
     }
+    // Cluster count: what the volume holds after the metadata, and no more
+    // than the FAT has entries for (a BPB that claims more is damaged, and the
+    // smaller number is the safe one).
+    let meta = reserved.checked_add(num_fats.checked_mul(spf32)?)?;
+    if blocks_per_cluster == 0 || total <= meta {
+        warn!("fat: volume at {} has a bad BPB", base);
+        return None;
+    }
+    let clusters = ((total - meta) / blocks_per_cluster).min(spf32.saturating_mul(128).saturating_sub(2));
+    if root_cluster - 2 >= clusters {
+        warn!("fat: volume at {} has its root outside the data area", base);
+        return None;
+    }
     let g = Geometry {
         fat_lba: base + reserved,
         sectors_per_fat: spf32,
-        data_lba: base + reserved + num_fats * spf32,
+        data_lba: base + meta,
         blocks_per_cluster,
         root_cluster,
+        clusters,
     };
     info!("fat: FAT32 at {}, {} blocks/cluster, fat@{} data@{}",
           base, blocks_per_cluster, g.fat_lba, g.data_lba);
@@ -154,7 +178,7 @@ pub fn probe() -> Option<Geometry> {
 /// else sets it back to 0.
 fn fat_next(g: &Geometry, cluster: u32, cached: &mut u32, buf: &mut [u8; 512]) -> Result<Option<u32>, ()> {
     let sector = cluster / 128;
-    if sector >= g.sectors_per_fat {
+    if sector >= g.sectors_per_fat || cluster < 2 || cluster - 2 >= g.clusters {
         return Err(());
     }
     if sector + 1 != *cached {
@@ -165,7 +189,9 @@ fn fat_next(g: &Geometry, cluster: u32, cached: &mut u32, buf: &mut [u8; 512]) -
     let v = rd32(buf, (cluster % 128) as usize * 4) & 0x0FFF_FFFF;
     if v >= 0x0FFF_FFF8 {
         Ok(None)
-    } else if v < 2 || v == 0x0FFF_FFF7 {
+    } else if v < 2 || v - 2 >= g.clusters {
+        // Free, reserved, bad (0x0FFFFFF7) or past the end of the volume: the
+        // chain is damaged, and the value must never reach `cluster_lba`.
         Err(())
     } else {
         Ok(Some(v))
@@ -218,8 +244,15 @@ pub fn lookup(g: &Geometry, dir_cluster: u32, key: &Key<'_>, buf: &mut [u8; 512]
         Key::Long(_) => None,
     };
     let mut cluster = dir_cluster;
+    // A directory has at most `clusters` clusters; a longer walk is a chain
+    // that loops (the watchdog is off, so it would never return).
+    let mut hops = 0u32;
     loop {
-        let base = g.cluster_lba(cluster);
+        hops += 1;
+        if hops > g.clusters {
+            return None;
+        }
+        let base = g.cluster_lba(cluster)?;
         for b in 0..g.blocks_per_cluster {
             read_block(base + b, buf).ok()?;
             for e in buf.chunks_exact(32) {
@@ -266,23 +299,31 @@ pub fn find_in_dir(g: &Geometry, dir_cluster: u32, name: &ShortFileName, buf: &m
     lookup(g, dir_cluster, &Key::Short(name), buf)
 }
 
+/// A `ShortFileName` holding the 11 bytes of a directory entry as they are.
+///
+/// embedded-sdmmc has no public constructor for that: `create_from_str` folds
+/// case and refuses `[ \ | ]` and the like, which are the second bytes of
+/// code-page (cp932) characters in an alias, so a name made of them cannot be
+/// built through it. The type is one `[u8; 11]` (compile-time check below), and
+/// open/compare by short name look at exactly those bytes.
+pub fn short_from_raw(raw: &[u8; 11]) -> ShortFileName {
+    const _: () = assert!(
+        core::mem::size_of::<ShortFileName>() == 11 && core::mem::align_of::<ShortFileName>() == 1
+    );
+    // SAFETY: size and alignment are those of `[u8; 11]` (asserted above) and
+    // every bit pattern is a valid value of the type's only field.
+    unsafe { core::mem::transmute_copy::<[u8; 11], ShortFileName>(raw) }
+}
+
 /// The 8.3 alias of the file called `name` (as the GDI spells it) in the
 /// directory at `dir_cluster`, for use with everything that opens or maps a
-/// file by short name.
+/// file by short name. The alias is the entry's own 11 bytes (any code page).
 pub fn resolve_long(g: &Geometry, dir_cluster: u32, name: &str, buf: &mut [u8; 512]) -> Option<ShortFileName> {
     let e = lookup(g, dir_cluster, &Key::Long(name), buf)?;
     if e.is_dir {
         return None;
     }
-    let mut text = [0u8; 12];
-    let n = fatmap::lfn::display_83(&e.short, &mut text);
-    // Bytes above 0x7F are OEM-code-page characters; ShortFileName takes
-    // ISO-8859-1 and stores the byte back, which is what the directory holds.
-    let mut s = heapless::String::<12>::new();
-    for &b in &text[..n] {
-        s.push(b as char).ok()?;
-    }
-    ShortFileName::create_from_str(&s).ok()
+    Some(short_from_raw(&e.short))
 }
 
 /// Why `map_extents` gave up on a file.

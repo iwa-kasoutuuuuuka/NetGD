@@ -35,6 +35,7 @@ fn build(sessions: &[Vec<T>]) -> Vec<u8> {
     f.extend_from_slice(&[0u8; 7]);
     f.extend_from_slice(&[0u8; 56]);
     f.extend_from_slice(&[0x33u8; 40]);
+    f.extend_from_slice(&0x8000_0006u32.to_le_bytes());
     let len = (f.len() - desc_start + 4) as u32;
     f.extend_from_slice(&len.to_le_bytes());
     f

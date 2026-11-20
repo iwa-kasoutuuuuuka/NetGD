@@ -157,21 +157,22 @@ fn name_case_is_preserved() {
 }
 
 #[test]
-fn numbers_stop_at_the_first_non_digit_and_truncate_to_field_width() {
+fn numbers_stop_at_the_first_non_digit_and_are_range_checked() {
     // "4abc" parses as 4: parse_u32 stops at a non-digit once it has one.
     let t = parse_vec(b"1\n1 0 4abc 2352 t.bin 0\n").unwrap();
     assert_eq!(t[0].ctrl, 4);
-    // Track number, ctrl and sector size are cast down without a range check.
-    let t = parse_vec(b"1\n257 0 260 65537 t.bin 0\n").unwrap();
-    assert_eq!((t[0].number, t[0].ctrl, t[0].sector_size), (1, 4, 1));
+    // R89 C6: track number, ctrl and sector size are no longer cast down
+    // without a range check (257 -> 1, 260 -> 4, 65537 -> 1 used to parse).
+    assert_eq!(parse_vec(b"1\n257 0 260 65537 t.bin 0\n"), Err(Error::Parse));
 }
 
 #[test]
 fn errors() {
     let p = |s: &str| parse_vec(s.as_bytes());
     assert_eq!(p(""), Err(Error::Parse));
-    // A leading blank line makes the *header* empty, which is not a number.
-    assert_eq!(p("\n3\n1 0 4 2352 a.bin 0\n"), Err(Error::Parse));
+    // R89 C6: leading blank lines before the count are skipped, as the Python
+    // tool does (they used to make the header empty, which is not a number).
+    assert_eq!(p("\n3\n1 0 4 2352 a.bin 0\n").unwrap().len(), 1);
     assert_eq!(p("three\n"), Err(Error::Parse));
     assert_eq!(p("-1\n"), Err(Error::Parse));
     // Header alone is a valid, empty table.
@@ -295,4 +296,38 @@ fn agrees_with_the_original_parser_on_a_corpus() {
             (n, o) => panic!("mismatch on {:?}: {:?} vs {:?}", String::from_utf8_lossy(c), n, o),
         }
     }
+}
+
+// ---- R89 A5 / C6: field ranges, sector sizes, leading blank lines ---------
+
+#[test]
+fn sector_size_must_be_a_known_one() {
+    for bad in ["0", "512", "2049", "2353", "65535"] {
+        let g = format!("1\n1 0 4 {} t.bin 0\n", bad);
+        assert_eq!(parse_vec(g.as_bytes()), Err(Error::Parse), "sector size {}", bad);
+    }
+    for ok in [2048u16, 2336, 2352] {
+        let g = format!("1\n1 0 4 {} t.bin 0\n", ok);
+        assert_eq!(parse_vec(g.as_bytes()).unwrap()[0].sector_size, ok);
+    }
+}
+
+#[test]
+fn fields_that_overflow_their_type_are_rejected_not_truncated() {
+    // 65536 + 2352 truncates to 2352 under `as u16`.
+    assert_eq!(parse_vec(b"1\n1 0 4 67888 t.bin 0\n"), Err(Error::Parse));
+    // track number 257 truncates to 1 under `as u8`.
+    assert_eq!(parse_vec(b"1\n257 0 4 2352 t.bin 0\n"), Err(Error::Parse));
+    // control 260 truncates to 4.
+    assert_eq!(parse_vec(b"1\n1 0 260 2352 t.bin 0\n"), Err(Error::Parse));
+    assert!(parse_vec(b"1\n255 0 4 2352 t.bin 0\n").is_ok());
+}
+
+#[test]
+fn leading_blank_lines_and_spaces_before_the_count() {
+    let want = parse_vec(GDI3.as_bytes()).unwrap();
+    let with = format!("\n  \r\n\t\n   {}", GDI3);
+    assert_eq!(parse_vec(with.as_bytes()).unwrap(), want);
+    // Only blanks: still no count.
+    assert_eq!(parse_vec(b"\n  \n"), Err(Error::Parse));
 }

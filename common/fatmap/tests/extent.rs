@@ -414,3 +414,40 @@ fn full_map_len(fat: &Fat, first: u32, size: u32) -> usize {
     });
     n
 }
+
+// ---- R89 C7: a damaged FAT value must not overflow the LBA ----------------
+
+#[test]
+fn cluster_lba_is_checked() {
+    assert_eq!(G.checked_cluster_lba(2), Some(1000));
+    assert_eq!(G.checked_cluster_lba(3), Some(1064));
+    assert_eq!(G.checked_cluster_lba(1), None);
+    assert_eq!(G.checked_cluster_lba(0), None);
+    // 0x0FFFFFF6 * 64 overflows u32.
+    assert_eq!(G.checked_cluster_lba(0x0FFF_FFF6), None);
+    assert_eq!(G.checked_cluster_lba(u32::MAX), None);
+}
+
+#[test]
+fn chain_leaving_the_block_space_is_broken_not_wrapped() {
+    let fat = Fat::new(100);
+    let mut emitted = Vec::new();
+    let r = walk(
+        &G,
+        Cursor::start(10, 3 * CB).unwrap(),
+        |c| if c == 10 { Ok(Some(0x0FFF_FFF6)) } else { fat.lookup()(c) },
+        |o, e| {
+            emitted.push((o, e));
+            true
+        },
+    );
+    assert_eq!(r, Walk::Broken);
+    assert_eq!(emitted.len(), 1); // the cluster before the jump was fine
+    // A first cluster that is already out of range.
+    let r = walk(&G, Cursor::start(0x0FFF_FFF6, CB).unwrap(), fat.lookup(), |_, _| true);
+    assert_eq!(r, Walk::Broken);
+    // A run whose end passes u32::MAX.
+    let g = ClusterGeom { data_lba: u32::MAX - 100, blocks_per_cluster: 64 };
+    let r = walk(&g, Cursor::start(2, 2 * CB).unwrap(), |c| Ok(Some(c + 1)), |_, _| true);
+    assert_eq!(r, Walk::Broken);
+}

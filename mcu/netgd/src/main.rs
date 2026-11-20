@@ -266,7 +266,8 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
     loop {
         Timer::after(Duration::from_secs(1)).await;
         led.toggle().unwrap();
-        let (_free_run, _strobes, _rstn_edges, _bus_state, _audio_alive) = unsafe {
+        #[cfg_attr(not(feature = "fpga-diag"), allow(unused_variables))]
+        let (free_run, strobes, rstn_edges, bus_state, audio_alive) = unsafe {
             (
                 read_volatile(fpga.add(14)),
                 read_volatile(fpga.add(15)),

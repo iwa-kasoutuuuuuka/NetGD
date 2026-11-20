@@ -50,8 +50,18 @@ pub struct ClusterGeom {
 }
 
 impl ClusterGeom {
+    /// First block of `cluster`; `None` for a cluster number below 2 or one
+    /// whose block number does not fit a `u32` (a damaged FAT value).
+    pub fn checked_cluster_lba(&self, cluster: u32) -> Option<u32> {
+        self.data_lba
+            .checked_add(cluster.checked_sub(2)?.checked_mul(self.blocks_per_cluster)?)
+    }
+
+    /// [`checked_cluster_lba`](Self::checked_cluster_lba) for a cluster the
+    /// caller knows is valid (tests); wraps rather than panics otherwise.
     pub fn cluster_lba(&self, cluster: u32) -> u32 {
-        self.data_lba + (cluster - 2) * self.blocks_per_cluster
+        self.data_lba
+            .wrapping_add(cluster.wrapping_sub(2).wrapping_mul(self.blocks_per_cluster))
     }
 }
 
@@ -136,7 +146,9 @@ pub fn walk_dyn(
         let run_cluster = cluster;
         let run_left = left;
         let run_off = off;
-        let run_lba = g.cluster_lba(cluster);
+        let Some(run_lba) = g.checked_cluster_lba(cluster) else {
+            return Walk::Broken;
+        };
         let mut blocks = 0u32;
         let following = loop {
             let n = g.blocks_per_cluster.min(left);
@@ -148,7 +160,7 @@ pub fn walk_dyn(
             }
             match next(cluster) {
                 Ok(Some(c)) if c >= 2 => {
-                    if c == cluster + 1 {
+                    if cluster.checked_add(1) == Some(c) {
                         cluster = c;
                     } else {
                         break Some(c);
@@ -157,6 +169,10 @@ pub fn walk_dyn(
                 _ => return Walk::Broken,
             }
         };
+        // The run must end inside the 32-bit block space.
+        if run_lba.checked_add(blocks).is_none() {
+            return Walk::Broken;
+        }
         if !emit(run_off, Extent { lba: run_lba, blocks }) {
             return Walk::More(Cursor {
                 cluster: run_cluster,
