@@ -10,9 +10,11 @@
 //!
 //! While the EEFC is programming, its flash plane cannot be read, so an
 //! instruction fetched from the plane being written faults. The SAM3U2E has a
-//! single plane, so "run from the other bank" is not an option, and the ROM
-//! IAP entry that would side-step this is documented for SAM3S/4S/4E, not
-//! SAM3U. The flash writer therefore has to execute from RAM.
+//! single plane, so "run from the other bank" is not an option. (The SAM3U
+//! datasheet does document a ROM IAP function, section 22.4.4, entry point in
+//! the ROM's NMI vector; it is not used here -- driving the EEFC directly
+//! from RAM keeps the lock-bit, FSR and wait-state handling visible in this
+//! file.) The flash writer therefore executes from RAM.
 //!
 //! The obvious way to get that — `#[link_section = ".data"]` on each function
 //! — works, but only as long as nothing in the module gives the compiler a
@@ -37,18 +39,49 @@
 //!
 //! Every step is vendor opcode `0xF9` on the disk device, selected by the
 //! FEATURES byte. Getting here at all took a 56-bit key (see the firmware's
-//! `fwupdate` shim); from this point the sequence is:
+//! `fwupdate` shim); from this point the sequence is, per image:
 //!
 //! ```text
-//!   F9 / feat 55                header, one 512-byte block
-//!   F9 / feat 56, count = n     n 512-byte payload blocks
-//!   F9 / feat 57                verify: CRC32 what was written
-//!   F9 / feat 58                reset
+//!   F9 / feat 55                header, one 512-byte block (see `logic.rs`)
+//!   F9 / feat 56, count = n     n 512-byte payload blocks (count 0 = 256)
+//!   F9 / feat 57                verify and commit
 //! ```
 //!
-//! Header and payload are per flash plane, so a full update runs
-//! header/data/verify once for the code plane and once for the bitstream
-//! plane before the final reset.
+//! and, once every image is verified:
+//!
+//! ```text
+//!   F9 / feat 58                reset -- refused unless an image was verified
+//!                               and nothing is left half-written
+//!   F9 / feat 59 + FORCE_KEY    reset regardless (48-bit key in the LBA regs)
+//! ```
+//!
+//! A full 4E update is two images (code to plane 0, bitstream to plane 1); a
+//! 2E update is one, because code and bitstream share its only plane.
+//!
+//! # What keeps a bad update from bricking the board
+//!
+//! * The header names the part it is for (CHIPID_CIDR, silicon revision
+//!   ignored); a mismatch is `BadTarget`. On a part without plane 1 a plane-1
+//!   destination is `BadDest`. A code image must start at the plane base, so
+//!   a partial overwrite of the code plane cannot be requested.
+//! * The first 256 bytes (the vector table) are held in RAM, not written. For
+//!   a code image they are checked against *this* part's SRAM before the
+//!   first page is erased (`BadVector`).
+//! * Pages 1..N are programmed as they arrive. Page 0 is written last, at
+//!   verify, after the CRC of the whole image (RAM page 0 + flash pages 1..N)
+//!   matched the header; then the whole flash image is read back against the
+//!   CRC once more.
+//! * Reset is only honoured after a successful verify.
+//! * FWS=6 for the whole run (SAM3U errata 46.1.1.3), stale EEFC error flags
+//!   are cleared before every command, lock bits over the destination are
+//!   read first (`Locked`), and the IDE write FIFO is drained after a
+//!   failure so the retry starts clean.
+//!
+//! Remaining unrecoverable window: from the first page-1.. erase until page 0
+//! has been rewritten, the old vector table is still in flash but points at
+//! partly overwritten code. A power cut or a host that disappears in that
+//! window leaves a board that needs SWD. Closing it needs a resident boot
+//! region (LOG R37, countermeasure B).
 //!
 //! Results come back in the ERROR register with the ERR status bit, since
 //! there is no logging in here: see [`Status`].
@@ -56,7 +89,11 @@
 #![no_std]
 #![no_main]
 
+use core::mem::MaybeUninit;
 use core::ptr::{read_volatile, write_volatile};
+
+use fwupdater_logic as logic;
+use logic::{Header, Part, Reject, KIND_CODE, PAGE, PLANE0_BASE, PLANE1_BASE};
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -74,10 +111,10 @@ const FEAT_HEADER: u8 = 0x55;
 const FEAT_DATA: u8 = 0x56;
 const FEAT_VERIFY: u8 = 0x57;
 const FEAT_RESET: u8 = 0x58;
+const FEAT_FORCE_RESET: u8 = 0x59;
 
-/// Header magic, at the start of the 512-byte header block: "OGFW".
-const HEADER_MAGIC: u32 = 0x5746_474F;
-const HEADER_VERSION: u32 = 1;
+/// 48-bit key, in the LBA registers of the forced reset: "OGFRST".
+const FORCE_KEY: u64 = 0x4F47_4652_5354;
 
 /// Reported in the ERROR register alongside the ERR status bit.
 ///
@@ -93,6 +130,7 @@ const HEADER_VERSION: u32 = 1;
 /// refuses to arm, which keeps "refused to start" distinct from every way an
 /// update can fail once it has started.
 #[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Status {
     Ok = 0x00,
     BadHeader = 0x14,
@@ -102,14 +140,37 @@ enum Status {
     Overrun = 0x54,
     FlashError = 0x64,
     CrcMismatch = 0x74,
+    /// Header is for a different part (or this part is not a SAM3U2E/4E).
+    BadTarget = 0x84,
+    /// A lock region under the destination is locked.
+    Locked = 0x94,
+    /// Initial SP or a handler of the new vector table is not plausible.
+    BadVector = 0xA4,
+    /// Reset requested before an image was verified (or with one half-written).
+    NotVerified = 0xB4,
+}
+
+impl From<Reject> for Status {
+    fn from(r: Reject) -> Status {
+        match r {
+            Reject::BadHeader => Status::BadHeader,
+            Reject::BadTarget => Status::BadTarget,
+            Reject::BadDest => Status::BadDest,
+            Reject::BadLength => Status::BadLength,
+            Reject::BadVector => Status::BadVector,
+        }
+    }
 }
 
 // --- EEFC ---------------------------------------------------------------
 
 const EFC0: *mut u32 = 0x400E_0800 as *mut u32;
+/// Exists on the SAM3U4E only. Never touched on any other part.
 const EFC1: *mut u32 = 0x400E_0A00 as *mut u32;
+const EEFC_FMR: usize = 0; // 0x00 / 4
 const EEFC_FCR: usize = 1; // 0x04 / 4
 const EEFC_FSR: usize = 2; // 0x08 / 4
+const EEFC_FRR: usize = 3; // 0x0C / 4
 const FSR_FRDY: u32 = 1 << 0;
 /// FCMDE | FLOCKE: bad command, or the target lock region is locked.
 const FSR_ERRORS: u32 = (1 << 1) | (1 << 2);
@@ -118,16 +179,19 @@ const FSR_ERRORS: u32 = (1 << 1) | (1 << 2);
 /// dropped it for a separate erase), which is why there is no erase pass
 /// below — but also why a page must be filled completely before committing.
 const FCMD_EWP: u32 = 0x03;
+/// Get Lock Bit: the lock bits of the plane come back in EEFC_FRR.
+const FCMD_GLB: u32 = 0x0A;
 const FKEY: u32 = 0x5A;
 
-/// Flash page size, and the granularity of EWP.
-const PAGE: u32 = 256;
+/// Wait states during programming. Errata 46.1.1.3: with fewer, the data
+/// written may not be the data expected. Set once at entry; the board resets
+/// at the end, which restores the firmware's own setting.
+const PROGRAMMING_FWS: u32 = 6;
 
-/// Plane 0 holds the code, plane 1 the compressed bitstream. On a SAM3U2E
-/// only plane 0 exists, and `plane_of` simply never matches the second entry.
-const PLANE0_BASE: u32 = 0x0008_0000;
-const PLANE1_BASE: u32 = 0x0010_0000;
-const PLANE_LEN: u32 = 0x0002_0000;
+/// CHIPID_CIDR. The flash writer takes the part from here, not from a build
+/// option, so an image cannot be steered to the wrong part by the firmware
+/// that happened to launch it.
+const CHIPID_CIDR: *const u32 = 0x400E_0740 as *const u32;
 
 // --- FPGA register file (mirrors the constants in the firmware's ide.rs) --
 
@@ -136,6 +200,9 @@ const REG_STATUS: usize = 1;
 const REG_ERROR: usize = 3;
 const REG_CMD_FEAT: usize = 4;
 const REG_SECTOR_COUNT: usize = 5;
+const REG_LBA_LOW_MID: usize = 6;
+const REG_LBA_HIGH_LOWP: usize = 7;
+const REG_LBA_MIDP_HIGHP: usize = 8;
 const REG_DATA_FIFO: usize = 9;
 const REG_WRITE_FIFO_LEVEL: usize = 11;
 const REG_DMA_MODE: usize = 19;
@@ -152,6 +219,7 @@ const ERR_ABRT: u8 = 0x04;
 
 /// Words per 512-byte block, matching the host's PIO sector size.
 const WORDS_PER_BLOCK: u16 = 256;
+const WORDS_PER_PAGE: usize = (PAGE / 4) as usize;
 
 /// The FPGA's register window, as a handle so the register pokes read
 /// somewhat like the firmware's `IdeDevice`.
@@ -195,8 +263,36 @@ impl Fpga {
         lo | (hi << 16)
     }
 
+    /// The 48-bit LBA of the pending command, assembled the way the
+    /// firmware's `CommandSnapshot::lba48` does.
+    fn lba48(self) -> u64 {
+        let low_mid = self.read(REG_LBA_LOW_MID) as u64;
+        let high_lowp = self.read(REG_LBA_HIGH_LOWP) as u64;
+        let midp_highp = self.read(REG_LBA_MIDP_HIGHP) as u64;
+        (midp_highp << 32) | ((high_lowp >> 8) << 24) | ((high_lowp & 0xFF) << 16) | low_mid
+    }
+
+    /// Throw away whatever the host left in the write FIFO. After a failed
+    /// block the rest of it (and possibly a whole further block) is still
+    /// there, and the next header would otherwise be parsed out of the
+    /// middle of stale payload.
+    fn discard_fifo(self) {
+        // BSY first, so the host stops feeding it while we empty it.
+        self.close_block();
+        // Bounded: a full FIFO is 512 words.
+        for _ in 0..1024 {
+            if self.read(REG_WRITE_FIFO_LEVEL) == 0 {
+                break;
+            }
+            let _ = self.pop16();
+        }
+    }
+
     /// End a command: drop flow control, post the result, release the latch.
     fn finish(self, status: Status) {
+        if status != Status::Ok {
+            self.discard_fifo();
+        }
         self.write(REG_DMA_MODE, 0);
         let err = status as u8;
         self.write(REG_ERROR, err as u16);
@@ -239,18 +335,33 @@ impl Fpga {
     }
 }
 
-/// Where the next payload block goes, and what to check at the end.
+/// State of the image being received.
 #[derive(Default)]
 struct Target {
-    /// Next flash address to program. `None` until a header is accepted.
-    cursor: Option<u32>,
-    /// First address of the current image, kept for the CRC pass.
+    /// A header was accepted and nothing has failed since.
+    active: bool,
+    /// Something failed mid-image: only a new header can continue.
+    failed: bool,
+    kind: u32,
+    /// First flash address of the image.
     base: u32,
-    /// Bytes still expected for the current image.
-    remaining: u32,
-    /// Total bytes in the current image.
+    /// Total bytes in the image.
     len: u32,
+    /// Bytes received so far (page 0 counts once it is held in RAM).
+    off: u32,
     crc: u32,
+    /// Page 0 has been programmed (verify did it).
+    committed: bool,
+}
+
+/// What outlives a single image: whether a reset would boot something
+/// half-written.
+#[derive(Default)]
+struct Session {
+    /// Per kind: flash was modified and the image has not verified since.
+    dirty: [bool; 2],
+    /// At least one image has verified.
+    verified_any: bool,
 }
 
 /// Blob entry point. The firmware branches here with the FPGA register
@@ -262,7 +373,22 @@ pub extern "C" fn _start(base: *mut u16) -> ! {
     unsafe { core::arch::asm!("cpsid i", options(nomem, nostack)) };
 
     let fpga = Fpga(base);
+    let part = Part::from_cidr(unsafe { read_volatile(CHIPID_CIDR) });
+
+    // Errata 46.1.1.3. EFC1 only where it exists.
+    unsafe {
+        write_volatile(EFC0.add(EEFC_FMR), PROGRAMMING_FWS << 8);
+        if part == Some(Part::Sam3u4e) {
+            write_volatile(EFC1.add(EEFC_FMR), PROGRAMMING_FWS << 8);
+        }
+    }
+
     let mut t = Target::default();
+    let mut s = Session::default();
+    // Page 0 of the image being received, parked in RAM until verify. On the
+    // borrowed stack rather than in the blob, so it costs the blob nothing.
+    let mut page0 = MaybeUninit::<[u32; WORDS_PER_PAGE]>::uninit();
+    let page0 = unsafe { &mut *page0.as_mut_ptr() };
 
     // Drop any flow control the interrupted command left armed, then report
     // ready so the host can start the sequence.
@@ -287,36 +413,32 @@ pub extern "C" fn _start(base: *mut u16) -> ! {
 
         match (cmd_feat >> 8) as u8 {
             FEAT_HEADER => {
-                let r = recv_header(fpga, &mut t);
+                let r = recv_header(fpga, part, &mut t);
                 fpga.finish(r);
             }
             FEAT_DATA => {
                 // Sector count 0 means 256, as everywhere else in ATA.
                 let n = if count == 0 { 256 } else { count as u32 };
-                let r = recv_data(fpga, &mut t, n);
+                let r = recv_data(fpga, part, &mut t, &mut s, page0, n);
                 fpga.finish(r);
             }
             FEAT_VERIFY => {
-                let r = match t.cursor {
-                    Some(_) if t.remaining == 0 => {
-                        if crc32(t.base, t.len) == t.crc {
-                            Status::Ok
-                        } else {
-                            Status::CrcMismatch
-                        }
-                    }
-                    Some(_) => Status::BadLength,
-                    None => Status::NoHeader,
-                };
+                let r = verify(&mut t, &mut s, page0);
                 fpga.finish(r);
             }
             FEAT_RESET => {
-                fpga.finish(Status::Ok);
-                // AIRCR: VECTKEY | SYSRESETREQ.
-                unsafe { write_volatile(0xE000_ED0C as *mut u32, 0x05FA_0004) };
-                loop {
-                    core::hint::spin_loop();
+                if s.verified_any && !s.dirty[0] && !s.dirty[1] {
+                    fpga.finish(Status::Ok);
+                    reset();
                 }
+                fpga.finish(Status::NotVerified);
+            }
+            FEAT_FORCE_RESET => {
+                if fpga.lba48() == FORCE_KEY {
+                    fpga.finish(Status::Ok);
+                    reset();
+                }
+                fpga.finish(Status::NotVerified);
             }
             _ => {
                 fpga.write(REG_DMA_MODE, 0);
@@ -328,8 +450,16 @@ pub extern "C" fn _start(base: *mut u16) -> ! {
     }
 }
 
+fn reset() -> ! {
+    // AIRCR: VECTKEY | SYSRESETREQ.
+    unsafe { write_volatile(0xE000_ED0C as *mut u32, 0x05FA_0004) };
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 /// Accept the 512-byte header block and set up `t` for the payload.
-fn recv_header(fpga: Fpga, t: &mut Target) -> Status {
+fn recv_header(fpga: Fpga, part: Option<Part>, t: &mut Target) -> Status {
     *t = Target::default();
 
     fpga.open_data_out();
@@ -338,54 +468,66 @@ fn recv_header(fpga: Fpga, t: &mut Target) -> Status {
     }
     fpga.close_block();
 
-    let magic = fpga.pop32();
-    let len = fpga.pop32();
-    let crc = fpga.pop32();
-    let dest = fpga.pop32();
-    let version = fpga.pop32();
+    let mut w = [0u32; logic::HEADER_WORDS];
+    for x in w.iter_mut() {
+        *x = fpga.pop32();
+    }
     // Drain the rest of the block: the FIFO must be empty for the next one.
-    for _ in 10..WORDS_PER_BLOCK {
+    for _ in (logic::HEADER_WORDS * 2)..WORDS_PER_BLOCK as usize {
         let _ = fpga.pop16();
     }
 
-    if magic != HEADER_MAGIC || version != HEADER_VERSION {
-        return Status::BadHeader;
-    }
-    // A destination must name a flash plane *and* start on a page: EWP
-    // commits whole pages, so a misaligned start would silently write
-    // somewhere other than where the header asked for.
-    let Some(plane) = plane_of(dest) else {
-        return Status::BadDest;
+    let h: Header = match logic::parse_header(&w) {
+        Ok(h) => h,
+        Err(e) => return e.into(),
     };
-    if dest % PAGE != 0 {
-        return Status::BadDest;
+    // Not one of the two supported parts: nothing is ever written.
+    let Some(part) = part else {
+        return Status::BadTarget;
+    };
+    if let Err(e) = logic::check_header(&h, part) {
+        return e.into();
     }
-    // Non-empty, a whole number of blocks, and inside the plane.
-    if len == 0 || len % 512 != 0 || (dest - plane).saturating_add(len) > PLANE_LEN {
-        return Status::BadLength;
+    if locked(h.dest, h.len) {
+        return Status::Locked;
     }
 
-    t.cursor = Some(dest);
-    t.base = dest;
-    t.len = len;
-    t.remaining = len;
-    t.crc = crc;
+    t.active = true;
+    t.kind = h.kind;
+    t.base = h.dest;
+    t.len = h.len;
+    t.crc = h.crc;
     Status::Ok
 }
 
-/// Receive `n` 512-byte blocks and program each as two flash pages.
-fn recv_data(fpga: Fpga, t: &mut Target, n: u32) -> Status {
-    let Some(mut cursor) = t.cursor else {
+/// Receive `n` 512-byte blocks and program each as two flash pages, except
+/// page 0 of the image, which is held in RAM until verify.
+fn recv_data(
+    fpga: Fpga,
+    part: Option<Part>,
+    t: &mut Target,
+    s: &mut Session,
+    page0: &mut [u32; WORDS_PER_PAGE],
+    n: u32,
+) -> Status {
+    if !t.active {
         return Status::NoHeader;
+    }
+    let Some(part) = part else {
+        return Status::BadTarget;
     };
-    if n.saturating_mul(512) > t.remaining {
+    if t.failed {
+        // Half-written already: only a fresh header gets past this.
+        return Status::FlashError;
+    }
+    if n.saturating_mul(512) > t.len - t.off {
         return Status::Overrun;
     }
 
     fpga.open_data_out();
     for block in 0..n {
         if !fpga.await_block() {
-            t.cursor = Some(cursor);
+            t.failed = true;
             return Status::Overrun;
         }
         fpga.close_block();
@@ -393,16 +535,33 @@ fn recv_data(fpga: Fpga, t: &mut Target, n: u32) -> Status {
         // Two pages per block, popped straight from the FIFO into the flash
         // latch buffer. There is no intermediate copy to get out of step.
         for _ in 0..2 {
-            let latch = cursor as *mut u32;
-            for w in 0..(PAGE / 4) as usize {
-                unsafe { write_volatile(latch.add(w), fpga.pop32()) };
+            if t.off == 0 {
+                for w in page0.iter_mut() {
+                    *w = fpga.pop32();
+                }
+                if t.kind == KIND_CODE {
+                    let v = [page0[0], page0[1], page0[2], page0[3]];
+                    if let Err(e) = logic::check_vectors(&v, t.base, t.len, part) {
+                        // Nothing has been erased or written for this image.
+                        t.failed = true;
+                        return e.into();
+                    }
+                }
+            } else {
+                // From here on flash is being changed: a reset now would
+                // boot a mixture, until verify has run.
+                s.dirty[t.kind as usize] = true;
+                let addr = t.base + t.off;
+                let latch = addr as *mut u32;
+                for w in 0..WORDS_PER_PAGE {
+                    unsafe { write_volatile(latch.add(w), fpga.pop32()) };
+                }
+                if !program_page(addr) {
+                    t.failed = true;
+                    return Status::FlashError;
+                }
             }
-            if !program_page(cursor) {
-                t.cursor = Some(cursor);
-                return Status::FlashError;
-            }
-            cursor += PAGE;
-            t.remaining -= PAGE;
+            t.off += PAGE;
         }
 
         if block + 1 < n {
@@ -411,61 +570,115 @@ fn recv_data(fpga: Fpga, t: &mut Target, n: u32) -> Status {
         }
     }
 
-    t.cursor = Some(cursor);
     fpga.write(REG_DMA_MODE, 0);
     Status::Ok
 }
 
-/// Which plane `addr` belongs to, or `None` if it is not in flash.
-fn plane_of(addr: u32) -> Option<u32> {
-    if (PLANE0_BASE..PLANE0_BASE + PLANE_LEN).contains(&addr) {
-        Some(PLANE0_BASE)
-    } else if (PLANE1_BASE..PLANE1_BASE + PLANE_LEN).contains(&addr) {
-        Some(PLANE1_BASE)
-    } else {
-        None
+/// Check the whole image, then write page 0 and check it again.
+fn verify(t: &mut Target, s: &mut Session, page0: &[u32; WORDS_PER_PAGE]) -> Status {
+    if !t.active {
+        return Status::NoHeader;
     }
+    if t.failed {
+        return Status::FlashError;
+    }
+    if t.off != t.len {
+        return Status::BadLength;
+    }
+
+    if !t.committed {
+        // Page 0 still lives in RAM: CRC it from there, then pages 1..N from
+        // flash. Only if the image as received is good does the old page 0
+        // get replaced.
+        let mut c = logic::CRC_INIT;
+        for &w in page0.iter() {
+            c = logic::crc_word(c, w);
+        }
+        c = crc_flash(c, t.base + PAGE, t.len - PAGE);
+        if logic::crc_finish(c) != t.crc {
+            return Status::CrcMismatch;
+        }
+
+        let latch = t.base as *mut u32;
+        for (i, &w) in page0.iter().enumerate() {
+            unsafe { write_volatile(latch.add(i), w) };
+        }
+        s.dirty[t.kind as usize] = true;
+        if !program_page(t.base) {
+            t.failed = true;
+            return Status::FlashError;
+        }
+        t.committed = true;
+    }
+
+    // Everything as it now sits in flash.
+    let c = crc_flash(logic::CRC_INIT, t.base, t.len);
+    if logic::crc_finish(c) != t.crc {
+        return Status::CrcMismatch;
+    }
+    s.dirty[t.kind as usize] = false;
+    s.verified_any = true;
+    Status::Ok
+}
+
+/// EEFC and plane base for a flash address.
+fn efc_of(addr: u32) -> (*mut u32, u32) {
+    if addr >= PLANE1_BASE {
+        (EFC1, PLANE1_BASE)
+    } else {
+        (EFC0, PLANE0_BASE)
+    }
+}
+
+/// Wait for FRDY, returning false if an error flag came up first.
+fn wait_ready(efc: *mut u32) -> bool {
+    loop {
+        let fsr = unsafe { read_volatile(efc.add(EEFC_FSR)) };
+        if fsr & FSR_ERRORS != 0 {
+            return false;
+        }
+        if fsr & FSR_FRDY != 0 {
+            return true;
+        }
+    }
+}
+
+/// Issue one command. Stale FCMDE/FLOCKE from earlier are cleared by a read
+/// of FSR first, so an error seen afterwards is this command's.
+fn command(efc: *mut u32, fcr: u32) -> bool {
+    unsafe {
+        let _ = read_volatile(efc.add(EEFC_FSR));
+        write_volatile(efc.add(EEFC_FCR), (FKEY << 24) | fcr);
+    }
+    wait_ready(efc)
 }
 
 /// Commit the latch buffer to the page containing `addr`.
 fn program_page(addr: u32) -> bool {
-    let (efc, plane) = if addr >= PLANE1_BASE {
-        (EFC1, PLANE1_BASE)
-    } else {
-        (EFC0, PLANE0_BASE)
-    };
+    let (efc, plane) = efc_of(addr);
     // FARG is the page index within the plane; each EEFC numbers from 0.
     let page = (addr - plane) / PAGE;
-    unsafe {
-        write_volatile(
-            efc.add(EEFC_FCR),
-            (FKEY << 24) | ((page & 0xFFFF) << 8) | FCMD_EWP,
-        );
-        loop {
-            let fsr = read_volatile(efc.add(EEFC_FSR));
-            if fsr & FSR_ERRORS != 0 {
-                return false;
-            }
-            if fsr & FSR_FRDY != 0 {
-                return true;
-            }
-        }
-    }
+    command(efc, ((page & 0xFFFF) << 8) | FCMD_EWP)
 }
 
-/// CRC-32 (the reflected, zlib/PNG one) over `len` bytes at `addr`.
-///
-/// Bitwise: a table would be 1 KB in a blob that has to be copied into RAM,
-/// and at a few hundred milliseconds for a whole plane the speed is
-/// irrelevant next to the programming time.
-fn crc32(addr: u32, len: u32) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for i in 0..len {
-        crc ^= unsafe { read_volatile((addr + i) as *const u8) } as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
+/// Is any lock region under `[addr, addr + len)` locked? A failed lock-bit
+/// read counts as locked.
+fn locked(addr: u32, len: u32) -> bool {
+    let (efc, _) = efc_of(addr);
+    if !command(efc, FCMD_GLB) {
+        return true;
     }
-    !crc
+    let bits = unsafe { read_volatile(efc.add(EEFC_FRR)) };
+    bits & logic::lock_mask(len) != 0
+}
+
+/// Continue a CRC over `len` bytes of flash at `addr`.
+fn crc_flash(mut crc: u32, addr: u32, len: u32) -> u32 {
+    let mut a = addr;
+    let end = addr + len;
+    while a < end {
+        crc = logic::crc_word(crc, unsafe { read_volatile(a as *const u32) });
+        a += 4;
+    }
+    crc
 }

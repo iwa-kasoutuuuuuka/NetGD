@@ -117,7 +117,7 @@ fn select_linker_script(out_dir: &Path) {
 /// half-way through erasing the plane it was running from.
 fn build_updater(out_dir: &Path) {
     const CRATE: &str = "../fwupdater";
-    for f in ["src/main.rs", "updater.x", "Cargo.toml", ".cargo/config.toml"] {
+    for f in ["src/main.rs", "src/logic.rs", "updater.x", "Cargo.toml", ".cargo/config.toml"] {
         println!("cargo:rerun-if-changed={CRATE}/{f}");
     }
 

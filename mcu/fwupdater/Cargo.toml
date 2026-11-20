@@ -4,6 +4,12 @@ description = "Standalone RAM-resident flash writer, embedded into the firmware 
 version = "0.1.0"
 edition = "2021"
 
+# The pure decisions (header checks, vector checks, CRC) live in a library so
+# they can be tested on the host; see src/logic.rs.
+[lib]
+name = "fwupdater_logic"
+path = "src/logic.rs"
+
 [[bin]]
 name = "fwupdater"
 path = "src/main.rs"

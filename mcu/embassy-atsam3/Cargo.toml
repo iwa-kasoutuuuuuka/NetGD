@@ -25,6 +25,9 @@ lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 
 
 [features]
+# Target the SAM3U2E: one flash plane, no EFC1. Set by opengdemu's own
+# `sam3u2e` feature.
+sam3u2e = []
 rt = ["atsam3u4e-pac/rt"]
 # Adds defmt::Format impls for the peripheral singletons (see lib.rs).
 defmt = []

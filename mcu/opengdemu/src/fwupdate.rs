@@ -24,6 +24,14 @@
 //! 56 bits of key across two commands is not something a BIOS, a WinCE
 //! driver, or a stray disk write arrives at by accident, which is the point:
 //! nothing should be able to wander into a firmware update.
+//!
+//! # Once inside
+//!
+//! The updater refuses images for another part (CHIPID_CIDR in the header),
+//! checks the new vector table against this part's SRAM before erasing
+//! anything, writes page 0 last, and only resets after a verified image; see
+//! `mcu/fwupdater/src/main.rs` and `tools/fwimage/FORMAT.md`. It keeps a
+//! 256-byte copy of the new page 0 on the caller's stack.
 
 use defmt::warn;
 

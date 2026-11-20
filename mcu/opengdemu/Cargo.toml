@@ -34,7 +34,7 @@ heapless = { version = "0.8", features = ["defmt-03"] }
 # moves `cdda::RING` into the otherwise-unused NFC SRAM.
 # Build it as `DEFMT_LOG=off cargo build --release --features sam3u2e`; the
 # logging code is part of what has to come out to fit.
-sam3u2e = []
+sam3u2e = ["embassy-atsam3/sam3u2e"]
 
 # SD throughput benchmark at boot. Off by default: it takes ~6 s, which
 # delays the IDE task spawn past the point the DC starts issuing ATAPI
