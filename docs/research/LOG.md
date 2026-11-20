@@ -164,6 +164,46 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - `upstream` = cepawiel/OpenGDEMU、`origin` = https://github.com/iwa-kasoutuuuuuka/NetGD（公開リポジトリ）に設定し、`main` を push。
 - README を NetGD の入口として書き直した（日本語 + 英語の要約）。
 
+### R13 G3：`0x52` 切替コマンドと番号フォルダの設計（Opus 設計、Sonnet 実装中）
+- **openMenu の使い方（一次資料、Opus が確認）**：`src/openmenu/src/backend/gdemu_control.c`。ゲーム起動時に `gdemu_set_img_num(slot)`
+  （= `52 82 lo hi`）を送り、`wait_cd_ready()` で `cdrom_reinit()` が成功するまで 20 ms × 最大 500 回待つ。コマンドのエラーは見ない。
+  `gdemu_get_version`（`52 00`）は呼ばれていない（`main.c` の `gdemu_set_img_num(1)` もコメントアウト）。
+- **設計**：
+  1. 番号フォルダ：ルート直下の 2〜4 桁の数字だけの名前（値 1 以上）を番号 N とする。名前→番号と次・前の巡回は `common/discimg::slot`（ホストテスト）。
+  2. 既定のマウント：選択中 → GDEMU.CFG → **フォルダ 01**（本家と同じ）。
+  3. `0x52`：`82` = 番号でマウント（0 = 既定。番号が無ければ今のディスクに触らずエラー）、`81 55/44` = 次／前（欠番は飛ばす）、
+     `00` = 8 バイトのバージョン（ブートローダ 0.0.0、FW は互換レベル `GDEMU_COMPAT_VERSION` = 5.20.0）。
+     `0x52` は unit attention の割り込みと「ディスクなし」チェックの対象外（メニューのコマンドを握りつぶさないため）。
+  4. ボタン：`GAME.CFG` の `next` を優先し、無ければ番号順の次（最後の次は 01）。
+  5. マウント処理の重複（IMAGE_CTL と ボタン）を `mount_named` にまとめる。
+  6. INSTALL.md §9 の誤り（「最初に見つけたものをマウント」）と Cargo.toml の `MAX_IMAGES` の記述を直す。
+- **判断の理由**：番号が無いときにディスクを外さないのは、openMenu がエラーを見ずに READY を待つため、外すと 10 秒待った末に空のドライブで起動を試みるから。
+  バージョンを 5.20.0 互換とするのは、本家の最新ファーム（5.20.5）相当の機能を前提とするメニューに合わせるため（openMenu 自体は見ていない）。
+
+### R14 G3：`0x52` と番号フォルダの実装（Sonnet 実装、Opus がレビューして1件修正）
+- **実装（Sonnet）**：
+  - `common/discimg/src/slot.rs`：`number_of`（2〜4 桁の数字、値 1 以上、先頭ゼロ可）。
+  - `gdi.rs`：`for_each_slot`（ルートを1回走査、拡張子のないディレクトリの 8.3 名だけ）、`folder_for_number`、`mounted_number`、`step_folder`。
+    `load_default` は 選択中 → GDEMU.CFG → フォルダ 01 → 空。
+  - `ide.rs`：`mount_named` に重複していたマウント処理を集約（IMAGE_CTL・ボタン・`0x52`）。`handle_gdemu_cmd`：
+    `52 82 lo hi`（0 = 既定。番号が無ければ ILLEGAL REQUEST でディスクはそのまま）、`52 81 55/44`（次／前）、
+    `52 00`（応答 `00 00 00 00 00 00 14 05` = ブートローダ 0.0.0、FW 5.20.0）、それ以外は ILLEGAL REQUEST。
+    `0x52` は unit attention の割り込みの対象外（UA は保留のまま）。「ディスクなし」で事前に弾く処理は元々無かった（TEST UNIT READY と CD_READ が個別に確認）。
+  - 名前は async フレームに置かず、同期関数 `stage_folder` で `MOUNT_NAME` の static に解決する → IDE タスクのフレームはむしろ縮小
+    （2E の `handle` 128 → 96 バイト、4E の `handle_packet` 208 → 168 バイト）。
+  - `button.rs`：`GAME.CFG` の `next` を優先し、無ければ番号順の次。
+  - INSTALL.md §9 を番号フォルダ方式に書き直し、Cargo.toml の存在しない `MAX_IMAGES` の記述を削除。
+- **Opus のレビューで見つけた問題（修正済み）**：`step_folder` が欠番ごとにルート全体を読み直していた（最大「最大番号」回）。
+  `01` と `2024` があると、次へ進むだけでルートを約 2000 回走査し、ATAPI コマンドの処理中に数分止まってホストがタイムアウトする。
+  → `discimg::slot::Nearest`（「今より大きい中で最小、無ければ全体の最小」を1回の走査で選ぶ。Prev は逆）に置き換え、走査は合計2回に。
+  `step` と `max_number` は不要になったので削除。テストを書き直し（欠番・年号名のフォルダ・今の番号が無い場合・重複・空）。
+- INSTALL.md の `GDEMU.CFG` の例（`image=SONICADV`）を、新しいフォルダ例に合わせて `image=02` に直した（Opus）。
+- **検証（確認済み、Opus）**：discimg 53 / lzma 5 / gamecfg 9 件パス。4E・2E とも警告は従来の 13 件のみ。
+  サイズ（text）：4E 150160 → 153352（+3192）、2E 110484 → 113200（+2716、空き約 17 KB）。`.bss` 不変。
+- **未確認・既知の制限**：実機未検証（openMenu からの切替、切替後に READY になるまでの時間）。番号は 8.3 名だけで判定するので、
+  LFN だけの `01 Title` のような名前は番号として扱わない。`52 82` は `0xE0` の名前の受け渡し用バッファ `MOUNT_NAME` を共用する
+  （`0xE0` の名前を分割送信している途中に `0x52` が来ると上書きされるが、現実には起きないと判断）。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -179,3 +219,5 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | 調査・レビュー・判断はすべて `docs/research/LOG.md` に記録する | ユーザーの指示 | ユーザー |
 | 2026-11-20 | 上流から引き継いだ ATAPI 応答の疑い（R11 の D）は、実機と比べるまで挙動を変えない | 実機の純正 GDEMU が仕様や Flycast と違う応答をしている可能性がある（コード内コメント） | Opus |
 | 2026-11-20 | GitHub の公開先は iwa-kasoutuuuuuka/NetGD（公開）、上流は `upstream` リモートに残す | ユーザーの指示 | ユーザー |
+| 2026-11-20 | 番号フォルダ方式を採用し、設定が無ければフォルダ 01 をマウント。`0x52` で番号指定・次／前に対応 | 本家と GDmenu / openMenu との互換（R13・R14） | ユーザー（G3 を選択）、Opus 設計 |
+| 2026-11-20 | `0x52 82` で番号が見つからないときは、今のディスクを外さずにエラーを返す | openMenu はエラーを見ずに READY を待つため | Opus |
