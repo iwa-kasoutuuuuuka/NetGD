@@ -143,3 +143,27 @@ debug = 2
 opt-level = "s"
 lto = "fat"
 codegen-units = 1
+
+# Opt-in size profiles (docs/research/flash-budget-2e.md section 7). Nothing
+# selects them by default: `cargo build --release` is unchanged. Build with
+#   DEFMT_LOG=off cargo build --profile release-z --features sam3u2e,resident,sd-fast
+# The output lands in target/thumbv7m-none-eabi/release-z/netgd. opt-level "z"
+# trades speed for size and has NOT been timed on hardware (IDE command
+# response, CD_READ DMA, CDDA tick, LZMA/FPGA start-up).
+[profile.release-z]
+inherits = "release"
+opt-level = "z"
+
+# Same, but the timing-sensitive support crates stay at "s": the LZMA decoder
+# (FPGA start-up time), the SAM3U HAL (CDDA tick, DMA) and the PS loader.
+[profile.release-z-hot-s]
+inherits = "release-z"
+
+[profile.release-z-hot-s.package.lzma]
+opt-level = "s"
+
+[profile.release-z-hot-s.package.embassy-atsam3]
+opt-level = "s"
+
+[profile.release-z-hot-s.package.psload]
+opt-level = "s"
