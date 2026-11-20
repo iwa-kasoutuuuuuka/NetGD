@@ -558,6 +558,13 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **確認（Opus）**：テスト 59 件パス、`.gitignore` が `.bin`・`.part`・`gdemu60_flash_*` を除外することを `git check-ignore` で確認。
 - これで **fwbackup は使用可**（`check` → ロックなし 2E なら `dump`）。実機と実物の probe-rs では未検証。
 
+### R44 今日の残り作業の割り当てと、Pico の配線をガイドに追加（Opus）
+- 割り当て：Sonnet = 自己更新（`0xF9`）の安全対策 A と更新イメージのツール `tools/fwimage`／Fable = GDEMU.INI・CDI 修正・F6〜F8 のデバッグ（読むだけ）／
+  Haiku = README と資料の索引を新しいツールに合わせる、`ide_device.py` の古いコメント／Opus = Pico の配線。改名（#7）は `mcu/` を触る作業と `netgd-recv` の後。
+- **Pico の配線**（実機作業ガイド 版10、`INSTALL.md` §3 と同じ）：GP2（物理ピン4）= SWCLK → SAM3U 9 番、GP3（物理ピン5）= SWDIO → SAM3U 7 番、GND（物理ピン3 など）→ ヘッダの GND。
+  3V3・VSYS・VBUS はつながない（電源は Dreamcast から）。**6.0 のヘッダは穴だけでピンが無い** → ピンヘッダのはんだ付けを推奨。信号は双方 3.3 V。
+- ガイドの作業3に `fwbackup` の手順（`check` → ロックなし 2E なら `dump` → `inspect`）と条件を追加。
+
 ---
 
 ## 判断の記録（Decisions）

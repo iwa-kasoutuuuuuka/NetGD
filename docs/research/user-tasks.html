@@ -283,7 +283,20 @@ switch=off           # 1回目は切替なし（dcload-ip のディスクだけ�
       <li><input type="checkbox" id="t3-1"><div><label for="t3-1">Raspberry Pi Pico（または Pico 2、公式 Debug Probe）とメス‐メスのジャンパー線を用意する</label></div></li>
       <li><input type="checkbox" id="t3-2"><div><label for="t3-2">Pico に debugprobe のファームを書き込む（2.2.3 以降を推奨）</label><span class="sub"><a href="https://github.com/raspberrypi/debugprobe/releases" target="_blank" rel="noopener">raspberrypi/debugprobe のリリース</a>から <code>debugprobe_on_pico.uf2</code>（Pico 2 は <code>_on_pico2</code>）を取得 → BOOTSEL を押しながら USB を挿す → 出てきたドライブにコピー。古い <code>picoprobe.uf2</code> は使えません。</span></div></li>
       <li><input type="checkbox" id="t3-3"><div><label for="t3-3">PC に probe-rs を入れて、プローブが見えるか確かめる</label><span class="sub"><a href="https://github.com/probe-rs/probe-rs/releases" target="_blank" rel="noopener">probe-rs のリリース</a>から Windows 用の <code>probe-rs-tools</code> を取得して PATH に置きます。debugprobe は CMSIS-DAP v2 なので、Windows でもドライバは不要です。<code>probe-rs list</code> に何も出ないときだけ、ドライバ（Zadig など）を疑ってください。</span><pre><code>probe-rs list</code></pre></div></li>
-      <li><input type="checkbox" id="t3-4"><div><label for="t3-4">（2 で SWD の場所が分かったら）SWDIO・SWCLK・GND の3本をつなぐ</label><span class="sub">Pico の GP3 = SWDIO、GP2 = SWCLK、GND。<b>3.3 V はつながない</b>（基板の電源は Dreamcast から取る。INSTALL.md §4）。</span></div></li>
+      <li><input type="checkbox" id="t3-4"><div><label for="t3-4">（2 で SWD の場所が分かったら）SWDIO・SWCLK・GND の3本をつなぐ</label>
+        <div class="tbl"><table>
+          <thead><tr><th>Pico 側（debugprobe）</th><th class="num">Pico の物理ピン</th><th>GDEMU 6.0 側</th></tr></thead>
+          <tbody>
+            <tr><td>GP2 = <b>SWCLK</b></td><td class="num">4</td><td>作業2で見つけた、SAM3U の <b>9 番</b>（TCK/SWCLK）につながるヘッダのピン</td></tr>
+            <tr><td>GP3 = <b>SWDIO</b></td><td class="num">5</td><td>SAM3U の <b>7 番</b>（TMS/SWDIO）につながるヘッダのピン</td></tr>
+            <tr><td><b>GND</b></td><td class="num">3（または 8・13 など）</td><td>ヘッダの GND（SAM3U の 18・52・60・90・126 番につながるピン）</td></tr>
+            <tr><td>（任意）GP4 = UART 送信 / GP5 = UART 受信</td><td class="num">6 / 7</td><td>NetGD を書き込んだ後のログ用。今は不要</td></tr>
+            <tr><td>3V3（36 番）・VSYS・VBUS</td><td class="num">—</td><td><b>つながない</b>（基板の電源は Dreamcast から取る）</td></tr>
+          </tbody>
+        </table></div>
+        <span class="sub">Pico の物理ピン番号は、USB コネクタを上にして左上が 1 番、左の列を下へ 1〜20、右の列を下から上へ 21〜40 です。</span>
+        <span class="sub"><b>6.0 のヘッダは穴だけで、ピンが付いていません</b>（写真の 5・3・8・2 ピンの丸いパッド）。確実なのは、ピンヘッダをはんだ付けしてからジャンパー線（メス）を挿す方法です。はんだ付けしない場合は、ピンヘッダを穴に斜めに押し込んで接触させる方法もありますが、読み出し中に外れると失敗するので、できればはんだ付けしてください。</span>
+        <span class="sub">信号はどちらも 3.3 V なので、レベル変換は不要です。線はできるだけ短く（20 cm 以下が目安）。</span></div></li>
       <li><input type="checkbox" id="t3-5"><div><label for="t3-5">Dreamcast の電源を入れ、CHIPID を読んでみる（読み取りだけ）</label><pre><code>probe-rs read --chip ATSAM3U2E --protocol swd b32 0x400e0740 1
 probe-rs info --verbose</code></pre><span class="sub">6.0 の MCU は 2E なので <code>--chip ATSAM3U2E</code> です（INSTALL.md の <code>ATSAM3U4E</code> は v5.5 用）。<code>--connect-under-reset</code> などのリセットを伴うオプションは付けないでください。<b>どの結果でも分かることがあります。出力は全文を Claude に貼ってください。</b></span>
         <div class="tbl"><table>
@@ -292,9 +305,16 @@ probe-rs info --verbose</code></pre><span class="sub">6.0 の MCU は 2E なの�
             <tr><td><code>281a0761</code></td><td>SAM3U2E で、<b>純正はフラッシュをロックしていない</b>。この場合は<b>純正ファームを丸ごと読み出して保存できる</b>可能性が高いので、何かを書き込む前に、まず Claude と読み出しコマンドを確認してバックアップを取る（フラッシュ 128 KB、読み取りだけ）</td></tr>
             <tr><td><code>28100961</code> など <code>2810…</code></td><td>4E が載っている（写真と矛盾。刻印を見直す）</td></tr>
             <tr><td>読み出しは失敗、<code>info --verbose</code> でデバッグポート（DP）は見える</td><td><b>純正がロックしている</b>可能性が高い。書き込みには ERASE が必要</td></tr>
-            <tr><td>DP も見えない</td><td>配線・電源（Dreamcast の電源が入っているか）・JTAGSEL（142 番）を疑う</td></tr>
+            <tr><td>DP も見えない</td><td>配線・電源（Dreamcast の電源が入っているか）・JTAGSEL（142 番）を疑う。<b>ただし、ロックで SWD ごと無効になっている可能性もあり、配線不良と区別できない</b></td></tr>
           </tbody>
         </table></div></div></li>
+      <li><input type="checkbox" id="t3-6"><div><label for="t3-6">吸い出しツール <code>tools/fwbackup</code> で確認し、ロックが無ければバックアップを取る</label>
+        <pre><code>cd tools\fwbackup
+python fwbackup.py check
+python fwbackup.py dump --out out        # check が「ロックなし 2E」のときだけ動く
+python fwbackup.py inspect out\gdemu60_flash_281a0761_*.bin</code></pre>
+        <span class="sub">上の手作業（probe-rs read）の代わりにこちらを使えます。読み取り専用で、消去・書き込み・リセットはできない作りです（安全レビュー済み、LOG R40・R43）。条件：probe-rs は <b>0.32.0 ちょうど</b>、<code>.probe-rs.toml</code> などの設定ファイルが無いこと、配線は 3 本だけ、<b>Dreamcast は BIOS メニュー</b>（ディスクを読んでいない状態）で実行。読み出しのたびに MCU が数ミリ秒止まりますが、壊れることはありません。</span>
+        <span class="sub">吸い出したファイルは純正メーカーの著作物です。<b>名前を変えず、クラウド同期フォルダにも置かず、手元に非公開で保管</b>してください（git には入らない設定です）。Claude に渡すのは <code>check</code> の出力だけにしてください。</span></div></li>
     </ol>
   </section>
 
