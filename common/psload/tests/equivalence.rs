@@ -1,5 +1,5 @@
 //! CYCLONE2 must put the same waveform on the wire as the loader it
-//! replaced. `old_load` below is that loader (`mcu/opengdemu/src/cyclone.rs`
+//! replaced. `old_load` below is that loader (`mcu/netgd/src/cyclone.rs`
 //! at 665ac01d), ported line for line onto the same pin/clock traits; the
 //! new `load_once` runs against an identical simulated FPGA and the two
 //! event traces are compared.

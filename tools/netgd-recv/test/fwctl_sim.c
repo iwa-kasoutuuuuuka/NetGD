@@ -1,5 +1,5 @@
 /* Packet-level model of the firmware's IMAGE_CTL commands and write session (docs:
-   common/discimg/src/wsession.rs, mcu/opengdemu/src/ide.rs).  It is the transport under the
+   common/discimg/src/wsession.rs, mcu/netgd/src/ide.rs).  It is the transport under the
    real src/fwctl.c (fw_xfer), so the packet layouts and the UNIT ATTENTION retry are tested. */
 #include <string.h>
 #include "fwctl.h"

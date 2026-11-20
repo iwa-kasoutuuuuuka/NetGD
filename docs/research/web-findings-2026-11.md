@@ -76,7 +76,7 @@ GDmenu（元祖）はクローズドソースで、ソースは見つからな�
 | 項目 | 内容 |
 |------|------|
 | PLAN | G3-2 の #2（GDmenu / openMenu のコマンド対応）、#1（番号フォルダ、既定 `01`）、#3（ボタン送り） |
-| 追加先 | `mcu/opengdemu/src/ide.rs` のパケットディスパッチ（`OGDM_IMAGE_CTL = 0xE0` の隣）。`0x52` ハンドラを足す |
+| 追加先 | `mcu/netgd/src/ide.rs` のパケットディスパッチ（`OGDM_IMAGE_CTL = 0xE0` の隣）。`0x52` ハンドラを足す |
 | 設計 | `52 82`: N = 0 → 既定（`load_default` 相当）、N >= 1 → `gdi.rs` に「番号 N のフォルダ」を探す関数を足してマウント。`52 81`: `0x55` = `next_of_mounted` の番号版、`0x44` = 前。`52 00`: 8 バイトを返す |
 | 未決 | 応答の FW 版バイトを何にするか（NetGD 版を名乗る / 5.20.x を名乗る）。openMenu 側は**バージョンで挙動を変えていない**ことをソースで確認済み（`gdemu_get_version` を呼んでいる箇所が見当たらない。呼び出し元の全文検索はしていないので、断定はしない） |
 | テスト | `common/discimg` に 12 バイト CDB の解釈（`parse_gdemu_cmd`）を切り出し、ホストテストで固定できる |
@@ -135,7 +135,7 @@ GDmenu（元祖）はクローズドソースで、ソースは見つからな�
 NetGD への含意:
 | PLAN | 内容 | 場所 |
 |------|------|------|
-| G3-2 #5 | 更新ファイル名 `GDEMU.FW`、**ライトプロテクトが立っているときだけ更新する**（誤更新防止）、完了は LED 0.5 秒点滅 | `mcu/opengdemu/src/fwupdate.rs`、`main.rs` の起動処理 |
+| G3-2 #5 | 更新ファイル名 `GDEMU.FW`、**ライトプロテクトが立っているときだけ更新する**（誤更新防止）、完了は LED 0.5 秒点滅 | `mcu/netgd/src/fwupdate.rs`、`main.rs` の起動処理 |
 | 注意 | **SAM3U2E は 128 KB フラッシュ**で、現行の `0xF9` 方式（RAM 常駐 updater）がそのまま使えるか要確認 | `mcu/fwupdater` のサイズ |
 | G3-2 #4 | `GDEMU.ini` は**カード検出のたびに読み直す**。無ければ前の値を保持 | `gdi.rs` の設定読み出し |
 | P0 | 切替後の挙動に `open_time` → `detect_time` の順（NOT READY / MEDIA CHANGE）が必要。**これが 1-2 のコマンドと一体** | `ide.rs` の `request_swap` |
@@ -167,7 +167,7 @@ https://www.agm-micro.com/upload/userfiles/files/AG16KPSoC_DS.pdf
 | 論点 | 判断 |
 |------|------|
 | DD は SoC か | データシート上は **「SoC（ARM + FPGA + DDR + フラッシュ）」**。Y/N は **6.0 基板がこの ARM を使っているか**で、これは未判明。基板に ATSAM3U2E が別にあるので、ARM は**使われていない可能性が高い**（推測） |
-| ビットストリームの置き場所 | パッケージ内に SPI フラッシュがあるなら、**FPGA は電源投入で自動的にそのフラッシュから読み込む**。この場合 ATSAM3U2E が FPGA をコンフィグしない（`mcu/opengdemu` の `fpga.rs` に当たる処理が要らない）。逆に PS で流す設計なら MCU 側の書き込みが要る。**どちらかは基板上の配線（nCONFIG / DCLK / DATA0 / CONF_DONE 相当が MCU に繋がっているか）で判断する。`docs/boards/gdemu60/README.md` の「ヘッダ 5/3/8/2 ピン」を実測する項目に足す** |
+| ビットストリームの置き場所 | パッケージ内に SPI フラッシュがあるなら、**FPGA は電源投入で自動的にそのフラッシュから読み込む**。この場合 ATSAM3U2E が FPGA をコンフィグしない（`mcu/netgd` の `fpga.rs` に当たる処理が要らない）。逆に PS で流す設計なら MCU 側の書き込みが要る。**どちらかは基板上の配線（nCONFIG / DCLK / DATA0 / CONF_DONE 相当が MCU に繋がっているか）で判断する。`docs/boards/gdemu60/README.md` の「ヘッダ 5/3/8/2 ピン」を実測する項目に足す** |
 | 書き換え | 内蔵フラッシュを書き換えられるなら、**ビットストリームの更新は SD → MCU → FPGA 経由のフラッシュ書き込み**になる。書き込み用の JTAG / AS ピンがパッドとして出ているか要確認 |
 
 この 3 点は**実機でしか決まらない**。データシートには PS のピン名もタイミングも書かれていない（`pdftotext` で `passive` を検索して 0 件）。

@@ -331,7 +331,7 @@ G1 側は `fpga-diag` のカウンタ（ストローブ数・RSTn のエッジ�
 
 ### 3-1 いまの 2E の使用量 [測定]
 
-2026-11-20、`mcu/opengdemu` で `DEFMT_LOG=off cargo build --release --features sam3u2e` を実行し、`llvm-size -A` で読んだ値
+2026-11-20、`mcu/netgd` で `DEFMT_LOG=off cargo build --release --features sam3u2e` を実行し、`llvm-size -A` で読んだ値
 （他の作業と並行中の作業ツリーでの値。コミットごとに数百バイト動く）。
 
 | 領域 | 大きさ（B） | 備考 |
@@ -431,7 +431,7 @@ xz --format=raw --lzma1=preset=9e,dict=4KiB,lc=0,lp=0,pb=0 -c OpenGDEMU_compress
 ### 4-1 feature の形
 
 ```toml
-# mcu/opengdemu/Cargo.toml
+# mcu/netgd/Cargo.toml
 [features]
 default   = ["board-v55"]
 board-v55 = []                 # SAM3U4E + Cyclone II（v5.5 / v5.15b クローン）
@@ -472,18 +472,18 @@ fpga-self-config   = []        # 案 F（B1）。ローダを組み込まない
 
 | ファイル | 変更 |
 |----------|------|
-| `mcu/opengdemu/Cargo.toml` | §4-1 の feature |
-| `mcu/embassy-atsam3/src/lib.rs` | `UserPeripherals` が LED・ローダ 5 本・IRQ のピンを型で固定している（`PB18`、`PA23`、…）。これを `#[cfg(feature = "board-…")]` で分けるのではなく、**ピンの選択を `opengdemu` 側に出す**：HAL は `Peripherals`（全ピン）を返し、どれを何に使うかは下の `board` モジュールが決める。`init()` の中の `uart::init`・PCK0（PA21）の有効化も、ボードごとに呼ぶかどうかを選べるよう引数にする |
-| `mcu/opengdemu/src/board/mod.rs`（新規） | `pub struct Board { led, button, fpga_cfg: Option<FpgaCfgPins>, fpga_irq, … }` と `pub fn take(p: Peripherals) -> Board`。`v55.rs` / `v60.rs` を feature で選ぶ。定数 `FPGA_IRQ_PIN`、`HAS_UART`、`FPGA_KIND` もここに置く |
-| `mcu/opengdemu/src/cyclone.rs` → `fpga_loader.rs` | `PSLoader` を残し、違いを定数の組（`PsProfile`）にまとめる：(1) ビット順（Supra の `.bin` と `.rbf` は各バイトのビット順が逆 [二次]。どちらを LSB 先頭で送るかを決める）、(2) nCONFIG を Low に保つ時間、(3) nSTATUS を待つ上限、(4) CONF_DONE の後に追加で送るクロック数、(5) 1 bit あたりの待ち。**今の `load_from` は nSTATUS を無限に待ち、エラーで `panic!` する。** 6.0 では想定外が起きやすいので、上限つきで `Result` を返し、失敗を LED の点滅回数で示す形に直す |
-| `mcu/opengdemu/src/main.rs` | (a) `BITSTREAM_LZMA` と `load_from` の呼び出しを `fn bring_up_fpga(board) -> Result<…>` に切り出し、E / S / F を feature で選ぶ。(b) 案 S では `sdcard::init()` を FPGA の前に移す。今は「FPGA → SD → GDI」の順なので、S のときだけ「SD → FPGA → GDI」になる。(c) `enable_pioa_falling_irq(22)` の `22` を `board::FPGA_IRQ_PIN` にする（2 か所）。(d) FPGA 起動後の 10 ms 待ち（Cyclone II の初期化待ち）をプロファイルの値にする。(e) `FPGA[12] == 0xC0DE` の確認を、今のログ出力だけから「違えば止まって LED で知らせる」に強める（`DEFMT_LOG=off` ではログが出ないため） |
-| `mcu/opengdemu/build.rs` | `const RBF` をボードごとのパスにする（`CARGO_FEATURE_BOARD_V60` を見る）。`fpga-from-sd` / `fpga-self-config` のときは埋め込みを空にし、`BITSTREAM_RAW_LEN = 0` を出す。`select_linker_script` は今のまま（`sam3u2e` を見る） |
-| `mcu/opengdemu/link/sam3u2e.x` | 変更なし（`.flash1` はすでに `FLASH` に入る） |
-| `mcu/opengdemu/src/button.rs`・`mcu/embassy-atsam3/src/gpio.rs` | ボタンのピン（PA20 固定の読み取り）を `board` の定数にする |
+| `mcu/netgd/Cargo.toml` | §4-1 の feature |
+| `mcu/embassy-atsam3/src/lib.rs` | `UserPeripherals` が LED・ローダ 5 本・IRQ のピンを型で固定している（`PB18`、`PA23`、…）。これを `#[cfg(feature = "board-…")]` で分けるのではなく、**ピンの選択を `netgd` 側に出す**：HAL は `Peripherals`（全ピン）を返し、どれを何に使うかは下の `board` モジュールが決める。`init()` の中の `uart::init`・PCK0（PA21）の有効化も、ボードごとに呼ぶかどうかを選べるよう引数にする |
+| `mcu/netgd/src/board/mod.rs`（新規） | `pub struct Board { led, button, fpga_cfg: Option<FpgaCfgPins>, fpga_irq, … }` と `pub fn take(p: Peripherals) -> Board`。`v55.rs` / `v60.rs` を feature で選ぶ。定数 `FPGA_IRQ_PIN`、`HAS_UART`、`FPGA_KIND` もここに置く |
+| `mcu/netgd/src/cyclone.rs` → `fpga_loader.rs` | `PSLoader` を残し、違いを定数の組（`PsProfile`）にまとめる：(1) ビット順（Supra の `.bin` と `.rbf` は各バイトのビット順が逆 [二次]。どちらを LSB 先頭で送るかを決める）、(2) nCONFIG を Low に保つ時間、(3) nSTATUS を待つ上限、(4) CONF_DONE の後に追加で送るクロック数、(5) 1 bit あたりの待ち。**今の `load_from` は nSTATUS を無限に待ち、エラーで `panic!` する。** 6.0 では想定外が起きやすいので、上限つきで `Result` を返し、失敗を LED の点滅回数で示す形に直す |
+| `mcu/netgd/src/main.rs` | (a) `BITSTREAM_LZMA` と `load_from` の呼び出しを `fn bring_up_fpga(board) -> Result<…>` に切り出し、E / S / F を feature で選ぶ。(b) 案 S では `sdcard::init()` を FPGA の前に移す。今は「FPGA → SD → GDI」の順なので、S のときだけ「SD → FPGA → GDI」になる。(c) `enable_pioa_falling_irq(22)` の `22` を `board::FPGA_IRQ_PIN` にする（2 か所）。(d) FPGA 起動後の 10 ms 待ち（Cyclone II の初期化待ち）をプロファイルの値にする。(e) `FPGA[12] == 0xC0DE` の確認を、今のログ出力だけから「違えば止まって LED で知らせる」に強める（`DEFMT_LOG=off` ではログが出ないため） |
+| `mcu/netgd/build.rs` | `const RBF` をボードごとのパスにする（`CARGO_FEATURE_BOARD_V60` を見る）。`fpga-from-sd` / `fpga-self-config` のときは埋め込みを空にし、`BITSTREAM_RAW_LEN = 0` を出す。`select_linker_script` は今のまま（`sam3u2e` を見る） |
+| `mcu/netgd/link/sam3u2e.x` | 変更なし（`.flash1` はすでに `FLASH` に入る） |
+| `mcu/netgd/src/button.rs`・`mcu/embassy-atsam3/src/gpio.rs` | ボタンのピン（PA20 固定の読み取り）を `board` の定数にする |
 | `mcu/embassy-atsam3/src/uart.rs` | PA11 / PA12 固定。6.0 に UART が無ければ `init` を呼ばない（ピンを別用途に使っている可能性があるので、**呼ばないことが安全側**） |
 | `mcu/embassy-atsam3/src/smc.rs` | `FPGA_BASE = 0x6300_0000`（NCS3）と SMC のタイミング。6.0 の NCS が違えばここ。タイミング（`PULSE3` 8 MCK など）は 48 MHz の FPGA クロック前提なので、同じクロックなら変更なし |
-| `mcu/opengdemu/src/fwupdate.rs`・`mcu/fwupdater` | 2E の単一プレーンで、SRAM1 から動く更新プログラムが 128 KB 全体（コード + ビットストリーム）を書き換えられるかを確認する。EFC のページ数・ロック領域の扱いが 4E の「プレーン 0 だけ」前提になっていないかを読む（今回は未確認） |
-| `mcu/opengdemu/.cargo/config.toml` | `runner` のチップ名。feature では切り替えられないので、`cargo run` の代わりに `probe-rs run --chip ATSAM3U2E …` を README に書く |
+| `mcu/netgd/src/fwupdate.rs`・`mcu/fwupdater` | 2E の単一プレーンで、SRAM1 から動く更新プログラムが 128 KB 全体（コード + ビットストリーム）を書き換えられるかを確認する。EFC のページ数・ロック領域の扱いが 4E の「プレーン 0 だけ」前提になっていないかを読む（今回は未確認） |
+| `mcu/netgd/.cargo/config.toml` | `runner` のチップ名。feature では切り替えられないので、`cargo run` の代わりに `probe-rs run --chip ATSAM3U2E …` を README に書く |
 | `fpga/amaranth/main.py` | AG16K 用の出力を足す場合（§2-3 の対策 2）。v5.5 用の出力は変えない |
 | `.github/workflows/build.yaml` | `board-v60` のビルドと、§2-6 の構造検査 |
 
@@ -636,10 +636,10 @@ stat
 
 ```bash
 # 2E のフラッシュ使用量
-cd mcu/opengdemu
+cd mcu/netgd
 DEFMT_LOG=off cargo build --release --features sam3u2e
 ~/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-size -A \
-  target/thumbv7m-none-eabi/release/opengdemu
+  target/thumbv7m-none-eabi/release/netgd
 
 # ビットストリームの LZMA 後の大きさ（build.rs と同じ設定）
 xz --format=raw --lzma1=preset=9e,dict=4KiB,lc=0,lp=0,pb=0 -c fpga/Quartus/output_files/OpenGDEMU.rbf | wc -c   # 49,629
@@ -662,4 +662,4 @@ PYTHONPATH=./yw python -c "import sys,yowasp_yosys; sys.exit(yowasp_yosys.run_yo
 - AG16KDDF256 ユーザーマニュアルの紹介記事（本文は取得できず、検索結果の要約のみ。FPGA + DDR の積層、MSEL[2]・MSEL[0] は内部で GND）：https://blog.csdn.net/Embeded_FPGA/article/details/135171458
 - AGM と Altera のピン互換の選定表（AG16KF256 ↔ EP4CE15F17）：http://www.jsm-ic.com/archives/402.html
 - リポジトリ内：`fpga/src/OpenGDEMU.v`、`fpga/Quartus/OpenGDEMU.qsf`・`.sdc`、`fpga/Quartus/ip/*`、`fpga/amaranth/out/OpenGDEMUCore.v`、
-  `mcu/opengdemu/src/main.rs`・`cyclone.rs`・`build.rs`・`link/sam3u2e.x`、`mcu/embassy-atsam3/src/lib.rs`
+  `mcu/netgd/src/main.rs`・`cyclone.rs`・`build.rs`・`link/sam3u2e.x`、`mcu/embassy-atsam3/src/lib.rs`

@@ -18,7 +18,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 
 | 項目 | 状態 | LOG |
 |------|------|-----|
-| MCU 4E（`mcu/opengdemu`、`cargo build --release`） | 成功。警告は従来どおり（R53 では 13 件）。`resident`（0x82000 リンク）版も成功 | R21, R53, R60 |
+| MCU 4E（`mcu/netgd`、`cargo build --release`） | 成功。警告は従来どおり（R53 では 13 件）。`resident`（0x82000 リンク）版も成功 | R21, R53, R60 |
 | MCU 2E（`sam3u2e`） | 成功。text 118,312 B、フラッシュの空き 約 13 KB。`resident` 版は 119,296 B で残り 3,584 B | R53, R60 |
 | MCU 6.0 向け `board-v60`（`sam3u2e` + FPGA ローダー） | ビルド成功。`.rbf` を置かないと起動時に `NoBitstream`（LED 5 回点滅）。`resident` 版も成功 | R57, R60 |
 | 自己更新プログラム `mcu/fwupdater` | ビルド成功（888 → 2,188 B、ファームに埋め込み）。純粋ロジックのホストテスト 5 件パス | R46 |
@@ -46,7 +46,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - **G3（本家同等）**：番号フォルダ（`01` = GDmenu）と既定マウント、`0x52`（番号指定・次／前・バージョン応答。R14）、ボタンの番号順送り（R14、R21）、`GDEMU.INI`（`reset_goto`・`open_time`・`detect_time`。R27、R53 で R45 の指摘を修正。open/detect の NOT READY の窓は既定で無効）。CDI のデータ位置の修正（`start_lba + pregap - 150`。R36）。
 - **自己更新（`0xF9`）**：対策 A（CHIPID 照合、ベクタ検査、検証後のみリセット、FWS=6 など。R46）。対策 B の S0〜S2 はホスト側まで実装（R58・R60・R61。下の「自己更新」節）。転送中の電源断などで起動不能になる窓は、対策 B の SD 復旧が実機で動くまで残る。
 - **基板ごとの FPGA ローダー**：`common/psload`、feature `board-v55`（既定）／`board-v60`（R57）。6.0 のローダーのピン 5 本は v5.5 の値を仮に使っており未確認。
-- **未修正**（実機と比べるまで挙動を変えない）：上流の ATAPI 応答の疑い D-1〜D-5 のうち、**D-1（トラック 2 本の CDI でセッション 2 が返らない）は未修正**。R36 で直したのは pregap（D-5 の一部）だけ。コードでも `mcu/opengdemu/src/gdi.rs:835` と `:1073` に、トラック 3 番以降が無いときの LBA 45000 の既定値が残っている。
+- **未修正**（実機と比べるまで挙動を変えない）：上流の ATAPI 応答の疑い D-1〜D-5 のうち、**D-1（トラック 2 本の CDI でセッション 2 が返らない）は未修正**。R36 で直したのは pregap（D-5 の一部）だけ。コードでも `mcu/netgd/src/gdi.rs:835` と `:1073` に、トラック 3 番以降が無いときの LBA 45000 の既定値が残っている。
 
 **ツール**（一行ずつ）：
 - `tools/gdprobe`：純正 GDEMU と NetGD に読み取り系コマンドだけを送る KOS 製プローブ。PC 側の `compare.py` で比較（R19、R22、R31）。純正での記録はまだ取っていない。
@@ -86,7 +86,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
   - 境界：`gdi::parse`（`gdi.rs`）のテキスト解析、`cdi::parse`（`cdi.rs`）の記述子解析、
     `ide.rs` の応答ビルダ（`bcd`・`put_msf`・REQ_SES・GET_SCD・TOC）。グローバルを読まず引数で受ける形に。
   - 手順：先に現行コードの出力を固定する特性テストを書き、切り出し前後で同じ入力→同じ出力を担保する。
-- **P5 改名** — 未着手（後回し。CI とドキュメントが安定してから、R63）。README / INSTALL を NetGD に。クレート名・バイナリ名（`opengdemu`）の改名は別途行う。
+- **P5 改名** — 完了（2026-11-20、R76）。クレート・バイナリ・フォルダを `netgd`（`mcu/netgd`、ELF は `target/thumbv7m-none-eabi/release/netgd`）に。IDENTIFY の機種名・FPGA のファイル名など上流の名前は残す。
 
 ### G1：GDEMU 6.0 対応
 > **実物の写真で判明（2026-11-20、`docs/boards/gdemu60/README.md`）：MCU は ATSAM3U2E、FPGA は AGM AG16KDDF256。**

@@ -4,7 +4,7 @@
 //! directory clobbers it, so the caller consumes each data chunk before
 //! asking for the next.
 //!
-//! What it accepts, compared with `mcu/opengdemu/src/fat.rs` (the
+//! What it accepts, compared with `mcu/netgd/src/fat.rs` (the
 //! application's `probe`, which delegates the type decision to
 //! embedded-sdmmc):
 //!

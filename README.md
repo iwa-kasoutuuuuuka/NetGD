@@ -32,7 +32,7 @@ The full plan (phases, roles, open issues) is in [`docs/PLAN.md`](docs/PLAN.md) 
 ## 構成 / Layout
 
 ```
-mcu/opengdemu/      MCU ファームウェア（Rust + embassy、SAM3U4E / SAM3U2E）  MCU firmware (Rust + embassy)
+mcu/netgd/      MCU ファームウェア（Rust + embassy、SAM3U4E / SAM3U2E）  MCU firmware (Rust + embassy)
 mcu/embassy-atsam3/ SAM3U 用 HAL                                             HAL for the SAM3U
 mcu/fwupdater/      RAM で動くファーム更新プログラム（ファームに埋め込み）  RAM-resident updater, embedded in the firmware
 common/discimg/     GDI / CDI 解析と ATAPI 応答（no_std、ホストでテスト可能） GDI/CDI parsing and ATAPI replies (host-tested)
@@ -48,9 +48,9 @@ tools/ci/             KOS ビルドのスクリプト（GitHub Actions から呼
 docs/               計画・調査・設計・基板の資料                               Plan, research, designs, board notes
 ```
 
-パス名やバイナリ名（`mcu/opengdemu`、`opengdemu.elf`）は上流のままです。改名は後で行います。
+ファームのクレート名・バイナリ名は `netgd`（`mcu/netgd`、`netgd.elf`）。上流の名前が残るのは IDENTIFY の型番文字列、SD 上の `OPENGDEMU.CFG`、FPGA のファイル名（`OpenGDEMU.rbf` など）だけです。
 
-Paths and binary names (`mcu/opengdemu`, `opengdemu.elf`) still carry the upstream name; renaming comes later.
+The firmware crate and binary are `netgd` (`mcu/netgd`, `netgd.elf`). The upstream name remains only in the IDENTIFY model string, the SD-card `OPENGDEMU.CFG` name, and FPGA file names (e.g. `OpenGDEMU.rbf`).
 
 ## 今のファームウェアにできること / What the firmware does
 
@@ -82,7 +82,7 @@ Requirements: Rust (`rustup` installs the toolchain and `thumbv7m-none-eabi` fro
 
 ```sh
 # ファーム（SAM3U4E、v5.5 クローン） / Firmware for SAM3U4E (v5.5 clones)
-cd mcu/opengdemu && cargo build --release
+cd mcu/netgd && cargo build --release
 
 # ファーム（SAM3U2E、GDEMU 6.0 の MCU） / Firmware for SAM3U2E (the GDEMU 6.0 MCU)
 DEFMT_LOG=off cargo build --release --features sam3u2e

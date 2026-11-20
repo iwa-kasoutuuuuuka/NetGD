@@ -25,12 +25,12 @@ lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 
 
 [features]
-# Target the SAM3U2E: one flash plane, no EFC1. Set by opengdemu's own
+# Target the SAM3U2E: one flash plane, no EFC1. Set by netgd's own
 # `sam3u2e` feature.
 sam3u2e = []
 # Started by a resident boot region that has already set up the clocks
 # (96 MHz PLLA, flash wait states): clock init leaves a matching setup alone
-# and, if it must rebuild PLLA, first moves MCK off it. Set by opengdemu's
+# and, if it must rebuild PLLA, first moves MCK off it. Set by netgd's
 # own `resident` feature.
 resident = []
 rt = ["atsam3u4e-pac/rt"]

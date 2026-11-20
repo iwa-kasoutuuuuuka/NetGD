@@ -3,8 +3,8 @@
 This is the SAM3U side of the FPGA register window: what the firmware sees when it reads and writes the
 FPGA over the Static Memory Controller. The Dreamcast-side (G1) register decode is not covered here.
 
-Sources: `mcu/opengdemu/src/ide.rs` (the `REG_*`, `HW_*`, `STATUS_*` constants and their use),
-`mcu/opengdemu/src/cdda.rs` and `main.rs` (slots 12, 14-18, 29-31), `fpga/amaranth/hw/ide_device.py` (the
+Sources: `mcu/netgd/src/ide.rs` (the `REG_*`, `HW_*`, `STATUS_*` constants and their use),
+`mcu/netgd/src/cdda.rs` and `main.rs` (slots 12, 14-18, 29-31), `fpga/amaranth/hw/ide_device.py` (the
 MCU-side `Switch` on `mcu_addr`), `fpga/amaranth/hw/cdda.py` (slots 29-31 bit layout), `fpga/amaranth/hw/OpenGDEMU.py`
 and `mcu/embassy-atsam3/src/smc.rs` (window placement). Where the sources disagree, the section
 "Discrepancies" at the end says so.

@@ -1256,7 +1256,7 @@ pub unsafe fn read_block_dma(
 
 // ---- High-Speed support ---------------------------------------------
 //
-// `opengdemu`'s `sd-highspeed` feature calls these from `sdcard::init` to run
+// `netgd`'s `sd-highspeed` feature calls these from `sdcard::init` to run
 // the SD bus above the 25 MHz default-speed ceiling. Unreferenced they are
 // dropped at link time. The clock bookkeeping at the end of the file is
 // always compiled in: with nothing armed it is a load and a compare.

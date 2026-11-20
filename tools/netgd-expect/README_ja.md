@@ -3,7 +3,7 @@
 `tools/gdprobe` の記録（純正 GDEMU 6.0 で取ったもの）と、**NetGD のファームが同じ試験に返すはずの記録**を同じ形式で出して、
 `compare.py` で突き合わせる。NetGD を書き込む前に、純正の記録が届いた時点で「NetGD が純正と違うところ」の一覧が出る。
 
-予測の作り方：`common/discimg` の公開 API だけを使う `examples/expect.rs` が、ファーム（`mcu/opengdemu/src/ide.rs`）と同じ手順で
+予測の作り方：`common/discimg` の公開 API だけを使う `examples/expect.rs` が、ファーム（`mcu/netgd/src/ide.rs`）と同じ手順で
 イメージを読み込み（GDI は各トラックファイルの大きさからセクタ数を出す、境界は「3 番以降の最初のトラック、無ければ 45000」、
 セッション数は GDI 1・CDI は記述部の値）、同じビルダ（`atapi::build_toc` / `req_ses_reply` / `req_stat_reply` / `get_scd_reply`）を
 `gdprobe/probes.c` と同じ CDB・確保長で呼ぶ。ファームが応答を包む部分は `ide.rs`（HEAD）に合わせてある：

@@ -1,5 +1,5 @@
 /* netgd-fwupd: update NetGD's firmware from the Dreamcast through the secondary IDE device
- * (vendor opcode 0xF9, mcu/opengdemu/src/fwupdate.rs + mcu/fwupdater). KOS 2.3.0 glue only;
+ * (vendor opcode 0xF9, mcu/netgd/src/fwupdate.rs + mcu/fwupdater). KOS 2.3.0 glue only;
  * everything that can be tested on a PC is in fwcore.c. NOT run on hardware yet: see README_ja.md.
  *
  * Flow: read the .ogfw from /pc/ -> check it on the console -> check that the secondary IDE

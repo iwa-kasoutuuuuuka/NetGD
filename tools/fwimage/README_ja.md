@@ -5,11 +5,11 @@ NetGD の自己更新（`0xF9`）用の更新イメージ（"OGFW"）を作る�
 
 ```
 # ファームのビルド（CLAUDE.md の手順どおり。ビルドのたびに ELF は上書きされる）
-cd mcu/opengdemu
+cd mcu/netgd
 cargo build --release                                              # 4E
 DEFMT_LOG=off cargo build --release --features sam3u2e             # 2E
 
-python tools/fwimage/fwimage.py build --elf mcu/opengdemu/target/thumbv7m-none-eabi/release/opengdemu \
+python tools/fwimage/fwimage.py build --elf mcu/netgd/target/thumbv7m-none-eabi/release/netgd \
        --target 2e -o fw_2e.ogfw [--image-version N]
 python tools/fwimage/fwimage.py inspect fw_2e.ogfw [--target 2e|4e]
 ```

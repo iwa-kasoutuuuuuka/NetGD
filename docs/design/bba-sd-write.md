@@ -629,7 +629,7 @@ G2 の判定基準（`PLAN.md`）は G2-5a で満たす。G2-5b は「誰でも�
 
 ## 12. 出典
 
-- このリポジトリ：`mcu/opengdemu/src/{ide,gdi,fat,cdi,button,sdcard,fwupdate}.rs`、`mcu/embassy-atsam3/src/hsmci.rs`、`mcu/fwupdater/src/main.rs`、`fpga/amaranth/hw/ide_device.py`、`docs/AddressMapMCU.md`、`docs/PLAN.md`、`README.md`
+- このリポジトリ：`mcu/netgd/src/{ide,gdi,fat,cdi,button,sdcard,fwupdate}.rs`、`mcu/embassy-atsam3/src/hsmci.rs`、`mcu/fwupdater/src/main.rs`、`fpga/amaranth/hw/ide_device.py`、`docs/AddressMapMCU.md`、`docs/PLAN.md`、`README.md`
 - KallistiOS（master）：`kernel/arch/dreamcast/hardware/g1ata.c`、`addons/libkosfat/fs_fat.c`（https://github.com/KallistiOS/KallistiOS）
 - Dreamcast-Dev-Tools-for-BBA：`KNOWHOW_ja.md` 2〜7・10・13 章、`README.md`
 - dcload-ip（https://github.com/sizious/dcload-ip）：BBA（HIT-0400）と LAN アダプタ（HIT-0300）の両対応

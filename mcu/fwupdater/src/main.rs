@@ -3,7 +3,7 @@
 //! This is not part of the firmware binary. It is built as its own program,
 //! linked to run from the base of SRAM1 (see `updater.x`), emitted as a raw
 //! binary, and embedded in the firmware image as a byte blob. When a firmware
-//! update starts, `opengdemu`'s `fwupdate` shim copies the blob to
+//! update starts, `netgd`'s `fwupdate` shim copies the blob to
 //! `0x2008_0000` and branches to offset 0 — [`_start`].
 //!
 //! # Why a separate binary

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and inspect NetGD firmware update images ("OGFW").
 
-    fwimage.py build --elf opengdemu --target 2e|4e -o out.ogfw [--image-version N] [--format 2|3]
+    fwimage.py build --elf netgd --target 2e|4e -o out.ogfw [--image-version N] [--format 2|3]
     fwimage.py seal in.elf -o sealed.elf
     fwimage.py inspect out.ogfw [--target 2e|4e]
 
@@ -536,7 +536,7 @@ def cmd_inspect(args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("build", help="make an .ogfw from an opengdemu ELF")
+    b = sub.add_parser("build", help="make an .ogfw from a netgd ELF")
     b.add_argument("--elf", required=True)
     b.add_argument("--target", required=True, choices=sorted(PARTS))
     b.add_argument("-o", "--output", required=True)

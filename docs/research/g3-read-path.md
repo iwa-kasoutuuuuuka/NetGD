@@ -48,7 +48,7 @@ feature 名の `sd-multiblock` は依頼の例に合わせた名前で、実体�
 - **マップされていないトラック**（FAT を引けなかった、エクステント 96 本超 `fat.rs:38`）は `fill_cd_read_buf_from_sd` の後半、`embedded_sdmmc` 経由になる（ide.rs:1930 付近）。この経路は 1 ブロックずつ CMD17（`blockdev.rs:56`。`embedded-sdmmc 0.9` の `File::read` は 1 ブロックずつ `read` を呼ぶ）、しかも**チャンクごとにボリューム・ディレクトリ・ファイルを開き直して先頭から `seek_from_start`** する（FAT のクラスタ鎖をたどる）。桁違いに遅いので、マルチブロック化の対象外（置き換えるなら鎖を自前で引く必要がある。`gdi.rs`/`fat.rs` は別の担当が触っている）。
 - 起動時に IP.BIN の先頭 7 セクタをキャッシュしておく（`prefetch_ip_bin`、ide.rs:2371）。BIOS の最初の CD_READ だけはキャッシュヒット。
 
-### 2.2 SD ドライバ（`embassy-atsam3/src/hsmci.rs`、`opengdemu/src/sdcard.rs`）
+### 2.2 SD ドライバ（`embassy-atsam3/src/hsmci.rs`、`netgd/src/sdcard.rs`）
 
 | 項目 | 現状 | 根拠 |
 |---|---|---|
@@ -148,7 +148,7 @@ HSMCI は GD-ROM の読み出し（`handle_cd_read`）以外に、**`cdda_task`�
 
 ## 6. 実装の中身
 
-### 6.1 `fast-complete`（`mcu/opengdemu/src/ide.rs` `stream_from_sd` の完了待ち）
+### 6.1 `fast-complete`（`mcu/netgd/src/ide.rs` `stream_from_sd` の完了待ち）
 
 完了待ちのループで FIFO の最大レベルを覚え、それより下がったら `pulled = true`。`(i >= min_wait_ms && lvl == 0) || (pulled && 0 を2回続けて読んだ)` で抜ける（R73 S1・S2 の修正：最大レベルは `level_after_prime` から始める。SMC が FPGA のカウンタを非同期に読むので 1 回の読みは裂けうる、2 回目は 1 ms 後なのでほぼ確実に直る）。ホストが動かない場合（FIFO のレベルが動かない）は従来どおり下限まで待ち、200 ms で打ち切る。feature なしのコードは元のまま。
 
@@ -242,8 +242,8 @@ CI（`.github/workflows/build.yaml` の `host-tests`）の matrix には `common
 
 ## 10. 関連ファイル
 
-- `mcu/opengdemu/src/ide.rs`（`read_ahead`、`stream_from_sd` の `fast-complete`）
-- `mcu/opengdemu/src/sdcard.rs`（`enable_high_speed`）
+- `mcu/netgd/src/ide.rs`（`read_ahead`、`stream_from_sd` の `fast-complete`）
+- `mcu/netgd/src/sdcard.rs`（`enable_high_speed`）
 - `mcu/embassy-atsam3/src/hsmci.rs`（`set_high_speed_mode`、`read_short_block`）
-- `mcu/opengdemu/Cargo.toml`（feature `sd-multiblock`・`sd-highspeed`・`fast-complete`・`sd-fast`、任意依存 `sdfast`）
+- `mcu/netgd/Cargo.toml`（feature `sd-multiblock`・`sd-highspeed`・`fast-complete`・`sd-fast`、任意依存 `sdfast`）
 - `common/sdfast/`（新規。ホストテスト 14 件）

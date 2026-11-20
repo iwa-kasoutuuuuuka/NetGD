@@ -344,7 +344,7 @@ R37 の素描（ビットストリームもロック）を選んだ場合に加�
 ### 5-1 今のビルド
 
 道具は `~/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/` の `llvm-size`・`llvm-nm`。
-対象は `mcu/opengdemu/target/thumbv7m-none-eabi/release/opengdemu`（作業ツリー、2E、`DEFMT_LOG=off`、2026-11-20 15:11。他の作業と並行中なので数百バイトは動く）。
+対象は `mcu/netgd/target/thumbv7m-none-eabi/release/netgd`（作業ツリー、2E、`DEFMT_LOG=off`、2026-11-20 15:11。他の作業と並行中なので数百バイトは動く）。
 
 | 部品 | 大きさ（B） | 読み方 |
 |------|------------:|--------|
@@ -457,7 +457,7 @@ R37 の素描どおりの形（ビットストリームをロック、`0xF9` で
 
 ```bash
 B=~/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin
-E=mcu/opengdemu/target/thumbv7m-none-eabi/release/opengdemu     # DEFMT_LOG=off cargo build --release --features sam3u2e
+E=mcu/netgd/target/thumbv7m-none-eabi/release/netgd     # DEFMT_LOG=off cargo build --release --features sam3u2e
 $B/llvm-size -A $E
 $B/llvm-nm -S --size-sort -C $E | tail -40
 # 試作（スクラッチパッドの resident-proto で）

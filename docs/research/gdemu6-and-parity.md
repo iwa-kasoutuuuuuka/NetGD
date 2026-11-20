@@ -38,7 +38,7 @@
      **PS のピン名・タイミング・ビットストリーム大きさは本文に無い**。ビットストリーム圧縮（実時間展開）に対応。
    - 同じ AG16K の製品ページ（FPGA 単体 AG16KF256）はコンフィグを「JTAG と SPI」とだけ書き、LQFP-144/176・FBGA-256、ピン表 `AG16KF256_Pinout.xls` を挙げる。 http://www.agmsemi.com/program_details_agmfpgaag16kf256.html
 3. **SAM3U ファミリー**（Microchip/Atmel doc6430）: SAM3U4E は 2×128 KB フラッシュ（2 プレーン）、SAM3U2E は 128 KB 単一プレーン。SRAM は 4E が SRAM0 32 K + SRAM1 16 K + NFC 4 K（計 52 K）、2E は 16 K + 16 K + 4 K（計 36 K）。両者とも LQFP/BGA-144、96 MHz、HSMCI 8 bit 幅。
-   https://www.keil.com/dd/docs/datashts/atmel/sam3u/doc6430.pdf （検索結果の抜粋で確認。巨大 PDF のため全文取得は失敗。上記の 2E の数値は本リポジトリ `mcu/opengdemu/link/sam3u2e.x` の記述とも一致）
+   https://www.keil.com/dd/docs/datashts/atmel/sam3u/doc6430.pdf （検索結果の抜粋で確認。巨大 PDF のため全文取得は失敗。上記の 2E の数値は本リポジトリ `mcu/netgd/link/sam3u2e.x` の記述とも一致）
 4. **SD カード・ファイルシステム（本家）**: SD 512MB〜2GB、SDHC 4〜32GB 推奨、SDXC 非対応、FAT16/FAT32、**exFAT 非対応**、先頭パーティションのみ使用、クラスタは大きく（32 KB 典型）。 https://gdemu.wordpress.com/details/
 5. **Supra（AGM の IDE）**: フォーラムで「Quartus 13.1 と Supra-2023.02.b0 の組み合わせで動いた」「ネイティブモードの合成は Yosys」との報告。 https://www.eevblog.com/forum/fpga/agm-cplds-fpgas/ （投稿者の主張。後述 [B] の扱い）
 

@@ -79,7 +79,7 @@ third_party/fatfs/       FatFs R0.15b（ChaN、ライセンス表記つき。ffc
 test/                    ホスト試験（dev_file.c = ファイルを SD に見立てる、fwctl_sim.c = ファームの**パケット単位の**模型（`fw_xfer`。UNIT ATTENTION を出せる）、run_tests.py、fatcheck.py）
 ```
 
-ファームのパケットの形はすべて `src/fwctl.c` の 1 ファイルにある（ファーム側の実装 `mcu/opengdemu/src/ide.rs` と `common/discimg/src/wsession.rs` に合わせた）。
+ファームのパケットの形はすべて `src/fwctl.c` の 1 ファイルにある（ファーム側の実装 `mcu/netgd/src/ide.rs` と `common/discimg/src/wsession.rs` に合わせた）。
 
 ## テスト（ハードウェア無し）
 

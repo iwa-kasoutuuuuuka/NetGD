@@ -6,7 +6,7 @@
 //!                                   [--no-throughput] [--tp-batches 64] [--tp-sectors 16]
 //!                                   [--no-seek] [--seek-n 16] [--seek-span 50000] [--no-reads] [--sw-only]
 //!
-//! What it does: loads the image the way `mcu/opengdemu` does (the same `discimg` parsers, the same
+//! What it does: loads the image the way `mcu/netgd` does (the same `discimg` parsers, the same
 //! boot-area / session rules, GDI track sizes from the files) and answers each probe of tools/gdprobe
 //! (`probes.c`) with the same `discimg::atapi` builders the firmware's `ide.rs` calls, wrapped the way
 //! `handle_packet` wraps them: status / error / interrupt-reason registers, REQ_MODE contents, REQ_ERROR

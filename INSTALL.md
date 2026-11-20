@@ -29,7 +29,7 @@ prebuilt firmware `.elf`, a host flashing tool, and a prepared SD card with
 | File | Where from |
 |------|------------|
 | `debugprobe.uf2` | <https://github.com/raspberrypi/debugprobe/releases> — the **`debugprobe.uf2`** asset for your board (`debugprobe_on_pico.uf2` for a plain Pico, `_on_pico2` for a Pico 2). Version **2.2.0 or newer.** |
-| `opengdemu.elf` | The NetGD firmware ELF. The FPGA bitstream is compressed **inside** this ELF, so there is no separate `.rbf` to program. |
+| `netgd.elf` | The NetGD firmware ELF. The FPGA bitstream is compressed **inside** this ELF, so there is no separate `.rbf` to program. |
 | `*.gdi` / `*.cdi` disc images | Yours. One folder per disc on the card. |
 
 ---
@@ -246,8 +246,8 @@ set the security bit, so the debug port stays open.
 ### With probe-rs
 
 ```sh
-probe-rs download --chip ATSAM3U4E --protocol swd --binary-format elf opengdemu.elf
-probe-rs verify   --chip ATSAM3U4E --protocol swd opengdemu.elf   # optional
+probe-rs download --chip ATSAM3U4E --protocol swd --binary-format elf netgd.elf
+probe-rs verify   --chip ATSAM3U4E --protocol swd netgd.elf   # optional
 probe-rs reset    --chip ATSAM3U4E --protocol swd
 ```
 
@@ -275,7 +275,7 @@ openocd \
   -c "transport select swd" \
   -c "adapter speed 1000" \
   -f target/at91sam3u4e.cfg \
-  -c "program opengdemu.elf verify reset exit"
+  -c "program netgd.elf verify reset exit"
 ```
 
 If you'd rather drive it step by step, run openocd without the `program` line:
@@ -290,8 +290,8 @@ issue:
 
 ```
 reset halt
-flash write_image erase opengdemu.elf
-verify_image opengdemu.elf
+flash write_image erase netgd.elf
+verify_image netgd.elf
 reset run
 ```
 
@@ -313,14 +313,14 @@ probe's serial bridge. Decoding needs the same ELF you flashed (the strings live
 in it, not on the wire):
 
 ```sh
-defmt-print -e opengdemu.elf serial --path /dev/ttyACM0 --baud 115200
+defmt-print -e netgd.elf serial --path /dev/ttyACM0 --baud 115200
 ```
 
 If you have other USB-serial devices attached, `/dev/ttyACM0` may be one of
 them — use the stable name instead:
 
 ```sh
-defmt-print -e opengdemu.elf serial \
+defmt-print -e netgd.elf serial \
   --path /dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe_CMSIS-DAP_*-if01 \
   --baud 115200
 ```

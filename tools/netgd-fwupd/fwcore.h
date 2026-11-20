@@ -3,7 +3,7 @@
  * Host-tested against a fake device (tests/test_all.c); main.c / g1dev.c are the KOS glue.
  *
  * Sources of truth (read these, not this file, when they disagree):
- *   mcu/opengdemu/src/fwupdate.rs    handover: F9/4F + key, F9/53 + key
+ *   mcu/netgd/src/fwupdate.rs    handover: F9/4F + key, F9/53 + key
  *   mcu/fwupdater/src/main.rs        updater wire protocol and status codes
  *   mcu/fwupdater/src/logic.rs       header / vector checks
  *   tools/fwimage/FORMAT.md          OGFW v2, "Sending"

@@ -308,12 +308,12 @@ sysput NETGD.BIT:
 | 場所 | 変更 |
 |------|------|
 | `common/bitfile/`（新規、`no_std`、ホストテスト） | kind 2 のヘッダの解析と検査、CRC-32（4 ビット表）、「末尾を CRC 確定まで渡さない」状態機械。全バイトの 1 ビット破損・切り詰め・途中の読み取り失敗の総当たりで「CRC の合わないストリームの末尾が出ていかない」を確かめる |
-| `mcu/opengdemu/src/bitsd.rs`（新規） | 候補の順送り、`fat::*` と `hsmci::read_blocks_dma` を使う `SdSource`（`PsSource` の実装） |
-| `mcu/opengdemu/src/main.rs:69-125,153-156` | feature `bitstream-sd` のとき「SD 初期化 → `bitsd` → `cyclone::load`」。`sdcard::init` の結果を後段と共有。既定（v5.5）の経路は変えない |
-| `mcu/opengdemu/src/cyclone.rs:181-204` | アプリ側のエラー型（psload のエラー ＋ SD・ファイル・版）と LED 5〜8 |
-| `mcu/opengdemu/build.rs:52-58,91-98` | `bitstream-sd` で埋め込みなしのときは `.rbf` を読まない。期待する `iface` を定数に出す |
-| `mcu/opengdemu/Cargo.toml` | feature `bitstream-sd`、`bitstream-embed`（v5.5 の既定）。`board-v60 = ["sam3u2e", "bitstream-sd"]`。`ps-msb-first` はファイルのヘッダに移るので将来廃止 |
-| `mcu/opengdemu/src/resident.rs:37-41` | 記述子の種別 2 |
+| `mcu/netgd/src/bitsd.rs`（新規） | 候補の順送り、`fat::*` と `hsmci::read_blocks_dma` を使う `SdSource`（`PsSource` の実装） |
+| `mcu/netgd/src/main.rs:69-125,153-156` | feature `bitstream-sd` のとき「SD 初期化 → `bitsd` → `cyclone::load`」。`sdcard::init` の結果を後段と共有。既定（v5.5）の経路は変えない |
+| `mcu/netgd/src/cyclone.rs:181-204` | アプリ側のエラー型（psload のエラー ＋ SD・ファイル・版）と LED 5〜8 |
+| `mcu/netgd/build.rs:52-58,91-98` | `bitstream-sd` で埋め込みなしのときは `.rbf` を読まない。期待する `iface` を定数に出す |
+| `mcu/netgd/Cargo.toml` | feature `bitstream-sd`、`bitstream-embed`（v5.5 の既定）。`board-v60 = ["sam3u2e", "bitstream-sd"]`。`ps-msb-first` はファイルのヘッダに移るので将来廃止 |
+| `mcu/netgd/src/resident.rs:37-41` | 記述子の種別 2 |
 | `tools/fwimage/`（`fwimage.py`、`FORMAT.md`、`vectors/bitfile.txt`） | `bitfile` サブコマンド、`inspect` の kind 2、共通ベクタ（Python と Rust の 2 者） |
 | `tools/mksdcard`、`tools/netgd-send`、`tools/netgd-recv` | カード作成時に配置／`sysput` の準備と 2 世代の入れ替え（電源断の総当たりテストに追加） |
 | `fpga/amaranth` | 版レジスタ（`0xC0DE` の隣）。`g1-ag16k-port.md` §3-5 と同じ |

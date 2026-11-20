@@ -2,7 +2,7 @@
 //!
 //! Everything here takes explicit inputs and returns bytes or track
 //! descriptions: no statics, no filesystem, no hardware. The firmware
-//! (`mcu/opengdemu`) keeps the file I/O and the global state and calls in;
+//! (`mcu/netgd`) keeps the file I/O and the global state and calls in;
 //! the host tests pin the outputs byte for byte.
 //!
 //! Tracks are not copied into this crate's own type on the firmware side

@@ -1,4 +1,4 @@
-//! Hand-written HAL for the ATSAM3U4E, used by the OpenGDEMU firmware.
+//! Hand-written HAL for the ATSAM3U4E, used by the NetGD firmware.
 //!
 //! Cargo features:
 //! - `rt`: interrupt handlers and the PAC's vector table (enables `atsam3u4e-pac/rt`).
@@ -153,7 +153,7 @@ pub fn init(config: config::Config) -> UserPeripherals {
         // cycles, so we use it as the durable log channel for IDE
         // command tracing alongside RTT.
         uart::init(96_000_000);
-        for &b in b"\r\n[opengdemu uart up]\r\n" {
+        for &b in b"\r\n[netgd uart up]\r\n" {
             uart::write_byte(b);
         }
 

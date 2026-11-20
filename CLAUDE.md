@@ -17,7 +17,7 @@ NetGD は OpenGDEMU のフォーク（Dreamcast GD-ROM 置き換え基板のフ�
 
 ## ビルドとテスト
 
-- ファーム（SAM3U4E）：`cd mcu/opengdemu && cargo build --release`
+- ファーム（SAM3U4E）：`cd mcu/netgd && cargo build --release`
 - ファーム（SAM3U2E、GDEMU 6.0 の MCU）：`DEFMT_LOG=off cargo build --release --features sam3u2e`
   - `--target-dir` で出力先を変えないこと（`.cargo/config.toml` の `-Map=target/openmenu.map` が相対パスのため、リンクが失敗する）。
 - ホストテスト：`common/discimg`・`common/lzma`・`common/gamecfg` でそれぞれ `cargo test`

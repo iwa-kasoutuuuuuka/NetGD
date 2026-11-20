@@ -229,7 +229,7 @@ PS で SPI フラッシュ用の先頭部（`ff55` と 12 バイト）をその�
 
 ## 4. 今のローダ（Cyclone II 用）との比較
 
-### 4-1 `mcu/opengdemu/src/cyclone.rs` がやっていること [一次]
+### 4-1 `mcu/netgd/src/cyclone.rs` がやっていること [一次]
 
 | 段階 | 今の動作 |
 |------|----------|
@@ -462,7 +462,7 @@ Q14 で記録したビット列は純正のビットストリームそのもの�
 - rodinia `bitstream/bin2prg.py`（JTAG の命令、SRAM 用のビット順）：https://raw.githubusercontent.com/pablomarx/rodinia/master/bitstream/bin2prg.py
 - rodinia `bitstream/chips.py`（デバイス ID、LZW の設定）：https://raw.githubusercontent.com/pablomarx/rodinia/master/bitstream/chips.py
 - rodinia `bitstream/` の README（対応デバイス。AG16KSDE176 は非圧縮のみ）：https://github.com/pablomarx/rodinia/tree/master/bitstream
-- リポジトリ内：`mcu/opengdemu/src/cyclone.rs`、`main.rs`、`build.rs`、`mcu/embassy-atsam3/src/lib.rs`・`clocks.rs`・`gpio.rs`、`docs/design/g1-ag16k-port.md`、`docs/research/LOG.md`（R32・R39・R41）、`docs/research/user-tasks.html`
+- リポジトリ内：`mcu/netgd/src/cyclone.rs`、`main.rs`、`build.rs`、`mcu/embassy-atsam3/src/lib.rs`・`clocks.rs`・`gpio.rs`、`docs/design/g1-ag16k-port.md`、`docs/research/LOG.md`（R32・R39・R41）、`docs/research/user-tasks.html`
 
 二次資料：
 

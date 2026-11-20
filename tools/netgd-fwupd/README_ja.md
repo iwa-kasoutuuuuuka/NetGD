@@ -2,7 +2,7 @@
 
 Dreamcast（KallistiOS 2.3.0）上で動き、PC の `/pc/`（dcload-ip）にある更新イメージ（`tools/fwimage` の OGFW）を読み、
 **GDEMU のセカンダリ IDE デバイス**へ独自コマンド `0xF9` で送って、NetGD 自身のフラッシュを書き換える。
-受け側は `mcu/opengdemu/src/fwupdate.rs`（入口）と `mcu/fwupdater`（RAM 上の書き込みプログラム）。
+受け側は `mcu/netgd/src/fwupdate.rs`（入口）と `mcu/fwupdater`（RAM 上の書き込みプログラム）。
 形式と手順は `tools/fwimage/FORMAT.md`、安全の考え方は `docs/research/LOG.md` R37・R46。
 
 > **実機では一度も動かしていない。** KOS のビルドも未確認（この PC に KOS が無い。CI の `kos.yaml` が確かめる）。
@@ -53,7 +53,7 @@ Dreamcast（KallistiOS 2.3.0）上で動き、PC の `/pc/`（dcload-ip）にあ
 
 ```powershell
 # 2E（コードのみ）：
-python tools\fwimage\fwimage.py build --elf <opengdemu の ELF> --target 2e -o fw_2e.ogfw --image-version 12
+python tools\fwimage\fwimage.py build --elf <netgd の ELF> --target 2e -o fw_2e.ogfw --image-version 12
 # 4E（コード + ビットストリーム）：--target 4e
 python tools\fwimage\fwimage.py inspect fw_2e.ogfw          # 検査（CRC・ベクタ）
 ```
@@ -116,7 +116,7 @@ message_ja=...
 
 ## 送る手順（実装したもの）
 
-`mcu/opengdemu/src/fwupdate.rs` と `mcu/fwupdater/src/main.rs`、`FORMAT.md`「Sending」のとおり。すべて `0xF9`、セカンダリ（`DEVICE_SELECT = 0xF0`）、
+`mcu/netgd/src/fwupdate.rs` と `mcu/fwupdater/src/main.rs`、`FORMAT.md`「Sending」のとおり。すべて `0xF9`、セカンダリ（`DEVICE_SELECT = 0xF0`）、
 PIO。FEATURES = 手順、LBA = 48 ビット鍵、セクタ数 = ブロック数（0 = 256）。
 
 | 手順 | feat | 鍵 / データ | 根拠 |

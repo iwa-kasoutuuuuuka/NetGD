@@ -1,7 +1,7 @@
 /* The firmware command layer (host-testable: the transport is fw_xfer, see fwxfer.h).
    ATAPI PACKET commands to the PRIMARY (GD-ROM) device.
 
-   Packet layouts (all packet[0] = 0xE0 IMAGE_CTL), from mcu/opengdemu/src/ide.rs and
+   Packet layouts (all packet[0] = 0xE0 IMAGE_CTL), from mcu/netgd/src/ide.rs and
    common/discimg/src/wsession.rs:
      3 VERSION   [3..=4] = allocation length (big endian)      -> 32 bytes
      5 MOUNT_NAME[2] = chunk index, [3..12] = up to 9 name bytes (chunk 0 starts a name)

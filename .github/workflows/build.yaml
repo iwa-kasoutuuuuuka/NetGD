@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # mcu/opengdemu/rust-toolchain.toml selects stable + thumbv7m-none-eabi;
+      # mcu/netgd/rust-toolchain.toml selects stable + thumbv7m-none-eabi;
       # installing it explicitly here keeps the first cargo call from doing it.
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -29,7 +29,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            mcu/opengdemu
+            mcu/netgd
             mcu/fwupdater
 
       # build.rs builds fwupdater itself into OUT_DIR; the standalone build
@@ -38,26 +38,26 @@ jobs:
         working-directory: mcu/fwupdater
         run: cargo build --release
 
-      - name: Build opengdemu
-        working-directory: mcu/opengdemu
+      - name: Build netgd
+        working-directory: mcu/netgd
         run: cargo build --release
 
       - name: Upload firmware ELF
         uses: actions/upload-artifact@v4
         with:
-          name: opengdemu-elf
-          path: mcu/opengdemu/target/thumbv7m-none-eabi/release/opengdemu
+          name: netgd-elf
+          path: mcu/netgd/target/thumbv7m-none-eabi/release/netgd
           if-no-files-found: error
 
       # The resident-boot layout (app linked at 0x82000, `.app_desc`,
       # `.image_crc`) must keep linking on both parts. After the upload above:
       # these overwrite the ELF in the shared target directory.
-      - name: Build opengdemu (resident layout, 4E)
-        working-directory: mcu/opengdemu
+      - name: Build netgd (resident layout, 4E)
+        working-directory: mcu/netgd
         run: cargo build --release --features resident
 
-      - name: Build opengdemu (resident layout, 2E / board-v60)
-        working-directory: mcu/opengdemu
+      - name: Build netgd (resident layout, 2E / board-v60)
+        working-directory: mcu/netgd
         env:
           DEFMT_LOG: "off"
         run: cargo build --release --no-default-features --features board-v60,resident

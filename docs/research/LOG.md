@@ -962,6 +962,12 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - コミット：M1 の部分は同じ関数の中で他の変更と入り組んでいて、対話的な `git add -p` はこの環境で使えないため、1つのコミットにした（どれが既定のバイナリを変えるかはこの項目のとおり）。
 - 信頼度：データシート（一次資料）とビルド・ホストテスト（確認済み）。実機では未検証。
 
+### R76 クレート名の変更 `opengdemu` → `netgd`（Haiku、Opus が残りの箇所を確認）
+- 結論：`git mv mcu/opengdemu mcu/netgd`、パッケージ名とバイナリ名を `netgd` に（ELF は `target/thumbv7m-none-eabi/release/netgd`）。CI（成果物名 `netgd-elf`）、README・INSTALL、ツール（fwimage・netgd-expect・netgd-fwupd・netgd-recv）、docs（LOG.md は履歴なので旧名のまま）のパスを更新。CLAUDE.md と PLAN.md は Opus が更新。
+- 残した旧名（意図的）：IDENTIFY の機種名 `"OpenGDEMU SD Disk"`・`"OpenGDEMU GD-ROM"`、ATA のシリアル `OPENGDEMU0000000000`、`OGDM_IMAGE_CTL`、SD の `OPENGDEMU.CFG`、FPGA のファイル名（`OpenGDEMU.rbf` ほか）、上流へのリンク、リポジトリのフォルダ名。
+  `netgd-fwupd` の機種名の確認（`fwcore.c:318`）は `OPENGDEMU` と `NETGD` の両方を受け付け、テスト済み（古いファームの基板も更新できる）。
+- 確認：`mcu/netgd` で 4E・2E・v60 のビルド成功、fwupdater 13 件（Windows 向け）、fwimage 33 件、netgd-recv（CI=true）、netgd-fwupd 984 項目すべて通過。Linux 向けの fwupdater は CI で確認する。
+
 ---
 
 ## 判断の記録（Decisions）
@@ -987,3 +993,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-20 | `netgd-recv` のホストテストは quick を既定、CI は full。作業フォルダはシステムの一時フォルダ | USB HDD 上での実行が遅さの原因だった。CI は `CI=true` で自動的に full（R62） | Fable 提案、Opus 承認 |
 | 2026-11-20 | 常駐部の FAT リーダーは、有効な FAT の指定（BPB 0x28）と MBR の4項目すべてに対応する | ロック後は SWD でしか直せない。実在しうるカードを拒否する理由が無く、数行で済む（R67） | Opus |
 | 2026-11-20 | G3-4 の高速化（`fast-complete`・`sd-multiblock`・`sd-highspeed`）は既定ではオフの feature にする | 実機で測るまで既定の動作を変えない。完了のタイミングは実機で壊れた前歴がある（R72） | Opus |
+| 2026-11-20 | クレート・バイナリ・フォルダを `netgd` に改名。IDENTIFY の機種名など、ファームが外に見せる名前は変えない | 既存のツールや純正との比較が機種名に依存しうる。更新ツールは両方の名前を受け付ける（R76） | Opus |

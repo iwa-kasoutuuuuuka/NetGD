@@ -2,7 +2,7 @@
    device -- VERSION, MOUNT_NAME, and the F6 write session (design 4.2).
 
    ALL of the firmware-facing packet layouts live in fwctl.c so that when the firmware
-   side settles (mcu/opengdemu/src/ide.rs), this is the one file to fix.  fwctl.c sends
+   side settles (mcu/netgd/src/ide.rs), this is the one file to fix.  fwctl.c sends
    its packets through fw_xfer (fwxfer.h): fwxfer_kos.c on the Dreamcast, the packet-level
    firmware model test/fwctl_sim.c in the host tests. */
 #ifndef NG_FWCTL_H
