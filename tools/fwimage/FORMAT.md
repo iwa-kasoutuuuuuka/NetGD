@@ -167,6 +167,16 @@ dependencies), the application and `fwimage.py`. **Frozen with the resident:**
 once a resident is locked on a board only SWD changes it, so everything here
 changes only by raising the generation (design 3-4).
 
+**Revised 2026-11-20 (findings B1..B12 of `docs/research/fable-debug-2026-11-20.md`,
+LOG R89), still generation 1.** No resident exists yet and no board is locked,
+so there is no "old generation 1" in the field to tell apart; `IFACE_GEN` and
+the descriptor version (`DESC_VERSION`) both stay 1. What changed: GPBR0 gets
+a second word written by the resident ("in progress"); GPBR1 gets flag bit 14
+`LOCK_UNKNOWN` (was reserved) and result 10; `report.txt` has one more column;
+`Flash::lock_bits` returns `Option<u32>`; an EWP timeout does not return; the
+hand-off starts with the watchdog rewind; writing recovery attempts are bounded
+per boot. Design section 10 has the old/new table.
+
 ### Resident information block (`0x00081FF0`, 16 bytes, end of lock region 0)
 
 `bootcore::info` (`INFO_ADDR`, `INFO_MAGIC`, `IFACE_GEN`, `Info`,
@@ -191,14 +201,29 @@ check the CRC at boot (about 1 ms); only when asked (`netgd-fwupd`). Vectors
 ### GPBR0 (app -> resident) and GPBR1 (resident -> app)
 
 `SYS_GPBR0` = `0x400E1290`, `SYS_GPBR1` = `0x400E1294`. `bootcore::boot`
-(`GPBR_RECOVER_MAGIC`, `GPBR1_MARK`, `REPORT_*`, `RESULT_*`, `Trigger`,
-`report`, `Report::parse`, `request_allowed`) and `fwimage.py` (`pack_report`,
-`parse_report`). Vectors `report.txt`.
+(`GPBR_RECOVER_MAGIC`, `GPBR_RECOVER_BUSY`, `Request`, `GPBR1_MARK`,
+`REPORT_*`, `RESULT_*`, `Trigger`, `report`, `Report::parse`,
+`request_allowed`) and `fwimage.py` (`pack_report`, `parse_report`). Vectors
+`report.txt`.
 
 * **GPBR0 = request.** The app writes `GPBR_RECOVER_MAGIC` (`0x4352474E`,
   `"NGRC"` as a little-endian word) with interrupts off and resets with
-  `RSTC_CR = 0xA5000005` (PROCRST | PERRST). The resident, before it touches
-  the card, writes 0 if it reads the magic; any other value is left alone.
+  `RSTC_CR = 0xA5000005` (PROCRST | PERRST). The resident reads GPBR0 three
+  ways (`Request::of`):
+
+  | GPBR0 at reset | meaning | recovery? | written before the card is touched | written at hand-off |
+  |----------------|---------|-----------|------------------------------------|---------------------|
+  | `0x4352474E` (`GPBR_RECOVER_MAGIC`, written by the app) | a new request | yes | `0xBCADB8B1` | 0 |
+  | `0xBCADB8B1` (`GPBR_RECOVER_BUSY` = `!MAGIC`, written by the resident) | a requested recovery was cut short by a reset | **not on that ground**; only if the app is invalid or the button is held (GPBR0 then stays as it is) | nothing | 0 |
+  | anything else | nothing asked | only if the app is invalid or the button is held | nothing | nothing (not the resident's word) |
+
+  Both of the resident's readings report `REQ`. With `GPBR_RECOVER_BUSY` and a
+  valid app the resident starts the app at once, without touching the card,
+  with `REQ` and `RESULT_INTERRUPTED` (10). Why not simply write 0 before
+  recovering (the earlier draft): a reset in the middle (a card that hangs the
+  resident until the watchdog fires, an EWP timeout, the reset button) would
+  forget that the app had asked, the next boot would be a plain one, and the
+  app would ask again: request, hang, 16 s, app, request, for ever.
 * **GPBR1 = report.** The resident writes it on every boot just before it
   jumps; the app reads it first thing and treats a word without the mark as no
   report (a cold GPBR is undefined).
@@ -215,20 +240,47 @@ flags (bit in the word)
   bit 11  REPORT_LOCKED    the last GLB read lock bit 0 of plane 0 as 1
   bit 12  REPORT_SLB       this boot issued SLB
   bit 13  REPORT_UNSEALED  an unsealed app was accepted (development resident only)
-  bits 14-15 reserved, written 0, ignored when read
+  bit 14  REPORT_LOCK_UNKNOWN  the last GLB failed: whether region 0 is locked is not
+                           known. LOCKED is 0 then and says nothing (never both)
+  bit 15  reserved, written 0, ignored when read
 result  RESULT_NONE 0 no recovery tried | RESULT_RECOVERED 1 done (written, or already the same image)
         2..9 recovery failed and a valid old app was started; also the LED blink count:
         RESULT_NO_CARD 2, RESULT_NO_FILE 3, RESULT_READ 4, RESULT_HEADER 5,
-        RESULT_LOCKED 6, RESULT_WRITE 7, RESULT_CRC 8, RESULT_VERIFY 9
+        RESULT_LOCKED 6 (also: lock bits unreadable and a valid app was kept),
+        RESULT_WRITE 7, RESULT_CRC 8, RESULT_VERIFY 9
+        RESULT_INTERRUPTED 10 GPBR0 held GPBR_RECOVER_BUSY: a requested recovery was cut
+        short by a reset and was not tried again; always with REQ; never blinked
 ```
+
+A reader that finds `LOCKED` and `LOCK_UNKNOWN` both set (never written) takes
+it as unknown.
 
 `RecoverError::result_code` (`bootcore::update`) maps every recovery error to a
 result (exhaustive `match`, so a new error needs a code); `sd_recover_ex`
-returns `Recovered { len, wrote }` for `REPORT_WROTE`. "No card" (2) is decided
-by the caller (card initialisation failed). A failure after the application's
-first page was erased leaves no valid app: the resident keeps polling the card
-and writes no report; the jump happens only after a recovery that succeeded or
+returns `Recovered { len, wrote }` for `REPORT_WROTE`, and `sd_recover_attempt`
+returns `Attempt { result, wrote }`, where `wrote` also tells of a failed
+attempt whether it issued flash commands. "No card" (2) is decided by the
+caller (card initialisation failed). A failure after the application's first
+page was erased leaves no valid app: the resident keeps polling the card and
+writes no report; the jump happens only after a recovery that succeeded or
 with an app that is still valid.
+
+**Bounded rewriting (`after_failed_recovery`, `MAX_WRITING_ATTEMPTS` = 3).**
+With no valid app the resident polls the card again after a failure
+(`Fallback::RetryRecovery`). It counts, in RAM, the attempts of this boot
+whose `wrote` is true; after the third one that failed it stops
+(`Fallback::GiveUp`): it keeps showing the failure and rewinding the watchdog
+and writes nothing more until a reset or power cycle. A card that validates
+and then fails while the body is written would otherwise cost up to about 480
+page writes at every poll, for as long as the board is powered. Attempts that
+wrote nothing (no card, no file, a refused file) are not counted.
+
+**"Already installed" (`sd_recover*` writes nothing).** Same app length and
+trailer CRC, and for a file with a bitstream the CRC of plane 1 equals the
+header's `payload_crc` **and the last word of plane 1 equals the file's**. A
+stamped bitstream (V3) has the CRC residue `0x2144DF1C` as its `payload_crc`
+whatever its content, so the CRC alone only says "some self-consistent
+bitstream of this length". The check after writing is the same.
 
 **Rule X6 (`request_allowed`).** The app must not ask for recovery again when
 the report says `REQ`: a recovery that did not help (an FPGA that never starts)
@@ -239,13 +291,32 @@ plain boot), it may ask once.
 
 ### Boot procedure the resident follows (reference: `mcu/bootcore/tests/common/sim.rs`)
 
-1. Clocks, `FWS_RUN`; `lock_resident`: GLB, `lock_step` (SLB only if region 0
-   reads unlocked and the build is not `dev`), FWS 6, SLB, FWS 4, GLB,
-   `lock_report`. Never stops the boot.
+1. Clocks, `FWS_RUN`; `lock_resident`: GLB, `lock_step` (SLB only if the GLB
+   worked, region 0 reads unlocked and the build is not `dev`), FWS 6, SLB,
+   FWS 4, GLB, `lock_report` / `lock_unknown`. Never stops the boot. A GLB
+   that fails (`lock_bits` = `None`: FCMDE, or no FRDY in time) is reported as
+   `LOCK_UNKNOWN`, not as locked, and no SLB is issued.
 2. Button: **one** read; only if pressed, two more 20 ms apart (`button_held`).
-3. `verify_flash_app`, `decide`; on `Recover` clear GPBR0 first if the request
-   was the cause; `sd_recover_ex`; `report` into GPBR1; hand-off with FWS 4,
-   VTOR, MSP.
+3. `verify_flash_app`, `decide`; on `Recover` store
+   `Request::gpbr0_before_recovery` in GPBR0 first; `sd_recover_attempt`
+   (it sets `FWS_RUN` itself before its first flash read: on a 4E nobody has
+   set EEFC1's FWS yet); on failure `after_failed_recovery`.
+4. Hand-off, in this order: **`WDT_CR` rewind first**; pins, HSMCI, SysTick
+   back, FWS 4; GPBR0 = `Request::gpbr0_at_handoff`, GPBR1 = `report`; at
+   least `WDT_RESTART_TO_JUMP_US` (100 us) after the rewind: VTOR, MSP, jump.
+   (Later SAM datasheets forbid a `WDT_MR` write within three slow-clock
+   periods, about 92 us, of a `WDT_CR` restart. The SAM3U datasheet does not
+   say so; this is from memory of the SAM4/SAM E70 ones and is hardware check
+   H9. The app's first act may be its single `WDT_MR` write.)
+
+**Lock bits before a recovery (`lock_verdict`).** A target region that reads
+locked: `Locked` (result 6), nothing written. Lock bits that cannot be read: if
+the app in flash is valid, this attempt ends with `LockUnknown` (result 6) and
+the app is untouched (a region locked in the middle of the image would
+otherwise cost a working app); if there is no valid app the recovery goes
+ahead, since there is nothing to lose and an EWP on a locked page is aborted
+with FLOCKE. Nothing is remembered: the next attempt reads the lock bits
+again, so a GLB failure never refuses recovery for good.
 
 ### Clock and flash wait-state constants (`bootcore::part`)
 
@@ -259,23 +330,50 @@ hand-off value, both planes), `FWS_WRITE` 6 (only while an EWP or SLB runs),
 ### Flash trait duties (`bootcore::flash::Flash`)
 
 `set_fws(FWS_WRITE)` before `ewp`/`slb`, `set_fws(FWS_RUN)` right after (the
-portable code does it; the host model counts an EWP/SLB at any other FWS, and
-every flash read, hence the hand-off, at FWS 6 as a violation). `ewp` and
+portable code does it; the host model counts an EWP/SLB at any other FWS,
+every flash read, hence the hand-off, at FWS 6, and every flash read before
+the first `set_fws` after reset as a violation). `ewp` and
 `BlockRead::read_block` rewind the watchdog (`WDT_CR = 0xA5000001`) as their
-first act; the resident never writes `WDT_MR`. Measured bound in the model: at
+first act; the resident never writes `WDT_MR`. Every command reads FSR once
+before it writes FCR (stale FCMDE/FLOCKE clear on read) and takes its flags
+from the FSR read that saw FRDY.
+
+**An `ewp` that times out does not return.** The plane is unreadable while the
+command is busy, and the caller of the RAM routine is code in that plane; a
+return would fetch from a busy plane and fault. The RAM routine resets the chip
+(`RSTC_CR = 0xA5000005`, written from RAM) or stops rewinding the watchdog.
+That is a reset in the middle of a page write, which the power-cut sweep
+covers. `FlashError::Timeout` is only ever returned by `slb` (flash stays
+readable during SLB/GLB); `lock_bits` returns `None` on a timeout. Measured bound in the model: at
 most 254 008 flash bytes read between two rewinds (`tests/resident.rs`, limit
 262 144).
 
 ### What is frozen with the resident (design 3-4)
 
 `APP_BASE`, `layout`, the descriptor's position (+0x100), length (32), version
-(1) and words 0/4/8/28, the trailer rule, the vector check, GPBR0's word,
-GPBR1's layout, the information block's position and layout, the OGFW format-3
-header, the file name `NETGD.OGF`, the LED counts, and design section 2 as a
-whole. Everything else (NGAX, the app's descriptor words 12..27) is the app's.
+(1) and words 0/4/8/28, the trailer rule, the vector check, GPBR0's two words
+(request, in progress), GPBR1's layout (seven flags, results 0..10), the
+information block's position and layout, the OGFW format-3 header, the file
+name `NETGD.OGF`, the LED counts, the bound on writing attempts, and design
+section 2 as a whole. Everything else (NGAX, the app's descriptor words 12..27) is the app's.
 
 ### `fwimage.py`
 
+* `build` (both formats) refuses an ELF that is not a build for `--target`
+  (finding B1 of R89: `--target 4e` used to take a SAM3U2E ELF, whose stack
+  pointer `0x20004000` is a valid one on a 4E, with only a warning about the
+  missing plane 1; on a format-2 4E board that file leaves the FPGA without a
+  bitstream and only SWD recovers). Two checks on top of the updater's own,
+  in `check_built_for`, both before the output file is written:
+  * the initial SP must be **exactly** the end of the target's SRAM0 (2E
+    `0x20004000`, 4E `0x20008000`), where every netgd linker script puts it:
+    `BadTarget`. `--any-sp` for an ELF with a deliberately different stack;
+  * a `--target 4e` ELF must have plane-1 content: `NoBitstream`.
+    `--code-only` for a file with the code image alone (the board keeps the
+    bitstream it has).
+
+  A real 2E ELF needs both flags to become a 4E file. The updater and
+  `inspect` are unchanged (they cannot know what the ELF was).
 * `build --elf E --target 2e|4e --format 3 -o out.ogfw`: refuses an ELF with
   load content below `APP_BASE` (`BadDest`: "link the app for the resident
   layout"), requires the descriptor magic at `APP_BASE + 0x100`
@@ -322,7 +420,7 @@ Read by `fwimage.py` (`test_fwimage.py`), `mcu/fwupdater/src/logic.rs` and
 | `desc.txt` | 32 descriptor bytes, image length, expect (`OK`, `Unsealed`, `BadDescriptor`) | descriptor check |
 | `trailer.txt` | image bytes (trailer included), expect (`OK`, `BadTrailer`) | trailer check |
 | `image3.txt` | board part, whole one-image file, expect (`OK`, `CrcMismatch`, `BadVector`, ...) | the format-3 reader end to end, in the order given above; each row fails in exactly one way |
-| `report.txt` | `E` button request wrote locked slb unsealed result word / `R` word, flags, result (parse only, reserved bits set) / `N` word (no mark) | GPBR1 report encode and parse (`bootcore::boot`, `fwimage.py`) |
+| `report.txt` | `E` button request wrote locked slb unsealed lock_unknown result word / `R` word, the seven flags, result (parse only: the reserved bit set, or LOCKED together with LOCK_UNKNOWN) / `N` word (no mark; includes the two GPBR0 words) | GPBR1 report encode and parse (`bootcore::boot`, `fwimage.py`) |
 | `info.txt` | `I` 16 bytes, gen, flags, layout>>8, version, crc / `N` 16 bytes (version unknown) | resident information block parse |
 | `ax.txt` | 32-byte NGAX block, bitstream trailer word, expect (`OK`, `NoAx`, `BadAx`, `StampMismatch`) | `check_ax`; the bitstream's own trailer rule is `trailer.txt` |
 
@@ -377,3 +475,36 @@ power cut, a console reset, or a vanished host in that window leaves a board
 that only SWD can recover. The same applies to the few milliseconds of the
 page-0 write itself. Closing the window needs a resident boot region
 (`docs/research/LOG.md` R37, countermeasure B).
+
+### SAM3U4E, format 2: the window between the two images
+
+A 4E file has two images, code (plane 0) then bitstream (plane 1), and each is
+verified and committed on its own (`0x57` after each). **Between the commit of
+the code image and the commit of the bitstream image the board holds new code
+with the old bitstream, and once the first bitstream page has been written,
+new code with a partly written bitstream.** If the transfer stops there (power
+cut, console reset, host gone, a flash error on plane 1), the next boot runs
+the new code, the FPGA does not configure (or configures with a design the new
+code does not match), and without the FPGA there is no ATA interface to send
+`0xF9` through again: **only SWD recovers the board.** The updater's "reset
+only after verify" rule does not help; it refuses the reset command, not a
+power cut.
+
+* The window is the whole bitstream transfer (about 50 KB, several seconds)
+  plus its verify.
+* Nothing in format 2 closes it: the two planes cannot be committed together,
+  and sending the bitstream first only moves the window (new bitstream, old
+  code).
+* What reduces it: do not interrupt a 4E update; `netgd-fwupd` sends both
+  images in one run and reports which one failed. A file without the plane-1
+  image is refused by `build` unless `--code-only` is given, for the same
+  reason (a 2E build flashed to a 4E has the same result).
+* With a resident (format 3) the case is recoverable: the app compares its
+  `bs_stamp` with the last word of plane 1 before it loads the FPGA, sees the
+  mismatch, and asks the resident for an SD recovery, which rewrites both
+  planes from `NETGD.OGF`. The same window exists during that recovery and is
+  covered by its power-cut handling (the app is invalid until both are
+  written).
+
+The SAM3U2E has no plane 1 and no such window (its bitstream is inside the
+code image or on the SD card).

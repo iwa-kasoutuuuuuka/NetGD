@@ -12,6 +12,19 @@
 //! host model in `tests/common` checks that `read` is never entered while
 //! an `ewp` is in progress and cuts power inside `ewp`.
 //!
+//! **An EWP that times out does not return** (finding B5 of R89). While the
+//! command is busy the plane cannot be read, and the caller of the RAM
+//! routine is code in that plane: a return after "FRDY did not come" would
+//! fetch from a plane that is still busy and fault. So on a timeout the RAM
+//! routine resets the chip itself (`RSTC_CR = 0xA5000005`, from RAM) or, if
+//! that is not built in, spins without rewinding the watchdog until it
+//! fires. Either way it is a reset in the middle of a page write, which is
+//! what the power-cut sweep covers; the next boot finds the application
+//! invalid (or untouched) and goes on from there. [`FlashError::Timeout`] is
+//! therefore **never returned by `ewp`** and nothing in this crate relies on
+//! it; it remains for `slb`, during which flash stays readable. The host
+//! model treats an EWP timeout as a reset (`Model::dead`).
+//!
 //! **Wait states** (design 2-2 K6; datasheet errata 46.1.1.3, 46.2.1.2): a
 //! flash command runs with FWS = 6, everything else with FWS = 4. The portable
 //! code owns that: it calls [`Flash::set_fws`] (`FWS_WRITE` before
@@ -24,8 +37,9 @@
 //! implementations of [`Flash::ewp`] and of [`crate::fat::BlockRead::read_block`]
 //! do that as their first act, so every SD sector and every flash page rewinds
 //! it. The pure code in between (CRC over the flash, a FAT chain step) is
-//! bounded: `tests/watchdog.rs` bounds the flash bytes read between two
-//! rewinds in the model.
+//! bounded: `watchdog_is_rewound_often_enough_in_every_path` in
+//! `tests/resident.rs` bounds the flash bytes read between two rewinds in the
+//! model.
 
 use crate::fcr::{FcrCmd, Plane};
 
@@ -42,13 +56,15 @@ pub enum FlashError {
     Locked,
     /// The controller or the supply failed.
     Failed,
-    /// FRDY did not come up in time. The page content is unknown.
+    /// FRDY did not come up in time. **Only `slb` returns this**: an `ewp`
+    /// that times out resets the chip instead (module docs).
     Timeout,
 }
 
 pub trait Flash {
     /// Read flash bytes at an absolute address. Never called while `ewp`
-    /// is running.
+    /// is running, and never before the first [`Flash::set_fws`] after reset
+    /// (at 96 MHz the reset value FWS = 0 reads garbage; contract K6, K7).
     fn read(&mut self, addr: u32, out: &mut [u8]);
 
     /// Set `EEFC_FMR.FWS` of every plane the part has ([`crate::part::FWS_RUN`]
@@ -56,19 +72,30 @@ pub trait Flash {
     fn set_fws(&mut self, fws: u8);
 
     /// Latch `data` into the page `cmd` names (an EWP command) and run it to
-    /// completion, with a timeout (`Err(Timeout)`). FLOCKE gives
-    /// `Err(Locked)`, FCMDE `Err(Refused)`. Called with FWS = 6; rewinds the
-    /// watchdog first.
+    /// completion. FLOCKE gives `Err(Locked)`, FCMDE `Err(Refused)`. Called
+    /// with FWS = 6; rewinds the watchdog first; reads FSR once before the
+    /// FCR write so that a stale FCMDE/FLOCKE is not taken for this
+    /// command's.
+    ///
+    /// The wait for FRDY has a timeout, and **on a timeout this method does
+    /// not return**: it resets the chip from RAM, or stops and lets the
+    /// watchdog do it (module docs). It never returns `Err(Timeout)`.
     fn ewp(&mut self, cmd: FcrCmd, data: &[u8; PAGE]) -> Result<(), FlashError>;
 
     /// Run SLB (`cmd` from [`FcrCmd::slb`]): write FCR, wait for FRDY with a
-    /// timeout. Errors as for `ewp`. Called with FWS = 6. Flash may be read
-    /// while it runs (datasheet 20.4.3.4) but the resident does not.
+    /// timeout (`Err(Timeout)`; it may return, flash stays readable). FLOCKE
+    /// and FCMDE as for `ewp`, FSR read once before the FCR write. Called
+    /// with FWS = 6. Flash may be read while it runs (datasheet 20.4.3.4)
+    /// but the resident does not.
     fn slb(&mut self, cmd: FcrCmd) -> Result<(), FlashError>;
 
-    /// GLB: bit n set = lock region n of `plane` is locked. A failure must
-    /// be reported as all ones (everything locked).
-    fn lock_bits(&mut self, plane: Plane) -> u32;
+    /// GLB: `Some(bits)`, bit n set = lock region n of `plane` is locked.
+    /// `None` when the command failed: FCMDE in the FSR read that saw FRDY,
+    /// no FRDY in time, or a plane this part does not have. FSR is read once
+    /// before the FCR write. A failure is **not** "everything locked"
+    /// (finding B12 of R89): the callers decide what an unknown lock state
+    /// means for them.
+    fn lock_bits(&mut self, plane: Plane) -> Option<u32>;
 }
 
 /// Plane and page index (relative to the plane, as FARG wants it) of a

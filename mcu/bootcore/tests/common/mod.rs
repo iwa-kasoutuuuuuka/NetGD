@@ -240,9 +240,16 @@ pub struct Model {
     /// FLOCKE count.
     pub flocke: u32,
     pub cut: Option<Cut>,
-    /// Like `cut`, but FRDY never comes: the EWP leaves the outcome in the
-    /// page and returns `Timeout` while the power stays on.
+    /// Like `cut`, but FRDY never comes. The real `ewp` does not return then
+    /// (`bootcore::flash` module docs): its RAM routine resets the chip. The
+    /// model leaves the outcome in the page, counts `timeout_resets` and goes
+    /// `dead`, exactly as for a power cut; the harness must `power_up`.
     pub timeout: Option<Cut>,
+    /// EWPs that timed out and reset the chip.
+    pub timeout_resets: u32,
+    /// The chip is not running any more (power cut or reset inside a
+    /// command). Whatever the code under test does after this did not happen
+    /// on a board; every flash command fails.
     pub dead: bool,
     /// A weak cell: an EWP of an all-0xFF page (an erase) leaves bit 0 of
     /// this byte cleared.
@@ -252,13 +259,19 @@ pub struct Model {
     /// A stuck bit: after an EWP that covers this address, bit 0 of that
     /// byte reads back flipped (a failing cell).
     pub stuck: Option<u32>,
-    /// `EEFC_FMR.FWS` as the portable code last set it. Starts at 4 (the
-    /// resident sets it right after reset).
-    pub fws: u8,
-    /// Flash commands (EWP, SLB) issued at an FWS other than 6, and flash
-    /// reads at FWS 6 (which includes the hand-off): must stay 0. Not reset
-    /// by `power_up`.
+    /// `EEFC_FMR.FWS` as the portable code last set it. `None` = not set
+    /// since reset (the reset value 0, with which flash reads garbage at
+    /// 96 MHz): the resident's start-up sets plane 0, nobody sets plane 1 of
+    /// a 4E before `sd_recover` does.
+    pub fws: Option<u8>,
+    /// Flash commands (EWP, SLB) issued at an FWS other than 6, flash reads
+    /// at FWS 6 (which includes the hand-off), and flash reads before the
+    /// first `set_fws`: must stay 0. Not reset by `power_up`.
     pub fws_violations: u32,
+    /// GLBs issued, per plane.
+    pub glbs: [u32; 2],
+    /// Per plane: this many of the next GLBs fail (`u32::MAX`: all of them).
+    pub glb_fail: [u32; 2],
     /// SLB commands issued.
     pub slbs: u32,
     /// SLB commands issued while region 0 already read locked (must stay 0:
@@ -293,12 +306,15 @@ impl Model {
             flocke: 0,
             cut: None,
             timeout: None,
+            timeout_resets: 0,
             dead: false,
             weak_erase: None,
             ignore: None,
             stuck: None,
-            fws: FWS_RUN,
+            fws: None,
             fws_violations: 0,
+            glbs: [0; 2],
+            glb_fail: [0; 2],
             slbs: 0,
             slb_while_locked: 0,
             slb_fault: None,
@@ -331,13 +347,14 @@ impl Model {
         &self.mem[i..i + len]
     }
 
-    /// Back from a power cut: controller idle, cut plan cleared.
+    /// Back from a power cut or a reset: controller idle, FWS at its reset
+    /// value (unset), cut plan cleared.
     pub fn power_up(&mut self) {
         self.dead = false;
         self.in_ewp = false;
         self.cut = None;
         self.timeout = None;
-        self.fws = FWS_RUN;
+        self.fws = None;
         self.violations = 0;
         self.ops = 0;
         self.log.clear();
@@ -399,8 +416,11 @@ impl Model {
         }
         if let Some(c) = self.timeout {
             if c.op == op {
+                // the RAM routine resets the chip: nothing after this runs
                 self.apply_cut(i, data, c.outcome);
-                return Err(FlashError::Timeout);
+                self.timeout_resets += 1;
+                self.dead = true;
+                return Err(FlashError::Failed);
             }
         }
         if let Some(a) = self.ignore {
@@ -434,7 +454,8 @@ impl Flash for Model {
         if self.in_ewp {
             self.violations += 1;
         }
-        if self.fws == FWS_WRITE {
+        if self.fws != Some(FWS_RUN) {
+            // FWS 6 (a command's setting left on) or never set since reset
             self.fws_violations += 1;
         }
         if let Some(w) = &self.wdt {
@@ -447,13 +468,14 @@ impl Flash for Model {
     }
 
     fn set_fws(&mut self, fws: u8) {
-        self.fws = fws;
+        assert!(fws == FWS_RUN || fws == FWS_WRITE, "FWS {fws}");
+        self.fws = Some(fws);
     }
 
     fn slb(&mut self, cmd: FcrCmd) -> Result<(), FlashError> {
         assert_eq!(cmd.word(), 0x5A00_0008, "not SLB 0");
         assert_eq!(cmd.eefc_base(), EEFC0_BASE);
-        if self.fws != FWS_WRITE {
+        if self.fws != Some(FWS_WRITE) {
             self.fws_violations += 1;
         }
         if self.dead {
@@ -484,7 +506,7 @@ impl Flash for Model {
         if let Some(w) = &self.wdt {
             w.feed();
         }
-        if self.fws != FWS_WRITE {
+        if self.fws != Some(FWS_WRITE) {
             self.fws_violations += 1;
         }
         assert!(!self.in_ewp, "EWP entered re-entrantly");
@@ -494,8 +516,19 @@ impl Flash for Model {
         r
     }
 
-    fn lock_bits(&mut self, plane: Plane) -> u32 {
-        self.lock[if plane == Plane::P0 { 0 } else { 1 }]
+    fn lock_bits(&mut self, plane: Plane) -> Option<u32> {
+        let pi = if plane == Plane::P0 { 0 } else { 1 };
+        self.glbs[pi] += 1;
+        if self.dead || (pi == 1 && !self.has_p1) {
+            return None;
+        }
+        if self.glb_fail[pi] > 0 {
+            if self.glb_fail[pi] != u32::MAX {
+                self.glb_fail[pi] -= 1;
+            }
+            return None;
+        }
+        Some(self.lock[pi])
     }
 }
 

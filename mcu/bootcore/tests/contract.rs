@@ -30,24 +30,32 @@ fn cases(text: &'static str) -> impl Iterator<Item = Vec<&'static str>> {
 
 // ------------------------------------------------------------------ GPBR1
 
+fn lock(locked: bool, slb: bool, unknown: bool) -> LockOutcome {
+    LockOutcome { locked, slb, unknown }
+}
+
 /// report.txt: E (encode and parse), R (parse only), N (no mark).
+/// Flag columns: button request wrote locked slb unsealed lock_unknown.
 #[test]
 fn report_vectors_shared_with_fwimage() {
     let mut n = 0;
     for c in cases(include_str!("../../../tools/fwimage/vectors/report.txt")) {
         match c[0] {
             "E" => {
-                let b: Vec<bool> = c[1..7].iter().map(|x| *x == "1").collect();
-                let result: u8 = c[7].parse().unwrap();
-                let word = num(c[8]);
+                let b: Vec<bool> = c[1..8].iter().map(|x| *x == "1").collect();
+                let result: u8 = c[8].parse().unwrap();
+                let word = num(c[9]);
                 let t = Trigger { button: b[0], request: b[1] };
-                assert_eq!(report(t, b[2], b[3], b[4], b[5], result), word, "{c:?}");
+                assert_eq!(report(t, b[2], lock(b[3], b[4], b[6]), b[5], result), word, "{c:?}");
                 let r = Report::parse(word).unwrap();
-                assert_eq!(r, Report { trigger: t, wrote: b[2], locked: b[3], slb: b[4], unsealed: b[5], result });
+                assert_eq!(
+                    r,
+                    Report { trigger: t, wrote: b[2], locked: b[3], slb: b[4], unsealed: b[5], lock_unknown: b[6], result }
+                );
                 assert_eq!(r.word(), word);
             }
             "R" => {
-                let b: Vec<bool> = c[2..8].iter().map(|x| *x == "1").collect();
+                let b: Vec<bool> = c[2..9].iter().map(|x| *x == "1").collect();
                 let r = Report::parse(num(c[1])).unwrap();
                 assert_eq!(
                     r,
@@ -57,7 +65,8 @@ fn report_vectors_shared_with_fwimage() {
                         locked: b[3],
                         slb: b[4],
                         unsealed: b[5],
-                        result: c[8].parse().unwrap()
+                        lock_unknown: b[6],
+                        result: c[9].parse().unwrap()
                     },
                     "{c:?}"
                 );
@@ -67,7 +76,7 @@ fn report_vectors_shared_with_fwimage() {
         }
         n += 1;
     }
-    assert!(n >= 20);
+    assert!(n >= 24);
 }
 
 #[test]
@@ -78,11 +87,14 @@ fn report_bits_are_the_documented_ones() {
         [REPORT_BTN, REPORT_REQ, REPORT_WROTE, REPORT_LOCKED, REPORT_SLB, REPORT_UNSEALED],
         [0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000]
     );
-    assert_eq!(REPORT_FLAGS_MASK, 0x3F00);
+    assert_eq!(REPORT_LOCK_UNKNOWN, 0x4000);
+    assert_eq!(REPORT_FLAGS_MASK, 0x7F00);
     // the mark's two bytes are 0x4E, 0xB1
     assert_eq!(REPORT_MARK_WORD >> 24, 0x4E);
     assert_eq!((REPORT_MARK_WORD >> 16) & 0xFF, 0xB1);
     assert_eq!(GPBR_RECOVER_MAGIC, 0x4352_474E);
+    assert_eq!(GPBR_RECOVER_BUSY, 0xBCAD_B8B1);
+    assert_eq!(RESULT_INTERRUPTED, 10);
     let all = [
         RESULT_NONE,
         RESULT_RECOVERED,
@@ -100,22 +112,32 @@ fn report_bits_are_the_documented_ones() {
 
 #[test]
 fn report_roundtrips_for_every_flag_set_and_result() {
-    for flags in 0u32..64 {
+    for flags in 0u32..128 {
         for result in 0..=255u8 {
             let t = Trigger { button: flags & 1 != 0, request: flags & 2 != 0 };
-            let w = report(t, flags & 4 != 0, flags & 8 != 0, flags & 16 != 0, flags & 32 != 0, result);
+            let unknown = flags & 64 != 0;
+            let w = report(t, flags & 4 != 0, lock(flags & 8 != 0, flags & 16 != 0, unknown), flags & 32 != 0, result);
             assert_eq!(w >> 16, 0x4EB1);
-            assert_eq!(w & 0xC000, 0, "reserved bits are written as 0");
-            assert_eq!(w & REPORT_FLAGS_MASK, flags << 8);
+            assert_eq!(w & 0x8000, 0, "the reserved bit is written as 0");
+            // LOCK_UNKNOWN and LOCKED never come together: unknown wins
+            let want = if unknown { flags & !8 } else { flags };
+            assert_eq!(w & REPORT_FLAGS_MASK, want << 8);
+            assert_ne!(w & (REPORT_LOCKED | REPORT_LOCK_UNKNOWN), REPORT_LOCKED | REPORT_LOCK_UNKNOWN);
             assert_eq!(w & 0xFF, result as u32);
             let r = Report::parse(w).unwrap();
             assert_eq!(r.word(), w);
             assert_eq!(r.result, result);
+            assert_eq!(r.lock_unknown, unknown);
+            assert!(!(r.locked && r.lock_unknown));
         }
     }
-    // reserved bits are ignored when read, and are not carried over
-    let r = Report::parse(0x4EB1_C001).unwrap();
+    // the reserved bit is ignored when read, and is not carried over
+    let r = Report::parse(0x4EB1_8001).unwrap();
     assert_eq!(r.word(), 0x4EB1_0001);
+    // a word with both LOCKED and LOCK_UNKNOWN (never written) reads as unknown
+    let r = Report::parse(0x4EB1_4800).unwrap();
+    assert!(r.lock_unknown && !r.locked);
+    assert_eq!(r.word(), 0x4EB1_4000);
 }
 
 #[test]
@@ -125,15 +147,18 @@ fn a_cold_gpbr_is_not_a_report_unless_it_looks_like_one() {
     }
     // what a request word is: not a report, and a report is not a request
     assert_ne!(GPBR_RECOVER_MAGIC >> 16, GPBR1_MARK);
-    for w in [REPORT_MARK_WORD, REPORT_MARK_WORD | 0x3FFF] {
+    assert_ne!(GPBR_RECOVER_BUSY >> 16, GPBR1_MARK);
+    assert_eq!(Report::parse(GPBR_RECOVER_BUSY), None);
+    for w in [REPORT_MARK_WORD, REPORT_MARK_WORD | 0x7FFF] {
         assert_ne!(w, GPBR_RECOVER_MAGIC);
+        assert_ne!(w, GPBR_RECOVER_BUSY);
     }
 }
 
 #[test]
 fn request_allowed_rule_x6() {
     let none = Trigger::default();
-    let rep = |t: Trigger, res: u8| Some(Report::parse(report(t, false, true, false, false, res)).unwrap());
+    let rep = |t: Trigger, res: u8| Some(Report::parse(report(t, false, lock(true, false, false), false, res)).unwrap());
     // no report (probe start, older resident): nothing would answer, so not allowed
     assert!(!request_allowed(None));
     // a normal boot, a button boot, an invalid-app boot: allowed
@@ -148,13 +173,24 @@ fn request_allowed_rule_x6() {
 
 #[test]
 fn trigger_of_a_decision() {
-    use Action::*;
-    assert_eq!(Trigger::of(RunApp, false), Trigger { button: false, request: false });
-    assert_eq!(Trigger::of(RunApp, true), Trigger { button: false, request: false }); // cannot happen
-    assert_eq!(Trigger::of(Recover { clear_request: false }, false), Trigger { button: false, request: false });
-    assert_eq!(Trigger::of(Recover { clear_request: false }, true), Trigger { button: true, request: false });
-    assert_eq!(Trigger::of(Recover { clear_request: true }, false), Trigger { button: false, request: true });
-    assert_eq!(Trigger::of(Recover { clear_request: true }, true), Trigger { button: true, request: true });
+    use Request::{Interrupted, New};
+    let none = Request::None;
+    let run = |r: Request| Action::RunApp { request: r };
+    let rec = |r: Request| Action::Recover { request: r };
+    assert_eq!(Trigger::of(run(none), false), Trigger { button: false, request: false });
+    assert_eq!(Trigger::of(run(none), true), Trigger { button: false, request: false }); // cannot happen
+    assert_eq!(Trigger::of(rec(none), false), Trigger { button: false, request: false });
+    assert_eq!(Trigger::of(rec(none), true), Trigger { button: true, request: false });
+    assert_eq!(Trigger::of(rec(New), false), Trigger { button: false, request: true });
+    assert_eq!(Trigger::of(rec(New), true), Trigger { button: true, request: true });
+    // B6: an interrupted request is reported as REQ on every path, so the
+    // application does not ask again in the run that follows
+    assert_eq!(Trigger::of(run(Interrupted), false), Trigger { button: false, request: true });
+    assert_eq!(Trigger::of(rec(Interrupted), false), Trigger { button: false, request: true });
+    assert_eq!(Trigger::of(rec(Interrupted), true), Trigger { button: true, request: true });
+    let r = Report::parse(report(Trigger::of(run(Interrupted), false), false, lock(true, false, false), false, RESULT_INTERRUPTED));
+    assert_eq!(r.unwrap().word(), 0x4EB1_0A0A);
+    assert!(!request_allowed(r));
 }
 
 /// Every error, every code: an explicit table, and a new variant fails to compile in `result_code`.
@@ -186,6 +222,7 @@ fn recover_error_to_result() {
         (Image(ImageError::BadTrailer), RESULT_CRC),
         (Changed, RESULT_READ),
         (Locked, RESULT_LOCKED),
+        (LockUnknown, RESULT_LOCKED),
         (Flash(FlashError::Refused), RESULT_WRITE),
         (Flash(FlashError::Locked), RESULT_WRITE),
         (Flash(FlashError::Failed), RESULT_WRITE),

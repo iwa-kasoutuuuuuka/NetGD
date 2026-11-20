@@ -300,28 +300,39 @@ with open(os.path.join(out, "image3.txt"), "w", newline="\n") as f:
     for p, h, e in F3:
         f.write(f"{p} {h} {e}\n")
 # --- GPBR1 report (resident -> app), design 3-2 -------------------------------
-# E button request wrote locked slb unsealed result word   (encode and parse)
-# R word button request wrote locked slb unsealed result    (parse only: reserved bits set)
-# N word                                                     (no mark: not a report)
+# E button request wrote locked slb unsealed lock_unknown result word   (encode and parse)
+# R word button request wrote locked slb unsealed lock_unknown result    (parse only: reserved bit, or LOCKED with LOCK_UNKNOWN)
+# N word                                                                  (no mark: not a report)
 REPORT_ROWS = [
-    "E 0 0 0 0 0 0 0 4eb10000",
-    "E 0 0 0 0 0 0 1 4eb10001",
-    "E 1 0 0 0 0 0 1 4eb10101",
-    "E 0 1 0 0 0 0 1 4eb10201",
-    "E 0 0 1 0 0 0 1 4eb10401",
-    "E 0 0 0 1 0 0 0 4eb10800",
-    "E 0 0 0 1 0 0 1 4eb10801",
-    "E 0 0 0 0 1 0 0 4eb11000",
-    "E 0 0 0 0 0 1 0 4eb12000",
-    "E 0 1 0 1 1 0 6 4eb11a06",
-    "E 1 1 1 1 1 1 9 4eb13f09",
-    "E 0 0 0 0 0 0 2 4eb10002",
-    "E 0 1 0 0 0 0 5 4eb10205",
-    "E 0 0 0 1 0 0 8 4eb10808",
-    "E 0 0 0 0 0 0 255 4eb100ff",
-    "R 4eb1c001 0 0 0 0 0 0 1",
-    "R 4eb1ff09 1 1 1 1 1 1 9",
-    "R 4eb14000 0 0 0 0 0 0 0",
+    "E 0 0 0 0 0 0 0 0 4eb10000",
+    "E 0 0 0 0 0 0 0 1 4eb10001",
+    "E 1 0 0 0 0 0 0 1 4eb10101",
+    "E 0 1 0 0 0 0 0 1 4eb10201",
+    "E 0 0 1 0 0 0 0 1 4eb10401",
+    "E 0 0 0 1 0 0 0 0 4eb10800",
+    "E 0 0 0 1 0 0 0 1 4eb10801",
+    "E 0 0 0 0 1 0 0 0 4eb11000",
+    "E 0 0 0 0 0 1 0 0 4eb12000",
+    "E 0 1 0 1 1 0 0 6 4eb11a06",
+    "E 1 1 1 1 1 1 0 9 4eb13f09",
+    "E 0 0 0 0 0 0 0 2 4eb10002",
+    "E 0 1 0 0 0 0 0 5 4eb10205",
+    "E 0 0 0 1 0 0 0 8 4eb10808",
+    "E 0 0 0 0 0 0 0 255 4eb100ff",
+    # the GLB failed: LOCK_UNKNOWN, and LOCKED is 0
+    "E 0 0 0 0 0 0 1 0 4eb14000",
+    "E 0 0 0 0 1 0 1 0 4eb15000",
+    "E 1 1 1 0 1 1 1 9 4eb17709",
+    "E 0 1 0 0 0 0 1 6 4eb14206",
+    # a requested recovery was cut short by a reset: REQ and result 10
+    "E 0 1 0 1 0 0 0 10 4eb10a0a",
+    "E 0 1 0 0 0 0 1 10 4eb1420a",
+    # the reserved bit (15) is ignored
+    "R 4eb18001 0 0 0 0 0 0 0 1",
+    "R 4eb1c001 0 0 0 0 0 0 1 1",
+    # LOCKED together with LOCK_UNKNOWN (never written) reads as unknown, not locked
+    "R 4eb1ff09 1 1 1 0 1 1 1 9",
+    "R 4eb14800 0 0 0 0 0 0 1 0",
     "N 00000000",
     "N ffffffff",
     "N 5a5aa5a5",
@@ -331,10 +342,13 @@ REPORT_ROWS = [
     "N 4eb20001",
     "N 4fb10001",
     "N 0eb10001",
+    # the two GPBR0 words are not reports
+    "N 4352474e",
+    "N bcadb8b1",
 ]
 with open(os.path.join(out, "report.txt"), "w", newline="\n") as f:
-    f.write("# GPBR1 word: mark 0x4EB1 << 16 | flags << 8 | result; flags BTN=0x100 REQ=0x200 WROTE=0x400 LOCKED=0x800 SLB=0x1000 UNSEALED=0x2000\n"
-            "# E button request wrote locked slb unsealed result(dec) word | R word b r w l s u result | N word (no mark -> not a report)\n")
+    f.write("# GPBR1 word: mark 0x4EB1 << 16 | flags << 8 | result; flags BTN=0x100 REQ=0x200 WROTE=0x400 LOCKED=0x800 SLB=0x1000 UNSEALED=0x2000 LOCK_UNKNOWN=0x4000\n"
+            "# E button request wrote locked slb unsealed lock_unknown result(dec) word | R word b r w l s u k result | N word (no mark -> not a report)\n")
     for r in REPORT_ROWS:
         f.write(r + "\n")
 
