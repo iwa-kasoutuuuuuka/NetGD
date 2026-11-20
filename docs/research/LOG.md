@@ -806,6 +806,24 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：ホストテストで確認済み（Fable の実行）。
 - 関連：`tools/netgd-recv/`（25 ファイル＋`src/fwxfer.h`・`src/fwxfer_kos.c`）、`.github/workflows/build.yaml`。
 
+### R63 残りの課題の並列割り当て（Opus）
+- ユーザーの指示「全部並列で進めて」により、実機の要らない課題を次のように割り当てた（2026-11-20）。
+  - Fable：`netgd-recv` のマウント時間の改善（FAT をまとめて読み、空き数を自分で数えて FatFs に渡す。進捗の出力）。
+  - Sonnet：AG16K のビットストリームを作る道筋の調査と、可能な範囲の合成（`docs/research/ag16k-toolchain.md`）。
+  - Fable：2E でのビットストリームの置き場所の設計（埋め込み／SD の `NETGD.BIT`／併用／圧縮の改善、`docs/design/g1-bitstream-storage.md`）。
+  - Sonnet：G3-4 の SD 読み込みの高速化（読み込み経路の調査 `docs/research/g3-read-path.md`、複数ブロック読み出し等を feature の裏で実装）。
+  - Sonnet：常駐部の FAT リーダーを本物のフォーマッタ（mkfs.fat、mtools、mksdcard の出力）のイメージで試験（`src/` は変えず、問題は報告）。
+  - Sonnet：GDI の引用符付きファイル名などの書式の違いへの対応。
+  - Haiku：`docs/PLAN.md` を現状に合わせて更新。
+- 後回し：P3 の警告掃除とクレート名の変更（`mcu/` の作業と重なるため最後）。
+
+### R64 `docs/PLAN.md` の更新（Haiku）と、未修正だった CDI の問題
+- PLAN.md を LOG R1〜R62・判断の表・git の履歴に合わせて書き直した（状況表、実装済みの一覧、ツール、フェーズ、自己更新の節。すべて実機未検証と明記）。
+- **訂正**：Opus の指示では「トラックが2本の CDI でセッション2が返らない問題は R45 で修正済み」としたが、**誤り**。LOG にあるのはプリギャップの修正（R36）だけで、
+  3番目以降のトラックが無いと LBA 45000 を仮定するコードは残っている（`mcu/opengdemu/src/gdi.rs:835` は CDI、`:1073` は GDI）。Haiku が LOG とコードを照合して見つけた。PLAN では未修正として載せた。
+  → GDI の書式対応の作業（同じ `gdi.rs` を触る可能性がある）が終わってから修正を割り当てる。
+- 信頼度：コードで確認済み（Opus が該当行を確認）。
+
 ---
 
 ## 判断の記録（Decisions）
