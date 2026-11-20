@@ -147,12 +147,12 @@ pub fn init(config: config::Config) -> UserPeripherals {
         dmac::init();
 
         // Bring up HSMCI for the SD card slot. MCK = PLLA = 96 MHz.
-        hsmci::init(96_000_000);
+        hsmci::init(bootcore::part::MCK_HZ);
 
         // UART0 on PA11/PA12 — survives MCU resets across DC power
         // cycles, so we use it as the durable log channel for IDE
         // command tracing alongside RTT.
-        uart::init(96_000_000);
+        uart::init(bootcore::part::MCK_HZ);
         for &b in b"\r\n[netgd uart up]\r\n" {
             uart::write_byte(b);
         }

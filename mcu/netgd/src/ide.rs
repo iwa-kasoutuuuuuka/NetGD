@@ -1791,7 +1791,7 @@ fn read_ahead(dev: &IdeDevice, gdi: &'static crate::gdi::Gdi, lba: u32, count: u
         return;
     }
     let Some(track) = gdi.track_for_lba(cand.lba) else { return };
-    if track.ext_len == 0 {
+    if !track.is_mapped() {
         return;
     }
     let remaining = track
@@ -1857,7 +1857,7 @@ pub fn loader_scratch() -> &'static mut [u8] {
 fn stage_sectors_for(gdi: &crate::gdi::Gdi, lba: u32) -> u32 {
     let payload_max = (CD_READ_BUF_BYTES / 2048) as u32;
     match gdi.track_for_lba(lba) {
-        Some(t) if t.ext_len != 0 && t.sector_size as usize > 2048 => {
+        Some(t) if t.is_mapped() && t.sector_size as usize > 2048 => {
             let sec = t.sector_size as usize;
             let mut n = payload_max as usize;
             while n > 1 && (n * sec + 511 + 511) / 512 * 512 > CD_READ_BUF_BYTES {
@@ -2204,6 +2204,14 @@ async fn handle_image_ctl(
             // question to answer. The bytes stay in the layout rather than
             // shortening the reply, so the offset of the version string does
             // not move.
+            // Behind a resident boot region they carry its interface
+            // generation and flags (docs/design/resident-app-contract.md 3-3).
+            #[cfg(feature = "resident")]
+            {
+                let gf = crate::resident::ogdm_gen_flags();
+                out[6] = gf as u8;
+                out[7] = (gf >> 8) as u8;
+            }
             let fw = env!("CARGO_PKG_VERSION").as_bytes();
             let n = fw.len().min(24);
             out[8..8 + n].copy_from_slice(&fw[..n]);
@@ -2243,7 +2251,8 @@ const GDEMU_VERSION: u8 = 0x00;
 
 /// The GDEMU protocol level NetGD emulates, as (major, minor, patch).
 /// Reported as the firmware version of `52 00`, BCD-encoded
-/// (`discimg::gdemu::version_word`); the bootloader reports 0.0.0.
+/// (`discimg::gdemu::version_word`); the bootloader reports 0.0.0, or the
+/// resident's version behind one (`resident::bootloader_version_word`).
 const GDEMU_COMPAT_VERSION: (u8, u8, u8) = (5, 20, 0);
 
 /// Resolve a GDEMU target folder -- number `n`, or one step from the mounted
@@ -2337,7 +2346,10 @@ async fn handle_gdemu_cmd(
             let (ma, mi, pa) = GDEMU_COMPAT_VERSION;
             let fw = discimg::gdemu::version_word(ma, mi, pa);
             let mut out = [0u8; 8];
-            // Bootloader 0.0.0 in the first word, firmware in the second.
+            // Bootloader in the first word (the resident's version when
+            // there is one, else 0.0.0), firmware in the second.
+            #[cfg(all(feature = "resident", not(feature = "sam3u2e")))]
+            out[..4].copy_from_slice(&crate::resident::bootloader_version_word().to_le_bytes());
             out[4..].copy_from_slice(&fw.to_le_bytes());
             send_alloc(dev, packet, &out).await;
         }
@@ -3326,6 +3338,9 @@ fn handle_fw_command(dev: &IdeDevice, label: &'static str, snap: &CommandSnapsho
         return;
     }
 
+    // The format-2 updater is not in a resident build (contract N5): it would
+    // erase the resident. `handle` below refuses every step there.
+    #[cfg(not(feature = "resident"))]
     if crate::fwupdate::should_enter(snap.features, key) {
         warn!("{}: entering the firmware updater -- no further logging, no way back", label);
         // Stop the one thing that keeps running off its own interrupt even

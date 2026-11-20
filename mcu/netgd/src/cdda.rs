@@ -174,7 +174,7 @@ fn report_underflow(when: &str) {
 pub fn play(start_fad: u32, end_fad: u32, repeat: u8) -> Result<(), ()> {
     let gdi = crate::ide::gdi_ref().ok_or(())?;
     let track = gdi.track_for_lba(start_fad.saturating_sub(150)).ok_or(())?;
-    if track.ext_len == 0 || end_fad <= start_fad {
+    if !track.is_mapped() || end_fad <= start_fad {
         return Err(());
     }
     quiesce_feed();

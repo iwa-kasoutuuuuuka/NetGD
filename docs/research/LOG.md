@@ -1049,6 +1049,25 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   アプリの先頭ページを消した後にカードの読み取りが失敗すると有効なアプリが無くなり、常駐部はカードを待ち続ける（報告は書かない）。
 - 信頼度：ホストテストで確認済み。実際の FWS・ウォッチドッグの動作は実機で未確認。
 
+### R84 取り決めのアプリ側の実装（Sonnet、N1〜N9）と起動時の一覧の削除（Opus）
+- 結論：`mcu/netgd/src/resident.rs`（`resident` のときだけ）：`boot_report()`（GPBR1）、`request_allowed()`、`request_recovery()`（割り込み禁止 → GPBR0 に `GPBR_RECOVER_MAGIC` → `RSTC_CR = 0xA5000005`、SYSRESETREQ は使わない）、`resident_info()`（0x81FF0）、`log_boot()`、`bitstream_stamp_ok()`。
+  `ide.rs`：OGDM の版の応答のバイト 6・7 に世代とフラグ、`52 00` の先頭の語に常駐部の版（BCD）。**2E では `52 00` の版の語を省いた（約 80 B、フラッシュが足りないため、従来どおり 0.0.0）**。
+  N3：クロックの定数を `bootcore::part` から取る（`embassy-atsam3` の `clocks.rs`・`efc.rs`・`lib.rs`、`netgd` の `main.rs`・`cyclone.rs`。両クレートが `bootcore` に依存）。N4：`.app_ax`（32 B、+0x120）、`_stext` を +0x140、ASSERT。
+  N5：`resident` のビルドでは形式2の更新プログラムをソースレベルで外し、`build.rs` もビルドしない。N6（V3、4E）：プレーン1の末尾に `.bs_crc`、不一致なら復旧を1回要求、拒否されたら LED 10 回点滅を繰り返す（番号は仮）。N7・N8 はコメント、N9 は S5 で。
+- **契約の前提の誤り**：N5 で約 2.2 KB 戻るはずだったが、元々 LLVM が `ARMED` を偽に畳んで更新プログラムは消えていて、**フラッシュは戻らない**。
+- **bootcore への指摘**：`request_allowed(None)` が true を返すので、常駐部が無い（プローブで起動した）アプリが復旧を求めると同じアプリに戻り続ける → アプリ側は `report.is_some() && …` にした。bootcore 側の変更かコメントの修正を検討。
+- 既定のビルド：`bootcore` への依存でクレートのハッシュが変わり関数の並びが動くが、各セクションの大きさと関数ごとの命令列は同一（4E は1関数の位置だけ）。`resident` の変更は既定のビルドでは `cfg` で消える。
+- 封印：4E・2E・v60 の `resident` を `fwimage seal` → `check_sealed_elf` で OK、4E の `bs_stamp` がプレーン1の末尾 4 B と一致。
+- **Opus の追加**：R81 の推奨 1 として `main.rs` の起動時の `list_root_dir` を feature `sd-list` の裏に（既定でオフ、約 2.5 KB と起動時間を節約）。長いファイル名（R82）と合わせて 2E `resident,sd-fast` がフラッシュに収まるかを確認する。
+- 実機：常駐部からの引き渡しの状態（H8・H10・H11）、RSTC のリセットで GPBR0 が残るか、V3 の不一致の経路、実際の常駐部の下での `52 00` と OGDM の応答、電源投入後の GPBR の値。
+
+### R85 R82 と R84 を合わせたビルドの確認（Opus）
+- 長いファイル名（R82）・取り決めのアプリ側（R84）・`sd-list` の切り出しを合わせた作業ツリーで、9 種類すべてリンク成功（`DEFMT_LOG=off` の text）：
+  4E 120,284／2E 120,296／v60 66,724／4E resident 118,656／2E resident 118,528／v60 resident 64,608／**2E resident,sd-fast 122,112（R82 では 640 B あふれていたのが収まった）**／4E sd-fast 123,560／4E sd-list 122,736。
+- `netgd` の警告は 0（`sd-list` の裏に `log_entry`・`sfn_label` も入れた）。残りの約 3,130 行は自動生成の PAC。
+- CI に 2E `resident,sd-fast`（`DEFMT_LOG=off`）のビルドを追加（R81 の推奨。いちばん余裕の無い組み合わせを最初に検出する）。
+- 注：2E `resident,sd-fast` の text は 122,112 で、イメージ（512 B 丸め・CRC 込み）の空きはごくわずか。次に機能を足すときは R81 の `opt-level="z"` などが要る。
+
 ---
 
 ## 判断の記録（Decisions）

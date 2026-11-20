@@ -4,10 +4,12 @@
  * "Format 3", mcu/bootcore/src/app.rs). Everything else is link/sam3u2e.x.
  *
  * What is added on top of that script:
- *   - _stext moves to ORIGIN(FLASH) + 0x120 (cortex-m-rt's .text starts at
- *     _stext), and `.app_desc` takes the 32 bytes at ORIGIN(FLASH) + 0x100,
- *     right behind the vector table. src/resident.rs fills it in (magic,
- *     version, bitstream fields); `fwimage` fills in length and CRC.
+ *   - _stext moves to ORIGIN(FLASH) + 0x140 (cortex-m-rt's .text starts at
+ *     _stext), `.app_desc` takes the 32 bytes at ORIGIN(FLASH) + 0x100,
+ *     right behind the vector table, and `.app_ax` (the "NGAX" extension
+ *     block, docs/design/resident-app-contract.md 3-5) the 32 bytes at
+ *     ORIGIN(FLASH) + 0x120. src/resident.rs fills them in (magic, version,
+ *     bitstream fields; min_gen); `fwimage` fills in length, CRC and stamp.
  *   - `.image_pad` + `.image_crc` close the image: the 4-byte trailer is the
  *     last thing in plane 0 and ends on a 512-byte boundary (ALIGN works on
  *     absolute addresses, and APP_BASE is a multiple of 512).
@@ -66,16 +68,23 @@ SECTIONS
   } > nfc
 } INSERT AFTER .bss;
 
-/* The descriptor lives right behind the vector table; .text starts behind
- * the descriptor. (Assigned here, before cortex-m-rt's own PROVIDE.) */
-_stext = ORIGIN(FLASH) + 0x120;
+/* The descriptor lives right behind the vector table, the extension block
+ * behind the descriptor; .text starts behind the extension block. (Assigned
+ * here, before cortex-m-rt's own PROVIDE.) */
+_stext = ORIGIN(FLASH) + 0x140;
 
 SECTIONS
 {
   .app_desc ORIGIN(FLASH) + 0x100 : { KEEP(*(.app_desc)); } > FLASH
 } INSERT AFTER .vector_table;
 
+SECTIONS
+{
+  .app_ax ORIGIN(FLASH) + 0x120 : { KEEP(*(.app_ax)); } > FLASH
+} INSERT AFTER .app_desc;
+
 ASSERT(SIZEOF(.vector_table) <= 0x100, "the vector table does not fit in the 0x100 bytes before .app_desc");
 ASSERT(SIZEOF(.app_desc) == 32, ".app_desc must be exactly 32 bytes (src/resident.rs)");
+ASSERT(SIZEOF(.app_ax) == 32, ".app_ax must be exactly 32 bytes (src/resident.rs)");
 ASSERT(SIZEOF(.image_crc) == 4, ".image_crc must be exactly 4 bytes (src/resident.rs)");
 ASSERT((ADDR(.image_crc) + 4) % 512 == 0, "the image (trailer included) must be a multiple of 512 bytes");

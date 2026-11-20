@@ -123,8 +123,8 @@ impl PsPins for McuPins {
     }
 }
 
-/// MCK, from `Config::new(12_000_000, 8, 1)`: 12 MHz * 8.
-const CYCLES_PER_US: u32 = 96;
+/// MCK in MHz: `bootcore::part::MCK_HZ`, 12 MHz * 8 (what `main` configures).
+const CYCLES_PER_US: u32 = bootcore::part::MCK_HZ / 1_000_000;
 
 pub struct McuClock;
 

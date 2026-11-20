@@ -16,11 +16,17 @@ gamecfg = { path = "../../common/gamecfg", features = ["defmt"] }
 lzma = { path = "../../common/lzma" }
 psload = { path = "../../common/psload", features = ["defmt"] }
 discimg = { path = "../../common/discimg", features = ["defmt"] }
+# FAT32 long-name matching and cluster-chain mapping (pure, host-tested).
+fatmap = { path = "../../common/fatmap", features = ["defmt"] }
 # Pure logic for the sd-multiblock / sd-highspeed features. Optional, so the
 # default build does not even see it.
 sdfast = { path = "../../common/sdfast", optional = true }
 
 embassy-atsam3 = { path = "../embassy-atsam3", features = ["rt", "time-driver"] }
+# The resident boot region's pure logic. In the app: the clock constants
+# (resident-app-contract.md N3) and, with `resident`, the GPBR1 report and
+# the information block it reads.
+bootcore = { path = "../bootcore" }
 embassy-time = "0.5"
 embassy-futures = "0.1"
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
@@ -47,9 +53,18 @@ heapless = { version = "0.8", features = ["defmt-03"] }
 #     DEFMT_LOG=off cargo build --release --no-default-features --features board-v60
 #   The five loader pins are the v5.5 ones, unconfirmed on 6.0: see
 #   `cyclone::pinmap`.
-default = ["board-v55"]
+default = ["board-v55", "lazy-extents"]
 board-v55 = []
-board-v60 = ["sam3u2e"]
+board-v60 = ["sam3u2e", "lazy-extents"]
+
+# Read a track file that is too fragmented for the shared extent pool
+# through a small on-demand window over its cluster chain (fat.rs, `lazy_*`),
+# instead of through embedded-sdmmc one 512-byte CMD17 at a time. About 1.1 KB
+# of flash and 0.7 KB of RAM; on by default and in `board-v60`. Without it such
+# a track still plays, slowly, as before -- build with
+# `--no-default-features --features board-v55,...` to win the flash back (the
+# 2E `resident,sd-fast` image needs it, docs/research/g3-read-path.md).
+lazy-extents = []
 
 # board-v60 only: send each byte MSB first instead of LSB first. The AG16K's
 # PS bit order is inferred, not measured (docs/research/ag16k-config.md 2-3):
@@ -105,6 +120,9 @@ sd-fast = ["sd-multiblock", "sd-highspeed", "fast-complete"]
 # commands, and the console times out with a CDB-DRQ error.
 # Build with `cargo build --release --features sd-bench` to measure.
 sd-bench = []
+# Log the card's root directory (two levels) at boot. Debug only: ~2.5 KB
+# of flash and extra boot time even with DEFMT_LOG=off (LOG R81).
+sd-list = []
 
 # Once-a-second FPGA liveness line on the UART. Off by default: uart_println!
 # is unsynchronized, so it interleaves mid-word with the IDE task's per-command

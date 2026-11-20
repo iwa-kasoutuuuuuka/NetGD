@@ -92,7 +92,7 @@ pub fn parse(dir: &Dir<'_>, name: &ShortFileName) -> Result<discimg::cdi::CdiInf
 
     // Cleared by the parser once it has the descriptor header, so a parse
     // that fails part way cannot leave the previous image's tail behind.
-    discimg::cdi::parse_info(file_len, read_at, &mut PoolSink { cdi: Some(name.clone()) }).map_err(|e| match e {
+    discimg::cdi::parse_info(file_len, read_at, &mut PoolSink::cdi(name.clone())).map_err(|e| match e {
         discimg::Error::Sink(e) => e,
         discimg::Error::Read => GdiError::ReadGdiFile,
         _ => GdiError::BadCdi,

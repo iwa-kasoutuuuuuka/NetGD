@@ -17,6 +17,9 @@ embassy-time-driver = { version = "0.2", optional = true }
 embassy-time-queue-utils = { version = "0.3", optional = true }
 embassy-sync = "0.8"
 atsam3u4e-pac = { path = "../atsam3u4e-pac", features = ["critical-section"] }
+# Clock and wait-state constants shared with the resident boot region
+# (docs/design/resident-app-contract.md N3). Numbers only, no code.
+bootcore = { path = "../bootcore" }
 
 portable-atomic = { version = "1.0", features = ["critical-section"] }
 critical-section = "1.1"

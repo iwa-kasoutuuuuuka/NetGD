@@ -62,8 +62,17 @@ jobs:
           DEFMT_LOG: "off"
         run: cargo build --release --no-default-features --features board-v60,resident
 
+      # The tightest fit: 2E with the v5.5 bitstream, the resident layout and
+      # the speed features (LOG R81). Fails here first if the app outgrows
+      # the 122,880-byte app area.
+      - name: Build netgd (2E, resident, sd-fast)
+        working-directory: mcu/netgd
+        env:
+          DEFMT_LOG: "off"
+        run: cargo build --release --features sam3u2e,resident,sd-fast
+
   host-tests:
-    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fwupdater)
+    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, fwupdater)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -75,6 +84,7 @@ jobs:
           - crate: common/psload
           - crate: mcu/bootcore
           - crate: common/sdfast
+          - crate: common/fatmap
           # .cargo/config.toml defaults to thumbv7m-none-eabi, so the host
           # target has to be named explicitly.
           - crate: mcu/fwupdater

@@ -63,8 +63,10 @@ pub struct Track {
     /// its own pregap).
     pub file_offset: u32,
     /// Slice of the shared extent pool (`extents()`) describing where
-    /// `filename` sits on the card, or `ext_len == 0` when the file could
-    /// not be mapped and reads must go through the filesystem instead.
+    /// `filename` sits on the card. With `ext_len == 0`, `ext_start` is
+    /// either 0 (the file could not be mapped; reads go through the
+    /// filesystem) or the 1-based slot of a *lazy* file (too fragmented for
+    /// the pool, read through `fat::lazy_locate`). Use `is_mapped`.
     pub ext_start: u16,
     pub ext_len: u16,
 }
@@ -104,6 +106,13 @@ impl Track {
         pool.get(self.ext_start as usize..(self.ext_start + self.ext_len) as usize)
     }
 
+    /// Whether `locate_byte` can answer for this track: its runs are in the
+    /// pool, or it is a lazy file. False means reads fall back to the
+    /// filesystem, which is an order of magnitude slower.
+    pub fn is_mapped(&self) -> bool {
+        self.ext_len != 0 || self.ext_start != 0
+    }
+
     /// Byte offset within `filename` of disc LBA `lba`.
     pub fn byte_offset_of(&self, lba: u32) -> Option<u32> {
         lba.checked_sub(self.start_lba)?
@@ -115,7 +124,15 @@ impl Track {
     /// `(block, offset within the block, contiguous blocks from there)`.
     /// `None` if the track is unmapped or the offset lies past its runs.
     pub fn locate_byte(&self, byte_off: u32) -> Option<(u32, u32, u32)> {
-        crate::fat::locate(self.extents()?, byte_off)
+        if self.ext_len != 0 {
+            crate::fat::locate(self.extents()?, byte_off)
+        } else if self.ext_start != 0 {
+            // May read FAT sectors; the data path is synchronous here, as it
+            // is for the CMD18 reads it feeds.
+            crate::fat::lazy_locate(self.ext_start as u8, byte_off)
+        } else {
+            None
+        }
     }
 
     /// Byte offset of the 2048-byte user data within one stored sector.
@@ -816,13 +833,16 @@ pub fn parse_image(num_blocks: u32, which: &ImageRef) -> Result<Gdi, GdiError> {
     let from_cdi = is_cdi;
     let mut gdi = if !is_cdi {
         {
-            // Borrow the CD_READ staging buffer for the text: nothing is
-            // streaming while an image is being (re)loaded, and it saves
-            // keeping a 4 KB buffer around for a file read once per boot.
+            // Borrow the CD_READ staging buffer: nothing is streaming while
+            // an image is being (re)loaded, and it saves keeping a 4 KB
+            // buffer around for a file read once per boot. The first 4 KB
+            // hold the text; the rest is the FAT reader's block buffer for
+            // looking up long track names (`PoolSink`), so that costs no
+            // stack under the volume manager.
             let scratch = crate::ide::loader_scratch();
-            let buf = &mut scratch[..MAX_GDI_BYTES];
-            let len = read_file_to_buf(&image_dir, &image_file, buf)?;
-            parse(&buf[..len])?
+            let (text, work) = scratch.split_at_mut(MAX_GDI_BYTES);
+            let len = read_file_to_buf(&image_dir, &image_file, text)?;
+            parse(&text[..len], &image_path, work)?
         }
     } else {
         {
@@ -849,7 +869,9 @@ pub fn parse_image(num_blocks: u32, which: &ImageRef) -> Result<Gdi, GdiError> {
     // Walk the image dir and fill in each track's sector_count from the
     // on-disk file size. The closure runs inside iterate_dir's scope and
     // needs the tracks mutably while comparing their filenames, so it goes
-    // through a raw pointer to the pool rather than a borrow of it.
+    // through a raw pointer to the pool rather than a borrow of it. The
+    // names compared are the 8.3 ones `parse` left in the tracks, aliases
+    // included.
     if !from_cdi {
         let tracks_ptr = tracks_mut().as_mut_ptr();
         let tracks_len = tracks().len();
@@ -928,8 +950,10 @@ pub fn read_ip_header(
 }
 
 /// Build the block-run map for every track file so the data path can read
-/// the card directly. Best effort: a track that cannot be mapped keeps
-/// `ext_len == 0` and is served through the filesystem as before.
+/// the card directly. Best effort: a track that cannot be mapped (not FAT32,
+/// file missing, broken chain) keeps `ext_start == ext_len == 0` and is served
+/// through the filesystem as before; one that only does not fit the pool
+/// becomes a lazy file.
 fn map_track_extents(gdi: &mut Gdi) {
     let pool = unsafe { &mut *core::ptr::addr_of_mut!(EXTENTS) };
     pool.clear();
@@ -938,19 +962,16 @@ fn map_track_extents(gdi: &mut Gdi) {
         t.ext_len = 0;
     }
     let Some(geom) = crate::fat::probe() else {
+        crate::fat::lazy_reset(None);
         warn!("gdi: no FAT32 geometry; track reads stay on the slow path");
         return;
     };
-    let mut dir_cluster = geom.root_cluster;
-    for part in gdi.image_dir.iter() {
-        let Some(e) = crate::fat::find_in_dir(&geom, dir_cluster, part).filter(|e| e.is_dir) else {
-            warn!("gdi: image dir not found in FAT; slow path");
-            return;
-        };
-        // A `..` entry pointing at the root stores cluster 0; the root's own
-        // cluster is what that means.
-        dir_cluster = if e.first_cluster < 2 { geom.root_cluster } else { e.first_cluster };
-    }
+    crate::fat::lazy_reset(Some(geom));
+    let mut buf = [0u8; 512];
+    let Some(dir_cluster) = dir_cluster_of(&geom, &gdi.image_dir, &mut buf) else {
+        warn!("gdi: image dir not found in FAT; slow path");
+        return;
+    };
 
     // Read through `tracks()` and write through a *fresh, short-lived*
     // `tracks_mut()` each time. Two `tracks_mut()` calls live at once are two
@@ -962,7 +983,7 @@ fn map_track_extents(gdi: &mut Gdi) {
         // CDI: every track shares one file, so reuse its map.
         let shared = (0..i).find(|&j| {
             let t = tracks();
-            t[j].ext_len != 0 && t[j].filename == t[i].filename
+            t[j].is_mapped() && t[j].filename == t[i].filename
         });
         if let Some(j) = shared {
             let (start, len) = (tracks()[j].ext_start, tracks()[j].ext_len);
@@ -974,22 +995,43 @@ fn map_track_extents(gdi: &mut Gdi) {
 
         let filename = tracks()[i].filename.clone();
         let number = tracks()[i].number;
-        let Some(entry) = crate::fat::find_in_dir(&geom, dir_cluster, &filename) else {
+        let Some(entry) = crate::fat::find_in_dir(&geom, dir_cluster, &filename, &mut buf) else {
             warn!("gdi: track {} file missing from FAT", number);
             continue;
         };
         let start = pool.len();
         match crate::fat::map_extents(&geom, &entry, pool) {
-            Some(len) => {
+            Ok(len) => {
                 let first = pool[start].lba;
                 let t = &mut tracks_mut()[i];
                 t.ext_start = start as u16;
                 t.ext_len = len as u16;
                 info!("gdi: track {} -> {} extent(s) from block {}", number, len, first);
             }
-            None => warn!("gdi: track {} unmapped; slow path", number),
+            // Fine but fragmented: the pool has no room for its runs, so they
+            // are found on demand instead of going through the filesystem.
+            Err(crate::fat::MapError::PoolFull) => match crate::fat::lazy_add(&entry) {
+                Some(slot) => {
+                    tracks_mut()[i].ext_start = slot as u16;
+                    info!("gdi: track {} fragmented beyond the pool; lazy slot {}", number, slot);
+                }
+                None => warn!("gdi: track {} unmapped; slow path", number),
+            },
+            Err(_) => warn!("gdi: track {} unmapped; slow path", number),
         }
     }
+}
+
+/// First cluster of the directory `path` names, walked from the root.
+fn dir_cluster_of(geom: &crate::fat::Geometry, path: &ImagePath, buf: &mut [u8; 512]) -> Option<u32> {
+    let mut dir_cluster = geom.root_cluster;
+    for part in path.iter() {
+        let e = crate::fat::find_in_dir(geom, dir_cluster, part, buf).filter(|e| e.is_dir)?;
+        // A `..` entry pointing at the root stores cluster 0; the root's own
+        // cluster is what that means.
+        dir_cluster = if e.first_cluster < 2 { geom.root_cluster } else { e.first_cluster };
+    }
+    Some(dir_cluster)
 }
 
 /// Read `buf.len()` bytes starting at `byte_offset` within the track
@@ -1060,11 +1102,20 @@ fn read_file_to_buf(
     Ok(total)
 }
 
-fn parse(data: &[u8]) -> Result<Gdi, GdiError> {
+/// The GDI text into the track pool.
+///
+/// A track whose name is not 8.3 (`Track 01.bin`, `Crazy Taxi (Track 1).bin`:
+/// what a PC makes of a copied file, and what the GDI keeps saying) is found
+/// on the card by its long name as it is parsed, and the 8.3 alias the card
+/// stores it under goes into the track. Everything downstream -- the size
+/// lookup, the extent map, the open by name -- goes by that alias and is
+/// unchanged. See `PoolSink::track_file`. `work` is a block of scratch for
+/// that lookup.
+fn parse(data: &[u8], path: &ImagePath, work: &mut [u8]) -> Result<Gdi, GdiError> {
     // Straight into the pool: 99 of these will not fit on the stack, which
     // is the whole reason the pool exists. Cleared first (by the parser), so
     // a failed parse cannot leave the previous image's tail behind this one's.
-    discimg::gdi::parse(data, &mut PoolSink { cdi: None }).map_err(|e| match e {
+    discimg::gdi::parse(data, &mut PoolSink::gdi(path, work)).map_err(|e| match e {
         discimg::Error::Sink(e) => e,
         _ => GdiError::Parse,
     })?;
@@ -1093,14 +1144,70 @@ fn parse(data: &[u8]) -> Result<Gdi, GdiError> {
     Ok(gdi)
 }
 
-/// Feeds the static track pool from `discimg`'s parsers. `cdi` is the image
-/// file's name when parsing a CDI (every track lives in that one file), `None`
-/// for a GDI (each track names its own).
-pub(crate) struct PoolSink {
-    pub cdi: Option<ShortFileName>,
+/// Feeds the static track pool from `discimg`'s parsers.
+///
+/// `cdi` is the image file's name when parsing a CDI (every track lives in
+/// that one file); `dir` is the image folder when parsing a GDI (each track
+/// names its own file, found in it).
+pub(crate) struct PoolSink<'a> {
+    cdi: Option<ShortFileName>,
+    dir: Option<&'a ImagePath>,
+    /// Block buffer for the long-name lookup (at least 512 bytes).
+    work: Option<&'a mut [u8]>,
+    /// The card's FAT32 geometry and the image folder's first cluster, worked
+    /// out the first time a track name needs them. `Some(None)` is "tried,
+    /// and the card is not FAT32 or the folder is not there".
+    fat: Option<Option<(crate::fat::Geometry, u32)>>,
 }
 
-impl discimg::TrackSink for PoolSink {
+impl<'a> PoolSink<'a> {
+    fn gdi(dir: &'a ImagePath, work: &'a mut [u8]) -> Self {
+        PoolSink { cdi: None, dir: Some(dir), work: Some(work), fat: None }
+    }
+
+    pub(crate) fn cdi(name: ShortFileName) -> PoolSink<'static> {
+        PoolSink { cdi: Some(name), dir: None, work: None, fat: None }
+    }
+
+    /// The 8.3 name of a GDI track file. A name that already is 8.3 is
+    /// itself; any other is looked up by its long name in the image folder,
+    /// and the answer is the alias the card keeps it under.
+    ///
+    /// `BadFilename` if there is no such file, the card is not FAT32 (the
+    /// long-name walk is this firmware's own FAT reader), or the folder
+    /// cannot be found.
+    fn track_file(&mut self, name: &str) -> Result<ShortFileName, GdiError> {
+        if let Ok(n) = ShortFileName::create_from_str(name) {
+            return Ok(n);
+        }
+        if name.is_empty() {
+            return Err(GdiError::BadFilename);
+        }
+        let (Some(dir), Some(work)) = (self.dir, self.work.as_deref_mut()) else {
+            return Err(GdiError::BadFilename);
+        };
+        let Some(buf) = work.first_chunk_mut::<512>() else {
+            return Err(GdiError::BadFilename);
+        };
+        let ctx = self.fat.get_or_insert_with(|| {
+            let geom = crate::fat::probe()?;
+            let cluster = dir_cluster_of(&geom, dir, buf)?;
+            Some((geom, cluster))
+        });
+        let Some((geom, cluster)) = ctx else {
+            warn!("gdi: track file '{}' is not 8.3 and the card/folder cannot be walked", name);
+            return Err(GdiError::BadFilename);
+        };
+        let Some(short) = crate::fat::resolve_long(geom, *cluster, name, buf) else {
+            warn!("gdi: track file '{}' not found by its long name", name);
+            return Err(GdiError::BadFilename);
+        };
+        info!("gdi: '{}' is {}", name, show_sfn(&short));
+        Ok(short)
+    }
+}
+
+impl discimg::TrackSink for PoolSink<'_> {
     type Error = GdiError;
 
     fn cdi_header(&mut self, desc_len: u32, sessions: u8) {
@@ -1115,8 +1222,7 @@ impl discimg::TrackSink for PoolSink {
         let is_cdi = self.cdi.is_some();
         let filename = match &self.cdi {
             Some(name) => name.clone(),
-            None => ShortFileName::create_from_str(t.filename.as_str())
-                .map_err(|_| GdiError::BadFilename)?,
+            None => self.track_file(t.filename.as_str())?,
         };
         tracks_mut()
             .push(Track {

@@ -11,30 +11,40 @@
 //! block with integer arithmetic and no filesystem code at all.
 //!
 //! Only FAT32 on a 512-byte-sector volume is handled (with or without an
-//! MBR in front). Anything else -- FAT16, exFAT, a file with more runs than
-//! the pool can hold -- leaves the track unmapped and the slow path stays in
-//! charge, so this is strictly an accelerator.
+//! MBR in front). Anything else -- FAT16, exFAT -- leaves the track unmapped
+//! and the slow path stays in charge, so this is strictly an accelerator.
+//!
+//! A file with more runs than the shared pool can hold is not unmapped any
+//! more: it is registered as a *lazy* file (`lazy_add`), and its runs are
+//! found on demand through a small window over its cluster chain
+//! (`lazy_locate`, `fatmap::extent::Window`). Streaming such a file walks its
+//! chain once; only a backward seek walks it again. The `embedded_sdmmc`
+//! fallback that this replaces re-opened the file and walked the chain from
+//! its start for every 2 KB chunk, one CMD17 per block (docs/research/
+//! g3-read-path.md, "Unmapped tracks").
+//!
+//! The directory walk is shared by the 8.3 lookup and the long-name lookup
+//! (`lookup`), so a track named `Track 01.bin` in the GDI is found the same
+//! way whichever the card stores it under (`fatmap::lfn`).
 
 use defmt::{info, warn, Format};
 use embassy_atsam3::hsmci;
 use embedded_sdmmc::ShortFileName;
+use fatmap::extent::{ClusterGeom, Cursor, Walk};
+#[cfg(feature = "lazy-extents")]
+use fatmap::extent::Window;
+use fatmap::lfn::{Feed, LfnMatcher};
 use heapless::Vec;
 
-/// One contiguous run of a file on the card.
-#[derive(Clone, Copy, Format)]
-pub struct Extent {
-    /// Byte offset within the file where this run starts.
-    pub file_off: u32,
-    /// First SD block of the run.
-    pub lba: u32,
-    /// Length of the run in 512-byte blocks.
-    pub blocks: u32,
-}
+/// One contiguous run of a file on the card (8 bytes: a run's file offset is
+/// the sum of the runs before it).
+pub use fatmap::extent::Extent;
 
 /// Shared pool: every mapped track file owns a slice of it (see
 /// `Track::ext_start` / `ext_len`). A freshly formatted card writes each
 /// file in one or two runs; 96 leaves room for a moderately fragmented
-/// 20-track image before we give up on the fast path.
+/// 20-track image. A file that does not fit is read through the lazy window
+/// (`lazy_add`) rather than the filesystem.
 pub const MAX_EXTENTS: usize = 96;
 
 /// Volume geometry, everything in 512-byte blocks.
@@ -52,9 +62,8 @@ impl Geometry {
         self.data_lba + (cluster - 2) * self.blocks_per_cluster
     }
 
-    /// Bytes per cluster.
-    pub fn cluster_bytes(&self) -> u32 {
-        self.blocks_per_cluster * 512
+    fn cluster_geom(&self) -> ClusterGeom {
+        ClusterGeom { data_lba: self.data_lba, blocks_per_cluster: self.blocks_per_cluster }
     }
 }
 
@@ -64,6 +73,8 @@ pub struct Entry {
     pub first_cluster: u32,
     pub size: u32,
     pub is_dir: bool,
+    /// The on-disk 8.3 name (the alias, when the file has a long name).
+    pub short: [u8; 11],
 }
 
 fn rd16(b: &[u8], off: usize) -> u32 {
@@ -136,34 +147,28 @@ pub fn probe() -> Option<Geometry> {
 }
 
 /// Next cluster in the chain, or `None` at end-of-chain / bad entry.
-/// `cache` holds one FAT sector so a chain walk mostly costs no reads.
-struct FatCursor {
-    sector: u32,
-    buf: [u8; 512],
-}
-
-impl FatCursor {
-    fn new() -> Self {
-        Self { sector: u32::MAX, buf: [0; 512] }
+///
+/// `cached` is the FAT sector last read into `buf`, plus one (0: nothing), so
+/// a chain walk costs a read only when it crosses into another sector and a
+/// static of these is all zeroes. A caller that reuses `buf` for something
+/// else sets it back to 0.
+fn fat_next(g: &Geometry, cluster: u32, cached: &mut u32, buf: &mut [u8; 512]) -> Result<Option<u32>, ()> {
+    let sector = cluster / 128;
+    if sector >= g.sectors_per_fat {
+        return Err(());
     }
-
-    fn next(&mut self, g: &Geometry, cluster: u32) -> Result<Option<u32>, ()> {
-        let sector = cluster / 128;
-        if sector >= g.sectors_per_fat {
-            return Err(());
-        }
-        if sector != self.sector {
-            read_block(g.fat_lba + sector, &mut self.buf)?;
-            self.sector = sector;
-        }
-        let v = rd32(&self.buf, (cluster % 128) as usize * 4) & 0x0FFF_FFFF;
-        if v >= 0x0FFF_FFF8 {
-            Ok(None)
-        } else if v < 2 || v == 0x0FFF_FFF7 {
-            Err(())
-        } else {
-            Ok(Some(v))
-        }
+    if sector + 1 != *cached {
+        *cached = 0;
+        read_block(g.fat_lba + sector, buf)?;
+        *cached = sector + 1;
+    }
+    let v = rd32(buf, (cluster % 128) as usize * 4) & 0x0FFF_FFFF;
+    if v >= 0x0FFF_FFF8 {
+        Ok(None)
+    } else if v < 2 || v == 0x0FFF_FFF7 {
+        Err(())
+    } else {
+        Ok(Some(v))
     }
 }
 
@@ -181,100 +186,251 @@ fn name_matches(raw: &[u8], name: &ShortFileName) -> bool {
     base.eq_ignore_ascii_case(name.base_name()) && ext.eq_ignore_ascii_case(name.extension())
 }
 
-/// Look `name` up in the directory starting at `dir_cluster`.
-pub fn find_in_dir(g: &Geometry, dir_cluster: u32, name: &ShortFileName) -> Option<Entry> {
-    let mut fat = FatCursor::new();
-    let mut buf = [0u8; 512];
+/// Longest long name the lookup accepts, in UTF-16 code units. The GDI
+/// parser keeps file names to 32 bytes (`discimg::TrackDesc::filename`), so
+/// nothing longer is ever asked for.
+pub const MAX_LOOKUP_CHARS: usize = 32;
+
+/// What to look for in a directory.
+pub enum Key<'a> {
+    /// The 8.3 name. Matches the entry's own name, case-insensitively.
+    Short(&'a ShortFileName),
+    /// A long name as the GDI parser hands it over. Matches the file whose
+    /// VFAT long name equals it (ASCII case-insensitively; see
+    /// `fatmap::lfn`). A name that is already 8.3 is looked up as `Short`.
+    Long(&'a str),
+}
+
+/// Look `key` up in the directory starting at `dir_cluster`.
+///
+/// One walk serves both kinds of key. It reads the directory a block at a
+/// time and feeds every 32-byte entry to the long-name matcher, which keeps
+/// its state across blocks and clusters; the only memory is one block and the
+/// matcher (about 80 bytes). `buf` is the caller's block buffer, so that this
+/// can run under the volume manager without a frame of its own.
+pub fn lookup(g: &Geometry, dir_cluster: u32, key: &Key<'_>, buf: &mut [u8; 512]) -> Option<Entry> {
+    let mut matcher = match key {
+        Key::Long(name) => Some(LfnMatcher::<MAX_LOOKUP_CHARS>::from_gdi_name(name)?),
+        Key::Short(_) => None,
+    };
+    let short_key = match key {
+        Key::Short(n) => Some(*n),
+        Key::Long(_) => None,
+    };
     let mut cluster = dir_cluster;
     loop {
         let base = g.cluster_lba(cluster);
         for b in 0..g.blocks_per_cluster {
-            read_block(base + b, &mut buf).ok()?;
+            read_block(base + b, buf).ok()?;
             for e in buf.chunks_exact(32) {
-                match e[0] {
-                    0x00 => return None,
-                    0xE5 => continue,
-                    _ => {}
-                }
-                let attr = e[11];
-                if attr & 0x0F == 0x0F || attr & 0x08 != 0 {
-                    continue; // LFN piece or volume label
-                }
-                if name_matches(&e[..11], name) {
+                let long = match matcher.as_mut() {
+                    Some(m) => match m.feed(e) {
+                        Feed::End => return None,
+                        Feed::Other => continue,
+                        Feed::Entry { long } => long,
+                    },
+                    None => match e[0] {
+                        0x00 => return None,
+                        0xE5 => continue,
+                        _ => {
+                            let attr = e[11];
+                            if attr & 0x0F == 0x0F || attr & 0x08 != 0 {
+                                continue; // LFN piece or volume label
+                            }
+                            false
+                        }
+                    },
+                };
+                let hit = long
+                    || short_key.map_or(false, |n| name_matches(&e[..11], n));
+                if hit {
+                    let attr = e[11];
+                    let mut short = [0u8; 11];
+                    short.copy_from_slice(&e[..11]);
                     return Some(Entry {
                         first_cluster: (rd16(e, 0x14) << 16) | rd16(e, 0x1A),
                         size: rd32(e, 0x1C),
                         is_dir: attr & 0x10 != 0,
+                        short,
                     });
                 }
             }
         }
-        cluster = fat.next(g, cluster).ok()??;
+        // The directory block is spent, so the FAT sector may take its place.
+        cluster = fat_next(g, cluster, &mut 0, buf).ok()??;
     }
 }
 
+/// Look an 8.3 name up in the directory starting at `dir_cluster`.
+pub fn find_in_dir(g: &Geometry, dir_cluster: u32, name: &ShortFileName, buf: &mut [u8; 512]) -> Option<Entry> {
+    lookup(g, dir_cluster, &Key::Short(name), buf)
+}
+
+/// The 8.3 alias of the file called `name` (as the GDI spells it) in the
+/// directory at `dir_cluster`, for use with everything that opens or maps a
+/// file by short name.
+pub fn resolve_long(g: &Geometry, dir_cluster: u32, name: &str, buf: &mut [u8; 512]) -> Option<ShortFileName> {
+    let e = lookup(g, dir_cluster, &Key::Long(name), buf)?;
+    if e.is_dir {
+        return None;
+    }
+    let mut text = [0u8; 12];
+    let n = fatmap::lfn::display_83(&e.short, &mut text);
+    // Bytes above 0x7F are OEM-code-page characters; ShortFileName takes
+    // ISO-8859-1 and stores the byte back, which is what the directory holds.
+    let mut s = heapless::String::<12>::new();
+    for &b in &text[..n] {
+        s.push(b as char).ok()?;
+    }
+    ShortFileName::create_from_str(&s).ok()
+}
+
+/// Why `map_extents` gave up on a file.
+#[derive(Clone, Copy, Format, PartialEq, Eq)]
+pub enum MapError {
+    /// The shared pool is full: the file is fine, just fragmented. It can be
+    /// served lazily.
+    PoolFull,
+    /// Empty file, or its chain is broken.
+    Unmappable,
+}
+
 /// Walk `entry`'s cluster chain and append its runs to `out`. Returns the
-/// number of extents added, or `None` if the pool ran out or the chain is
-/// broken (the caller then leaves the file on the slow path).
+/// number of extents added. On failure `out` is left as it was.
 pub fn map_extents<const N: usize>(
     g: &Geometry,
     entry: &Entry,
     out: &mut Vec<Extent, N>,
-) -> Option<usize> {
-    if entry.first_cluster < 2 || entry.size == 0 {
-        return None;
-    }
+) -> Result<usize, MapError> {
+    let Some(cur) = Cursor::start(entry.first_cluster, entry.size) else {
+        return Err(MapError::Unmappable);
+    };
     let start_len = out.len();
-    let mut fat = FatCursor::new();
-    let mut cluster = entry.first_cluster;
-    let cluster_bytes = g.cluster_bytes();
-    // Blocks the file actually occupies; the last cluster is usually partial.
-    let mut blocks_left = (entry.size + 511) / 512;
-    let mut file_off = 0u32;
-    let mut run = Extent { file_off: 0, lba: g.cluster_lba(cluster), blocks: 0 };
-    loop {
-        let n = g.blocks_per_cluster.min(blocks_left);
-        run.blocks += n;
-        blocks_left -= n;
-        file_off = file_off.wrapping_add(cluster_bytes);
-        if blocks_left == 0 {
-            break;
+    let mut buf = [0u8; 512];
+    let mut cached = 0;
+    let r = fatmap::extent::walk(
+        &g.cluster_geom(),
+        cur,
+        |c| fat_next(g, c, &mut cached, &mut buf),
+        |_, e| out.push(e).is_ok(),
+    );
+    match r {
+        Walk::Done => Ok(out.len() - start_len),
+        Walk::More(_) => {
+            warn!("fat: extent pool full");
+            out.truncate(start_len);
+            Err(MapError::PoolFull)
         }
-        let next = match fat.next(g, cluster) {
-            Ok(Some(c)) => c,
-            _ => {
-                warn!("fat: chain ends early ({} blocks short)", blocks_left);
-                out.truncate(start_len);
-                return None;
-            }
-        };
-        if next != cluster + 1 {
-            if out.push(run).is_err() {
-                warn!("fat: extent pool full");
-                out.truncate(start_len);
-                return None;
-            }
-            run = Extent { file_off, lba: g.cluster_lba(next), blocks: 0 };
+        Walk::Broken => {
+            warn!("fat: chain ends early or is damaged");
+            out.truncate(start_len);
+            Err(MapError::Unmappable)
         }
-        cluster = next;
     }
-    if out.push(run).is_err() {
-        warn!("fat: extent pool full");
-        out.truncate(start_len);
-        return None;
-    }
-    Some(out.len() - start_len)
 }
 
 /// Resolve a byte offset within a mapped file to `(sd_block, offset within
 /// that block, contiguous blocks available from there)`.
 pub fn locate(extents: &[Extent], byte_off: u32) -> Option<(u32, u32, u32)> {
-    let e = extents
-        .iter()
-        .rfind(|e| e.file_off <= byte_off)?;
-    let rel = (byte_off - e.file_off) / 512;
-    if rel >= e.blocks {
-        return None;
-    }
-    Some((e.lba + rel, byte_off % 512, e.blocks - rel))
+    fatmap::extent::locate(extents, 0, byte_off)
+}
+
+// ---------------------------------------------------------------------------
+// Lazy files: too fragmented for the pool, read through a window.
+// ---------------------------------------------------------------------------
+
+/// Files that can be lazy at once. One per unmapped track file; a CDI is one
+/// file whatever its track count, and a GDI whose tracks are *all* too
+/// fragmented for the pool is not a case worth RAM.
+#[cfg(feature = "lazy-extents")]
+const MAX_LAZY_FILES: usize = 6;
+
+/// Runs held in the window. An extent is 8 bytes.
+#[cfg(feature = "lazy-extents")]
+const WINDOW_EXTENTS: usize = 12;
+
+#[cfg(feature = "lazy-extents")]
+#[derive(Clone, Copy)]
+struct LazyFile {
+    first_cluster: u32,
+    size: u32,
+}
+
+#[cfg(feature = "lazy-extents")]
+struct Lazy {
+    geom: Option<Geometry>,
+    files: Vec<LazyFile, MAX_LAZY_FILES>,
+    window: Window<WINDOW_EXTENTS>,
+    /// One FAT sector, and which it is (see `fat_next`).
+    fat_buf: [u8; 512],
+    fat_cached: u32,
+}
+
+#[cfg(feature = "lazy-extents")]
+static mut LAZY: Lazy = Lazy {
+    geom: None,
+    files: Vec::new(),
+    window: Window::new(),
+    fat_buf: [0; 512],
+    fat_cached: 0,
+};
+
+#[cfg(feature = "lazy-extents")]
+fn lazy() -> &'static mut Lazy {
+    unsafe { &mut *core::ptr::addr_of_mut!(LAZY) }
+}
+
+/// Forget every lazy file and the window: a new image is being mapped.
+/// `geom` is the volume the files live on.
+#[cfg(feature = "lazy-extents")]
+pub fn lazy_reset(geom: Option<Geometry>) {
+    let l = lazy();
+    l.geom = geom;
+    l.files.clear();
+    l.window.invalidate();
+}
+
+/// Register `entry` as a lazily mapped file. Returns its slot (1-based, so 0
+/// can mean "none" in a track), or `None` if it cannot be served this way.
+#[cfg(feature = "lazy-extents")]
+pub fn lazy_add(entry: &Entry) -> Option<u8> {
+    let l = lazy();
+    l.geom?;
+    Cursor::start(entry.first_cluster, entry.size)?;
+    l.files
+        .push(LazyFile { first_cluster: entry.first_cluster, size: entry.size })
+        .ok()?;
+    Some(l.files.len() as u8)
+}
+
+/// `locate` for a lazy file: `(sd_block, offset within the block, contiguous
+/// blocks from there)`. May read FAT sectors from the card when the offset is
+/// outside the window; reads nothing when it is inside.
+#[cfg(feature = "lazy-extents")]
+pub fn lazy_locate(slot: u8, byte_off: u32) -> Option<(u32, u32, u32)> {
+    let l = lazy();
+    let g = l.geom?;
+    let f = *l.files.get((slot as usize).checked_sub(1)?)?;
+    // The FAT sector cached by the last walk is not trusted across lookups:
+    // the host can write the card.
+    l.fat_cached = 0;
+    let (buf, cached) = (&mut l.fat_buf, &mut l.fat_cached);
+    l.window.lookup(slot, &g.cluster_geom(), f.first_cluster, f.size, byte_off, |c| {
+        fat_next(&g, c, cached, buf)
+    })
+}
+
+// Without the feature the same three entry points say "no": every file the
+// pool cannot hold stays on the filesystem path.
+#[cfg(not(feature = "lazy-extents"))]
+pub fn lazy_reset(_geom: Option<Geometry>) {}
+
+#[cfg(not(feature = "lazy-extents"))]
+pub fn lazy_add(_entry: &Entry) -> Option<u8> {
+    None
+}
+
+#[cfg(not(feature = "lazy-extents"))]
+pub fn lazy_locate(_slot: u8, _byte_off: u32) -> Option<(u32, u32, u32)> {
+    None
 }

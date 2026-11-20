@@ -2,6 +2,8 @@
 use defmt::debug;
 
 use crate::{pac::PMC, config::ClockConfig};
+// One definition for the resident and for this file; see `bootcore::part`.
+use bootcore::part::{MOSC_XTST, PLLA_COUNT};
 use crate::pac;
 
 #[inline]
@@ -30,7 +32,7 @@ impl PowerManagementController {
             // register "password"
             w.key().bits(0x37)   
             // startup cycles * 8
-             .moscxtst().bits(8)
+             .moscxtst().bits(MOSC_XTST)
             // main osc enable
              .moscxten().set_bit()
             // on chip rc enable
@@ -50,7 +52,7 @@ impl PowerManagementController {
             // register "password"
             w.key().bits(0x37)
             // startup cycles * 8
-             .moscxtst().bits(8)
+             .moscxtst().bits(MOSC_XTST)
              // main osc enable
             .moscxten().set_bit()            
              // on chip rc enable
@@ -79,7 +81,7 @@ impl PowerManagementController {
             // required 1
             w.one().set_bit()
              .mula().bits(config.plla.mul - 1)
-             .pllacount().bits(0x3F)
+             .pllacount().bits(PLLA_COUNT)
              .diva().bits(config.plla.div)
         });
 
@@ -98,6 +100,13 @@ impl PowerManagementController {
 
     /// Main crystal running and selected, PLLA locked with the multiplier and
     /// divider `config` asks for, MCK from PLLA with no prescaler.
+    ///
+    /// What it does not look at: the on-chip RC (`MOSCRCEN`) and `PLLACOUNT`.
+    /// The resident hands over with the RC stopped and the values of
+    /// `bootcore::part` (docs/design/resident-app-contract.md 2-2, K1-K3), so
+    /// a resident that keeps to them leaves exactly the state `init` builds;
+    /// the test stays this loose on purpose, since neither field is
+    /// observable here once PLLA is locked (N8).
     #[cfg(feature = "resident")]
     fn already_configured(config: &ClockConfig) -> bool {
         let mor = pmc().ckgr_mor.read();

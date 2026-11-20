@@ -49,6 +49,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
+name = "bootcore"
+version = "0.1.0"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -227,6 +231,7 @@ name = "embassy-atsam3"
 version = "0.1.0"
 dependencies = [
  "atsam3u4e-pac",
+ "bootcore",
  "cortex-m",
  "cortex-m-rt",
  "critical-section",
@@ -400,6 +405,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fatmap"
+version = "0.1.0"
+dependencies = [
+ "defmt 0.3.100",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -560,6 +572,7 @@ checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 name = "netgd"
 version = "0.1.1"
 dependencies = [
+ "bootcore",
  "cortex-m",
  "cortex-m-rt",
  "critical-section",
@@ -572,6 +585,7 @@ dependencies = [
  "embassy-time",
  "embedded-hal 0.2.7",
  "embedded-sdmmc",
+ "fatmap",
  "gamecfg",
  "heapless 0.8.0",
  "lzma",

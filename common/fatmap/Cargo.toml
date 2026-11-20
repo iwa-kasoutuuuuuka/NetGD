@@ -1,0 +1,13 @@
+[package]
+name = "fatmap"
+description = "Pure FAT32 helpers for the firmware's track-file lookup: VFAT long-name matching and cluster-chain to block-run (extent) mapping, shared by the firmware and the host tests"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Let the firmware log these types. Off by default so the host tests do not
+# need defmt.
+defmt = ["dep:defmt"]
+
+[dependencies]
+defmt = { version = "0.3", optional = true }

@@ -41,9 +41,15 @@ unsafe fn DefaultHandler(irqn: i16) {
 fn main() -> ! {
     info!("CPU Booted!!!\n");
 
-    let config = Config::new(12_000_000, 8, 1);
+    // Clock constants shared with the resident (bootcore::part, contract N3).
+    use bootcore::part::{PLLA_DIV, PLLA_MUL, XTAL_HZ};
+    let config = Config::new(XTAL_HZ, PLLA_MUL as u16, PLLA_DIV as u8);
 
     let p = embassy_atsam3::init(config);
+    // What the resident said about this boot (contract 6-1). Reads two words
+    // of GPBR/flash; the logging is compiled out with DEFMT_LOG=off.
+    #[cfg(feature = "resident")]
+    resident::log_boot();
    
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
@@ -64,6 +70,21 @@ static BITSTREAM_LZMA: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/bitstream.
 // does not carry.
 include!(concat!(env!("OUT_DIR"), "/bitstream_len.rs"));
 
+/// LED code for "the bitstream does not belong to this code": ten blinks, a
+/// pause, three times over (the loader's own codes are `PsError::code`, 1-5).
+#[cfg(all(feature = "resident", not(feature = "sam3u2e")))]
+async fn blink_stamp_mismatch(led: &mut Output<'static, embassy_atsam3::peripherals::PB18>) {
+    for _ in 0..3 {
+        for _ in 0..10 {
+            led.set_low();
+            Timer::after(Duration::from_millis(200)).await;
+            led.set_high();
+            Timer::after(Duration::from_millis(200)).await;
+        }
+        Timer::after(Duration::from_millis(2000)).await;
+    }
+}
+
 #[embassy_executor::task]
 async fn main_task(spawner: Spawner, p: UserPeripherals) {
     // Load the FPGA first. When the GDEMU board is powered by the DC
@@ -83,6 +104,22 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
     // any case.
     let mut led_pin = Some(p.led);
     let mut led = None;
+
+    // 4E behind the resident (contract 4-3, V3): the bitstream in plane 1 must
+    // be the one this code was built with. Two words compared; the FPGA's own
+    // CRC cannot tell an old bitstream from a good one.
+    #[cfg(all(feature = "resident", not(feature = "sam3u2e")))]
+    if !resident::bitstream_stamp_ok() {
+        error!("bitstream stamp mismatch: plane 1 is not the bitstream of this code");
+        // Ask the resident to reinstall from the card -- once: when this boot
+        // already is the answer to such a request there is nothing more to
+        // try, and asking again would reset forever.
+        let _ = resident::request_recovery();
+        let mut l = Output::new(led_pin.take().unwrap(), Level::High);
+        loop {
+            blink_stamp_mismatch(&mut l).await;
+        }
+    }
 
     let stats = loop {
         let r = if !BITSTREAM_PRESENT {
@@ -171,6 +208,10 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
 
             let dev = blockdev::HsmciBlockDevice::new();
             dev.set_num_blocks(card.size_blocks);
+            // Debug listing of the card (two directory levels). Off by
+            // default: it costs ~2.5 KB of flash and boot time even with
+            // logging off (LOG R81). Enable with the `sd-list` feature.
+            #[cfg(feature = "sd-list")]
             list_root_dir(dev);
 
             match gdi::load_default(card.size_blocks) {
@@ -272,6 +313,7 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
 /// Open MBR partition 0, walk the root directory, log every entry.
 /// Lives in its own fn so embedded-sdmmc's `Volume<'_, ...>` borrow of the
 /// VolumeManager doesn't leak into `main_task`'s drop scope.
+#[cfg(feature = "sd-list")]
 fn list_root_dir(dev: blockdev::HsmciBlockDevice) {
     let mgr = embedded_sdmmc::VolumeManager::new(dev, blockdev::DummyClock);
     let volume = match mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) {
@@ -319,6 +361,7 @@ fn list_root_dir(dev: blockdev::HsmciBlockDevice) {
     }
 }
 
+#[cfg(feature = "sd-list")]
 fn sfn_label(name: &embedded_sdmmc::ShortFileName) -> [u8; 12] {
     let mut out = [b' '; 12];
     let raw = name.base_name();
@@ -327,6 +370,7 @@ fn sfn_label(name: &embedded_sdmmc::ShortFileName) -> [u8; 12] {
     out
 }
 
+#[cfg(feature = "sd-list")]
 fn log_entry(parent: &str, entry: &embedded_sdmmc::DirEntry) {
     let mut name = [b' '; 12];
     let raw = entry.name.base_name();

@@ -108,7 +108,12 @@ fn main() {
     )
     .expect("write bitstream_len.rs");
 
-    build_updater(&out_dir);
+    // The format-2 updater writes from 0x80000, which is the resident in the
+    // resident layout: it is not linked there (src/fwupdate.rs), so it is not
+    // built either (docs/design/resident-app-contract.md N5).
+    if std::env::var_os("CARGO_FEATURE_RESIDENT").is_none() {
+        build_updater(&out_dir);
+    }
 }
 
 /// Put the right `memory.x` where `link.x` will find it.
