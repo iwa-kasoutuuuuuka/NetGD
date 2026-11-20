@@ -155,7 +155,7 @@ llvm-nm -C -S --size-sort -td target/thumbv7m-none-eabi/release/netgd           
 
 - **案 1（`list_root_dir` の削除）**：すでに feature `sd-list` の裏にあり、既定では入っていない（`main.rs:213-215`、`Cargo.toml` の `sd-list`）。1 節・2 節の −2.5 KB は、この feature が入る前のソースでの数字。現行の基準には既に反映されている。追加作業なし。
 - **案 3（`trim` の共有化）**：`gamecfg` と `gdi.rs` の挙動（Unicode 空白の扱い）を feature で分けると、既定ビルドの生成コードが変わりうる。−0.5 KB と小さいため見送り。
-- **案 d（LZMA の辞書 8 KiB）**：辞書を大きくすると `lzma` の作業メモリ（`State::dict`）が **4 KiB 増える**。2E の SRAM は 16 KiB で（`bss` は既に 27 KB 台は別の領域）、RAM 側の余裕を確認せずに入れるべきでない。`build.rs` の `XZ_FILTER` と `lzma::DICT_SIZE` の両方を同時に変える必要があり、
+- **案 d（LZMA の辞書 8 KiB）**：辞書を大きくすると `lzma` の作業メモリ（`State::dict`）が **4 KiB 増える**。2E の SRAM0 は 16 KiB（別領域の NFC SRAM などもある）なので、RAM 側の余裕を確認せずに入れるべきでない。`build.rs` の `XZ_FILTER` と `lzma::DICT_SIZE` の両方を同時に変える必要があり、
   ビットストリームの再圧縮（約 −2 %、1.2〜1.4 KB）と引き換えになる。サイズ以外の影響が大きいので今回は実装せず、必要になったら RAM 配置を調べてから。
 - **`ide.rs` に関わるもの**：触っていない（別のエージェントが編集中）。`fast-complete` など既存の feature 以外に、ここで追加できる削減は無い。
 - 案 4・5・6（outliner、`icf`、`panic-probe`）：5 節のとおり採らない。案 9（`embedded_sdmmc` の置き換え）、11（nightly）は feature では表せない。
