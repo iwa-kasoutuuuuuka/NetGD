@@ -1,4 +1,4 @@
-# NetGD 計画（2026-11-20 立て直し、R88 まで反映）
+# NetGD 計画（2026-11-20 立て直し、R100 まで反映）
 
 NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。ドリームキャストの GD-ROM ドライブを
 置き換える基板（GDEMU 系）のファームウェアと FPGA コアを、オープンソースで作る。
@@ -77,14 +77,16 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 **次の山場は実機**：G2 のファームと `netgd-recv` の実機試験、G1 の導通確認（分岐 A の確認）と PS のタイミングの確認、純正の記録（P5.5）。上流の疑い D は純正の実測データ待ち。
 
 **R63・R77 の割り当ての結果**（すべて完了、LOG に記録済み）：AG16K のツールの道筋（R69：この PC では合成できない、Supra が要る）、
-ビットストリームの置き場所（R66：SD の `NETGD.BIT` を既定、Supra の実サイズが約 53 KB 以下なら埋め込みも可。判断は実サイズ待ち）、
+ビットストリームの置き場所（R66：SD の `NETGD.BIT` を既定、Supra の実サイズが約 53 KB 以下なら埋め込みも可。**R99 で実サイズは LZMA 後 37.7 KB と判明**。最終判断は PS の転送時間と実ピンでの再測定の後）、
 G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名前（R65・R86）、マウント時間（R68・R80）、P3（R74）、P5 改名（R76）。
 
 **ソフト側の残り（実機なしでできるもの）**：
 - R88 で進行中：古いコメントの修正、`read_ip_header` の起動トラックの推定を起動領域の判定にそろえる、`trim` の共用（2E −0.5 KB）。
-- 2E のフラッシュの削減案 2（`opt-level="z"`、約 −7.5 KB）は実機で速度を比べてから（`docs/research/flash-budget-2e.md`）。
+- 2E のフラッシュの削減案 2（`opt-level="z"`、約 −7.5 KB）は、オプトインのプロファイル `release-z`・`release-z-hot-s` として用意済み（R98）。既定にするかは実機で速度を比べてから（`docs/research/flash-budget-2e.md` §7）。
+- NetGD 専用メニュー `tools/netgd-menu`：設計（R97）と、手順 1〜8 の実装（R101）。手順 9〜12 は任意。KOS の層は CI でコンパイルを確かめるだけで、実機は未確認。
+- v5.5 用の `OpenGDEMU.rbf` を Quartus で作り直す（R100 の番号つき ack を実機で有効にするため）。
 - `embedded_sdmmc` を自前の FAT に置き換える（−4〜−7 KB の見積もり、作業は大きい）。ビットストリームを埋め込むことになった場合に検討。
-- それ以外の大きな課題はすべて実機・Supra・純正の記録が要る（下の P5.5・P6、G1-3）。
+- それ以外の大きな課題はすべて実機・純正の記録が要る（下の P5.5・P6）。
 
 ## フェーズ
 
@@ -120,7 +122,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - **G1-1 調査** — 済（上記）。6.0 基板の MCU / FPGA / 水晶 / ヘッダ配置を公開情報から洗い出し、v5.5 との差分を表にする。
 - **G1-2 実物確認（ユーザー）** — 部品の写真による確認は済（R6、R41）。導通確認（SWD・UART・ERASE パッドの位置、PA23/24/25・PB1/2 が FPGA の方へ伸びているか）はユーザーの作業待ち（R24、R32）。
 - **G1-3 移植** — 進行中。ボード差分を Cargo feature（`board-v55` / `board-v60`）で切り替え、FPGA ローダーは `common/psload` に切り出し済み（R57、ホストのみ）。FIFO のブロック RAM 対応は実装済み（R39）。
-  AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。ユーザーが Supra を用意して実サイズを測るまで止める（判断の記録「Supra の実サイズ待ち」）。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。
+  AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。**R99：Supra 2026.03（Linux 版、ネットワークなし）でビルドできた**。M9K 14 個、ロジック 13 %、LZMA 後 37,727 B。手順は `docs/research/ag16k-supra-build.md`（inout の後処理 `fixio.py` が必須、PLL は `alta_pllve`）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作れる。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。
 - **G1-4 実機起動** — 未。P5 の手順で書き込み → UART ログ → IDE バス動作確認。
 
 ### G2：BBA 経由の SD 書き込み
@@ -208,11 +210,11 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - **残る未決**：6.0 のボタンのピンと LED の表示（D6 で保留）。SWD なしで移行するイメージは作らない（D3）。
 - ホスト側のツールは揃っている：`tools/fwimage`（形式 2・3）、`tools/netgd-fwupd`（BBA 経由の送信。実機未検証）。
 
-## 将来の地雷メモ（レビューで判明、未修正）
+## 将来の地雷メモ（レビューで判明）
 - slot 0・5・19 の3件は FPGA とファームの両方で対処した（`docs/design/mcu-fpga-handshake.md`、スロットの説明は `docs/AddressMapMCU.md`）。
   **シミュレーションとビルドで確認しただけで、実機では未確認。新しい動作は `out/OpenGDEMUCore.v` からビットストリームを作り直してから有効**（同梱の `OpenGDEMU.rbf` は古いまま。古いビットストリームでは新しいファームも従来どおりに動く）。
   - slot 0：`ack_command` はコマンドの番号つきで ack する。取り込みより後に来たコマンドの COMMAND_PEND は消えない（R89 A-c の残り）。
   - slot 19：書き込みにビットごとのマスク（bit 12:8）。ファームは DMA モードと PIO フロー制御をまとめて1つの「転送モード」として書き（転送は DMA か PIO のどちらかなので、片方を立てるともう片方が消えるのは意図した動作）、FPGA が持つ PKT_PHASE には触らない。
   - slot 5：MCU からの書き込みは下位バイトだけ。`set_irr` は上位バイト（LBA48 の前回値）を消さない。
 - `ide_device.py` 845 行付近の「Layout」コメントと、`ide.rs` の `read_fifo_depth` のコメント（256 と 1024）。R88 で修正中。
-- 2E のフラッシュ：`resident,sd-fast` で残りは数百 B（R86）。機能を足すときは `docs/research/flash-budget-2e.md` の削減案から先に入れる。
+- 2E のフラッシュ：`resident,sd-fast` で、512 B の境界までの空きは 348 B（R100）。機能を足すときは、`release-z` のプロファイル（R98）か `docs/research/flash-budget-2e.md` の削減案を先に入れる。

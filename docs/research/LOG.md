@@ -1349,6 +1349,33 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：あり（取り込み後のシミュレーション・ビルド・サイズ、`take_command`・`ack_command`・スロット 0 の論理を読んだ）。
 - 関連：R89（A-c）、R90（573e95e5、レベルでの監視）、`docs/design/mcu-fpga-handshake.md`、`docs/AddressMapMCU.md`。
 
+### R101 NetGD 専用メニュー `netgd-menu` の実装（設計の手順 1〜8）（Sonnet、Opus が確認）
+
+- 担当：Sonnet（実装）。コミットは aecba5f5〜d618d5a1 の8つ。main への取り込みは c4cea201。
+- 問い：R97 の設計の手順 1〜8 を実装し、ホストのテストと CI の KOS ビルドで確かめられるか。
+- 結論：
+  - `tools/netgd-menu/`（一覧・情報・起動・取り込み画面、NGTP サーバ、KOS 層）を作った。
+  - `tools/netgd-recv` に足したもの：読み取り専用フラグ、軽いマウント、`fwctl` の6関数、模型の `0x52`・TEST UNIT READY。
+  - `tools/netgd-send` に足したもの：`push`・`remote`（`ngtp.py`）。
+  - mcu・fpga・`recv_core.c` は変えていない。
+  - 設計からのずれ：
+    - `nm_plat_controller()` を足した。
+    - `NM_NET_AGAIN` を足した（届いていない状態と切断を分けるため）。
+    - NGTP のエラー名（`EPROTO`・`EBADCRC`・`ESTATE`）を決めた。
+    - 5分間通信が無いときに閉じる判定が、符号なしの引き算で誤って閉じていた不具合を直した。
+  - **CI の KOS ビルド（KOS 2.3.0）**：
+    - 全ファイルが、本物のヘッダで警告 0 でコンパイルできた。設計 §10 で未確認だった KOS の API 名（`arch_menu`・`net_init`・ソケットなど）は、少なくとも宣言の上では存在する。
+    - リンクは失敗した。`Makefile` のオブジェクトの一覧に `ngtp_frame.o`・`ngtp_srv.o` が抜けていたため（44846460694 の ld の出力：`undefined reference to ngtp_srv_end` ほか）。Opus が一覧に足して直した。
+- 根拠：Opus が取り込み後の main で再実行した。
+  - `python tools/netgd-recv/test/run_tests.py`：52 件 OK（以前の 47 件 + 新しい 5 件）。軽いマウントの読み出しは 8 コマンド、FAT の全走査は 250 コマンド。
+  - `python tools/netgd-menu/test/run_tests.py`：40 件 OK（U1〜U8・L1〜L14・N1〜N14。N7 は 12 か所で電源断を模擬）。
+  - `tools/netgd-send` の `unittest`：67 件 OK。
+  - CI の Build and Test（44846460649）は成功した。
+- 信頼度：ホストのテストと KOS のコンパイルは確認済み。実機は未確認。
+- 実機でしか分からないこと（設計 §14）：`52 82` の後に BIOS から起動できるか、`arch_reboot()` の動き、BBA なしで `net_init` が待たされないか、`make cdi` のツール名。
+- Opus による検証：あり（テストの再実行、CI のログの確認、リンクの修正）。
+- 関連：R97、`docs/design/menu-app.md`、`tools/netgd-menu/README_ja.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
