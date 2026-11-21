@@ -1,5 +1,9 @@
 /* Host test driver for netgd-menu's core.  Driven by test/run_tests.py.
      menu_host selftest                 pure functions (design 11.2 U1..U7; U8 is in the frame tests)
+     menu_host ui <img> <sectors> --script "<events>" [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--noimg]
+                  [--rflip K] [--rflip-all] [--nocontroller] [--names A|B]
+        events: U D L R A B X Y S LT RT (press and release), hold:A:1200, t:500, scan, step, dump, rflipall,
+                nocontroller, controller
    Nothing here runs on a Dreamcast. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +15,11 @@
 #include "nm_ipbin.h"
 #include "nm_list.h"
 #include "nm_input.h"
+#include "nm_ui.h"
+#include "nm_plat.h"
+#include "plat_host.h"
+#include "ngdev.h"
+#include "simdisk.h"
 
 static int bad;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); bad++; } } while (0)
@@ -267,6 +276,126 @@ static void u7_input(void)
     CHECK(nm_input_update(&in, NM_BTN_UP, 0x100u) == NM_BTN_UP);                    /* 0x200 ms later */
 }
 
+/* ---- menu_host ui: the UI core on a virtual clock, driven by a script ---- */
+
+static void sim_summary(void)
+{
+    printf("SIM cmd_writes=%llu sector_writes=%llu begin=%d end=%d unsess=%d violations=%llu rcmds=%llu rsecs=%llu "
+           "gdemu_mounts=%d named_mounts=%d mount_in_session=%d packets=%d\n",
+           (unsigned long long)sim_cmd_writes, (unsigned long long)sim_sector_writes, sim_begin_calls, sim_end_calls,
+           sim_unsessioned_writes, (unsigned long long)sim_violations, (unsigned long long)sim_cmd_reads,
+           (unsigned long long)sim_sector_reads, sim_gdemu_mounts, sim_named_mounts, sim_mount_in_session, sim_packets);
+}
+
+static nm_ui_t ui;
+
+#define FRAME_MS 16
+
+static void frame(void)
+{
+    nm_ui_step(&ui);
+    nm_plat_sleep(FRAME_MS);
+}
+
+static void run_ms(uint32_t ms)
+{
+    for (uint32_t t = 0; t < ms; t += FRAME_MS) frame();
+}
+
+static void dump_screen(void)
+{
+    char row[NM_COLS + 1];
+    printf("SCREEN state=%d cursor=%d top=%d count=%d scan=%d\n", ui.state, ui.cursor, ui.top, ui.list.count, ui.scan.state);
+    for (int r = 0; r < NM_ROWS; r++) {
+        nm_screen_row_text(&nm_host_screen, r, row);
+        printf("S%02d|%s\n", r, row);
+    }
+    printf("END\n");
+}
+
+static uint32_t button_by_name(const char *n)
+{
+    static const struct { const char *name; uint32_t bit; } tab[] = {
+        { "U", NM_BTN_UP }, { "D", NM_BTN_DOWN }, { "L", NM_BTN_LEFT }, { "R", NM_BTN_RIGHT }, { "A", NM_BTN_A },
+        { "B", NM_BTN_B }, { "X", NM_BTN_X }, { "Y", NM_BTN_Y }, { "S", NM_BTN_START }, { "LT", NM_BTN_LT }, { "RT", NM_BTN_RT },
+    };
+    for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i++) if (!strcmp(tab[i].name, n)) return tab[i].bit;
+    return 0;
+}
+
+static void run_event(char *ev)
+{
+    uint32_t bit;
+    if (!strcmp(ev, "dump")) { dump_screen(); return; }
+    if (!strcmp(ev, "step")) { frame(); return; }
+    if (!strcmp(ev, "scan")) {
+        for (int i = 0; i < 200000 && (ui.state == NM_S_BOOT || ui.scan.state == NM_SCAN_RUNNING || ui.scan.state == NM_SCAN_IDLE); i++) {
+            frame();
+            if (ui.state == NM_S_NOFW || ui.state == NM_S_NOSD) break;
+        }
+        return;
+    }
+    if (!strcmp(ev, "rflipall")) { sim_rflip_every = 1; return; }
+    if (!strcmp(ev, "nocontroller")) { nm_host_controller = 0; return; }
+    if (!strcmp(ev, "controller")) { nm_host_controller = 1; return; }
+    if (!strncmp(ev, "t:", 2)) { run_ms((uint32_t)atol(ev + 2)); return; }
+    if (!strncmp(ev, "hold:", 5)) {
+        char *colon = strchr(ev + 5, ':');
+        if (!colon) return;
+        *colon = 0;
+        bit = button_by_name(ev + 5);
+        nm_host_buttons = bit;
+        run_ms((uint32_t)atol(colon + 1));
+        nm_host_buttons = 0;
+        frame();
+        return;
+    }
+    bit = button_by_name(ev);
+    if (!bit) { printf("unknown event '%s'\n", ev); exit(2); }
+    nm_host_buttons = bit;
+    frame();
+    nm_host_buttons = 0;
+    frame();
+}
+
+/* menu_host ui <img> <sectors> --script "..." [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--noimg] [--rflip K] [--rflip-all] */
+static int ui_cmd(int argc, char **argv)
+{
+    const char *script = "";
+    const char *img = argv[2];
+    uint32_t sectors = (uint32_t)strtoul(argv[3], NULL, 10);
+    int noimg = 0, k = 0;
+    char *copy, *tok;
+    for (int i = 4; i < argc; i++) {
+        if (!strcmp(argv[i], "--script") && i + 1 < argc) script = argv[++i];
+        else if (!strcmp(argv[i], "--slots") && i + 1 < argc) {
+            char *s = argv[++i], *p;
+            for (p = strtok(s, ","); p && k < 63; p = strtok(NULL, ",")) sim_slots[k++] = atoi(p);
+        }
+        else if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
+        else if (!strcmp(argv[i], "--notready") && i + 1 < argc) sim_notready_polls = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--nofw")) sim_fw_dead = 1;
+        else if (!strcmp(argv[i], "--noimg")) noimg = 1;
+        else if (!strcmp(argv[i], "--rflip") && i + 1 < argc) sim_rflip_cmd = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
+        else if (!strcmp(argv[i], "--nocontroller")) nm_host_controller = 0;
+        else if (!strcmp(argv[i], "--names") && i + 1 < argc) snprintf(sim_names, sizeof sim_names, "%s", argv[++i]);
+    }
+    if (!noimg && sim_open(img, sectors)) { printf("cannot open image\n"); return 2; }
+    sim_trace = 1;
+    atexit(sim_summary);
+    nm_ui_init(&ui);
+    copy = malloc(strlen(script) + 1);
+    strcpy(copy, script);
+    for (tok = strtok(copy, " ,"); tok; tok = strtok(NULL, " ,")) {
+        char ev[64];
+        snprintf(ev, sizeof ev, "%s", tok);
+        run_event(ev);
+    }
+    free(copy);
+    return 0;
+}
+
 static int selftest(void)
 {
     u1_slot();
@@ -283,6 +412,7 @@ static int selftest(void)
 int main(int argc, char **argv)
 {
     if (argc >= 2 && !strcmp(argv[1], "selftest")) return selftest();
-    fprintf(stderr, "usage: menu_host selftest\n");
+    if (argc >= 4 && !strcmp(argv[1], "ui")) return ui_cmd(argc, argv);
+    fprintf(stderr, "usage: menu_host selftest | ui <img> <sectors> --script \"<events>\" [options]\n");
     return 2;
 }

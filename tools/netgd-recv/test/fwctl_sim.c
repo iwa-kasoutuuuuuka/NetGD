@@ -22,6 +22,7 @@ int sim_notready_polls;
 int sim_gdemu_mounts;
 char sim_names[256];
 int sim_trace;
+int sim_fw_dead;
 int sim_mount_in_session;
 int sim_tur_calls;
 uint32_t sim_fw_version = 0x05200000u;     /* 5.20.0: bytes 00 00 20 05 */
@@ -64,6 +65,10 @@ int fw_xfer(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, ui
     *err = 0;
     if (got) *got = 0;
     sim_packets++;
+    if (sim_fw_dead) {                          /* not a NetGD board: nothing answers (timeout, no sense key) */
+        if (sim_trace) printf("FW (no answer)\n");
+        return -1;
+    }
     if (sim_trace) {
         printf("FW");
         for (int i = 0; i < 12; i++) printf(" %02X", pkt[i]);

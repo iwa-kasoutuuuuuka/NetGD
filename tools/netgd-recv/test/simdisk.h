@@ -42,6 +42,7 @@ extern int sim_mounted_number;      /* last number mounted by 52 82 / 52 81 (0 =
 extern int sim_notready_polls;      /* TEST UNIT READY answers NOT READY this many times after a mount */
 extern int sim_gdemu_mounts;        /* successful 52 82 / 52 81 */
 extern char sim_names[256];         /* '|'-separated names a named MOUNT accepts (upper case); empty = any */
+extern int sim_fw_dead;             /* the firmware does not answer any packet (no OGDM, a stock GDEMU, no board) */
 extern int sim_trace;               /* print "FW <12 hex bytes>" for every packet */
 extern int sim_mount_in_session;    /* mount-type commands seen while a write session was open */
 extern int sim_tur_calls;           /* TEST UNIT READY packets seen */
