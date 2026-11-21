@@ -1,0 +1,173 @@
+name: Build FPGA Bitstream (v5.5, Cyclone II)
+
+# Rebuilds fpga/Quartus/output_files/OpenGDEMU.rbf from the committed Verilog
+# (fpga/amaranth/out/OpenGDEMUCore.v + fpga/src/OpenGDEMU.v) with Quartus II
+# 13.0 SP1, using the image that quartus_container.yaml publishes to GHCR.
+#
+# The result is ARTIFACTS ONLY. Nothing is committed or pushed.
+#
+# To adopt the new bitstream:
+#   1. Download the `fpga-rbf` artifact and unzip it.
+#   2. Copy OpenGDEMU.rbf over fpga/Quartus/output_files/OpenGDEMU.rbf
+#      (the only tracked file in that directory; see .gitignore).
+#   3. mcu/netgd/build.rs reads exactly that path for the `board-v55` feature
+#      (RBF_V55), LZMA-packs it with `xz` and embeds it in netgd.elf. Rebuild
+#      the firmware (`cd mcu/netgd && cargo build --release`); cargo notices the
+#      changed file via `rerun-if-changed`. There is no separate .rbf to flash.
+#   (board-v60 uses fpga/agm/output/OpenGDEMU_ag16k.rbf and is NOT built here.)
+#
+# The compile commands mirror fpga/build_fpga.sh (same staging layout, because
+# OpenGDEMU.qsf refers to ../amaranth/out/OpenGDEMUCore.v and ../src/OpenGDEMU.v)
+# and the Makefile's podman invocation. The .rbf comes straight out of
+# `quartus_sh --flow compile` because the .qsf has GENERATE_RBF_FILE ON; no
+# separate quartus_cpf step is needed.
+#
+# Nothing here is hardware-verified. A green run only means Quartus finished
+# and no timing slack was negative.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: >-
+          Quartus image to use. Default is this repository's own
+          ghcr.io/<owner>/<repo>/quartus2:latest (lower-cased).
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'fpga/Quartus/**'
+      - 'fpga/amaranth/out/**'
+      - 'fpga/src/**'
+      - '.github/workflows/fpga.yaml'
+  pull_request:
+    paths:
+      - 'fpga/Quartus/**'
+      - 'fpga/amaranth/out/**'
+      - 'fpga/src/**'
+      - '.github/workflows/fpga.yaml'
+
+jobs:
+  quartus-compile:
+    name: Quartus II 13.0 SP1 compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Pulling the image from GHCR. A package pushed by quartus_container.yaml
+      # is private by default and linked to this repository, so the workflow's
+      # GITHUB_TOKEN can read it with `packages: read`. If the image was never
+      # pushed from this repo (or the package is not linked to it), the pull
+      # fails with "denied"/"not found": run quartus_container.yaml first, or
+      # pass another image via the `image` input. (PRs from forks get no
+      # package access and will fail at the pull.)
+      packages: read
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      # The image is ~7.5 GB; free some space like quartus_container.yaml does.
+      - name: Reclaim Runner Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/lib/android \
+            /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve and pull image
+        id: img
+        env:
+          INPUT_IMAGE: ${{ github.event.inputs.image }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -n "$INPUT_IMAGE" ]; then
+            image="$INPUT_IMAGE"
+          else
+            # GHCR names must be lower case; github.repository may not be.
+            image="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')/quartus2:latest"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Using $image"
+          docker pull "$image"
+
+      # Same staging layout as fpga/build_fpga.sh.
+      - name: Stage sources
+        run: |
+          mkdir -p "$RUNNER_TEMP/work/project" "$RUNNER_TEMP/work/amaranth/out" "$RUNNER_TEMP/work/src"
+          cp -r fpga/Quartus/* "$RUNNER_TEMP/work/project/"
+          cp fpga/amaranth/out/OpenGDEMUCore.v "$RUNNER_TEMP/work/amaranth/out/"
+          cp fpga/src/OpenGDEMU.v "$RUNNER_TEMP/work/src/"
+          # Drop the committed bitstream so a failed compile cannot pass by
+          # leaving the old one behind.
+          rm -f "$RUNNER_TEMP/work/project/output_files/OpenGDEMU.rbf"
+
+      - name: Compile (quartus_sh --flow compile)
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+        run: |
+          # --user 0: the image ends on USER ubuntu (uid 1000), which cannot
+          # write the runner's bind mount.
+          docker run --rm --user 0 \
+            -v "$RUNNER_TEMP/work:/build" \
+            --entrypoint /bin/bash \
+            "$IMAGE" \
+            -c "cd /build/project && quartus_sh --flow compile OpenGDEMU"
+
+      - name: Collect outputs, size and SHA-256
+        run: |
+          mkdir -p dist
+          o="$RUNNER_TEMP/work/project/output_files"
+          test -f "$o/OpenGDEMU.rbf" || { echo "::error::no OpenGDEMU.rbf produced"; ls -la "$o"; exit 1; }
+          cp "$o/OpenGDEMU.rbf" dist/
+          for r in fit.summary sta.summary map.summary fit.rpt sta.rpt map.rpt flow.rpt; do
+            [ -f "$o/OpenGDEMU.$r" ] && cp "$o/OpenGDEMU.$r" dist/
+          done
+          size=$(stat -c %s dist/OpenGDEMU.rbf)
+          sha=$(sha256sum dist/OpenGDEMU.rbf | cut -d' ' -f1)
+          old_sha=$(sha256sum fpga/Quartus/output_files/OpenGDEMU.rbf | cut -d' ' -f1)
+          {
+            echo "### OpenGDEMU.rbf"
+            echo "- size: $size bytes (committed: $(stat -c %s fpga/Quartus/output_files/OpenGDEMU.rbf))"
+            echo "- sha256: \`$sha\`"
+            if [ "$sha" = "$old_sha" ]; then echo "- identical to the committed rbf"; else echo "- DIFFERS from the committed rbf (\`$old_sha\`)"; fi
+            echo
+            echo "### fit.summary"; echo '```'; cat dist/OpenGDEMU.fit.summary 2>/dev/null; echo '```'
+            echo "### sta.summary"; echo '```'; cat dist/OpenGDEMU.sta.summary 2>/dev/null; echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # sta.summary has repeated blocks of "Type : ..." / "Slack : <ns>" /
+      # "TNS : ...". Any negative Slack (setup or hold, any model) fails.
+      # If the file is missing the check is skipped with a warning.
+      - name: Check timing slack
+        run: |
+          f=dist/OpenGDEMU.sta.summary
+          if [ ! -f "$f" ]; then echo "::warning::no sta.summary; timing not checked"; exit 0; fi
+          if grep -E '^Slack *: *-' "$f"; then
+            echo "::error::negative timing slack (see sta.summary above)"; exit 1
+          fi
+          echo "No negative slack."
+
+      - name: Upload bitstream
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpga-rbf
+          path: dist/OpenGDEMU.rbf
+          if-no-files-found: ignore
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpga-reports
+          path: |
+            dist/*.summary
+            dist/*.rpt
+          if-no-files-found: ignore
