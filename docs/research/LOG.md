@@ -1706,6 +1706,35 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み（ユーザーの測定）。
 - 関連：R115、`docs/boards/gdemu60/README.md`、`docs/PCB.md:28-38`。
 
+### R117 純正 GDEMU 6.0 に gdprobe を初めて実行（switch=off、dcload-ip の CDI）（Opus）
+
+- 担当：Opus。問いは P5.5 の 1 回目：純正ファームの GDEMU 6.0 に、読み取り系のコマンドだけを送ると何が返るか。
+- 環境：Dreamcast + BBA（HIT-0400）+ PC の本体の LAN 端子（192.168.10.1。USB の LAN アダプタは外していた）。GDmenu から DCLOAD-IP を起動。
+  gdprobe はこの PC の DreamSDK（KOS 2.3.0、gcc 13.2.0）でビルド。設定は `label=stock`、`switch=off`、`cdread_flags=0x20`。
+- 結論：
+  1. **1 回目は打ち切り**（`docs/research/probe-records/stock_20261121_01_abort.txt`）：最初の TUR から `rc=timeout`、STATUS と IRQ_REASON がどちらも `0xae`。
+     原因は **G1 バスの保護が閉じたまま**だったこと。gdprobe は `KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM)` で起動するので、KOS の `cdrom_init` が行う
+     「0x005F74E4 にサイズを書き、BIOS をバス越しに読む」手順が走らない。dcload-ip から起動した KOS プログラムでは、保護の状態（0x005F74EC）が 0 だった。
+  2. **修正**：`tools/gdprobe/gdraw.c` に `gdraw_bus_prepare` を追加し、`main.c` がプローブの前に呼ぶ。状態が 3（通過）でなければ `cdrom_init` と同じ手順を行う。
+     バスのコントローラだけの操作で、ドライブのレジスタには書かない。前後の値を記録のヘッダに残す。
+  3. **2 回目は最後まで成功**（`stock_20261121_02.txt`、`abort=0`）：`g1bus prot_before=0 prot_after=3 bios_read=2097152 us=551392`。
+- 純正の応答（今マウントされている dcload-ip の CDI に対して。`img=0`）：
+  - **ディスクの形**：GET_TOC はトラック 2 本（1 = CTRL/ADR 0x01・FAD 150、2 = データ 0x41・FAD 11852、lead-out 0x05017C）。**REQ_SES_0 = `02 00 02 05 01 7c`（セッション数 2）**、
+    REQ_SES_1 = FAD 150、REQ_SES_2 = FAD 11852（`002e4c`）、REQ_SES_3 = CHECK。トラック 2 本の CDI でセッション 2 を返す（D-1 で直した NetGD の動作の正解データ）。
+  - **D-3**：REQ_STAT = `02 2f 01 01 01 00 00 96 00 00`。**バイト 1 の上位 4 ビットが 2**（ディスクの形式。CD-ROM XA）、下位が 0xF。NetGD はここに形式を入れていない（D-3 の指摘どおり）。
+  - **D-2**：GET_SCD 形式 1 = `00 15 00 0e 01 01 01 00 00 00 00 00 00 96`。末尾の位置は **バイナリの FAD（0x000096 = 150）**。NetGD は BCD/MSF で返している（D-2 の指摘どおり、純正は仕様と同じ）。
+  - **CD_READ のバイト 1**：`0x20` と `0x28`（Mode 2 Form 1）が 2048 バイト、`0x10` が 2352 バイト、**`0x24`（Mode 1）は CHECK・センス 5/64/00**。純正はセクタの種別を検査する。
+    `0x20` と `0x28` の CRC は同じ（cdc10aa3）。
+  - **識別**：REQ_MODE（0, 32）= `...SE      Rev 6.42990316`（実機の GD-ROM と同じ文字列）。GDEMU のバージョン（`52 00`）= `00 00 05 02 00 05 20 05`。
+  - **速さ**：CD_READ 16 セクタずつ（PIO）64 回で **2,279 KiB/s**（1 回 13.9〜16.5 ms）。1 セクタのシーク読み 1.3〜2.9 ms。TUR・情報コマンドは 17〜33 µs。
+- 未確認：GD-ROM の GDI（03）、CDI 2・3 本（04・05）、音声入り GDI（06）、空フォルダ（07）への切替。これは `tools/mksdcard` で試験用の SD を作ってから（`switch=on`）。
+  `compare.py --manifest` による照合も、その SD を作ってから。
+- 根拠：`docs/research/probe-records/stock_20261121_01_abort.txt`・`stock_20261121_02.txt`、`H:\DC\tools\dc-bba-tools\logs\auto_20261121_221553.txt`・`auto_20261121_221752.txt`、
+  KOS の `kernel/arch/dreamcast/hardware/cdrom.c`（`cdrom_init`）と `include/dc/g1ata.h:121-143`。
+- 信頼度：記録の値は確認済み（実機）。`0xae` が「保護が閉じているときの値」という解釈は、修正後に正常な応答に変わったことからの推論。
+- Opus による検証：記録を読み、D-1〜D-3 の記述（`docs/PLAN.md`）と照合。
+- 関連：`tools/gdprobe/README_ja.md`（「ホストテストでできていないこと」の 2・7）、`docs/research/stock-gdemu-flow.md`、R31、R55、R71。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |

@@ -122,6 +122,13 @@ int main(int argc, char **argv)
     header(h);
     sink_sync(NULL);
 
+    /* Without cdrom_init the G1 bus protection may still be closed: every
+     * drive register then reads back the same value (run 1: status = irq
+     * reason = 0xae, TUR timed out). */
+    gdraw_bus_prepare(h, sizeof(h));
+    header(h);
+    sink_sync(NULL);
+
     gdraw_get_ops(&ops);
     sink.ctx = NULL;
     sink.line = sink_line;

@@ -54,6 +54,37 @@ static void bus_unlock(void) { sem_signal(&_g1_ata_sem); }
 
 static uint64_t now_us(void) { return timer_us_gettime64(); }
 
+#define G1_BUS_PROT        0xA05F74E4u   /* G1_ATA_BUS_PROTECTION | P2 */
+#define G1_BUS_PROT_STATUS 0xA05F74ECu   /* G1_ATA_BUS_PROTECTION_STATUS | P2 */
+#define G1_BUS_PASSED      3u
+
+unsigned gdraw_bus_prepare(char *buf, unsigned len)
+{
+    volatile uint32_t *bios = (volatile uint32_t *)0xA0000000u;
+    unsigned before, after, alt_before, alt_after, size = 0, p;
+    uint64_t t0, t1;
+
+    bus_lock();
+    before = IN32(G1_BUS_PROT_STATUS) & 0xFFu;
+    alt_before = IN8(GD_ALTSTATUS);
+    t0 = now_us();
+    if (before != G1_BUS_PASSED) {
+        /* Same as cdrom_init: a BIOS starting with 0xe6ff passes with 1 KB. */
+        size = (*(volatile uint16_t *)0xA0000000u == 0xe6ffu) ? 0x400u : 0x200000u;
+        *(volatile uint32_t *)G1_BUS_PROT = (size == 0x400u) ? 0x3ffu : 0x1fffffu;
+        for (p = 0; p < size / 4u; p++)
+            (void)bios[p];
+    }
+    t1 = now_us();
+    after = IN32(G1_BUS_PROT_STATUS) & 0xFFu;
+    alt_after = IN8(GD_ALTSTATUS);
+    bus_unlock();
+
+    snprintf(buf, len, "g1bus prot_before=%u prot_after=%u bios_read=%u us=%lu altstatus_before=0x%02x altstatus_after=0x%02x",
+             before, after, size, (unsigned long)(t1 - t0), alt_before, alt_after);
+    return after;
+}
+
 /* Wait until (ALTSTATUS & mask) == 0. 1 = ok, 0 = timed out. */
 static int wait_clear(uint8_t mask, uint64_t deadline)
 {

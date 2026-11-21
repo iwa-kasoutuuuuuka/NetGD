@@ -1,0 +1,9 @@
+# gdprobe version=1 kos=2.3.0 label=stock stamp=seq00000 seq=0 dcload=1
+# config switch=0 identify=0 throughput=1 tp=64x16 seek=1/16 ip_fad=0 cdread_flags=0x20 timeout_ms=3000 return_to=2 images=3,4,5,6,7
+img=0 probe=TUR_W0 cdb=000000000000000000000000 rc=timeout status=0xae err=0x00 irr=0xae bytes=0 us=3000002
+img=0 probe=REQ_ERROR_W0 cdb=130000000a00000000000000 rc=busy status=0xae err=0x00 irr=0xae bytes=0 us=3000002
+img=0 probe=TUR_W1 cdb=000000000000000000000000 rc=busy status=0xae err=0x00 irr=0xae bytes=0 us=3000002
+img=0 probe=ABORT reason=drive-not-answering
+img=0 probe=WARMUP ready=0
+img=0 probe=END abort=1
+# done abort=1 bytes_written=625

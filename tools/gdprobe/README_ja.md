@@ -246,6 +246,8 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
    食い違うときは `ip_fad=45150` を指定して再実行する。
 7. **KOS の cdrom ドライバ**：`main.c` は `KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM)` で、`cdrom_init` も `fs_iso9660` の vblank ポーリングも走らせない
    （純正ドライブに KOS が勝手にコマンドを送らない）。raw アクセスは `_g1_ata_sem` で直列化している。切替後に BIOS 経由の `/cd` を使うことはしていない。
+   **実機で判明（LOG R117）**：`cdrom_init` を走らせないと G1 バスの保護が閉じたままで、ドライブのレジスタがすべて同じ値（`0xae`）に読める。
+   そのため `gdraw_bus_prepare` が、プローブの前に `cdrom_init` と同じバスの確認（0x005F74E4 と BIOS の読み出し）だけを行う。結果は記録のヘッダ `# g1bus ...` に残る。
 8. **時計**：Dreamcast の RTC が正しければファイル名に日時が入る。無ければ `seq<番号>`。
 9. **`/pc/` の書き込み**：4 KB 単位 + `fflush`（ホストテストで確認）。実機で固まったら `PCOUT_CHUNK` を 2048 に下げる。
 
