@@ -1589,6 +1589,23 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：あり（テストの再実行、CI）。
 - 関連：R101、R104、R108。
 
+### R110 Google Drive の成果物を 07458751 に更新（Opus）
+
+- 担当：Opus。常設の指示（成果物は Google Drive にも上げる）による。
+- 結論：
+  - 前の版（33545021）を `old-33545021/` に移した。
+  - 新しい版を同じ構成で置いた（23 ファイル）。
+    - `firmware/`：07458751 をこの PC でビルドしたもの。v5.5 の rbf は R103 のもの。
+      - `netgd-v55-4e`（bin 573,060 B）
+      - `netgd-v55-2e`（bin 120,580 B）
+      - `netgd-v60-2e-nobitstream`（bin 67,868 B）
+    - `dreamcast/`：KOS の CI の実行 44857651127 の `dreamcast-elfs`。`netgd-menu.elf` は 2,916,608 B。
+    - `docs/`：前回の分に、`netgd-send-README_ja.md` と `fpga-agm-README_ja.md` を足した。
+    - 最上位に、新しい `はじめに読む.txt`（R103〜R109 の変更点）。
+- 根拠：Drive が返した大きさが、手元のファイルと一致した。
+- 信頼度：確認済み。
+- 関連：R102。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
