@@ -115,6 +115,20 @@ def used_slot_numbers(lines):
     return used
 
 
+_LIST_STATE_LINE = re.compile(r"^NGD:LIST (\w+) (.*)$")
+
+
+def partial_slot_numbers(lines):
+    """the numbers (ascending, 02 and up) of the top-level numbered folders a `list /` reply calls "partial": an
+    interrupted transfer left NETGD.CKP or a *.NGP there (R104 finding 2)"""
+    found = set()
+    for ln in lines:
+        m = _LIST_STATE_LINE.match(ln)
+        if m and m.group(1) == "partial" and re.fullmatch(r"\d{2,4}", m.group(2)) and int(m.group(2)) >= 2:
+            found.add(int(m.group(2)))
+    return sorted(found)
+
+
 def first_free_slot(used):
     n = 2                                   # 01 is the menu itself
     while n in used:
@@ -122,6 +136,25 @@ def first_free_slot(used):
     if n > 9999:
         raise imgmod.ImageError("no free numbered folder")
     return n
+
+
+def rerun_command(a, host, folder_number):
+    """the command line that goes on with the same transfer: the options of this run, with --slot pinned to the folder"""
+    parts = ["netgd-send", "push", '"%s"' % a.image]
+    if host:
+        parts += ["--host", host]
+    if a.port != ngtp.DEFAULT_PORT:
+        parts += ["--port", str(a.port)]
+    parts += ["--code", "%04d" % a.code, "--slot", "%02d" % folder_number if folder_number < 100 else str(folder_number)]
+    if a.title is not None:
+        parts += ["--title", '"%s"' % a.title]
+    if a.art:
+        parts += ["--art", '"%s"' % a.art]
+    for flag, on in (("--mount", a.mount), ("--force", a.force), ("--allow-fragmented", a.allow_fragmented),
+                     ("--no-finish", a.no_finish)):
+        if on:
+            parts.append(flag)
+    return " ".join(parts)
 
 
 def _printer(out):
@@ -187,28 +220,53 @@ def cmd_push(a, out=print):
                 return jobmod.EXIT_FAILED
             out("connected: firmware %s, menu %s%s" % (info.firmware, info.app, " (session open)" if info.session_open else ""))
             on_line = _printer(out)
+            state = {"folder": None, "number": None}
             try:
                 # the target folder
+                auto = a.name is None and a.slot in (None, "auto")
+
+                def attempt(folder, number=None):
+                    state["folder"], state["number"] = folder, number
+                    manifest = Manifest(folder, kind, [FileEntry(f.size, f.crc, f.name) for f in files], desc)
+                    mtext = manifest.render()            # validates (duplicate names, sizes, ...)
+                    out("sending %d files, %d bytes to %s (mode %s)" % (len(files), total, folder, a.mode))
+                    res = cl.put(mtext, source, mode=jobmod.MODES.index(a.mode), force=a.force,
+                                 allow_fragmented=a.allow_fragmented, tag=TAG, on_line=on_line)
+                    return res, manifest
+
+                res = manifest = None
                 if a.name is not None:
                     imgmod.validate_image_path(a.name)
-                    folder = a.name
-                elif a.slot in (None, "auto"):
+                    res, manifest = attempt(a.name)
+                elif not auto:
+                    n = int(a.slot)
+                    res, manifest = attempt(imgmod.slot_folder(n), n)
+                else:
                     r = cl.list("/", on_line=lambda t, th: None)
                     if not r.ok:
                         out("error: cannot list the card: %s" % r.error)
                         return jobmod.EXIT_FAILED
-                    folder = imgmod.slot_folder(first_free_slot(used_slot_numbers(r.lines)))
-                    out("using the free folder %s" % folder)
-                else:
-                    folder = imgmod.slot_folder(int(a.slot))
-                manifest = Manifest(folder, kind, [FileEntry(f.size, f.crc, f.name) for f in files], desc)
-                mtext = manifest.render()                # validates (duplicate names, sizes, ...)
-                out("sending %d files, %d bytes to %s (mode %s)" % (len(files), total, folder, a.mode))
-                res = cl.put(mtext, source, mode=jobmod.MODES.index(a.mode), force=a.force,
-                             allow_fragmented=a.allow_fragmented, tag=TAG, on_line=on_line)
-                code = _evaluate_put(res, manifest, out)
+                    # An earlier run that was interrupted left a partial numbered folder: go on there before taking a new one
+                    # (R104 finding 2).  Only in resume mode: new and overwrite must never be pointed at an old folder.
+                    if a.mode == "resume":
+                        for n in partial_slot_numbers(r.lines):
+                            folder = imgmod.slot_folder(n)
+                            out("an unfinished folder %s is there: trying to resume it" % folder)
+                            res, manifest = attempt(folder, n)
+                            if not res.ok and res.error == "EEXIST":
+                                out("folder %s holds a different image: going on to the next" % folder)
+                                res = None
+                                continue
+                            break
+                    if res is None:
+                        n = first_free_slot(used_slot_numbers(r.lines))
+                        out("using the free folder %s" % imgmod.slot_folder(n))
+                        res, manifest = attempt(imgmod.slot_folder(n), n)
+                rerun = rerun_command(a, host, state["number"]) if state["number"] is not None else None
+                code = _evaluate_put(res, manifest, out, rerun)
                 if code != jobmod.EXIT_OK:
                     return code
+                folder = state["folder"]
                 if not a.no_finish:
                     fin = cl.finish(ngtp.FINISH_MOUNT if a.mount else ngtp.FINISH_DEFAULT, folder if a.mount else "",
                                     on_line=on_line)
@@ -223,18 +281,22 @@ def cmd_push(a, out=print):
             except ngtp.ConnectionLost as e:
                 out("connection lost: %s" % e)
                 out("RESULT: incomplete (nothing is lost; run the same command again to resume)")
+                if state["number"] is not None:
+                    out("to go on with exactly this folder: " + rerun_command(a, host, state["number"]))
                 return jobmod.EXIT_INCOMPLETE
     finally:
         source.close()
 
 
-def _evaluate_put(res, manifest, out):
+def _evaluate_put(res, manifest, out, rerun=None):
     """The DONE status of the PUT, checked against the NGD: lines (same reading as `collect`)."""
     result = jobmod.parse_result("\n".join(res.lines) + "\n")
     st = result.puts.get(TAG)
     if not res.ok:
         if res.error in _RESUMABLE:
             out("RESULT: incomplete (%s; nothing is lost, run the same command again to resume)" % res.error)
+            if rerun:
+                out("to go on with exactly this folder: " + rerun)
             return jobmod.EXIT_INCOMPLETE
         out("RESULT: FAILED (%s)" % res.error)
         return jobmod.EXIT_FAILED

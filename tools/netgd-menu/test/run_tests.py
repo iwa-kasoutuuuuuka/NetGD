@@ -1121,6 +1121,40 @@ class TestPush(NetBase):
         fc = self.clean_fs(img)
         self.assertEqual(self.read(fc, "/03", "track01.bin"), tracks["track01.bin"])
 
+    def test_auto_slot_resumes_the_partial_folder_when_run_again(self):
+        """R104 finding 2: the same command (default --slot auto) goes on in the folder the stop left, not in the next one"""
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi(sizes=(200 * 2352, 3 * 2352, 5 * 2048))
+        srv = NgtServe(self, img, "--stopafter", "2")
+        r = self.push(srv, gdi)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("using the free folder 03", r.stdout)
+        self.assertIn("--slot 03", r.stdout)                                     # the exact command to go on
+        r = self.push(srv, gdi)                                                   # the same command again
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("trying to resume it", r.stdout)
+        self.assertNotIn("using the free folder", r.stdout)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/03", "track01.bin"), tracks["track01.bin"])
+        self.assertFalse([k for k in fc.files if k.startswith("/04") or k.startswith("04")], "a second numbered folder was started")
+        self.assertFalse([k for k in fc.files if k.lower().endswith((".ngp", ".ckp"))], "leftovers")
+
+    def test_auto_slot_skips_a_partial_folder_of_a_different_image(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi1, _t1 = self.make_gdi("srcA", sizes=(200 * 2352, 3 * 2352, 5 * 2048), stem="first")
+        gdi2, tracks2 = self.make_gdi("srcB", sizes=(7 * 2352, 3 * 2352, 5 * 2048), stem="second")
+        srv = NgtServe(self, img, "--stopafter", "2")
+        r = self.push(srv, gdi1)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)                   # 03 is partial now
+        r = self.push(srv, gdi2)                                                  # another image: not 03
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("holds a different image", r.stdout)
+        self.assertIn("using the free folder 04", r.stdout)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/04", "track01.bin"), tracks2["track01.bin"])
+
     def test_n12_after_finish_the_list_shows_the_new_folder(self):
         img = self.card({"/02/DISC.GDI": GDI3})
         gdi, tracks = self.make_gdi()
