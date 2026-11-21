@@ -726,6 +726,10 @@ struct DeviceState {
     /// the most-recent CHECK_CONDITION cause (6 = UA after reset, 0 =
     /// nothing pending). Reset to 0 once REQ_SENSE drains it.
     pending_sense_key: u8,
+    /// ASC / ASCQ that go with `pending_sense_key`, for REQ_ERROR bytes 8/9
+    /// (stock GDEMU 6.0 fills them, D7). Set and cleared with the key; 0 where
+    /// stock's value is not known (MEDIUM ERROR, ILLEGAL REQUEST).
+    pending_asc: (u8, u8),
 }
 
 impl DeviceState {
@@ -733,7 +737,33 @@ impl DeviceState {
         Self {
             unit_attention: true,
             pending_sense_key: 0x06, // UNIT_ATTENTION pending at boot
+            pending_asc: discimg::atapi::ASC_MEDIUM_CHANGED, // the boot mount
         }
+    }
+
+    /// UNIT ATTENTION, medium changed (6/28/00, what stock reports after a
+    /// mount), for the next command to serve.
+    fn medium_changed(&mut self) {
+        self.unit_attention = true;
+        self.pending_sense_key = 0x06;
+        self.pending_asc = discimg::atapi::ASC_MEDIUM_CHANGED;
+    }
+
+    /// NOT READY: 2/3A/00 with no medium, 2/04/01 while it becomes ready
+    /// (the swap window), as stock reports them (D7).
+    fn not_ready(&mut self) {
+        self.pending_sense_key = 0x02;
+        self.pending_asc = if media_present() {
+            discimg::atapi::ASC_BECOMING_READY
+        } else {
+            discimg::atapi::ASC_NO_MEDIUM
+        };
+    }
+
+    /// Nothing pending.
+    fn clear_sense(&mut self) {
+        self.pending_sense_key = 0;
+        self.pending_asc = (0, 0);
     }
 }
 
@@ -998,14 +1028,20 @@ async fn handle(
             }
         },
         CMD_IDENTIFY_PACKET => match role {
-            // 256 words = 512 bytes of ATAPI device ID. Stage it, then
-            // signal DRQ=1 so the host can start reading.
+            // The stock GDEMU 6.0 block: 80 bytes (40 words), not ATA's 512
+            // (D16). Stage it, then signal DRQ=1 so the host can start
+            // reading.
             Role::Packet => {
                 stage_identify_packet(dev);
-                dev.set_atapi_byte_count(512);
+                dev.set_atapi_byte_count(discimg::atapi::IDENTIFY_PACKET_REPLY.len() as u16);
                 dev.set_error(0);
                 dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
                 dev.ack_command();
+                // Drop DRQ once the host has the 80 bytes (stock: status
+                // 0x50 after them), as the disk IDENTIFY does: a host that
+                // reads while DRQ is up (gdprobe) would otherwise read on
+                // past the block.
+                finish_pio_in(dev).await;
             }
             // Mirror image: a non-packet device ABRTs the packet IDENTIFY.
             Role::Disk => {
@@ -1236,8 +1272,7 @@ async fn load_media(state: &mut DeviceState) -> bool {
     // The format nibble follows the mounted image (GDI -> GD-ROM, CDI -> CD-ROM
     // XA); without this a swap between the two shows the old one until reset.
     IdeDevice::primary().reassert_disc_format();
-    state.unit_attention = true;
-    state.pending_sense_key = 0x06;
+    state.medium_changed();
     ok
 }
 
@@ -1328,8 +1363,7 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
     }
     // Same as `load_media`: the format nibble must follow the new image.
     IdeDevice::primary().reassert_disc_format();
-    state.unit_attention = true;
-    state.pending_sense_key = 0x06;
+    state.medium_changed();
     info!("{}: mounted '{}' ({})", label, name, ok);
     ok
 }
@@ -1562,10 +1596,10 @@ async fn handle_packet(
         info!("{}: UNIT_ATTENTION served on opcode 0x{:02x}", label, opcode);
         dev.set_error(0x60); // sense key 6 << 4
         dev.set_irr(0x03);
-        state.unit_attention = false;
-        // Sense key 6 for the REQ_SENSE / REQ_ERROR that should follow (set
+        // 6/28/00 for the REQ_SENSE / REQ_ERROR that should follow (set
         // here, not left over: a GDEMU_CMD in between clears stale keys).
-        state.pending_sense_key = 0x06;
+        state.medium_changed();
+        state.unit_attention = false;
         dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_ERR); // 0x51
         return;
     }
@@ -1574,7 +1608,7 @@ async fn handle_packet(
     // sense readers starts from "no sense" (paths that fail set it again).
     // REQ_ERROR reports it now (R117), so a stale key would show there.
     if opcode != ATAPI_REQUEST_SENSE && opcode != SEGA_REQ_ERROR {
-        state.pending_sense_key = 0;
+        state.clear_sense();
     }
 
     // Step 4: dispatch.
@@ -1587,7 +1621,7 @@ async fn handle_packet(
                 dev.set_status_intrq(STATUS_IDLE);
             } else {
                 // NOT READY / MEDIUM NOT PRESENT.
-                state.pending_sense_key = 0x02;
+                state.not_ready();
                 dev.set_error(0x20);
                 dev.set_status_intrq(STATUS_IDLE_ERR);
             }
@@ -1638,7 +1672,7 @@ async fn handle_packet(
             let n = core::cmp::min(alloc, sense.len() as u16);
             send_data_in(dev, &sense[..n as usize]).await;
             state.unit_attention = false;
-            state.pending_sense_key = 0;
+            state.clear_sense();
         }
         SEGA_REQ_STAT => {
             let alloc = packet[4] as u16;
@@ -1686,7 +1720,7 @@ async fn handle_packet(
             // (CD_SEEK only pauses or stops, which reads nothing.)
             if !media_ready() {
                 info!("{}: CD_PLAY while ejected", label);
-                state.pending_sense_key = 0x02;
+                state.not_ready();
                 dev.set_irr(0x03);
                 dev.set_error(0x20);
                 dev.set_status_intrq(STATUS_IDLE_ERR);
@@ -1743,14 +1777,15 @@ async fn handle_packet(
         }
         SEGA_REQ_ERROR => {
             // F0, then the pending sense key (stock GDEMU 6.0, R117; this
-            // was all zeros). ASC/ASCQ are not tracked. Reading it clears
-            // the condition, as REQUEST SENSE does.
+            // was all zeros) and its ASC/ASCQ (D7). Reading it clears the
+            // condition, as REQUEST SENSE does.
             let alloc = packet[4] as u16;
-            let reply = discimg::atapi::req_error_reply(state.pending_sense_key);
+            let (asc, ascq) = state.pending_asc;
+            let reply = discimg::atapi::req_error_reply(state.pending_sense_key, asc, ascq);
             let n = core::cmp::min(alloc, reply.len() as u16);
             send_data_in(dev, &reply[..n as usize]).await;
             state.unit_attention = false;
-            state.pending_sense_key = 0;
+            state.clear_sense();
         }
         SEGA_GET_TOC => {
             // Sega GET_TOC packet: byte 1 selects the session/area
@@ -2366,8 +2401,7 @@ async fn handle_image_ctl(
             info!("{}: write session ended", label);
             let ok = match how {
                 Remount::None => {
-                    state.unit_attention = true;
-                    state.pending_sense_key = 0x06;
+                    state.medium_changed();
                     true
                 }
                 Remount::Default => {
@@ -4071,31 +4105,18 @@ pub fn disk_sectors() -> u32 {
     DISK_SECTORS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-// IDENTIFY PACKET DEVICE response (256 words = 512 bytes)
+// IDENTIFY PACKET DEVICE response (40 words = 80 bytes, stock GDEMU 6.0)
 // ---------------------------------------------------------------------------
 
+/// Stage `discimg::atapi::IDENTIFY_PACKET_REPLY` (D16). Byte `2i` goes in the
+/// low half of word `i`, as `send_data_in` packs every reply: the host reads
+/// the data register as 16-bit words and stores each little-endian
+/// (gdprobe's `gd_identify`), so it sees the bytes in the order the constant
+/// lists them -- "SE", "CD-ROM DRIVE", "6.42" not byte-swapped, as stock
+/// sends them.
 fn stage_identify_packet(dev: &IdeDevice) {
-    // Most fields are zero; we fill in the few that hosts actually look
-    // at. Words are little-endian on the wire; ASCII strings are stored
-    // big-endian-per-word per ATA convention.
-    let mut buf = [0u16; 256];
-    buf[0] = 0x8580; // word 0: ATAPI device, removable, CD-ROM, IRQ on PACKET
-    write_ata_string(&mut buf[10..20], b"GDEMU0000000000000000"); // serial #
-    write_ata_string(&mut buf[23..27], b"1.00    "); // firmware rev
-    write_ata_string(&mut buf[27..47], b"OpenGDEMU GD-ROM        "); // model
-    buf[49] = 0x0F00; // capabilities (LBA, IORDY, DMA)
-    for w in buf.iter() {
-        dev.push_read_fifo(*w);
-    }
-}
-
-fn write_ata_string(words: &mut [u16], src: &[u8]) {
-    // ATA stores ASCII with even-byte first within each word — so byte 0
-    // is the *high* byte of word 0, byte 1 is the *low* byte, etc.
-    for (i, w) in words.iter_mut().enumerate() {
-        let hi = src.get(2 * i).copied().unwrap_or(b' ') as u16;
-        let lo = src.get(2 * i + 1).copied().unwrap_or(b' ') as u16;
-        *w = (hi << 8) | lo;
+    for w in discimg::atapi::IDENTIFY_PACKET_REPLY.chunks_exact(2) {
+        dev.push_read_fifo(u16::from_le_bytes([w[0], w[1]]));
     }
 }
 

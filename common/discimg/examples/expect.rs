@@ -10,7 +10,7 @@
 //! boot-area / session rules, GDI track sizes from the files) and answers each probe of tools/gdprobe
 //! (`probes.c`) with the same `discimg::atapi` builders the firmware's `ide.rs` calls, wrapped the way
 //! `handle_packet` wraps them: status / error / interrupt-reason registers, REQ_MODE contents, REQ_ERROR
-//! (`F0`, the pending sense key, no ASC), the first command after a mount answered with UNIT ATTENTION, CD_READ ignoring byte 1 of
+//! (`F0`, the pending sense key and its ASC/ASCQ), the first command after a mount answered with UNIT ATTENTION, CD_READ ignoring byte 1 of
 //! the CDB and always returning 2048 bytes per sector.
 //!
 //! Fields NetGD cannot predict are written as `-`: every `us=`, `t_ms=`, `polls=`, `changes=`, `poll=`,
@@ -402,7 +402,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
     let req_err = cdb_simple(0x13, 0, 0, 10);
     if ua {
         o.probe("TUR_W0", None, Some(&tur), &Res::ua(), false);
-        o.probe("REQ_ERROR_W0", None, Some(&req_err), &Res::ok(&atapi::req_error_reply(6)), true);
+        o.probe("REQ_ERROR_W0", None, Some(&req_err), &Res::ok(&atapi::req_error_reply(6, atapi::ASC_MEDIUM_CHANGED.0, atapi::ASC_MEDIUM_CHANGED.1)), true);
         o.probe("TUR_W1", None, Some(&tur), &Res::ok(&[]), false);
     } else {
         o.probe("TUR_W0", None, Some(&tur), &Res::ok(&[]), false);
@@ -413,7 +413,8 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
     o.probe("TUR", None, Some(&tur), &Res::ok(&[]), false);
 
     let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0);
-    // disc_format() in ide.rs: CDI -> CD-ROM XA, anything else -> GD-ROM; repeat 0 at idle.
+    // disc_format() in ide.rs: CDI -> CD-ROM XA, anything else -> GD-ROM; the repeat
+    // nibble is F whenever nothing plays (req_stat_reply).
     let fmt = if d.is_cdi { atapi::DISC_FORMAT_CDROM_XA } else { atapi::DISC_FORMAT_GDROM };
     let stat = atapi::req_stat_reply(AudioState::Standby, fmt, 0, fad, track);
     let c = cdb_simple(0x10, 0, 0, 10);
@@ -426,7 +427,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
     ] {
         o.probe(name, None, Some(&c), &req_mode(&c), true);
     }
-    o.probe("REQ_ERROR", None, Some(&req_err), &Res::ok(&atapi::req_error_reply(0)), true);
+    o.probe("REQ_ERROR", None, Some(&req_err), &Res::ok(&atapi::req_error_reply(0, 0, 0)), true);
 
     // TOC of both areas; the runner remembers the last valid lead-out and the first data track.
     let mut leadout = 0u32;
@@ -563,8 +564,8 @@ fn switch_lines(o: &mut Out, n: u32, mounted: bool) {
     let c = cdb_mount(n);
     if mounted {
         o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::ok(&[]), false);
-        // First poll: UNIT ATTENTION (CHECK, err 0x60); its REQ_ERROR reads sense key 6 (no ASC). Second poll: READY.
-        o.event("SW_POLL", "t_ms=- poll=- rc=check status=0x51 err=0x60 sense=6/00/00");
+        // First poll: UNIT ATTENTION (CHECK, err 0x60); its REQ_ERROR reads 6/28/00 (medium changed). Second poll: READY.
+        o.event("SW_POLL", "t_ms=- poll=- rc=check status=0x51 err=0x60 sense=6/28/00");
         o.event("SW_POLL", "t_ms=- poll=- rc=ok status=0x50 err=0x00 sense=none");
     } else {
         // finish_illegal: ILLEGAL REQUEST, ERR = ABRT | 0x50. Media untouched, so the first poll is READY.

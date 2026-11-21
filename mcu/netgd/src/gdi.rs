@@ -186,9 +186,9 @@ pub struct Gdi {
     /// the BIOS abandons the boot -- the disc format reported in SECNR
     /// (CD-ROM XA, see `ide::disc_format`), the TOC (every track in the
     /// single-density area, since a CD has no high-density one), and the
-    /// lead-out (the truth, because a CDI descriptor carries a real sector
-    /// count per track, where a trimmed GDI must be padded out to a pressed
-    /// disc's capacity). See [`Gdi::leadout_lba`] and [`Gdi::build_toc`].
+    /// lead-out (the truth; a GDI now reports the end of its last track too,
+    /// as stock GDEMU 6.0 does, D1). See [`Gdi::leadout_lba`] and
+    /// [`Gdi::build_toc`].
     pub is_cdi: bool,
     /// How many sessions the disc has.
     ///
@@ -239,15 +239,17 @@ impl Gdi {
         Some((first, last))
     }
 
-    /// Total disc length in LBAs, used as the lead-out address.
+    /// Total disc length in LBAs, used as the lead-out address: the last
+    /// track's start + sector count.
     ///
-    /// A GDI carries no track lengths, and a pressed GD-ROM's high-density
-    /// area always runs out to LBA 549150, so that is what a GDI reports --
-    /// the conservative upper bound the BIOS expects for a GD-ROM rather
-    /// than a CD-ROM, and correct even for a trimmed dump.
+    /// A GDI used to report a pressed GD-ROM's capacity, LBA 549150. Stock
+    /// GDEMU 6.0 reports the end of the last track instead (D1: GDI 03, last
+    /// track 45000..64999, lead-out FAD 65150), so a GDI does too now; its
+    /// sector counts are the track files' sizes / sector size (filled by
+    /// [`parse_image`] when the image mounts).
     ///
-    /// A CDI is different, and reporting 549150 for one is a lie the BIOS
-    /// catches. The DiscJuggler descriptor gives an exact sector count per
+    /// For a CDI, reporting 549150 is a lie the BIOS catches. The
+    /// DiscJuggler descriptor gives an exact sector count per
     /// track, so the real end of the disc is known; a MIL-CD's data session
     /// ends where its last track ends, nowhere near a pressed disc's
     /// capacity. Claiming otherwise describes a GD-ROM whose high-density

@@ -80,7 +80,8 @@ fn toc_gdrom_sda_and_hda() {
             (404, [0x01, 0x00, 0x2D, 0x1E]),
         ])
     );
-    // HDA: track 3 only. Lead-out = 45000 + 504150 + 150 = 549300 = 0x0861B4.
+    // HDA: track 3 only. Lead-out = end of track 3 = 45000 + 504150 + 150 =
+    // 549300 = 0x0861B4 (a full-size track, so the same as the old padding).
     assert_eq!(
         toc(&g, false, 45000, 1),
         expect(&[
@@ -93,12 +94,13 @@ fn toc_gdrom_sda_and_hda() {
 }
 
 #[test]
-fn toc_hda_leadout_is_padded_to_the_pressed_capacity_but_sda_is_not() {
-    // A trimmed dump: track 3 file is only 1000 sectors.
+fn toc_hda_leadout_is_the_end_of_the_last_track_like_the_sda() {
+    // A trimmed dump: track 3 file is only 1000 sectors. Stock GDEMU 6.0
+    // reports the real end (D1); this used to be padded to 549300.
     let mut g = gd3();
     g[2].sector_count = 1000;
     let hda = toc(&g, false, 45000, 1);
-    assert_eq!(&hda[404..408], &[0x41, 0x08, 0x61, 0xB4]);
+    assert_eq!(&hda[404..408], &[0x41, 0x00, 0xB4, 0x46]); // 45000+1000+150 = 46150
     // Same trimming on the SDA side is reported as-is.
     g[1].sector_count = 100;
     let sda = toc(&g, false, 45000, 0);
@@ -106,14 +108,15 @@ fn toc_hda_leadout_is_padded_to_the_pressed_capacity_but_sda_is_not() {
 }
 
 #[test]
-fn toc_unknown_area_numbers_behave_like_hda_but_without_padding() {
-    // Anything but 0 selects tracks >= boot_area_lba; only area == 1 pads the
-    // lead-out out to the pressed-disc capacity.
+fn toc_unknown_area_numbers_behave_like_hda() {
+    // Anything but 0 selects tracks >= boot_area_lba (area 1 no longer pads
+    // the lead-out, D1, so the two are identical).
     let mut g = gd3();
     g[2].sector_count = 1000;
     let a2 = toc(&g, false, 45000, 2);
     assert_eq!(&a2[8..12], &[0x41, 0x00, 0xB0, 0x5E]);
     assert_eq!(&a2[404..408], &[0x41, 0x00, 0xB4, 0x46]); // 45000+1000+150 = 46150
+    assert_eq!(a2, toc(&g, false, 45000, 1));
 }
 
 #[test]
@@ -158,10 +161,15 @@ fn toc_skips_out_of_range_track_numbers_and_keeps_first_ctrl_quirk() {
 
 #[test]
 fn leadout() {
+    // GDI and CDI alike: the end of the last track (stock GDEMU 6.0, D1).
     assert_eq!(leadout_lba(&gd3(), false), 549150);
+    let mut g = gd3();
+    g[2].sector_count = 20000;
+    assert_eq!(leadout_lba(&g, false), 65000);
     assert_eq!(leadout_lba(&mil(), true), 65000);
-    // An (impossible) empty CDI falls back to the GD-ROM value.
+    // An (impossible) empty table falls back to the GD-ROM capacity.
     assert_eq!(leadout_lba(&[] as &[TrackDesc], true), 549150);
+    assert_eq!(leadout_lba(&[] as &[TrackDesc], false), 549150);
 }
 
 #[test]
@@ -229,7 +237,7 @@ fn req_stat() {
     let (fad, tr) = head_position(&g, AudioState::Standby, 777);
     assert_eq!(
         req_stat_reply(AudioState::Standby, DISC_FORMAT_GDROM, 0, fad, tr),
-        [0x02, 0x80, 0x41, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
+        [0x02, 0x8F, 0x41, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
     );
     let (fad, tr) = head_position(&g, AudioState::Playing, 1000);
     assert_eq!(
@@ -247,13 +255,23 @@ fn req_stat() {
         assert_eq!(drive_status(s), code);
     }
     // No track under the head: CTRL/ADR 0x41, track 1; FAD is full 24-bit BE.
+    // Paused: the repeat nibble is F whatever the count (stock, D3).
     assert_eq!(
         req_stat_reply::<TrackDesc>(AudioState::Paused, 0, 9, 0x01_02_03, None),
-        [0x01, 0x09, 0x41, 0x01, 0x01, 0x01, 0x02, 0x03, 0x00, 0x00]
+        [0x01, 0x0F, 0x41, 0x01, 0x01, 0x01, 0x02, 0x03, 0x00, 0x00]
     );
-    // Byte 1: disc format high nibble, repeat count low (the firmware's repeat
-    // is 4 bits; anything above is masked so it cannot spill into the format).
-    assert_eq!(req_stat_reply::<TrackDesc>(AudioState::Standby, DISC_FORMAT_CDROM_XA, 0x1F, 0, None)[1], 0x2F);
+    // Byte 1: disc format high nibble, repeat count low while playing (the
+    // firmware's repeat is 4 bits; anything above is masked so it cannot
+    // spill into the format).
+    assert_eq!(req_stat_reply::<TrackDesc>(AudioState::Playing, DISC_FORMAT_CDROM_XA, 0x13, 0, None)[1], 0x23);
+    // Not playing: F (stock GDEMU 6.0 sends 2f for a CDI and 8f for a GDI in
+    // standby and pause, records 02-07; there is no stock record of playback).
+    for s in [AudioState::Standby, AudioState::Paused, AudioState::Finished, AudioState::Error] {
+        for rep in [0u8, 3, 0x0F] {
+            assert_eq!(req_stat_reply::<TrackDesc>(s, DISC_FORMAT_GDROM, rep, 0, None)[1], 0x8F);
+            assert_eq!(req_stat_reply::<TrackDesc>(s, DISC_FORMAT_CDROM_XA, rep, 0, None)[1], 0x2F);
+        }
+    }
 }
 
 #[test]
@@ -384,8 +402,10 @@ fn sweep_matches_the_original_code() {
         for area in 0..3u8 {
             // A CDI answers every area with its one TOC (R117); the original
             // code gave area 0 only and FF for the rest.
+            // A GDI's area 1 lead-out is no longer padded to 549300 (D1):
+            // the original's area 2 is the same selection unpadded.
             let mut o = [0u8; 408];
-            og.build_toc(if is_cdi { 0 } else { area }, &mut o);
+            og.build_toc(if is_cdi { 0 } else if area == 1 { 2 } else { area }, &mut o);
             assert_eq!(toc(&new, is_cdi, boot, area), o);
         }
         for s in 0..5u8 {
@@ -400,12 +420,18 @@ fn sweep_matches_the_original_code() {
                 let st = rnd(16) as u8;
                 let want = oracle::build_req_ses_reply(Some(&og), s).map(|mut r| {
                     r[0] = st;
+                    // Session 0 of a GDI: lead-out = end of the last track
+                    // (D1), as the original already did for a CDI.
+                    if s == 0 && !is_cdi {
+                        let lo = end_of_last(&og).wrapping_add(150);
+                        r[3..6].copy_from_slice(&lo.to_be_bytes()[1..]);
+                    }
                     r
                 });
                 assert_eq!(req_ses_reply(&new, is_cdi, boot, sessions, s, st), want);
             }
         }
-        assert_eq!(leadout_lba(&new, is_cdi), og.leadout_lba());
+        assert_eq!(leadout_lba(&new, is_cdi), end_of_last(&og));
 
         for &(ns, os) in &states {
             let fad = if rnd(4) == 0 { rnd(400) as u32 } else { rnd(700000) as u32 };
@@ -419,7 +445,9 @@ fn sweep_matches_the_original_code() {
             // R117); the original code put the raw repeat count there.
             let fmt = [0u8, DISC_FORMAT_CDROM_XA, DISC_FORMAT_GDROM][rnd(3) as usize];
             let mut want = oracle::build_req_stat_reply(&snap, Some(&og));
-            want[1] = fmt | (want[1] & 0x0F);
+            // Repeat nibble F unless playing (D3).
+            let rep = if ns == AudioState::Playing { want[1] & 0x0F } else { 0x0F };
+            want[1] = fmt | rep;
             assert_eq!(req_stat_reply(ns, fmt, repeat, hf, ht), want);
             for format in [0u8, 1, 2] {
                 let mut a = [0xCCu8; 100];
@@ -447,6 +475,12 @@ fn sweep_matches_the_original_code() {
             }
         }
     }
+}
+
+/// The original code's CDI lead-out rule, which now applies to a GDI too:
+/// end of the last track, 549150 for an empty table.
+fn end_of_last(g: &oracle::Gdi) -> u32 {
+    g.tracks.last().map(|t| t.start_lba + t.sector_count).unwrap_or(549150)
 }
 
 #[test]
@@ -480,10 +514,24 @@ fn req_mode_is_a_window_into_the_stock_32_byte_block() {
 #[test]
 fn req_error_reply_layout() {
     // Stock GDEMU 6.0 with nothing pending (R117): F0 then zeros.
-    assert_eq!(req_error_reply(0), [0xF0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    // Sense key in the low nibble of byte 2 (SPI; gdprobe reads it there).
-    assert_eq!(req_error_reply(0x05), [0xF0, 0, 0x05, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(req_error_reply(0x16), [0xF0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(req_error_reply(0, 0, 0), [0xF0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    // Sense key in the low nibble of byte 2 (SPI; gdprobe reads it there),
+    // ASC/ASCQ in bytes 8/9 (D7).
+    assert_eq!(req_error_reply(0x05, 0, 0), [0xF0, 0, 0x05, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(req_error_reply(0x16, 0, 0), [0xF0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0]);
+    // The other sense triples stock reports (records 03-07): becoming ready,
+    // medium changed, illegal mode for this track.
+    assert_eq!(req_error_reply(2, ASC_BECOMING_READY.0, ASC_BECOMING_READY.1), [0xF0, 0, 2, 0, 0, 0, 0, 0, 0x04, 0x01]);
+    assert_eq!(req_error_reply(6, ASC_MEDIUM_CHANGED.0, ASC_MEDIUM_CHANGED.1), [0xF0, 0, 6, 0, 0, 0, 0, 0, 0x28, 0x00]);
+    assert_eq!(req_error_reply(5, 0x64, 0x00), [0xF0, 0, 5, 0, 0, 0, 0, 0, 0x64, 0x00]);
+}
+
+#[test]
+fn req_error_no_medium_is_the_stock_bytes() {
+    // stock_20261121_04_img3-7.txt img=6 REQ_ERROR_W0 (TUR said NOT READY,
+    // empty image slot): 2/3A/00.
+    let (asc, ascq) = ASC_NO_MEDIUM;
+    assert_eq!(&req_error_reply(2, asc, ascq)[..], &hex("f0000200000000003a00")[..]);
 }
 
 fn hex(s: &str) -> Vec<u8> {
@@ -511,9 +559,9 @@ fn the_stock_record_of_the_dcload_cdi() {
     let (fad, tr) = head_position(&c, AudioState::Standby, 0);
 
     // REQ_STAT: 02 2f 01 01 01 00 00 96 00 00. The low nibble of byte 1 (F) is
-    // the repeat count field; where stock gets F at idle is not known, so the
-    // test passes the stock value and checks the rest.
-    let stat = req_stat_reply(AudioState::Standby, DISC_FORMAT_CDROM_XA, 0x0F, fad, tr);
+    // the repeat field, F whenever nothing plays (D3), whatever count the
+    // player holds.
+    let stat = req_stat_reply(AudioState::Standby, DISC_FORMAT_CDROM_XA, 0, fad, tr);
     assert_eq!(&stat[..], &hex("022f0101010000960000")[..]);
 
     // GET_TOC area 0 and 1: the same 408 bytes.
@@ -538,7 +586,69 @@ fn the_stock_record_of_the_dcload_cdi() {
     assert_eq!(&r[..14], &hex("0015000e01010100000000000096")[..]);
 
     // REQ_ERROR with nothing pending.
-    assert_eq!(&req_error_reply(0)[..], &hex("f0000000000000000000")[..]);
+    assert_eq!(&req_error_reply(0, 0, 0)[..], &hex("f0000000000000000000")[..]);
 }
 
 const STOCK_GET_SCD_0: &str = "00150064000000000000004000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000400040400040000000400040000000";
+
+/// GDI 03 of the stock probe card (`stock_20261121_04_img3-7.txt`, img=3):
+/// data 0..599, audio 756..1355, data 45000..64999 (sector counts from the
+/// track files, as the firmware and `examples/expect.rs` derive them).
+fn stock_gdi03() -> Vec<TrackDesc> {
+    vec![t(1, 0, 4, 600), t(2, 756, 0, 600), t(3, 45000, 4, 20000)]
+}
+
+#[test]
+fn the_stock_record_of_gdi_03_leadout() {
+    // D1: stock reports the end of the last track, not 549300.
+    let g = stock_gdi03();
+    let boot = gdi_boot_area_lba(&g);
+    let a1 = toc(&g, false, boot, 1);
+    // GET_TOC_1: ... 4100b05e ... 41030000 41030000 4100fe7e
+    assert_eq!(&a1[8..12], &hex("4100b05e")[..]);
+    assert_eq!(&a1[396..], &hex("41030000410300004100fe7e")[..]);
+    // REQ_SES_0 (stock was paused, status 01): 01 00 01 00 fe 7e
+    assert_eq!(req_ses_reply(&g, false, boot, 1, 0, DRIVE_PAUSE).unwrap()[..], hex("01000100fe7e")[..]);
+    assert_eq!(leadout_lba(&g, false), 65000);
+}
+
+#[test]
+fn the_stock_record_of_gdi_08_leadout() {
+    // stock_20261121_06_gdi-variants.txt img=8: last track data 55900..65899.
+    // GET_TOC_1 ends 41030000 41050000 41010202; REQ_SES_0 01 00 01 01 02 02.
+    let g = vec![
+        t(1, 0, 4, 600),
+        t(2, 756, 0, 600),
+        t(3, 45000, 4, 10000),
+        t(4, 55150, 0, 600),
+        t(5, 55900, 4, 10000),
+    ];
+    let boot = gdi_boot_area_lba(&g);
+    let a1 = toc(&g, false, boot, 1);
+    assert_eq!(&a1[396..], &hex("410300004105000041010202")[..]);
+    assert_eq!(req_ses_reply(&g, false, boot, 1, 0, DRIVE_PAUSE).unwrap()[..], hex("010001010202")[..]);
+}
+
+#[test]
+fn the_stock_record_of_gdi_req_stat_repeat_nibble() {
+    // stock_20261121_04_img3-7.txt img=3 REQ_STAT: 01 8f ... (paused, GD-ROM).
+    let stat = req_stat_reply::<TrackDesc>(AudioState::Paused, DISC_FORMAT_GDROM, 0, 0, None);
+    assert_eq!(stat[1], 0x8F);
+}
+
+#[test]
+fn identify_packet_is_the_stock_80_bytes() {
+    // stock_20261122_08_identify.txt, probe=IDENTIFY_PACKET: 80 bytes, in the
+    // order gdprobe stores them (each 16-bit data word little-endian) (D16).
+    let want = hex(concat!(
+        "20202000000000000000000000000000",
+        "53452020202020202020202020202020",
+        "43442d524f4d20445249564520202020",
+        "362e3432202020202020202020202020",
+        "00000000000000000000000000000000",
+    ));
+    assert_eq!(&IDENTIFY_PACKET_REPLY[..], &want[..]);
+    assert_eq!(&IDENTIFY_PACKET_REPLY[16..18], b"SE");
+    assert_eq!(&IDENTIFY_PACKET_REPLY[32..44], b"CD-ROM DRIVE");
+    assert_eq!(&IDENTIFY_PACKET_REPLY[48..52], b"6.42");
+}

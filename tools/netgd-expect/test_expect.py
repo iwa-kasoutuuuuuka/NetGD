@@ -68,12 +68,14 @@ class ExpectTest(unittest.TestCase):
 
     def test_bytes_match_discimg_test_expectations(self):
         # tests/atapi.rs: standby REQ_STAT of a GDI, and the standby GET_SCD format 1
-        self.assertEqual(self.one(3, 'REQ_STAT')['data'], '02804101010000960000')
+        self.assertEqual(self.one(3, 'REQ_STAT')['data'], '028f4101010000960000')   # repeat nibble F when idle (D3)
         self.assertEqual(self.one(3, 'GET_SCD_1')['data'], '0015000e41010100000000000096')
         # TOC area 0 of the GDI: track 1 = 0x41 at FAD 150, track 2 audio at FAD 906 (LBA 756 + 150)
         self.assertTrue(self.one(3, 'GET_TOC_0')['data'].startswith('410000960100038a'))
-        # REQ_SES(0): session count 1, lead-out 549150 + 150 = 0x0861b4; REQ_SES(1): track 1 at FAD 150
-        self.assertEqual(self.one(3, 'REQ_SES_0')['data'], '0200010861b4')
+        # REQ_SES(0): session count 1, lead-out = end of track 3 (D1, stock): 45000 + 1100 + 150 = 0x00b4aa
+        # (it was 549150 + 150 = 0x0861b4); REQ_SES(1): track 1 at FAD 150
+        self.assertEqual(self.one(3, 'REQ_SES_0')['data'], '02000100b4aa')
+        self.assertEqual(self.one(3, 'GET_TOC_1')['data'][-8:], '4100b4aa')
         self.assertEqual(self.one(3, 'REQ_SES_1')['data'], '020001000096')
         # a GDI has no session 2 / 3: ABRT
         for s in (2, 3):
@@ -118,6 +120,7 @@ class ExpectTest(unittest.TestCase):
     def test_mount_gets_unit_attention_then_ready(self):
         polls = [e for e in self.entries if e['img'] == 3 and e['probe'] == 'SW_POLL']
         self.assertEqual([(p['rc'], p['err']) for p in polls], [('check', '0x60'), ('ok', '0x00')])
+        self.assertEqual(polls[0]['sense'], '6/28/00')   # medium changed (D7)
 
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer

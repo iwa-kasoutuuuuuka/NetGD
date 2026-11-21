@@ -20,8 +20,10 @@ pub enum AudioState {
     Error,
 }
 
-/// Lead-out LBA of a GDI: a pressed GD-ROM's high-density area always runs
-/// out to this.
+/// A pressed GD-ROM's capacity: its high-density area runs out to this LBA.
+/// Only the lead-out of an (impossible) empty track table now; a GDI reports
+/// the end of its last track, as stock GDEMU 6.0 does (D1, see
+/// [`leadout_lba`]).
 pub const GDROM_LEADOUT_LBA: u32 = 549150;
 
 /// Track containing `lba`: the last track starting at or before it.
@@ -74,16 +76,17 @@ pub fn ip_bin_candidates<T: TrackInfo>(
         .chain(tracks.iter().filter(data).filter(move |t| t.start_lba() < boot_area_lba))
 }
 
-/// Total disc length in LBAs, used as the lead-out address. A CDI knows its
-/// real length (last track's start + sector count); a GDI reports the
-/// pressed-disc capacity.
-pub fn leadout_lba<T: TrackInfo>(tracks: &[T], is_cdi: bool) -> u32 {
-    if is_cdi {
-        if let Some(last) = tracks.last() {
-            return last.start_lba().wrapping_add(last.sector_count());
-        }
+/// Total disc length in LBAs, used as the lead-out address: the last track's
+/// start + sector count, for a GDI as for a CDI. Stock GDEMU 6.0 reports a
+/// GDI that way (D1: GDI 03, last track 45000..64999, gives lead-out FAD
+/// 65150); this used to be the pressed-disc capacity, 549150. A GDI's sector
+/// counts are its track files' sizes / sector size (the firmware's
+/// `gdi.rs` fills them when it mounts). `is_cdi` no longer matters.
+pub fn leadout_lba<T: TrackInfo>(tracks: &[T], _is_cdi: bool) -> u32 {
+    match tracks.last() {
+        Some(last) => last.start_lba().wrapping_add(last.sector_count()),
+        None => GDROM_LEADOUT_LBA,
     }
-    GDROM_LEADOUT_LBA
 }
 
 /// Build a 408-byte Sega GD-ROM TOC response. `area` 0 is the single
@@ -153,12 +156,10 @@ pub fn build_toc<T: TrackInfo>(
         out[401] = l;
         out[402] = 0;
         out[403] = 0;
-        // Lead-out entry (offset 101*4 = 404). The HD area of a GDI is
-        // padded out to the pressed-disc capacity; a CDI is exact.
-        let mut leadout_fad = lt.start_lba().wrapping_add(lt.sector_count()).wrapping_add(150);
-        if area == 1 && !is_cdi {
-            leadout_fad = leadout_fad.max(leadout_lba(tracks, is_cdi).wrapping_add(150));
-        }
+        // Lead-out entry (offset 101*4 = 404): the end of the area's last
+        // track, CTRL of that track (stock GDI 03 area 1: 41 00 fe 7e). The
+        // HD area of a GDI used to be padded out to 549300 (D1).
+        let leadout_fad = lt.start_lba().wrapping_add(lt.sector_count()).wrapping_add(150);
         out[404] = ctrl_adr(lt.ctrl());
         out[405] = (leadout_fad >> 16) as u8;
         out[406] = (leadout_fad >> 8) as u8;
@@ -206,7 +207,10 @@ pub fn drive_status(state: AudioState) -> u8 {
 /// 10-byte Sega REQ_STAT reply: drive status, disc format | repeat count,
 /// CTRL/ADR, TNO, index, FAD MSB..LSB, max retry, 0. `disc_format` is a
 /// `DISC_FORMAT_*` value (high nibble; D-3, stock GDEMU 6.0 sends 0x2_ for a
-/// CDI, R117); `repeat` is the 4-bit CDDA repeat count. `fad`/`track` come
+/// CDI, R117); `repeat` is the 4-bit CDDA repeat count, sent only while
+/// playing: whenever no CD-DA plays the low nibble is 0xF (D3; stock sends
+/// `2f` for a CDI and `8f` for a GDI in standby and pause -- there is no
+/// stock record of playback, so that keeps the count). `fad`/`track` come
 /// from [`head_position`].
 pub fn req_stat_reply<T: TrackInfo>(
     state: AudioState,
@@ -216,6 +220,7 @@ pub fn req_stat_reply<T: TrackInfo>(
     track: Option<&T>,
 ) -> [u8; 10] {
     let status = drive_status(state);
+    let repeat = if state == AudioState::Playing { repeat } else { 0x0F };
     let (ctrl_adr, tno) = track
         .map(|t| ((t.ctrl() << 4) | 1, t.number()))
         .unwrap_or((0x41, 1));
@@ -272,15 +277,42 @@ pub fn req_mode_reply(offset: u8, len: u8) -> Option<&'static [u8]> {
     Some(&REQ_MODE_BLOCK[o..o + l])
 }
 
+/// ASC/ASCQ pairs stock GDEMU 6.0 reports with the sense key (records
+/// 03-07): NOT READY with no medium (2/3A/00, e.g. an empty image slot),
+/// NOT READY while becoming ready (2/04/01, the swap window), UNIT
+/// ATTENTION after a medium change (6/28/00). Stock also sends 5/64/00
+/// (illegal mode for this track) for a CD_READ data-type mismatch, which
+/// NetGD does not reject.
+pub const ASC_NO_MEDIUM: (u8, u8) = (0x3A, 0x00);
+pub const ASC_BECOMING_READY: (u8, u8) = (0x04, 0x01);
+pub const ASC_MEDIUM_CHANGED: (u8, u8) = (0x28, 0x00);
+
 /// 10-byte REQ_ERROR reply (SPI): byte 0 = 0xF0, byte 2 low nibble = sense
-/// key, bytes 8/9 = ASC/ASCQ (not tracked: 0). Stock GDEMU 6.0 sends
-/// `F0 00 ...` with nothing pending (R117); this used to be all zeros.
-pub fn req_error_reply(sense_key: u8) -> [u8; 10] {
+/// key, bytes 8/9 = ASC/ASCQ. Stock GDEMU 6.0 sends `F0 00 ...` with nothing
+/// pending (R117; this used to be all zeros) and fills ASC/ASCQ (D7, e.g.
+/// `f0 00 02 .. 3a 00` for no medium; they used to be 0).
+pub fn req_error_reply(sense_key: u8, asc: u8, ascq: u8) -> [u8; 10] {
     let mut r = [0u8; 10];
     r[0] = 0xF0;
     r[2] = sense_key & 0x0F;
+    r[8] = asc;
+    r[9] = ascq;
     r
 }
+
+/// IDENTIFY PACKET DEVICE (ATA 0xA1) data, as stock GDEMU 6.0 returns it:
+/// 80 bytes (the GD-ROM's 00h-4Fh block, SPI table 3.5), not ATA's 512 (D16,
+/// `stock_20261122_08_identify.txt`). Byte order is the host's: each 16-bit
+/// data-register word carries bytes `2i` (low) and `2i + 1` (high), which is
+/// how gdprobe stores them. Bytes 0-2 0x20, then zeros to 15; 16-31 the
+/// manufacturer "SE", 32-47 the model "CD-ROM DRIVE", 48-63 the firmware
+/// revision "6.42", all space padded and not byte-swapped; 64-79 zeros.
+pub const IDENTIFY_PACKET_REPLY: [u8; 80] = *b"\
+\x20\x20\x20\0\0\0\0\0\0\0\0\0\0\0\0\0\
+SE              \
+CD-ROM DRIVE    \
+6.42            \
+\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 /// 6-byte REQ_SES reply for one session (see the firmware's `ide.rs` for
 /// the history of why each subcommand reports what it does).
