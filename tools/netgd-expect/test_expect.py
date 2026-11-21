@@ -68,22 +68,23 @@ class ExpectTest(unittest.TestCase):
 
     def test_bytes_match_discimg_test_expectations(self):
         # tests/atapi.rs: standby REQ_STAT of a GDI, and the standby GET_SCD format 1
-        self.assertEqual(self.one(3, 'REQ_STAT')['data'], '02004101010000960000')
-        self.assertEqual(self.one(3, 'GET_SCD_1')['data'], '0015000e41010100000000000200')
+        self.assertEqual(self.one(3, 'REQ_STAT')['data'], '02804101010000960000')
+        self.assertEqual(self.one(3, 'GET_SCD_1')['data'], '0015000e41010100000000000096')
         # TOC area 0 of the GDI: track 1 = 0x41 at FAD 150, track 2 audio at FAD 906 (LBA 756 + 150)
         self.assertTrue(self.one(3, 'GET_TOC_0')['data'].startswith('410000960100038a'))
         # REQ_SES(0): session count 1, lead-out 549150 + 150 = 0x0861b4; REQ_SES(1): track 1 at FAD 150
-        self.assertEqual(self.one(3, 'REQ_SES_0')['data'], '0100010861b4')
-        self.assertEqual(self.one(3, 'REQ_SES_1')['data'], '010001000096')
+        self.assertEqual(self.one(3, 'REQ_SES_0')['data'], '0200010861b4')
+        self.assertEqual(self.one(3, 'REQ_SES_1')['data'], '020001000096')
         # a GDI has no session 2 / 3: ABRT
         for s in (2, 3):
             e = self.one(3, 'REQ_SES_%d' % s)
             self.assertEqual((e['rc'], e['status'], e['err'], e['bytes']), ('check', '0x51', '0x04', '0'))
-        # REQ_MODE as the firmware answers it, REQ_ERROR always zero, version 5.20.0
+        # REQ_MODE as the firmware answers it (the stock 32-byte block, R117), REQ_ERROR F0 + no sense, version 5.20.0
         self.assertEqual(self.one(3, 'REQ_MODE_18_8')['data'], '52657620362e3432')
         self.assertEqual(self.one(3, 'REQ_MODE_0_10')['data'], '0000000000b419000008')
-        self.assertEqual(self.one(3, 'REQ_MODE_0_32')['rc'], 'check')
-        self.assertEqual(self.one(3, 'REQ_ERROR')['data'], '00' * 10)
+        self.assertEqual(self.one(3, 'REQ_MODE_0_32')['data'],
+                         '0000000000b419000008534520202020202052657620362e3432393930333136')
+        self.assertEqual(self.one(3, 'REQ_ERROR')['data'], 'f0' + '00' * 9)
         self.assertEqual(self.one(3, 'GDEMU_VERSION')['data'], '0000000000002005')
 
     def test_cdi_with_two_tracks_has_req_ses_2(self):

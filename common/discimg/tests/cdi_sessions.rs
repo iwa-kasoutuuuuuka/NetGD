@@ -69,7 +69,7 @@ fn one_data_track_boots_from_track_1() {
     let (n, bt, boot, t) = load(&[vec![(150, 5000, 0, 5150, 1, 4)]]);
     assert_eq!((n, bt, boot), (1, 1, 0));
     // The old code fell back to 45000 here (and prefetched IP.BIN from there).
-    assert_eq!(req_ses_reply(&t, true, boot, n, 0), Some([1, 0, 1, 0x00, 0x14, 0x1E])); // 5000+150 = 5150
+    assert_eq!(req_ses_reply(&t, true, boot, n, 0, DRIVE_STANDBY), Some([2, 0, 1, 0x00, 0x14, 0x1E])); // 5000+150 = 5150
 }
 
 #[test]
@@ -78,12 +78,12 @@ fn audio_then_data_in_two_sessions() {
     assert_eq!((n, bt, boot), (2, 2, 11700));
     assert_eq!(t[1].start_lba, 11700);
     // session 0: count 2, lead-out 11700+20000+150 = 31850 = 0x7C6A
-    assert_eq!(req_ses_reply(&t, true, boot, n, 0), Some([1, 0, 2, 0x00, 0x7C, 0x6A]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 0, DRIVE_STANDBY), Some([2, 0, 2, 0x00, 0x7C, 0x6A]));
     // session 1: track 1 at FAD 150
-    assert_eq!(req_ses_reply(&t, true, boot, n, 1), Some([1, 0, 1, 0x00, 0x00, 0x96]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 1, DRIVE_STANDBY), Some([2, 0, 1, 0x00, 0x00, 0x96]));
     // session 2: track 2 at FAD 11850 = 0x2E4A (was ABRT with boot_area_lba = 45000)
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 2, 0x00, 0x2E, 0x4A]));
-    assert_eq!(req_ses_reply(&t, true, boot, n, 3), None);
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), Some([2, 0, 2, 0x00, 0x2E, 0x4A]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 3, DRIVE_STANDBY), None);
 }
 
 #[test]
@@ -92,8 +92,8 @@ fn data_then_data_in_two_sessions() {
     let (n, bt, boot, t) = load(&[vec![d1], vec![DATA2]]);
     assert_eq!((n, bt, boot), (2, 2, 11700));
     // Session 1 is track 1 even though it is data and below the boot area.
-    assert_eq!(req_ses_reply(&t, true, boot, n, 1), Some([1, 0, 1, 0x00, 0x00, 0x96]));
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 2, 0x00, 0x2E, 0x4A]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 1, DRIVE_STANDBY), Some([2, 0, 1, 0x00, 0x00, 0x96]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), Some([2, 0, 2, 0x00, 0x2E, 0x4A]));
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn mil_cd_three_tracks_gd_shaped_second_session_at_45000() {
     let d: T = (150, 20000, 45000, 20150, 1, 4);
     let (n, bt, boot, t) = load(&[vec![AUDIO, a2], vec![d]]);
     assert_eq!((n, bt, boot), (2, 3, 45000));
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 3, 0x00, 0xB0, 0x5E]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), Some([2, 0, 3, 0x00, 0xB0, 0x5E]));
 }
 
 #[test]
@@ -112,8 +112,8 @@ fn three_tracks_in_one_session_boot_from_the_session_start() {
     let (n, bt, boot, t) = load(&[vec![AUDIO, a2, d]]);
     assert_eq!((n, bt, boot), (1, 1, 0));
     // One session: no session 2.
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), None);
-    assert!(req_ses_reply(&t, true, boot, n, 1).is_some());
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), None);
+    assert!(req_ses_reply(&t, true, boot, n, 1, DRIVE_STANDBY).is_some());
 }
 
 #[test]
@@ -156,12 +156,12 @@ fn three_sessions_middle_session_is_its_own_first_track() {
     let (n, bt, boot, t) = load(&[vec![AUDIO], vec![DATA2], vec![d3]]);
     assert_eq!((n, bt, boot), (3, 3, 40000));
     assert_eq!(t.iter().map(|x| x.session).collect::<Vec<_>>(), [1, 2, 3]);
-    assert_eq!(req_ses_reply(&t, true, boot, n, 1), Some([1, 0, 1, 0x00, 0x00, 0x96]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 1, DRIVE_STANDBY), Some([2, 0, 1, 0x00, 0x00, 0x96]));
     // session 2 = track 2 at FAD 11850 (0x2E4A), NOT the boot track
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 2, 0x00, 0x2E, 0x4A]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), Some([2, 0, 2, 0x00, 0x2E, 0x4A]));
     // session 3 = track 3 at FAD 40150 = 0x9CD6
-    assert_eq!(req_ses_reply(&t, true, boot, n, 3), Some([1, 0, 3, 0x00, 0x9C, 0xD6]));
-    assert_eq!(req_ses_reply(&t, true, boot, n, 4), None);
+    assert_eq!(req_ses_reply(&t, true, boot, n, 3, DRIVE_STANDBY), Some([2, 0, 3, 0x00, 0x9C, 0xD6]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 4, DRIVE_STANDBY), None);
     // the boot area is still the first track of the last session
     assert_eq!(boot, t[2].start_lba);
 }
@@ -175,8 +175,8 @@ fn middle_session_with_several_tracks_reports_its_first() {
     assert_eq!((n, bt), (3, 4));
     assert_eq!(t.iter().map(|x| x.session).collect::<Vec<_>>(), [1, 2, 2, 3]);
     // session 2 = track 2 (not track 3 and not the boot track 4), FAD 11850
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 2, 0x00, 0x2E, 0x4A]));
-    assert_eq!(req_ses_reply(&t, true, boot, n, 3), Some([1, 0, 4, 0x00, 0x75, 0xC6])); // 30000+150
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), Some([2, 0, 2, 0x00, 0x2E, 0x4A]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 3, DRIVE_STANDBY), Some([2, 0, 4, 0x00, 0x75, 0xC6])); // 30000+150
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn tracks_without_session_numbers_keep_the_boot_fallback() {
     for x in t.iter_mut() {
         x.session = 0;
     }
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 3, 0x00, 0x9C, 0xD6]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), Some([2, 0, 3, 0x00, 0x9C, 0xD6]));
 }
 
 // ---- Track FAD = descriptor start + pregap (Flycast `StartFAD`) ----------
@@ -206,8 +206,8 @@ fn track_fad_is_start_plus_pregap_with_odd_pregaps() {
     assert_eq!([t[0].start_lba, t[1].start_lba, t[2].start_lba], [0, 1000, 5150]);
     assert_eq!(boot, 5150);
     // Reported FADs are Flycast's StartFAD values.
-    assert_eq!(req_ses_reply(&t, true, boot, n, 1), Some([1, 0, 1, 0x00, 0x00, 0x96]));
-    assert_eq!(req_ses_reply(&t, true, boot, n, 2), Some([1, 0, 3, 0x00, 0x14, 0xB4])); // 5300
+    assert_eq!(req_ses_reply(&t, true, boot, n, 1, DRIVE_STANDBY), Some([2, 0, 1, 0x00, 0x00, 0x96]));
+    assert_eq!(req_ses_reply(&t, true, boot, n, 2, DRIVE_STANDBY), Some([2, 0, 3, 0x00, 0x14, 0xB4])); // 5300
     let mut toc = [0u8; 408];
     build_toc(&t[..], true, boot, 0, &mut toc);
     assert_eq!(&toc[4..8], &[0x01, 0x00, 0x04, 0x7E]); // track 2: FAD 1150

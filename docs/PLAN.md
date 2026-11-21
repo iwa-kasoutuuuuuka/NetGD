@@ -56,7 +56,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - **G3-4 の高速化**（すべて既定ではオフ、feature `sd-fast`）：`fast-complete`・`sd-multiblock`・`sd-highspeed`（R72、R73 のレビュー、R75 で修正）。HSMCI の CRC・タイムアウトの取りこぼしは既定のビルドでも修正済み（R75）。
 - **自己更新（`0xF9`）**：対策 A（CHIPID 照合、ベクタ検査、検証後のみリセット、FWS=6 など。R46）。対策 B の S0〜S2 と、常駐部とアプリの取り決め（世代 1）の両側をホスト側まで実装（R58〜R61、R79、R83〜R86。下の「自己更新」節）。転送中の電源断などで起動不能になる窓は、対策 B の SD 復旧が実機で動くまで残る。
 - **基板ごとの FPGA ローダー**：`common/psload`、feature `board-v55`（既定）／`board-v60`（R57）。6.0 のローダーのピン 5 本は v5.5 の値を仮に使っており未確認。
-- **未修正**（実機と比べるまで挙動を変えない）：上流の ATAPI 応答の疑い D-2〜D-5（下の節）。
+- **ATAPI 応答の疑い D-2〜D-5**：純正 GDEMU 6.0 の最初の記録（CDI、R117）で決まった分を修正（D-2、D-3 の CDI、D-5 の一部。下の節）。GD-ROM（GDI）に関わる分は GD-ROM の記録を取るまで変えない。
 
 **ツール**（一行ずつ）：
 - `tools/gdprobe`：純正 GDEMU と NetGD に読み取り系コマンドだけを送る KOS 製プローブ。PC 側の `compare.py` で比較（R19、R22、R31）。純正での記録はまだ取っていない。
@@ -189,10 +189,10 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 仕様（Sega SPI v1.30）や Flycast と食い違う点。実機（純正 GDEMU または実ドライブ）と比べるまで挙動は変えない。
 直すときは `common/discimg` のテストを先に更新する。
 - **D-1（高、修正済み）**：トラック2本の CDI で REQ_SES(2) が ABRT していた。CDI のセッション情報で REQ_SES と起動領域を決めるよう修正（R71・R78・R86）。純正の記録で最終確認する。
-- **D-2（中、未修正）**：GET_SCD format 1 を BCD/MSF で返している（仕様はバイナリ FAD）。
-- **D-3（中、未修正）**：REQ_STAT のバイト1に Disc Format が入っていない。CDB のバイト2（開始アドレス）を無視している。
+- **D-2（中、ブランチ `compare/stock-vs-netgd` で修正・実機未確認）**：GET_SCD format 1 を BCD/MSF で返していた。純正（R117）は絶対位置をバイナリ FAD で返すので、相対・絶対ともバイナリにした。
+- **D-3（中、一部修正・実機未確認）**：REQ_STAT のバイト1上位に SECNR と同じディスク形式を入れた（CDI = 0x2 は純正 R117 と一致、GDI = 0x8 は GD-ROM の記録待ち）。下位（純正は待機中 0xF）と CDB のバイト2（開始アドレス）は未対応。
 - **D-4（中、未修正・要実機）**：GDI の REQ_SES がセッション数1（Flycast は2）。コード内コメントは「純正 GDEMU は1を返す」としており、実機で要確認。
-- **D-5（低、一部修正）**：CDI の pregap の扱いは R36 で修正（`start_lba + pregap - 150`）。GET_SCD format 0 の R〜W ビット、lead-out の CTRL、REQ_SES のバイト0、CDI の lead-out は未修正（R45 の 8 で lead-out の影響を訂正）。
+- **D-5（低、一部修正）**：CDI の pregap の扱いは R36 で修正（`start_lba + pregap - 150`）。GET_SCD format 0 の R〜W ビット（純正は Q = 0x40・ほか 0）と REQ_SES のバイト0（= ドライブ状態）は R117 に合わせて修正（実機未確認）。CDI の lead-out・lead-out の CTRL は R117 の CDI で純正と一致。GDI の lead-out は GD-ROM の記録待ち（R45 の 8 で lead-out の影響を訂正）。
 - **A-1（低、未確認）**：GDI パース中のスタックが増えた（R11 で約 140 バイト、R21 でマウント経路の最深部が約 +200 バイト）。
   2E のスタックは約 7.9 KB、マウント経路で約 5.1〜5.3 KB を使う。溢れるかは実機またはスタック解析で確かめる。
 - 仕様と一致した点（R11）：TOC エントリのニブル順、first/last エントリ、CDI の area 1、Standby 時の FAD 0x96、オーディオステータス値。

@@ -11,11 +11,11 @@
 | 項目 | 予測の内容 |
 |---|---|
 | レジスタ | 正常完了 = `status=0x50 err=0x00 irr=0x03`。CHECK は `status=0x51`（`err` は下の表） |
-| 切替直後 | 最初のコマンドは UNIT ATTENTION（`status=0x51 err=0x60`）、REQ_ERROR は常に 0 を返すので `sense=0/00/00`。2 回目の TUR で READY |
-| REQ_MODE | `(0,10)` = `00 00 00 00 00 b4 19 00 00 08`、`(18,8)` = `Rev 6.42`、それ以外（`(0,32)`）は ABRT（`err=0x04`） |
-| REQ_ERROR | 10 バイトの 0（`err` も 0） |
-| REQ_STAT / GET_SCD | 待機状態（FAD 150、トラック 1） |
-| REQ_SES | `req_ses_reply` どおり。GDI のセッション 2・3、2 トラック CDI のセッション 2 は ABRT（`err=0x04`、`bytes=0`） |
+| 切替直後 | 最初のコマンドは UNIT ATTENTION（`status=0x51 err=0x60`）、REQ_ERROR は `F0 00 06 …`（センスキー 6、ASC は持たない）なので `sense=6/00/00`。2 回目の TUR で READY |
+| REQ_MODE | 純正の 32 バイト（`00 00 00 00 00 b4 19 00 00 08` + `SE      ` + `Rev 6.42` + `990316`、R117）の窓。32 バイトを越える窓と長さ 0 は ABRT（`err=0x04`） |
+| REQ_ERROR | `F0`、バイト 2 = 保留中のセンスキー、残り 0（R117 の純正どおり。ASC/ASCQ は持たない） |
+| REQ_STAT / GET_SCD | 待機状態（FAD 150、トラック 1）。REQ_STAT バイト 1 の上位 = ディスク形式（CDI 0x2、GDI 0x8。SECNR と同じ）、GET_SCD 形式 1 の位置はバイナリ FAD、形式 0 は Q = 0x40・ほか 0 |
+| REQ_SES | `req_ses_reply` どおり（バイト 0 = ドライブ状態、待機中は 0x02）。GDI のセッション 2・3、2 トラック CDI のセッション 2 は ABRT（`err=0x04`、`bytes=0`） |
 | `52 00` | `00 00 00 00 00 00 20 05`（バージョン 5.20.0） |
 | CD_READ | CDB のバイト 1 は見ない。常に 1 セクタ 2048 バイト（`ssz=2048`、`0x10` でも 2352 にならない）。データは `file_offset + (LBA − 開始 LBA) × セクタ長 + 16`（2352）/ `+ 8`（2336）の 2048 バイト。要求がトラックの残りを越えると ABRT（`err=0x04`） |
 | `52 82 n`（n が空フォルダ） | ILLEGAL REQUEST（`status=0x51 err=0x54`）。**メディアは変わらない**ので、そのあとの `img=7` の試験は直前のイメージの答え（UNIT ATTENTION は消費済み）になる |

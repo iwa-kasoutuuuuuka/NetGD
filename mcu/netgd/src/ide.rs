@@ -1563,10 +1563,18 @@ async fn handle_packet(
         dev.set_error(0x60); // sense key 6 << 4
         dev.set_irr(0x03);
         state.unit_attention = false;
-        // Leave pending_sense_key at 6 — the host should follow up with
-        // REQ_SENSE next, and we want to report UNIT_ATTENTION there.
+        // Sense key 6 for the REQ_SENSE / REQ_ERROR that should follow (set
+        // here, not left over: a GDEMU_CMD in between clears stale keys).
+        state.pending_sense_key = 0x06;
         dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_ERR); // 0x51
         return;
+    }
+
+    // The sense key describes the last command only: anything but the two
+    // sense readers starts from "no sense" (paths that fail set it again).
+    // REQ_ERROR reports it now (R117), so a stale key would show there.
+    if opcode != ATAPI_REQUEST_SENSE && opcode != SEGA_REQ_ERROR {
+        state.pending_sense_key = 0;
     }
 
     // Step 4: dispatch.
@@ -1639,30 +1647,17 @@ async fn handle_packet(
             send_data_in(dev, &reply[..n as usize]).await;
         }
         SEGA_REQ_MODE => {
-            // packet[2] = offset, packet[4] = length. Per iceGDROM
-            // rv32/source/ide.c:202-213 the BIOS only ever asks for
-            // (offset=18, len=8) → "Rev 5.07" version string and
-            // (offset=0, len=10) → all zeros. Anything else aborts
-            // with status 0x50.
-            let offset = packet[2] as usize;
-            let len = packet[4] as usize;
-            if offset == 18 && len == 8 {
-                // Stock GDEMU returns "Rev 6.42" here (verified via
-                // g1bios_replay against a real GDEMU). iceGDROM's docs
-                // claimed "Rev 5.07" but that appears to be wrong.
-                send_data_in(dev, b"Rev 6.42").await;
-            } else if offset == 0 && len == 10 {
-                // Stock GDEMU returns [00 00 00 00 00 b4 19 00 00 08].
-                // The b4 19 00 00 looks like a 32-bit value in some
-                // big-endian-ish layout; meaning unknown but BIOS-
-                // visible. Match stock byte-for-byte.
-                let reply: [u8; 10] = [0x00, 0x00, 0x00, 0x00, 0x00,
-                                       0xb4, 0x19, 0x00, 0x00, 0x08];
-                send_data_in(dev, &reply).await;
-            } else {
-                warn!("{}: REQ_MODE off={} len={} unsupported", label, offset, len);
-                dev.set_error(ERR_ABRT);
-                dev.set_status_intrq(STATUS_IDLE_ERR);
+            // packet[2] = offset, packet[4] = length into the 32-byte block
+            // stock GDEMU 6.0 returns for (0, 32) (R117): the BIOS reads
+            // (0, 10) and (18, 8) = "Rev 6.42". A window past the block, or
+            // an empty one, still aborts (stock not probed there).
+            match discimg::atapi::req_mode_reply(packet[2], packet[4]) {
+                Some(reply) => send_data_in(dev, reply).await,
+                None => {
+                    warn!("{}: REQ_MODE off={} len={} unsupported", label, packet[2], packet[4]);
+                    dev.set_error(ERR_ABRT);
+                    dev.set_status_intrq(STATUS_IDLE_ERR);
+                }
             }
         }
         SEGA_SET_MODE => {
@@ -1747,9 +1742,15 @@ async fn handle_packet(
             dev.set_status_intrq(STATUS_IDLE);
         }
         SEGA_REQ_ERROR => {
+            // F0, then the pending sense key (stock GDEMU 6.0, R117; this
+            // was all zeros). ASC/ASCQ are not tracked. Reading it clears
+            // the condition, as REQUEST SENSE does.
             let alloc = packet[4] as u16;
-            let n = core::cmp::min(alloc, REQ_ERROR_REPLY.len() as u16);
-            send_data_in(dev, &REQ_ERROR_REPLY[..n as usize]).await;
+            let reply = discimg::atapi::req_error_reply(state.pending_sense_key);
+            let n = core::cmp::min(alloc, reply.len() as u16);
+            send_data_in(dev, &reply[..n as usize]).await;
+            state.unit_attention = false;
+            state.pending_sense_key = 0;
         }
         SEGA_GET_TOC => {
             // Sega GET_TOC packet: byte 1 selects the session/area
@@ -3937,39 +3938,23 @@ fn mounted_tracks() -> &'static [crate::gdi::Track] {
 }
 
 /// 10-byte Sega REQ_STAT reply (Marcus Comstedt's layout): drive status,
-/// repeat count, CTRL/ADR, TNO, index, FAD MSB..LSB, max retry, 0.
+/// disc format | repeat count, CTRL/ADR, TNO, index, FAD MSB..LSB, max
+/// retry, 0. The disc format is SECNR's ([`disc_format`]; D-3, stock sends
+/// 0x2_ for a CDI, R117).
 fn build_req_stat_reply() -> [u8; 10] {
     let s = crate::cdda::snapshot();
     let state = audio_state(s.status);
     let tracks = mounted_tracks();
     let (fad, track) = discimg::atapi::head_position(tracks, state, s.fad);
-    discimg::atapi::req_stat_reply(state, s.repeat, fad, track)
+    discimg::atapi::req_stat_reply(state, disc_format(), s.repeat, fad, track)
 }
-
-/// 32-byte REQ_MODE reply. The Sega GD-ROM REQ_MODE packet selects an
-/// offset (packet[2]) and length (packet[4]) into this 32-byte block.
-/// The BIOS in particular reads bytes 18..26 (alloc=8) and expects to
-/// find the firmware version string `"Rev 5.07"` there — anything
-/// else and it loops the read forever (per iceGDROM's empirical
-/// findings, ide.c:195/207). Other ranges are best-effort filler that
-/// looks like a real GD-ROM drive.
-#[allow(dead_code)]
-static REQ_MODE_REPLY: [u8; 32] = [
-    0x00, 0x00, // bytes 0..2:    reserved
-    b'S', b'E', b' ', b' ', b' ', b' ', b' ', b' ', // bytes 2..10:   hardware id
-    b'G', b'D', b'-', b'R', b'O', b'M', b' ', b' ', // bytes 10..18:  model
-    b'R', b'e', b'v', b' ', b'5', b'.', b'0', b'7', // bytes 18..26:  firmware ver
-    b'9', b'6', b'3', b'6', // bytes 26..30:  date code
-    0x00, 0x00, // bytes 30..32:  reserved
-];
-
-/// 10-byte REQ_ERROR reply (no error).
-static REQ_ERROR_REPLY: [u8; 10] = [0; 10];
 
 /// Build a 6-byte REQ_SES reply describing one session (0-indexed).
 /// REQ_SES reply format (verified byte-for-byte against a stock
 /// GDEMU via `tools/g1bios_replay`):
-///   byte 0 = drive_status low nibble (= LBA_LOW & 0x0f = 0x01 ready)
+///   byte 0 = drive status, as REQ_STAT byte 0 (stock GDEMU 6.0 sent 0x02
+///            in standby, R117; the g1bios_replay capture's 0x01 was
+///            presumably taken paused)
 ///   byte 1 = 0x00
 ///   byte 2 = track number
 ///   bytes 3..6 = 24-bit FAD, big-endian
@@ -3987,13 +3972,15 @@ fn build_req_ses_reply(_gdi: Option<&'static crate::gdi::Gdi>, session: u8) -> O
     // The per-subcommand reasoning (session count vs first track number,
     // MIL-CD's second session) lives with the builder, in discimg::atapi.
     let g = gdi_ref()?;
-    discimg::atapi::req_ses_reply(g.tracks(), g.is_cdi, g.boot_area_lba, g.sessions, session)
+    let status = discimg::atapi::drive_status(audio_state(crate::cdda::snapshot().status));
+    discimg::atapi::req_ses_reply(g.tracks(), g.is_cdi, g.boot_area_lba, g.sessions, session, status)
 }
 
 /// Build a 100-byte CD_SCD format-0 reply with a bit-expanded
 /// Q-subcode payload. The 4-byte header is `[0, audio_status, 0, 100]`
 /// and the remaining 96 bytes are 12 bytes of Q-subchannel expanded
-/// MSB-first into one byte per bit (`0x7F` for 1, `0x3F` for 0), with
+/// MSB-first into one byte per bit (`0x40` for 1, `0x00` for 0: Q is bit 6,
+/// P and R..W zero, as stock GDEMU 6.0 sends it, R117), with
 /// a CRC-CCITT (poly 0x1021, init 0) computed across the bit stream
 /// and substituted into Q[10..12] partway through expansion. Sending
 /// all-zero payload bytes makes the BIOS see ADR=0 / CTRL=0 / MSF=0
@@ -4001,8 +3988,9 @@ fn build_req_ses_reply(_gdi: Option<&'static crate::gdi::Gdi>, session: u8) -> O
 /// `firmware-rv32/source/cdda.c`.
 ///
 /// Format 1 (the one games poll while CDDA plays) is the plain 14-byte
-/// form: the same header with length 14, then Q[0..10]. Returns the reply
-/// length.
+/// form: the same header with length 14, then CTRL/ADR, TNO, index and the
+/// relative / absolute positions as binary FADs (D-2, R117). Returns the
+/// reply length.
 fn build_get_scd_reply(format: u8, r: &mut [u8; 100]) -> usize {
     let s = crate::cdda::snapshot();
     let state = audio_state(s.status);

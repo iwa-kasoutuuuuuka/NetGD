@@ -87,7 +87,9 @@ pub fn leadout_lba<T: TrackInfo>(tracks: &[T], is_cdi: bool) -> u32 {
 }
 
 /// Build a 408-byte Sega GD-ROM TOC response. `area` 0 is the single
-/// density area, 1 the high density area; on a CDI every track is in area 0.
+/// density area, 1 the high density area. A CDI has no areas: every area
+/// number gets the same TOC of all its tracks (stock GDEMU 6.0 answers
+/// GET_TOC area 1 of a CDI that way, R117; it used to be all 0xFF).
 ///
 /// Layout: 99 4-byte entries (tracks 1..99), then first-track, last-track and
 /// lead-out entries, 4 bytes each. Each entry is `[CTRL_ADR, FAD_hi, FAD_mid,
@@ -103,7 +105,7 @@ pub fn build_toc<T: TrackInfo>(
 
     let in_area = |t: &T| -> bool {
         if is_cdi {
-            area == 0
+            true
         } else if area == 0 {
             t.start_lba() < boot_area_lba
         } else {
@@ -180,27 +182,46 @@ pub fn head_position<T: TrackInfo>(
     (fad, track)
 }
 
-/// 10-byte Sega REQ_STAT reply: drive status, repeat count, CTRL/ADR, TNO,
-/// index, FAD MSB..LSB, max retry, 0. `fad`/`track` come from
-/// [`head_position`].
+/// Drive status codes (low nibble of SECNR, byte 0 of REQ_STAT / REQ_SES).
+pub const DRIVE_PAUSE: u8 = 0x01;
+pub const DRIVE_STANDBY: u8 = 0x02;
+pub const DRIVE_PLAY: u8 = 0x03;
+
+/// Disc format, already in the high nibble (SECNR, REQ_STAT byte 1).
+/// Stock GDEMU 6.0 reports CD-ROM XA for a CDI (R117).
+pub const DISC_FORMAT_CDROM_XA: u8 = 0x20;
+pub const DISC_FORMAT_GDROM: u8 = 0x80;
+
+/// Drive status for the pickup state: what REQ_STAT and REQ_SES put in
+/// byte 0.
+pub fn drive_status(state: AudioState) -> u8 {
+    match state {
+        AudioState::Playing => DRIVE_PLAY,
+        AudioState::Paused | AudioState::Finished => DRIVE_PAUSE,
+        AudioState::Error => 9,
+        AudioState::Standby => DRIVE_STANDBY,
+    }
+}
+
+/// 10-byte Sega REQ_STAT reply: drive status, disc format | repeat count,
+/// CTRL/ADR, TNO, index, FAD MSB..LSB, max retry, 0. `disc_format` is a
+/// `DISC_FORMAT_*` value (high nibble; D-3, stock GDEMU 6.0 sends 0x2_ for a
+/// CDI, R117); `repeat` is the 4-bit CDDA repeat count. `fad`/`track` come
+/// from [`head_position`].
 pub fn req_stat_reply<T: TrackInfo>(
     state: AudioState,
+    disc_format: u8,
     repeat: u8,
     fad: u32,
     track: Option<&T>,
 ) -> [u8; 10] {
-    let status: u8 = match state {
-        AudioState::Playing => 3,
-        AudioState::Paused | AudioState::Finished => 1,
-        AudioState::Error => 9,
-        AudioState::Standby => 2,
-    };
+    let status = drive_status(state);
     let (ctrl_adr, tno) = track
         .map(|t| ((t.ctrl() << 4) | 1, t.number()))
         .unwrap_or((0x41, 1));
     [
         status,
-        repeat,
+        (disc_format & 0xF0) | (repeat & 0x0F),
         ctrl_adr,
         tno,
         0x01,
@@ -223,9 +244,49 @@ pub fn put_msf(out: &mut [u8], blk: u32) {
     out[2] = bcd(blk % 75);
 }
 
+/// 24-bit big-endian FAD into `out[0..3]`.
+fn put_fad(out: &mut [u8], fad: u32) {
+    out[0] = (fad >> 16) as u8;
+    out[1] = (fad >> 8) as u8;
+    out[2] = fad as u8;
+}
+
+/// The 32 bytes REQ_MODE reads a window of, as stock GDEMU 6.0 returns them
+/// for (offset 0, length 32) (R117): ten parameter bytes, hardware id
+/// `"SE      "`, firmware `"Rev 6.42"`, date `"990316"`.
+pub const REQ_MODE_BLOCK: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xb4, 0x19, 0x00, 0x00, 0x08, // parameters
+    b'S', b'E', b' ', b' ', b' ', b' ', b' ', b' ', // hardware id
+    b'R', b'e', b'v', b' ', b'6', b'.', b'4', b'2', // firmware version
+    b'9', b'9', b'0', b'3', b'1', b'6', // date
+];
+
+/// REQ_MODE reply for CDB offset `offset` (byte 2) and length `len` (byte 4):
+/// that window of [`REQ_MODE_BLOCK`], or `None` (the caller aborts) for an
+/// empty window or one past the 32 bytes -- what stock does there is not known.
+pub fn req_mode_reply(offset: u8, len: u8) -> Option<&'static [u8]> {
+    let (o, l) = (offset as usize, len as usize);
+    if l == 0 || o + l > REQ_MODE_BLOCK.len() {
+        return None;
+    }
+    Some(&REQ_MODE_BLOCK[o..o + l])
+}
+
+/// 10-byte REQ_ERROR reply (SPI): byte 0 = 0xF0, byte 2 low nibble = sense
+/// key, bytes 8/9 = ASC/ASCQ (not tracked: 0). Stock GDEMU 6.0 sends
+/// `F0 00 ...` with nothing pending (R117); this used to be all zeros.
+pub fn req_error_reply(sense_key: u8) -> [u8; 10] {
+    let mut r = [0u8; 10];
+    r[0] = 0xF0;
+    r[2] = sense_key & 0x0F;
+    r
+}
+
 /// 6-byte REQ_SES reply for one session (see the firmware's `ide.rs` for
 /// the history of why each subcommand reports what it does).
-///   byte 0 = 0x01 (ready), byte 1 = 0, byte 2 = track, bytes 3..6 = FAD BE
+///   byte 0 = `status`, the drive status ([`drive_status`]; stock GDEMU 6.0
+///   sends 0x02 in standby, R117 -- this was a constant 0x01), byte 1 = 0,
+///   byte 2 = track, bytes 3..6 = FAD BE
 ///   session 0: session count + lead-out FAD
 ///   session 1: GDI: first track below `boot_area_lba`; CDI: the first track
 ///   session n >= 2 (CDI): the first track of session n when the tracks know
@@ -241,9 +302,10 @@ pub fn req_ses_reply<T: TrackInfo>(
     boot_area_lba: u32,
     sessions: u8,
     session: u8,
+    status: u8,
 ) -> Option<[u8; 6]> {
     let mut r = [0u8; 6];
-    r[0] = 0x01;
+    r[0] = status;
     let (track, fad) = match session {
         0 => (sessions, leadout_lba(tracks, is_cdi).wrapping_add(150)),
         1 => {
@@ -275,11 +337,14 @@ pub fn req_ses_reply<T: TrackInfo>(
     Some(r)
 }
 
-/// Build a CD_SCD reply. Format 1 is the plain 14-byte form (header
-/// `[0, audio_status, 0, 14]` then Q[0..10]); anything else is the 100-byte
-/// form with Q bit-expanded (`0x7F` / `0x3F`) and a CRC-CCITT substituted
-/// into Q[10..12]. Returns the reply length. `fad`/`track` come from
-/// [`head_position`].
+/// Build a CD_SCD reply. Format 1 is the plain 14-byte form: header
+/// `[0, audio_status, 0, 14]`, then CTRL/ADR, TNO, index, the relative and
+/// (after a 0) the absolute position as 24-bit binary FADs (D-2: stock
+/// GDEMU 6.0 sends `00 00 96` at standby, R117; this used to be BCD MSF).
+/// Anything else is the 100-byte form: the raw Q subcode (MSF in BCD, as on
+/// a disc) with a CRC-CCITT substituted into Q[10..12], one byte per bit,
+/// Q in bit 6 (`0x40`) and P, R..W zero (stock, R117; was `0x7F` / `0x3F`).
+/// Returns the reply length. `fad`/`track` come from [`head_position`].
 pub fn get_scd_reply<T: TrackInfo>(
     format: u8,
     state: AudioState,
@@ -295,25 +360,29 @@ pub fn get_scd_reply<T: TrackInfo>(
         AudioState::Standby => 0x15,
     };
     let mut q: [u8; 12] = [0; 12];
+    let mut rel = 0;
     match track {
         Some(t) => {
             q[0] = (t.ctrl() << 4) | 1; // CTRL, ADR=1 (Q-mode 1)
             q[1] = bcd(t.number() as u32);
-            put_msf(&mut q[3..6], fad.saturating_sub(t.start_lba().wrapping_add(150)));
+            rel = fad.saturating_sub(t.start_lba().wrapping_add(150));
         }
         None => q[0] = 0x41,
     }
     q[2] = 0x01; // index 1
-    put_msf(&mut q[7..10], fad);
-    // q[10..12] will be overwritten with CRC mid-expansion.
 
     r.fill(0);
     r[1] = audio_status;
     if format == 1 {
         r[3] = 14;
-        r[4..14].copy_from_slice(&q[..10]);
+        r[4..7].copy_from_slice(&q[..3]);
+        put_fad(&mut r[7..10], rel);
+        put_fad(&mut r[11..14], fad);
         return 14;
     }
+    put_msf(&mut q[3..6], rel);
+    put_msf(&mut q[7..10], fad);
+    // q[10..12] will be overwritten with CRC mid-expansion.
     r[3] = 100; // data length
 
     // Expand bits MSB-first; compute CRC-CCITT across the bit stream. After
@@ -331,7 +400,7 @@ pub fn get_scd_reply<T: TrackInfo>(
             let b = (byte >> (7 - bit)) & 1;
             let top = (crc >> 15) & 1;
             crc = (crc << 1) ^ if (top ^ b as u16) != 0 { 0x1021 } else { 0 };
-            r[4 + i * 8 + bit] = if b != 0 { 0x7F } else { 0x3F };
+            r[4 + i * 8 + bit] = (b as u8) << 6;
         }
     }
     100

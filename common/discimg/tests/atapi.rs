@@ -130,8 +130,10 @@ fn toc_mil_cd_has_everything_in_area_0_and_an_exact_leadout() {
             (404, [0x41, 0x00, 0xFE, 0x7E]), // 45000+20000+150 = 65150
         ])
     );
-    // Area 1 of a CDI is empty.
-    assert_eq!(toc(&m, true, 45000, 1), [0xFF; 408]);
+    // Area 1 of a CDI is the same TOC (stock GDEMU 6.0, R117: GET_TOC_1 of the
+    // dcload-ip CDI repeats area 0, lead-out included).
+    assert_eq!(toc(&m, true, 45000, 1), toc(&m, true, 45000, 0));
+    assert_eq!(toc(&m, true, 45000, 2), toc(&m, true, 45000, 0));
 }
 
 #[test]
@@ -166,20 +168,20 @@ fn leadout() {
 fn req_ses_gdrom() {
     let g = gd3();
     // session count 1, lead-out 549150 + 150 = 549300 = 0x0861B4
-    assert_eq!(req_ses_reply(&g, false, 45000, 1, 0), Some([0x01, 0x00, 0x01, 0x08, 0x61, 0xB4]));
-    assert_eq!(req_ses_reply(&g, false, 45000, 1, 1), Some([0x01, 0x00, 0x01, 0x00, 0x00, 0x96]));
+    assert_eq!(req_ses_reply(&g, false, 45000, 1, 0, DRIVE_STANDBY), Some([0x02, 0x00, 0x01, 0x08, 0x61, 0xB4]));
+    assert_eq!(req_ses_reply(&g, false, 45000, 1, 1, DRIVE_STANDBY), Some([0x02, 0x00, 0x01, 0x00, 0x00, 0x96]));
     // GD-ROM reports one session only.
-    assert_eq!(req_ses_reply(&g, false, 45000, 1, 2), None);
-    assert_eq!(req_ses_reply(&g, false, 45000, 1, 3), None);
+    assert_eq!(req_ses_reply(&g, false, 45000, 1, 2, DRIVE_STANDBY), None);
+    assert_eq!(req_ses_reply(&g, false, 45000, 1, 3, DRIVE_STANDBY), None);
 }
 
 #[test]
 fn req_ses_mil_cd() {
     let m = mil();
-    assert_eq!(req_ses_reply(&m, true, 45000, 2, 0), Some([0x01, 0x00, 0x02, 0x00, 0xFE, 0x7E]));
-    assert_eq!(req_ses_reply(&m, true, 45000, 2, 1), Some([0x01, 0x00, 0x01, 0x00, 0x00, 0x96]));
-    assert_eq!(req_ses_reply(&m, true, 45000, 2, 2), Some([0x01, 0x00, 0x03, 0x00, 0xB0, 0x5E]));
-    assert_eq!(req_ses_reply(&m, true, 45000, 2, 3), None);
+    assert_eq!(req_ses_reply(&m, true, 45000, 2, 0, DRIVE_STANDBY), Some([0x02, 0x00, 0x02, 0x00, 0xFE, 0x7E]));
+    assert_eq!(req_ses_reply(&m, true, 45000, 2, 1, DRIVE_STANDBY), Some([0x02, 0x00, 0x01, 0x00, 0x00, 0x96]));
+    assert_eq!(req_ses_reply(&m, true, 45000, 2, 2, DRIVE_STANDBY), Some([0x02, 0x00, 0x03, 0x00, 0xB0, 0x5E]));
+    assert_eq!(req_ses_reply(&m, true, 45000, 2, 3, DRIVE_STANDBY), None);
 }
 
 #[test]
@@ -190,17 +192,17 @@ fn req_ses_two_track_cdi_session_2_is_the_data_track() {
     // session's first track (11700); with a stale 45000 the lookup still
     // finds nothing, which is why the caller must not guess.
     let c = vec![t(1, 0, 0, 11000), t(2, 11700, 4, 20000)];
-    assert_eq!(req_ses_reply(&c, true, 45000, 2, 2), None);
+    assert_eq!(req_ses_reply(&c, true, 45000, 2, 2, DRIVE_STANDBY), None);
     // boot_area_lba = the data track's start finds it.
-    assert_eq!(req_ses_reply(&c, true, 11700, 2, 2), Some([0x01, 0x00, 0x02, 0x00, 0x2E, 0x4A]));
+    assert_eq!(req_ses_reply(&c, true, 11700, 2, 2, DRIVE_STANDBY), Some([0x02, 0x00, 0x02, 0x00, 0x2E, 0x4A]));
 }
 
 #[test]
 fn req_ses_no_sda_track() {
     let g = vec![t(3, 45000, 4, 100)];
-    assert_eq!(req_ses_reply(&g, false, 45000, 1, 1), None);
+    assert_eq!(req_ses_reply(&g, false, 45000, 1, 1, DRIVE_STANDBY), None);
     // Session 0 does not need any track.
-    assert_eq!(req_ses_reply(&[] as &[TrackDesc], false, 45000, 1, 0), Some([1, 0, 1, 0x08, 0x61, 0xB4]));
+    assert_eq!(req_ses_reply(&[] as &[TrackDesc], false, 45000, 1, 0, DRIVE_STANDBY), Some([2, 0, 1, 0x08, 0x61, 0xB4]));
 }
 
 #[test]
@@ -226,13 +228,13 @@ fn req_stat() {
     let g = gd3();
     let (fad, tr) = head_position(&g, AudioState::Standby, 777);
     assert_eq!(
-        req_stat_reply(AudioState::Standby, 0, fad, tr),
-        [0x02, 0x00, 0x41, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
+        req_stat_reply(AudioState::Standby, DISC_FORMAT_GDROM, 0, fad, tr),
+        [0x02, 0x80, 0x41, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
     );
     let (fad, tr) = head_position(&g, AudioState::Playing, 1000);
     assert_eq!(
-        req_stat_reply(AudioState::Playing, 3, fad, tr),
-        [0x03, 0x03, 0x01, 0x02, 0x01, 0x00, 0x03, 0xE8, 0x00, 0x00]
+        req_stat_reply(AudioState::Playing, DISC_FORMAT_CDROM_XA, 3, fad, tr),
+        [0x03, 0x23, 0x01, 0x02, 0x01, 0x00, 0x03, 0xE8, 0x00, 0x00]
     );
     for (s, code) in [
         (AudioState::Playing, 3),
@@ -241,13 +243,17 @@ fn req_stat() {
         (AudioState::Error, 9),
         (AudioState::Standby, 2),
     ] {
-        assert_eq!(req_stat_reply::<TrackDesc>(s, 0, 0, None)[0], code);
+        assert_eq!(req_stat_reply::<TrackDesc>(s, 0, 0, 0, None)[0], code);
+        assert_eq!(drive_status(s), code);
     }
     // No track under the head: CTRL/ADR 0x41, track 1; FAD is full 24-bit BE.
     assert_eq!(
-        req_stat_reply::<TrackDesc>(AudioState::Paused, 9, 0x01_02_03, None),
+        req_stat_reply::<TrackDesc>(AudioState::Paused, 0, 9, 0x01_02_03, None),
         [0x01, 0x09, 0x41, 0x01, 0x01, 0x01, 0x02, 0x03, 0x00, 0x00]
     );
+    // Byte 1: disc format high nibble, repeat count low (the firmware's repeat
+    // is 4 bits; anything above is masked so it cannot spill into the format).
+    assert_eq!(req_stat_reply::<TrackDesc>(AudioState::Standby, DISC_FORMAT_CDROM_XA, 0x1F, 0, None)[1], 0x2F);
 }
 
 #[test]
@@ -256,10 +262,11 @@ fn get_scd_format_1_is_14_bytes() {
     let (fad, tr) = head_position(&g, AudioState::Playing, 1000);
     let mut r = [0xEEu8; 100];
     assert_eq!(get_scd_reply(1, AudioState::Playing, fad, tr, &mut r), 14);
-    // Q: ctrl/adr 01, track 02, index 01, rel 00:05:25 (400 = 1000-600), 00, abs 00:13:25.
+    // Q: ctrl/adr 01, track 02, index 01, rel FAD 400 (1000-600) = 0x000190, 00,
+    // abs FAD 1000 = 0x0003E8 -- binary, not BCD MSF (D-2; stock GDEMU 6.0, R117).
     assert_eq!(
         &r[..14],
-        &[0x00, 0x11, 0x00, 0x0E, 0x01, 0x02, 0x01, 0x00, 0x05, 0x25, 0x00, 0x00, 0x13, 0x25]
+        &[0x00, 0x11, 0x00, 0x0E, 0x01, 0x02, 0x01, 0x00, 0x01, 0x90, 0x00, 0x00, 0x03, 0xE8]
     );
     // The rest of the buffer is zeroed, not left alone.
     assert!(r[14..].iter().all(|&b| b == 0));
@@ -271,16 +278,16 @@ fn get_scd_idle_and_trackless() {
     let (fad, tr) = head_position(&g, AudioState::Standby, 0);
     let mut r = [0u8; 100];
     assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
-    // Track 1, data; relative 0; absolute 150 = 00:02:00.
+    // Track 1, data; relative 0; absolute FAD 150 = 0x000096.
     assert_eq!(
         &r[..14],
-        &[0x00, 0x15, 0x00, 0x0E, 0x41, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00]
+        &[0x00, 0x15, 0x00, 0x0E, 0x41, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x96]
     );
     // No track: ctrl/adr 0x41, track and relative time left zero.
     assert_eq!(get_scd_reply::<TrackDesc>(1, AudioState::Paused, 150, None, &mut r), 14);
     assert_eq!(
         &r[..14],
-        &[0x00, 0x12, 0x00, 0x0E, 0x41, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00]
+        &[0x00, 0x12, 0x00, 0x0E, 0x41, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x96]
     );
     for (s, code) in [
         (AudioState::Playing, 0x11),
@@ -319,7 +326,9 @@ fn get_scd_format_0_is_100_bytes_with_bit_expanded_q_and_inverted_crc() {
     let mut r = [0u8; 100];
     assert_eq!(get_scd_reply(0, AudioState::Playing, fad, tr, &mut r), 100);
     assert_eq!(&r[..4], &[0x00, 0x11, 0x00, 100]);
-    // Same Q as the format-1 case, then the inverted CRC of Q[0..10].
+    // Raw Q (MSF in BCD, as on the disc): rel 00:05:25, abs 00:13:25, then the
+    // inverted CRC of Q[0..10]. Each bit is one byte: Q is bit 6 (0x40), P and
+    // R..W are 0 (stock GDEMU 6.0, R117; this used to be 0x7F / 0x3F).
     let q10 = [0x01, 0x02, 0x01, 0x00, 0x05, 0x25, 0x00, 0x00, 0x13, 0x25];
     let crc = !xmodem(&q10);
     let mut q = q10.to_vec();
@@ -327,7 +336,7 @@ fn get_scd_format_0_is_100_bytes_with_bit_expanded_q_and_inverted_crc() {
     let mut want = Vec::new();
     for b in &q {
         for bit in 0..8 {
-            want.push(if (b >> (7 - bit)) & 1 != 0 { 0x7F } else { 0x3F });
+            want.push(if (b >> (7 - bit)) & 1 != 0 { 0x40 } else { 0x00 });
         }
     }
     assert_eq!(&r[4..], &want[..]);
@@ -373,8 +382,10 @@ fn sweep_matches_the_original_code() {
         let og = Gdi { tracks: old, boot_area_lba: boot, is_cdi, sessions };
 
         for area in 0..3u8 {
+            // A CDI answers every area with its one TOC (R117); the original
+            // code gave area 0 only and FF for the rest.
             let mut o = [0u8; 408];
-            og.build_toc(area, &mut o);
+            og.build_toc(if is_cdi { 0 } else { area }, &mut o);
             assert_eq!(toc(&new, is_cdi, boot, area), o);
         }
         for s in 0..5u8 {
@@ -384,7 +395,14 @@ fn sweep_matches_the_original_code() {
             // CDI session 0 and all GDI replies must still match; the CDI
             // cases are pinned in tests/cdi_sessions.rs.
             if !is_cdi || s == 0 {
-                assert_eq!(req_ses_reply(&new, is_cdi, boot, sessions, s), oracle::build_req_ses_reply(Some(&og), s));
+                // Byte 0 is now the drive status (R117); the original code
+                // always put 0x01 there.
+                let st = rnd(16) as u8;
+                let want = oracle::build_req_ses_reply(Some(&og), s).map(|mut r| {
+                    r[0] = st;
+                    r
+                });
+                assert_eq!(req_ses_reply(&new, is_cdi, boot, sessions, s, st), want);
             }
         }
         assert_eq!(leadout_lba(&new, is_cdi), og.leadout_lba());
@@ -397,18 +415,130 @@ fn sweep_matches_the_original_code() {
             let (of, ot) = oracle::head_position(&snap, Some(&og));
             assert_eq!(hf, of);
             assert_eq!(ht.map(|t| t.number), ot.map(|t| t.number));
-            assert_eq!(
-                req_stat_reply(ns, repeat, hf, ht),
-                oracle::build_req_stat_reply(&snap, Some(&og))
-            );
+            // Byte 1 now carries the disc format in its high nibble (D-3,
+            // R117); the original code put the raw repeat count there.
+            let fmt = [0u8, DISC_FORMAT_CDROM_XA, DISC_FORMAT_GDROM][rnd(3) as usize];
+            let mut want = oracle::build_req_stat_reply(&snap, Some(&og));
+            want[1] = fmt | (want[1] & 0x0F);
+            assert_eq!(req_stat_reply(ns, fmt, repeat, hf, ht), want);
             for format in [0u8, 1, 2] {
                 let mut a = [0xCCu8; 100];
                 let mut b = [0xDDu8; 100];
                 let la = get_scd_reply(format, ns, hf, ht, &mut a);
                 let lb = oracle::build_get_scd_reply(format, &snap, Some(&og), &mut b);
                 assert_eq!(la, lb);
-                assert_eq!(a, b);
+                let mut want = b;
+                if format == 1 {
+                    // Positions are binary FADs now (D-2, R117); the rest of
+                    // the reply is the original's.
+                    let rel = match ht {
+                        Some(t) => hf.saturating_sub(t.start_lba.wrapping_add(150)),
+                        None => 0,
+                    };
+                    want[7..10].copy_from_slice(&rel.to_be_bytes()[1..]);
+                    want[11..14].copy_from_slice(&hf.to_be_bytes()[1..]);
+                } else {
+                    // Bit-expanded Q: 1 -> 0x40, 0 -> 0x00 instead of 0x7F / 0x3F.
+                    for x in &mut want[4..] {
+                        *x = if *x == 0x7F { 0x40 } else { 0x00 };
+                    }
+                }
+                assert_eq!(a, want);
             }
         }
     }
 }
+
+#[test]
+fn req_ses_byte_0_is_the_drive_status() {
+    // Stock GDEMU 6.0 answered 0x02 (standby) right after REQ_STAT said
+    // standby (R117). The older g1bios_replay capture saw 0x01, presumably
+    // with the drive paused by the BIOS's CD_SEEK -- same rule.
+    let g = gd3();
+    for st in [DRIVE_PAUSE, DRIVE_STANDBY, DRIVE_PLAY] {
+        assert_eq!(req_ses_reply(&g, false, 45000, 1, 1, st).unwrap()[0], st);
+    }
+}
+
+#[test]
+fn req_mode_is_a_window_into_the_stock_32_byte_block() {
+    // Stock GDEMU 6.0 (R117): REQ_MODE (0, 32).
+    let stock = hex("0000000000b419000008534520202020202052657620362e3432393930333136");
+    assert_eq!(&REQ_MODE_BLOCK[..], &stock[..]);
+    assert_eq!(req_mode_reply(0, 32), Some(&stock[..]));
+    assert_eq!(req_mode_reply(0, 10), Some(&stock[..10]));
+    assert_eq!(req_mode_reply(18, 8), Some(&b"Rev 6.42"[..]));
+    assert_eq!(req_mode_reply(10, 8), Some(&b"SE      "[..]));
+    // Outside the block, or empty: not answered (the caller aborts as before).
+    assert_eq!(req_mode_reply(0, 33), None);
+    assert_eq!(req_mode_reply(31, 2), None);
+    assert_eq!(req_mode_reply(32, 1), None);
+    assert_eq!(req_mode_reply(5, 0), None);
+    assert_eq!(req_mode_reply(255, 255), None);
+}
+
+#[test]
+fn req_error_reply_layout() {
+    // Stock GDEMU 6.0 with nothing pending (R117): F0 then zeros.
+    assert_eq!(req_error_reply(0), [0xF0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    // Sense key in the low nibble of byte 2 (SPI; gdprobe reads it there).
+    assert_eq!(req_error_reply(0x05), [0xF0, 0, 0x05, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(req_error_reply(0x16), [0xF0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+/// The dcload-ip CDI the stock GDEMU 6.0 had mounted in R117
+/// (`docs/research/probe-records/stock_20261121_02.txt`, img=0): track 1 audio
+/// at FAD 150 (session 1), track 2 data at FAD 11852 (session 2), lead-out
+/// FAD 0x05017C. Only what the TOC shows matters; track 1's length is a guess.
+fn dcload_cdi() -> Vec<TrackDesc> {
+    let mut a = t(1, 0, 0, 11552);
+    a.session = 1;
+    let mut d = t(2, 11702, 4, 0x05017C - 150 - 11702);
+    d.session = 2;
+    d.sector_size = 2336;
+    vec![a, d]
+}
+
+#[test]
+fn the_stock_record_of_the_dcload_cdi() {
+    let c = dcload_cdi();
+    let boot = cdi_boot_area_lba(&c, 2);
+    assert_eq!(boot, 11702);
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0);
+
+    // REQ_STAT: 02 2f 01 01 01 00 00 96 00 00. The low nibble of byte 1 (F) is
+    // the repeat count field; where stock gets F at idle is not known, so the
+    // test passes the stock value and checks the rest.
+    let stat = req_stat_reply(AudioState::Standby, DISC_FORMAT_CDROM_XA, 0x0F, fad, tr);
+    assert_eq!(&stat[..], &hex("022f0101010000960000")[..]);
+
+    // GET_TOC area 0 and 1: the same 408 bytes.
+    let mut want = [0xFFu8; 408];
+    want[..8].copy_from_slice(&hex("0100009641002e4c"));
+    want[396..].copy_from_slice(&hex("01010000410200004105017c"));
+    assert_eq!(toc(&c, true, boot, 0), want);
+    assert_eq!(toc(&c, true, boot, 1), want);
+
+    // REQ_SES 0..3.
+    let st = drive_status(AudioState::Standby);
+    assert_eq!(req_ses_reply(&c, true, boot, 2, 0, st).unwrap()[..], hex("02000205017c")[..]);
+    assert_eq!(req_ses_reply(&c, true, boot, 2, 1, st).unwrap()[..], hex("020001000096")[..]);
+    assert_eq!(req_ses_reply(&c, true, boot, 2, 2, st).unwrap()[..], hex("020002002e4c")[..]);
+    assert_eq!(req_ses_reply(&c, true, boot, 2, 3, st), None); // stock: CHECK
+
+    // GET_SCD format 0 (100 bytes, copied from the record) and format 1 (14).
+    let mut r = [0u8; 100];
+    assert_eq!(get_scd_reply(0, AudioState::Standby, fad, tr, &mut r), 100);
+    assert_eq!(&r[..], &hex(STOCK_GET_SCD_0)[..]);
+    assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
+    assert_eq!(&r[..14], &hex("0015000e01010100000000000096")[..]);
+
+    // REQ_ERROR with nothing pending.
+    assert_eq!(&req_error_reply(0)[..], &hex("f0000000000000000000")[..]);
+}
+
+const STOCK_GET_SCD_0: &str = "00150064000000000000004000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000400040400040000000400040000000";
