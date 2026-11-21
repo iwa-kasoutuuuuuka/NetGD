@@ -32,6 +32,11 @@ void nm_plat_present(const nm_screen_t *s)
 
 void nm_plat_handoff(int mode)
 {
+    char row[NM_COLS + 1];
+    for (int r = 0; r < NM_ROWS; r++) {                 /* what was on the screen when the BIOS took over */
+        nm_screen_row_text(&nm_host_screen, r, row);
+        if (row[0]) printf("H%02d|%s\n", r, row);
+    }
     printf("HANDOFF %s\n", mode == NM_HANDOFF_REBOOT ? "reboot" : "bios");
     fflush(stdout);
     exit(0);                    /* atexit() prints the SIM summary line */

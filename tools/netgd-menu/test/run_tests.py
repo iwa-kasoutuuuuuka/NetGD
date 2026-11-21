@@ -61,7 +61,7 @@ EXE = os.path.join(ROOT, "build", "menu_host.exe" if os.name == "nt" else "menu_
 RECV_EXE = os.path.join(RECV, "build", "test_host.exe" if os.name == "nt" else "test_host")
 
 MENU_SRCS = ["src/nm_text.c", "src/nm_slot.c", "src/nm_cfgparse.c", "src/nm_ipbin.c", "src/nm_list.c", "src/nm_input.c",
-             "src/nm_screen.c", "src/nm_scan.c", "src/nm_ui.c"]
+             "src/nm_screen.c", "src/nm_scan.c", "src/nm_launch.c", "src/nm_ui.c"]
 # the netgd-recv core and its test doubles (a disk image file, a packet-level firmware model); never main.c, xport_pc.c,
 # dev_kos.c, fwxfer_kos.c, plat_kos.c
 RECV_SRCS = ["src/crc32.c", "src/manifest.c", "src/ngblk.c", "src/fwctl.c", "src/ngfs.c", "src/recv_core.c", "src/diskio.c",
@@ -329,6 +329,107 @@ class TestListAndInfo(UiBase):
         img = self.card({"/02/DISC.GDI": GDI3})
         run = self.ui(img, "scan dump", "--slots", "2", "--nocontroller")
         self.assertEqual(run.rows[17], "No controller")
+
+
+class TestLaunch(UiBase):
+    """Design 11.2 L3-L7, L13, L14: the 0x52 mount, the READY wait and the hand-off."""
+
+    def games(self, extra=None):
+        files = {"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi", "/MYGAME/DISC.GDI": GDI3}
+        files.update(extra or {})
+        return self.card(files)
+
+    def fw(self, run):
+        """the firmware packets after the two of the start-up (E0 03, 52 00), as strings"""
+        return run.packets[2:]
+
+    def test_l3_launch_by_number(self):
+        run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3")
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertEqual([p[:11] for p in run.packets[:2]], ["E0 03 00 00", "52 00 00 00"])
+        self.assertEqual(self.fw(run)[0][:11], "52 82 03 00")                    # 52 82 lo hi
+        self.assertEqual([p[:2] for p in self.fw(run)], ["52", "00", "00"])      # READY twice in a row, then nothing more
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertIn("H04|  Starting 03 ...", run.text)                         # the screen at the hand-off
+        self.assertEqual((run.n("gdemu_mounts"), run.n("cmd_writes"), run.n("begin")), (1, 0, 0))
+
+    def test_l3_notready_polls_before_ready(self):
+        run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3", "--notready", "5")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        tur = [p for p in self.fw(run) if p.startswith("00 ")]
+        self.assertEqual(len(tur), 5 + 2, run.text)                              # five NOT READY, then two READY
+
+    def test_l4_launch_by_name(self):
+        files = {"/02/DISC.GDI": GDI3, "/SECOND_GAME_X/DISC.GDI": GDI3}
+        run = self.ui(self.card(files), "scan D A t:2000", "--slots", "2")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        fw = self.fw(run)
+        self.assertEqual(fw[0], "E0 05 00 53 45 43 4F 4E 44 5F 47 41")         # SECOND_GA
+        self.assertEqual(fw[1], "E0 05 01 4D 45 5F 58 00 00 00 00 00")         # ME_X + NUL
+        self.assertEqual(fw[2], "E0 02 00 00 00 00 00 00 00 00 00 00")         # mount the staged name
+        self.assertEqual(run.n("named_mounts"), 1)
+        self.assertIn("Starting SECOND_GAME_X ...", run.text)
+
+    def test_l5_no_image(self):
+        run = self.ui(self.games(), "scan A dump A t:100 dump", "--slots", "3")   # 02 is not mountable in the model
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertEqual(run.handoff, [])
+        self.assertEqual(run.screens[0][0]["state"], "6", run.text)               # NM_S_DIALOG
+        self.assertIn("No image in folder 02", "\n".join(run.screens[0][1]))
+        self.assertEqual(run.screens[1][0]["state"], "3")                         # back in the list
+        self.assertEqual(run.screens[1][1][2][:1], ">")
+        self.assertEqual(run.n("gdemu_mounts"), 0)
+
+    def test_l5_empty_and_incomplete_folders_are_not_started(self):
+        files = {"/02/README.TXT": b"x", "/03/DISC.NGP": b"x"}
+        run = self.ui(self.card(files), "scan A dump B D A dump", "--slots", "2,3")
+        self.assertIn("No image in folder 02", "\n".join(run.screens[0][1]))
+        self.assertIn("Image in folder 03 is incomplete", "\n".join(run.screens[1][1]))
+        self.assertEqual([p for p in self.fw(run) if p.startswith("52 8")], [])  # nothing was sent to the firmware
+
+    def test_l6_drive_never_ready(self):
+        files = {"/02/DISC.GDI": GDI3, "/GDEMU.INI": b"open_time=700\n"}
+        run = self.ui(self.card(files), "scan A t:10300 dump t:600 dump A t:3000 dump t:9000 dump B dump",
+                      "--slots", "2", "--notready", "1000000")
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertEqual(run.handoff, [])
+        self.assertEqual(run.screens[0][0]["state"], "5", run.text)               # NM_S_LAUNCH: 10 s + open_time not over yet
+        self.assertIn("Waiting for the drive ... 10 s", "\n".join(run.screens[0][1]))
+        self.assertEqual(run.screens[1][0]["state"], "6")                         # the dialog
+        self.assertIn("Drive not ready", "\n".join(run.screens[1][1]))
+        self.assertIn("did not become READY in 10 s", "\n".join(run.screens[1][1]))
+        self.assertEqual(run.screens[2][0]["state"], "5")                         # A: waiting again, without mounting again
+        self.assertEqual(run.screens[3][0]["state"], "6")                         # the second wait ran out as well
+        self.assertEqual(run.screens[4][0]["state"], "3")                         # B: the list
+        self.assertEqual(run.n("gdemu_mounts"), 1)                                # the mount was not repeated
+
+    def test_l7_unit_attention(self):
+        run = self.ui(self.games(), "scan D ua A t:2000", "--slots", "2,3")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        mounts = [p for p in self.fw(run) if p.startswith("52 82")]
+        self.assertEqual(len(mounts), 2, run.text)                                # the first was not executed: sent again
+        # the UNIT ATTENTION the mount raises is not repeated away inside TEST UNIT READY: the wait handles it
+        tur = [p for p in self.fw(run) if p.startswith("00 ")]
+        self.assertEqual(len(tur), 3, run.text)
+
+    def test_l13_reboot_hand_off(self):
+        run = self.ui(self.games(), "scan X A B A t:2000", "--slots", "2,3")
+        self.assertEqual(run.handoff, ["reboot"], run.text)
+
+    def test_l14_start_confirms_and_never_mounts(self):
+        img = self.games()
+        run = self.ui(img, "scan S dump B dump S A t:500", "--slots", "2,3")
+        self.assertEqual(run.screens[0][0]["state"], "7", run.text)               # NM_S_CONFIRM_BIOS
+        self.assertIn("Go back to the BIOS menu?", "\n".join(run.screens[0][1]))
+        self.assertEqual(run.screens[1][0]["state"], "3")                         # B: stays
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertEqual([p for p in run.packets if p.startswith("52 8") or p.startswith("E0 02") or p.startswith("E0 05")], [])
+        self.assertEqual((run.n("gdemu_mounts"), run.n("named_mounts"), run.n("cmd_writes")), (0, 0, 0))
+        self.assertIn("Returning to the BIOS menu ...", run.text)
+
+    def test_nofw_start_goes_to_the_bios_at_once(self):
+        run = self.ui(self.games(), "step step S", "--nofw")
+        self.assertEqual(run.handoff, ["bios"])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 #include "nm_input.h"
 #include "nm_list.h"
 #include "nm_scan.h"
+#include "nm_launch.h"
 #include "fwctl.h"
 
 #ifndef NM_HANDOFF_DEFAULT
@@ -21,8 +22,14 @@ typedef enum {
     NM_S_NOFW,
     NM_S_NOSD,
     NM_S_LIST,
-    NM_S_INFO
+    NM_S_INFO,
+    NM_S_LAUNCH,                        /* mounting the chosen game, waiting for READY */
+    NM_S_DIALOG,                        /* a message after a failed launch */
+    NM_S_CONFIRM_BIOS,                  /* START: really go back to the BIOS menu? */
+    NM_S_HANDOFF                        /* "Starting ..." shown; the BIOS gets control after a short pause */
 } nm_state_id_t;
+
+typedef enum { NM_DLG_NOIMAGE = 0, NM_DLG_INCOMPLETE, NM_DLG_FWERR, NM_DLG_NOTREADY } nm_dialog_t;
 
 typedef struct {
     int state;
@@ -44,6 +51,15 @@ typedef struct {
     uint32_t gdemu_fw;                  /* the 52 00 firmware word (0 = not answered) */
     int handoff_mode;
     char why[96];                       /* NOSD: the reason */
+
+    int sd_mounted;                     /* the light mount is active */
+    nm_launch_t launch;
+    int dialog;                         /* nm_dialog_t */
+    unsigned dlg_number;
+    char dlg_folder[NM_FOLDER_MAX + 1];
+    char start_msg[NM_COLS + 1];        /* HANDOFF: the line shown */
+    int handoff_target;                 /* HANDOFF: NM_HANDOFF_* */
+    uint32_t handoff_since;
 } nm_ui_t;
 
 void nm_ui_init(nm_ui_t *ui);

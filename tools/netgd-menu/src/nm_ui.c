@@ -4,6 +4,7 @@
 #include "nm_plat.h"
 #include "nm_text.h"
 #include "ngdev.h"
+#include "ngfs.h"
 
 #define LIST_ROW0 2
 #define LIST_ROWS 15
@@ -214,8 +215,72 @@ static void boot_work(nm_ui_t *ui)
     if (fw_version(&ui->fw) != 0) { ui->state = NM_S_NOFW; return; }
     if (ngdev_init() != 0) { to_nosd(ui, "no disk"); return; }
     if (ngfs_mount_light(why, sizeof why) != NG_OK) { to_nosd(ui, why); return; }
+    ui->sd_mounted = 1;
     if (fw_gdemu_version(&boot, &fwv) == 0) ui->gdemu_fw = fwv;
     start_scan(ui);
+}
+
+/* ---- launching ---- */
+
+static void folder_label(const nm_ui_t *ui, char *out, size_t n)
+{
+    if (ui->dlg_number) snprintf(out, n, "%02u", ui->dlg_number);
+    else snprintf(out, n, "%s", ui->dlg_folder);
+}
+
+static void show_dialog(nm_ui_t *ui, int kind)
+{
+    ui->dialog = kind;
+    ui->state = NM_S_DIALOG;
+}
+
+static void enter_handoff(nm_ui_t *ui, const char *msg, int target)
+{
+    snprintf(ui->start_msg, sizeof ui->start_msg, "%s", msg);
+    ui->handoff_target = target;
+    ui->handoff_since = ui->now;
+    ui->state = NM_S_HANDOFF;
+}
+
+static void begin_launch(nm_ui_t *ui)
+{
+    const nm_game_t *g;
+    if (ui->list.count == 0) return;
+    g = &ui->list.items[ui->cursor];
+    ui->dlg_number = g->number;
+    snprintf(ui->dlg_folder, sizeof ui->dlg_folder, "%s", g->folder);
+    if (g->state == NM_ST_EMPTY) { show_dialog(ui, NM_DLG_NOIMAGE); return; }
+    if (g->state == NM_ST_PARTIAL) { show_dialog(ui, NM_DLG_INCOMPLETE); return; }
+    nm_launch_begin(&ui->launch, g->number, g->folder, nm_ini_ready_limit_ms(&ui->ini));
+    ui->sd_mounted = 0;
+    ui->state = NM_S_LAUNCH;
+}
+
+/* back to the list after a dialog: the light mount comes back (the menu's own image is still the mounted one) */
+static void back_to_list(nm_ui_t *ui)
+{
+    char why[96];
+    if (!ui->sd_mounted) {
+        if (ngfs_mount_light(why, sizeof why) != NG_OK) { to_nosd(ui, why); return; }
+        ui->sd_mounted = 1;
+    }
+    ui->state = NM_S_LIST;
+}
+
+static void launch_frame(nm_ui_t *ui)
+{
+    char label[NM_FOLDER_MAX + 1], msg[NM_COLS + 1];
+    switch (nm_launch_step(&ui->launch)) {
+    case NM_L_OK:
+        folder_label(ui, label, sizeof label);
+        snprintf(msg, sizeof msg, "Starting %s ...", label);
+        enter_handoff(ui, msg, ui->handoff_mode);
+        break;
+    case NM_L_NOIMAGE: show_dialog(ui, NM_DLG_NOIMAGE); break;
+    case NM_L_FWERR: show_dialog(ui, NM_DLG_FWERR); break;
+    case NM_L_NOTREADY: show_dialog(ui, NM_DLG_NOTREADY); break;
+    default: break;
+    }
 }
 
 static void scan_frame(nm_ui_t *ui)
@@ -254,13 +319,42 @@ void nm_ui_step(nm_ui_t *ui)
         if (ui->events & (NM_BTN_LEFT | NM_BTN_LT)) move_cursor(ui, -LIST_ROWS, 1);
         if (ui->events & (NM_BTN_RIGHT | NM_BTN_RT)) move_cursor(ui, LIST_ROWS, 1);
         if (ui->events & NM_BTN_X) ui->state = NM_S_INFO;
-        scan_frame(ui);
+        if (ui->events & NM_BTN_A) begin_launch(ui);
+        if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
+        if (ui->state == NM_S_LIST || ui->state == NM_S_INFO || ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
         break;
 
     case NM_S_INFO:
         if (ui->events & NM_BTN_A) ui->handoff_mode = ui->handoff_mode == NM_HANDOFF_REBOOT ? NM_HANDOFF_BIOS : NM_HANDOFF_REBOOT;
         if (ui->events & NM_BTN_B) ui->state = NM_S_LIST;
         scan_frame(ui);
+        break;
+
+    case NM_S_LAUNCH:
+        launch_frame(ui);
+        break;
+
+    case NM_S_DIALOG:
+        if (ui->dialog == NM_DLG_NOTREADY && (ui->events & NM_BTN_A)) {
+            nm_launch_wait_again(&ui->launch);
+            ui->state = NM_S_LAUNCH;
+        } else if (ui->events & (NM_BTN_A | NM_BTN_B)) {
+            back_to_list(ui);
+        }
+        break;
+
+    case NM_S_CONFIRM_BIOS:
+        if (ui->events & NM_BTN_A) {
+            if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
+            enter_handoff(ui, "Returning to the BIOS menu ...", NM_HANDOFF_BIOS);
+        } else if (ui->events & NM_BTN_B) {
+            ui->state = NM_S_LIST;
+        }
+        if (ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
+        break;
+
+    case NM_S_HANDOFF:
+        if (ui->now - ui->handoff_since >= 100) nm_plat_handoff(ui->handoff_target);
         break;
 
     case NM_S_NOFW:
@@ -282,6 +376,53 @@ void nm_ui_step(nm_ui_t *ui)
         draw_text_screen(ui, w, "The menu needs a FAT32 card (first partition)", "in the NetGD board's SD slot.", NULL, NULL);
         break;
     }
+    case NM_S_LAUNCH: {
+        char label[NM_FOLDER_MAX + 1];
+        folder_label(ui, label, sizeof label);
+        nm_screen_clear(&ui->scr);
+        draw_frame(ui, "", "");
+        nm_screen_printf(&ui->scr, 3, 2, NM_ATTR_NORMAL, "Mounting %s ...", label);
+        if (ui->launch.phase == 1)
+            nm_screen_printf(&ui->scr, 5, 2, NM_ATTR_NORMAL, "Waiting for the drive ... %u s",
+                             (unsigned)(nm_launch_waited_ms(&ui->launch) / 1000));
+        break;
+    }
+    case NM_S_DIALOG: {
+        char label[NM_FOLDER_MAX + 1];
+        folder_label(ui, label, sizeof label);
+        nm_screen_clear(&ui->scr);
+        draw_frame(ui, ui->dialog == NM_DLG_NOTREADY ? "A:Wait again  B:Back to the list" : "A:Back to the list", "");
+        switch (ui->dialog) {
+        case NM_DLG_NOIMAGE:
+            nm_screen_printf(&ui->scr, 4, 2, NM_ATTR_WARN, "No image in folder %s", label);
+            nm_screen_put(&ui->scr, 6, 2, "The firmware found no disc image to mount there.", NM_ATTR_NORMAL);
+            break;
+        case NM_DLG_INCOMPLETE:
+            nm_screen_printf(&ui->scr, 4, 2, NM_ATTR_WARN, "Image in folder %s is incomplete", label);
+            nm_screen_put(&ui->scr, 6, 2, "Send it again (netgd-send push, resume).", NM_ATTR_NORMAL);
+            break;
+        case NM_DLG_FWERR:
+            nm_screen_printf(&ui->scr, 4, 2, NM_ATTR_WARN, "Firmware error while mounting %s", label);
+            nm_screen_printf(&ui->scr, 6, 2, NM_ATTR_NORMAL, "sense key %u", ui->launch.sense);
+            break;
+        default:
+            nm_screen_put(&ui->scr, 4, 2, "Drive not ready", NM_ATTR_WARN);
+            nm_screen_printf(&ui->scr, 6, 2, NM_ATTR_NORMAL, "%s did not become READY in %u s.", label,
+                             (unsigned)(ui->launch.limit_ms / 1000));
+            break;
+        }
+        break;
+    }
+    case NM_S_CONFIRM_BIOS:
+        nm_screen_clear(&ui->scr);
+        draw_frame(ui, "A:Yes, go to the BIOS menu", "B:No, stay in the menu");
+        nm_screen_put(&ui->scr, 4, 2, "Go back to the BIOS menu?", NM_ATTR_WARN);
+        break;
+    case NM_S_HANDOFF:
+        nm_screen_clear(&ui->scr);
+        draw_frame(ui, "", "");
+        nm_screen_put(&ui->scr, 4, 2, ui->start_msg, NM_ATTR_NORMAL);
+        break;
     default: break;
     }
     nm_plat_present(&ui->scr);

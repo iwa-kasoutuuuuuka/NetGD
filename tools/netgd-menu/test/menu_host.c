@@ -2,7 +2,7 @@
      menu_host selftest                 pure functions (design 11.2 U1..U7; U8 is in the frame tests)
      menu_host ui <img> <sectors> --script "<events>" [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--noimg]
                   [--rflip K] [--rflip-all] [--nocontroller] [--names A|B]
-        events: U D L R A B X Y S LT RT (press and release), hold:A:1200, t:500, scan, step, dump, rflipall,
+        events: U D L R A B X Y S LT RT (press and release), hold:A:1200, t:500, scan, step, dump, rflipall, ua,
                 nocontroller, controller
    Nothing here runs on a Dreamcast. */
 #include <stdio.h>
@@ -336,6 +336,7 @@ static void run_event(char *ev)
         return;
     }
     if (!strcmp(ev, "rflipall")) { sim_rflip_every = 1; return; }
+    if (!strcmp(ev, "ua")) { sim_ua_mode = 1; sim_ua_pending = 1; return; }
     if (!strcmp(ev, "nocontroller")) { nm_host_controller = 0; return; }
     if (!strcmp(ev, "controller")) { nm_host_controller = 1; return; }
     if (!strncmp(ev, "t:", 2)) { run_ms((uint32_t)atol(ev + 2)); return; }
