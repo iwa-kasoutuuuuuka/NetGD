@@ -7,6 +7,7 @@
 #include "ngfs.h"
 #include "ngtp.h"
 #include "nm_net.h"
+#include "nm_disc.h"
 #include "ng_plat.h"
 
 #define LIST_ROW0 2
@@ -511,6 +512,7 @@ static void net_start(nm_ui_t *ui)
     if (r == NM_NET_NODEV) { set_msg(ui, "BBA not found", 3000); return; }
     if (r != 0) { set_msg(ui, "No IP address", 3000); return; }
     if (nm_net_listen(NGTP_PORT) != 0) { set_msg(ui, "Cannot listen on the port", 3000); return; }
+    nm_net_udp_listen(NGTP_PORT);                                   /* discovery is optional: no message when it fails */
     if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }     /* the light mount and a write session never coexist */
     ui->code = nm_ui_code_from_seed(nm_plat_entropy());
     memset(&hk, 0, sizeof hk);
@@ -545,6 +547,7 @@ static void net_frame(nm_ui_t *ui)
 {
     int ev;
     if (ui->events & NM_BTN_B) { net_close(ui); return; }
+    nm_disc_service(ui->srv.connected);
     ev = ngtp_srv_service(&ui->srv);
     if (ui->srv.code_expired) {
         ui->code = nm_ui_code_from_seed(nm_plat_entropy() + (uint32_t)ui->now);

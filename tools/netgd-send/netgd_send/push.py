@@ -125,6 +125,35 @@ def _printer(out):
     return on_line
 
 
+def resolve_host(a, out):
+    """a.host, or the one menu a discovery finds.  Returns the address, or None after printing why not."""
+    if a.host:
+        return a.host
+    out("looking for a NetGD menu on the network (UDP %d, %.0f s) ..." % (a.port, a.discover_timeout))
+    found = ngtp.discover(a.discover_timeout, targets=(a.broadcast,), port=a.port)
+    if not found:
+        out("error: no menu answered. Open the transfer screen (Y) and give the IP address with --host.")
+        return None
+    if len(found) > 1:
+        out("error: %d menus answered: %s. Choose one with --host." % (len(found), ", ".join(f.host for f in found)))
+        return None
+    f = found[0]
+    out("found %s at %s (app %s, %s)" % (f.name or "a menu", f.host, f.app or "?", f.state or "?"))
+    if f.state == "busy":
+        out("warning: it says it is busy: another PC may be connected")
+    return f.host
+
+
+def cmd_discover(a, out=print):
+    """list the menus that answer (exit 0 when there is at least one)"""
+    found = ngtp.discover(a.discover_timeout, targets=(a.broadcast,), port=a.port)
+    for f in found:
+        out("%s  %s  app %s  %s" % (f.host, f.name or "?", f.app or "?", f.state or "?"))
+    if not found:
+        out("no menu answered (is the transfer screen open? is the BBA on this network?)")
+    return jobmod.EXIT_OK if found else jobmod.EXIT_FAILED
+
+
 def cmd_push(a, out=print):
     if a.slot not in (None, "auto") and a.name is not None:
         raise imgmod.ImageError("use either --slot or --name, not both")
@@ -133,10 +162,13 @@ def cmd_push(a, out=print):
     out("checking and hashing %s ..." % a.image)
     kind, desc, files = plan_push(a.image, a.title)
     total = sum(f.size for f in files)
+    host = resolve_host(a, out)
+    if host is None:
+        return jobmod.EXIT_FAILED
     source = FileSource(files)
     try:
         try:
-            cl = ngtp.Client(a.host, a.port, timeout=a.timeout)
+            cl = ngtp.Client(host, a.port, timeout=a.timeout)
         except ngtp.ConnectionLost as e:
             out("error: %s" % e)
             return jobmod.EXIT_FAILED
@@ -219,8 +251,11 @@ def _evaluate_put(res, manifest, out):
 
 def cmd_remote(a, out=print):
     on_line = _printer(out)
+    host = resolve_host(a, out)
+    if host is None:
+        return jobmod.EXIT_FAILED
     try:
-        cl = ngtp.Client(a.host, a.port, timeout=a.timeout)
+        cl = ngtp.Client(host, a.port, timeout=a.timeout)
     except ngtp.ConnectionLost as e:
         out("error: %s" % e)
         return jobmod.EXIT_FAILED

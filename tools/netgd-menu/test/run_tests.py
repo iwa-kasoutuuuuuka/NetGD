@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zlib
 
@@ -71,7 +72,7 @@ EXE = os.path.join(ROOT, "build", "menu_host.exe" if os.name == "nt" else "menu_
 RECV_EXE = os.path.join(RECV, "build", "test_host.exe" if os.name == "nt" else "test_host")
 
 MENU_SRCS = ["src/nm_text.c", "src/nm_slot.c", "src/nm_cfgparse.c", "src/nm_ipbin.c", "src/nm_list.c", "src/nm_input.c",
-             "src/nm_screen.c", "src/nm_scan.c", "src/nm_launch.c", "src/ngtp_frame.c", "src/ngtp_srv.c", "src/nm_ui.c"]
+             "src/nm_screen.c", "src/nm_scan.c", "src/nm_launch.c", "src/nm_disc.c", "src/ngtp_frame.c", "src/ngtp_srv.c", "src/nm_ui.c"]
 # the netgd-recv core and its test doubles (a disk image file, a packet-level firmware model); never main.c, xport_pc.c,
 # dev_kos.c, fwxfer_kos.c, plat_kos.c
 RECV_SRCS = ["src/crc32.c", "src/manifest.c", "src/ngblk.c", "src/fwctl.c", "src/ngfs.c", "src/recv_core.c", "src/diskio.c",
@@ -1129,6 +1130,105 @@ class TestPush(NetBase):
         sim = srv.finish()
         self.assertEqual((sim_int(sim, "begin"), sim_int(sim, "end")), (1, 1))
         self.assertNotIn("/03/DISC.CDI", self.clean_fs(img).files)
+
+
+def udp_ask(port, data, wait=2.0):
+    """one datagram to 127.0.0.1:port; the reply, or None when nothing came within `wait` seconds"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.settimeout(wait)
+        s.sendto(data, ("127.0.0.1", port))
+        try:
+            return s.recvfrom(512)[0]
+        except (socket.timeout, OSError):
+            return None
+    finally:
+        s.close()
+
+
+def free_udp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class TestDiscovery(NetBase):
+    """step 9: the UDP discovery on the transfer screen and netgd-send's use of it"""
+    make_gdi = TestPush.make_gdi
+
+    def send(self, *args, timeout=120):
+        return run_child([sys.executable, SEND_PY] + list(args), timeout=timeout)
+
+    def test_reply_and_ignored_requests(self):
+        srv = NgtServe(self, self.card({"/02/DISC.GDI": GDI3}))
+        r = udp_ask(srv.port, b"NGTP-DISCOVER 1")
+        self.assertIsNotNone(r)
+        self.assertRegex(r.decode(), r"^NGTP-HERE 1 name=NetGD app=\S+ state=idle$")
+        self.assertNotIn(b"4821", r)                                     # the pass code never goes out
+        self.assertIsNotNone(udp_ask(srv.port, b"NGTP-DISCOVER 1 more=ignored\r\n"))
+        self.assertIsNone(udp_ask(srv.port, b"NGTP-DISCOVER 2", 0.5))
+        self.assertIsNone(udp_ask(srv.port, b"hello", 0.5))
+        self.assertIsNone(udp_ask(srv.port, b"NGTP-HERE 1 name=NetGD app=0 state=idle", 0.5))
+        self.assertIsNotNone(udp_ask(srv.port, b"NGTP-DISCOVER 1"))      # still alive after the junk
+
+    def test_state_is_busy_while_a_pc_is_attached(self):
+        srv = NgtServe(self, self.card({"/02/DISC.GDI": GDI3}))
+        c = srv.client()
+        deadline = time.time() + 10
+        got = b""
+        while time.time() < deadline and b"state=busy" not in got:
+            got = udp_ask(srv.port, b"NGTP-DISCOVER 1", 0.5) or b""
+        self.assertIn(b"state=busy", got)
+        c.close()
+        deadline = time.time() + 10
+        while time.time() < deadline and b"state=idle" not in got:
+            got = udp_ask(srv.port, b"NGTP-DISCOVER 1", 0.5) or b""
+        self.assertIn(b"state=idle", got)
+
+    def test_discover_command_lists_the_menu(self):
+        srv = NgtServe(self, self.card({"/02/DISC.GDI": GDI3}))
+        r = self.send("discover", "--broadcast", "127.0.0.1", "--port", str(srv.port), "--discover-timeout", "1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"127\.0\.0\.1\s+NetGD\s+app \S+\s+idle")
+
+    def test_discover_command_without_an_answer_exits_1(self):
+        r = self.send("discover", "--broadcast", "127.0.0.1", "--port", str(free_udp_port()), "--discover-timeout", "0.5")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no menu answered", r.stdout)
+
+    def test_push_without_host_finds_the_menu(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi()
+        srv = NgtServe(self, img, "--slots", "2")
+        r = self.send("push", gdi, "--code", str(CODE), "--port", str(srv.port), "--broadcast", "127.0.0.1",
+                      "--discover-timeout", "1", "--slot", "auto")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("found NetGD at 127.0.0.1", r.stdout)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/03", "track03.bin"), tracks["track03.bin"])
+
+    def test_push_without_host_and_without_a_menu_fails_cleanly(self):
+        gdi, _t = self.make_gdi()
+        r = self.send("push", gdi, "--code", "1", "--port", str(free_udp_port()), "--broadcast", "127.0.0.1",
+                      "--discover-timeout", "0.5")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no menu answered", r.stdout)
+        self.assertNotIn("connected:", r.stdout)
+
+    def test_without_udp_the_host_argument_still_works(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+        srv = NgtServe(self, img, "--no-udp")
+        self.assertIsNone(udp_ask(srv.port, b"NGTP-DISCOVER 1", 0.5))
+        r = self.send("remote", "statfs", "--host", "127.0.0.1", "--port", str(srv.port), "--code", str(CODE))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.send("remote", "list", "--code", str(CODE), "--port", str(srv.port), "--broadcast", "127.0.0.1",
+                      "--discover-timeout", "0.5")
+        self.assertEqual(r.returncode, 1, r.stdout)                      # nothing to discover without a host
+        self.assertIn("no menu answered", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":

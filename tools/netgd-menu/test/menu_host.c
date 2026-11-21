@@ -17,6 +17,7 @@
 #include "nm_input.h"
 #include "ngtp.h"
 #include "nm_ui.h"
+#include "nm_disc.h"
 #include "nm_plat.h"
 #include "plat_host.h"
 #include "ngdev.h"
@@ -475,6 +476,31 @@ static void u8_frame(void)
     for (uint32_t s = 0; s < 1000; s++) CHECK(nm_ui_code_from_seed(s) < 10000 && nm_ui_code_from_seed(s) == nm_ui_code_from_seed(s));
 }
 
+/* U9: the discovery request and reply (step 9) */
+static void u9_disc(void)
+{
+    char out[NM_DISC_MAX];
+    size_t l;
+    static const char ok[] = "NGTP-DISCOVER 1";
+    CHECK(nm_disc_is_request(ok, sizeof ok - 1));
+    CHECK(nm_disc_is_request("NGTP-DISCOVER 1\n", 16));
+    CHECK(nm_disc_is_request("NGTP-DISCOVER 1 from=pc\r\n", 26));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVER 2", 15));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVER 10", 16));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVER", 13));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVEX 1", 15));
+    CHECK(!nm_disc_is_request("ngtp-discover 1", 15));
+    CHECK(!nm_disc_is_request("", 0));
+    CHECK(!nm_disc_is_request("NGTP-HERE 1 name=NetGD", 22));            /* another Dreamcast's reply is not a request */
+    l = nm_disc_reply(ok, sizeof ok - 1, 0, out, sizeof out);
+    CHECK(l && l == strlen(out));
+    CHECK_STR(out, "NGTP-HERE 1 name=NetGD app=" NM_VERSION " state=idle");
+    l = nm_disc_reply(ok, sizeof ok - 1, 1, out, sizeof out);
+    CHECK_STR(out, "NGTP-HERE 1 name=NetGD app=" NM_VERSION " state=busy");
+    CHECK(nm_disc_reply("junk", 4, 0, out, sizeof out) == 0);
+    CHECK(nm_disc_reply(ok, sizeof ok - 1, 0, out, 10) == 0);               /* too small: nothing half-written is sent */
+}
+
 /* ---- menu_host serve: the transfer screen on a real 127.0.0.1 socket, real time ---- */
 
 static int serve_confirm;       /* 1 = A is held while the confirm screen shows, 2 = B */
@@ -487,7 +513,7 @@ static uint32_t serve_buttons(void)
 }
 
 /* menu_host serve <img> <sectors> --port P --code C [--cut N] [--idle-ms N] [--stopafter N] [--confirm allow|deny]
-                   [--slots ..] [--ua] [--failend2] [--caps C] [--nobba] [--timeout-ms T] [--dump] [--trace] */
+                   [--slots ..] [--ua] [--failend2] [--caps C] [--nobba] [--no-udp] [--timeout-ms T] [--dump] [--trace] */
 static int serve_cmd(int argc, char **argv)
 {
     const char *img = argv[2];
@@ -506,6 +532,7 @@ static int serve_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--failend2")) sim_fail_end2 = 1;
         else if (!strcmp(argv[i], "--caps") && i + 1 < argc) sim_caps = (uint8_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
+        else if (!strcmp(argv[i], "--no-udp")) nm_host_no_udp = 1;
         else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--dump")) dump = 1;
         else if (!strcmp(argv[i], "--trace")) sim_trace = 1;
@@ -561,6 +588,7 @@ static int selftest(void)
     u6_list();
     u7_input();
     u8_frame();
+    u9_disc();
     printf(bad ? "SELFTEST FAIL (%d)\n" : "SELFTEST OK\n", bad);
     return bad ? 1 : 0;
 }

@@ -185,3 +185,75 @@ class Client(object):
 
     def finish(self, mode=FINISH_DEFAULT, folder="", on_line=None):
         return self.request(FINISH, bytes([mode]) + folder.encode("ascii"), on_line=on_line)
+
+
+# ---- UDP discovery (docs/design/menu-app.md 8.1, step 9) ----
+DISCOVER_REQUEST = b"NGTP-DISCOVER 1"
+DISCOVER_BROADCAST = "255.255.255.255"
+
+
+class Found(object):
+    """one menu that answered: `host` is the address the reply came from"""
+
+    def __init__(self, host, name, app, state):
+        self.host, self.name, self.app, self.state = host, name, app, state
+
+    def __repr__(self):
+        return "Found(%s %s app=%s state=%s)" % (self.host, self.name, self.app, self.state)
+
+
+def parse_here(data):
+    """'NGTP-HERE 1 name=NetGD app=0.1.0 state=idle' -> {'name': ..., 'app': ..., 'state': ...}; None if it is not a version 1 reply"""
+    try:
+        words = data.decode("ascii").split()
+    except UnicodeDecodeError:
+        return None
+    if len(words) < 2 or words[0] != "NGTP-HERE" or words[1] != "1":
+        return None
+    kv = {}
+    for w in words[2:]:
+        if "=" in w:
+            k, v = w.split("=", 1)
+            kv[k] = v
+    return kv
+
+
+def discover(timeout=2.0, targets=(DISCOVER_BROADCAST,), port=DEFAULT_PORT, bind=""):
+    """Send the discovery request to each of `targets` (UDP, `port`) and collect the answers for `timeout` seconds.
+    Returns a list of Found, one per answering host (the first answer of a host counts).  Never raises for network
+    trouble: no answer is an empty list."""
+    import select
+    import time
+    found, seen = [], set()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return found
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.bind((bind, 0))
+        for t in targets:
+            try:
+                s.sendto(DISCOVER_REQUEST, (t, port))
+            except OSError:
+                pass                    # an unreachable network or address: the other targets may still work
+        end = time.time() + timeout
+        while True:
+            left = end - time.time()
+            if left <= 0:
+                break
+            r, _w, _x = select.select([s], [], [], left)
+            if not r:
+                break
+            try:
+                data, addr = s.recvfrom(512)
+            except OSError:
+                continue                # Windows reports an ICMP error of an earlier datagram here
+            kv = parse_here(data)
+            if kv is None or addr[0] in seen:
+                continue
+            seen.add(addr[0])
+            found.append(Found(addr[0], kv.get("name", ""), kv.get("app", ""), kv.get("state", "")))
+    finally:
+        s.close()
+    return found

@@ -1,6 +1,6 @@
-"""CLI: python -m netgd_send {prepare,collect,status,push,remote} ...
+"""CLI: python -m netgd_send {prepare,collect,status,push,remote,discover} ...
 
-`prepare`/`collect`/`status` never talk to the Dreamcast: sending, running, logging and noexec detection
+`discover` (UDP) finds the menu without its IP address.  `prepare`/`collect`/`status` never talk to the Dreamcast: sending, running, logging and noexec detection
 belong to the owner's dc_auto / dc_gui (design 7.1).  `push` and `remote` talk to the NetGD menu over a BBA
 (docs/design/menu-app.md 8): the menu's transfer screen shows the IP address and the 4-digit code.
 """
@@ -83,11 +83,23 @@ def _slot_arg(v):
         raise argparse.ArgumentTypeError("--slot takes a number or auto")
 
 
+def cmd_discover(a):
+    return pushmod.cmd_discover(a)
+
+
+def _add_discover_args(p):
+    p.add_argument("--broadcast", default=ngtp.DISCOVER_BROADCAST,
+                   help="where the discovery request goes (default %s; if it finds nothing give your network's broadcast "
+                        "address, e.g. 192.168.1.255, or the console's IP)" % ngtp.DISCOVER_BROADCAST)
+    p.add_argument("--discover-timeout", type=float, default=2.0, help="seconds to wait for answers (default 2)")
+
+
 def _add_net_args(p):
-    p.add_argument("--host", required=True, help="IP address shown on the menu's transfer screen")
+    p.add_argument("--host", help="IP address shown on the menu's transfer screen (default: look for the menu with the UDP discovery)")
     p.add_argument("--code", required=True, type=int, help="the 4-digit code shown there")
     p.add_argument("--port", type=int, default=ngtp.DEFAULT_PORT)
     p.add_argument("--timeout", type=float, default=60.0, help="network timeout in seconds (default 60)")
+    _add_discover_args(p)
 
 
 def build_parser():
@@ -129,6 +141,11 @@ def build_parser():
     p.add_argument("--allow-fragmented", action="store_true", help="accept a fragmented allocation")
     p.add_argument("--no-finish", action="store_true", help="do not close the session at the end")
     p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("discover", help="look for NetGD menus on the network (UDP); the menu's transfer screen must be open")
+    p.add_argument("--port", type=int, default=ngtp.DEFAULT_PORT)
+    _add_discover_args(p)
+    p.set_defaults(func=cmd_discover)
 
     p = sub.add_parser("remote", help="one operation on the menu's transfer screen: statfs, list, delete, verify, finish")
     p.add_argument("op", choices=("statfs", "list", "delete", "verify", "finish"))

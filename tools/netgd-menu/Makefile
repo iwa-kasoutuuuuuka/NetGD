@@ -17,7 +17,7 @@ FATFS  = $(RECV)/third_party/fatfs
 OBJDIR = build/kos
 
 MENU_OBJS = $(addprefix $(OBJDIR)/, nm_text.o nm_slot.o nm_cfgparse.o nm_ipbin.o nm_list.o nm_input.o nm_screen.o \
-              nm_scan.o nm_launch.o nm_ui.o ngtp_frame.o ngtp_srv.o main_kos.o plat_kos.o net_kos.o)
+              nm_scan.o nm_launch.o nm_disc.o nm_ui.o ngtp_frame.o ngtp_srv.o main_kos.o plat_kos.o net_kos.o)
 RECV_OBJS = $(addprefix $(OBJDIR)/recv_, crc32.o manifest.o diskio.o ngblk.o ngfs.o fwctl.o recv_core.o dev_kos.o fwxfer_kos.o)
 FATFS_OBJS = $(addprefix $(OBJDIR)/ff_, ff.o ffunicode.o ffsystem.o)
 OBJS = $(MENU_OBJS) $(RECV_OBJS) $(FATFS_OBJS)

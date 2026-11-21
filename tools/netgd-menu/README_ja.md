@@ -52,7 +52,7 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 
 `menu_host`（`test/menu_host.c`）はメニューの中核を仮想時計で動かす。`menu_host ui <img> <sectors> --script "scan D A t:2000 dump"` のように、ボタンの列を与えて画面とファームへのパケットを見られる。カードのイメージは `tools/netgd-recv` の `test_host mkimage`／`addfile`／`mkdirs` で作る（`run_tests.py` が両方をビルドする）。
 
-実装したもの：一覧・走査・タイトル・起動（0x52／名前）・READY 待ち・情報画面・BIOS への渡し、BBA からの取り込み（NGTP 版 1）。**すべて実機未検証。** 無いもの：UDP の探索、ファーム更新の統合、箱絵（設計の手順 9〜12、任意）。
+実装したもの：一覧・走査・タイトル・起動（0x52／名前）・READY 待ち・情報画面・BIOS への渡し、BBA からの取り込み（NGTP 版 1）。**すべて実機未検証。** UDP の探索（設計の手順 9）。無いもの：ファーム更新の統合、実機の数字で決めるもの（設計の手順 10・12、任意）。
 
 ## BBA からの取り込み（実機未検証）
 
@@ -79,3 +79,12 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありで IP が出るか（DHCP の待ち時間、固定 IP が使われるか）。`netgd-send push` が最後まで通り、実効速度はどれくらいか（`WANT`／`DATA` の往復、64 KiB ごと）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
 
 KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`arch_menu()`／`arch_reboot()`（K1）、`bfont` の色設定（netgd-fwupd が使用）、`maple`（netgd-recv が使用）、ネットワーク：`net_init`・`net_default_dev->ip_addr`・TCP の `listen`／`accept`・`O_NONBLOCK`（K2〜K4、`net_kos.c`）。
+
+## 実装メモ（設計の任意の手順 9 と 11。設計書は書き換えていない）
+
+### 手順 9：UDP の探索（実機未検証）
+
+- 取り込み画面を開いている間（`NET_IDLE`／`NET_BUSY`）だけ、UDP 20039 で待つ。`net_start` で開き（開けなくても何も出さない。IP を手で指定すればよい）、`nm_net_stop` で閉じる。
+- 要求は `NGTP-DISCOVER 1`（後ろに空白・改行が続いてもよい。`NGTP-DISCOVER 10` や別の版には答えない）。答えは `NGTP-HERE 1 name=NetGD app=<版> state=idle|busy`。`busy` は「PC が TCP でつながっている」（もう 1 台は入れない）。**合言葉と TCP のポートは答えに入れない**（ポートは NGTP の 20039 固定。PC は `--port`）。
+- 1 フレームに 1 通だけ見る（`nm_disc_service`）。操作の最中（`RECV_BUSY`）は 1 つの操作が終わるまで答えない。そのとき PC は 2 秒で諦めて `--host` を求める。
+- 中核は `src/nm_disc.c`（文字列だけ。ソケットは持たない）。境界に `nm_net_udp_listen`／`nm_net_udp_recv`（待っていなければ 0 を返す）／`nm_net_udp_reply`（最後に受けた相手へ）を足した。KOS 側（`net_kos.c`）は `SOCK_DGRAM`・`recvfrom`・`sendto`・`socklen_t`・データグラムソケットの `O_NONBLOCK` が `KOS-API-UNVERIFIED`。

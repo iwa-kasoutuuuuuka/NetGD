@@ -28,8 +28,11 @@ typedef int sock_t;
 
 uint16_t nm_host_net_port;              /* listen here instead of the port asked for (0 = as asked) */
 int nm_host_net_nodev;                  /* nm_net_up answers "no BBA" */
+int nm_host_no_udp;                     /* nm_net_udp_listen fails */
 
-static sock_t lsock = BAD_SOCK, csock = BAD_SOCK;
+static sock_t lsock = BAD_SOCK, csock = BAD_SOCK, usock = BAD_SOCK;
+static struct sockaddr_in udp_peer;
+static int udp_have_peer;
 
 uint64_t nm_host_real_ms(void)
 {
@@ -152,4 +155,47 @@ void nm_net_stop(void)
 {
     if (lsock != BAD_SOCK) CLOSESOCK(lsock);
     lsock = BAD_SOCK;
+    if (usock != BAD_SOCK) CLOSESOCK(usock);
+    usock = BAD_SOCK;
+}
+
+/* ---- UDP discovery: a datagram socket on 127.0.0.1 (the same port number as the TCP one) ---- */
+
+int nm_net_udp_listen(uint16_t port)
+{
+    struct sockaddr_in a;
+    if (usock != BAD_SOCK) CLOSESOCK(usock);
+    usock = BAD_SOCK;
+    udp_have_peer = 0;
+    if (nm_host_no_udp) return -1;
+    usock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (usock == BAD_SOCK) return -1;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(nm_host_net_port ? nm_host_net_port : port);
+    if (bind(usock, (struct sockaddr *)&a, sizeof a)) { CLOSESOCK(usock); usock = BAD_SOCK; return -1; }
+    return 0;
+}
+
+int nm_net_udp_recv(void *buf, size_t cap)
+{
+    int r;
+#ifdef _WIN32
+    int l = (int)sizeof udp_peer;
+#else
+    socklen_t l = sizeof udp_peer;
+#endif
+    if (usock == BAD_SOCK) return -1;
+    if (!wait_readable(usock, 0)) return 0;
+    r = (int)recvfrom(usock, (char *)buf, (int)cap, 0, (struct sockaddr *)&udp_peer, &l);
+    if (r < 0) return 0;            /* Windows reports an ICMP "port unreachable" of an earlier reply as an error here */
+    udp_have_peer = 1;
+    return r;
+}
+
+int nm_net_udp_reply(const void *buf, size_t n)
+{
+    if (usock == BAD_SOCK || !udp_have_peer) return -1;
+    return sendto(usock, (const char *)buf, (int)n, 0, (struct sockaddr *)&udp_peer, (int)sizeof udp_peer) == (int)n ? 0 : -1;
 }

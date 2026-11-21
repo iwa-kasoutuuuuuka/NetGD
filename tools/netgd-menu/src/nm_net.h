@@ -20,6 +20,13 @@ int nm_net_accept(uint32_t timeout_ms);                 /* 1 a client / 0 timeou
 int nm_net_recv_all(void *buf, uint32_t n, uint32_t timeout_ms);
 int nm_net_send_all(const void *buf, uint32_t n);       /* 0 / -1 */
 void nm_net_close_client(void);
-void nm_net_stop(void);                                 /* stop listening (the BBA stays initialised) */
+void nm_net_stop(void);                                 /* stop listening, TCP and UDP (the BBA stays initialised) */
+
+/* UDP for the discovery (design 8.1, step 9).  One socket, non-blocking; failing to open it is not an error the user sees. */
+int nm_net_udp_listen(uint16_t port);                   /* 0 / -1 */
+/* One datagram, if one is waiting: its length (0 < n <= cap; a longer one is cut) and the sender is remembered for
+   nm_net_udp_reply.  0 = nothing waiting, -1 = error. */
+int nm_net_udp_recv(void *buf, size_t cap);
+int nm_net_udp_reply(const void *buf, size_t n);        /* to the sender of the last datagram.  0 / -1 */
 
 #endif
