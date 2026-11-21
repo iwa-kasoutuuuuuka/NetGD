@@ -31,6 +31,7 @@ RECV = os.path.join(os.path.dirname(ROOT), "netgd-recv")
 sys.path.insert(0, os.path.join(os.path.dirname(ROOT), "netgd-send"))     # netgd_send.manifest builds the manifests of the tests
 sys.path.insert(0, os.path.join(RECV, "test"))                             # fatcheck.py
 
+from netgd_send import art as artmod  # noqa: E402
 from netgd_send import manifest as mf  # noqa: E402
 import fatcheck  # noqa: E402
 
@@ -72,7 +73,7 @@ EXE = os.path.join(ROOT, "build", "menu_host.exe" if os.name == "nt" else "menu_
 RECV_EXE = os.path.join(RECV, "build", "test_host.exe" if os.name == "nt" else "test_host")
 
 MENU_SRCS = ["src/nm_text.c", "src/nm_slot.c", "src/nm_cfgparse.c", "src/nm_ipbin.c", "src/nm_list.c", "src/nm_input.c",
-             "src/nm_screen.c", "src/nm_scan.c", "src/nm_launch.c", "src/nm_disc.c", "src/ngtp_frame.c", "src/ngtp_srv.c", "src/nm_ui.c"]
+             "src/nm_screen.c", "src/nm_scan.c", "src/nm_launch.c", "src/nm_disc.c", "src/nm_art.c", "src/ngtp_frame.c", "src/ngtp_srv.c", "src/nm_ui.c"]
 # the netgd-recv core and its test doubles (a disk image file, a packet-level firmware model); never main.c, xport_pc.c,
 # dev_kos.c, fwxfer_kos.c, plat_kos.c
 RECV_SRCS = ["src/crc32.c", "src/manifest.c", "src/ngblk.c", "src/fwctl.c", "src/ngfs.c", "src/recv_core.c", "src/diskio.c",
@@ -1229,6 +1230,179 @@ class TestDiscovery(NetBase):
         self.assertEqual(r.returncode, 1, r.stdout)                      # nothing to discover without a host
         self.assertIn("no menu answered", r.stdout)
         self.assertNotIn("Traceback", r.stderr)
+
+
+def art_file(seed):
+    """a NETGD.ART with a picture of its own (made by netgd-send's art module)"""
+    return artmod.encode(bytes(((i * seed) >> 3) & 255 for i in range(128 * 128 * 3)))
+
+
+def art_crc(data):
+    return "%08X" % (zlib.crc32(data[16:16 + 128 * 128 * 2]) & 0xFFFFFFFF)
+
+
+def art_lines(run):
+    """every `ART ...` line a run printed (one per dump): a dict each"""
+    return [dict(re.findall(r"(\w+)=(\S+)", l)) for l in run.text.splitlines() if l.startswith("ART ")]
+
+
+class TestBoxArt(UiBase):
+    """step 11: NETGD.ART in the folder of the game under the cursor"""
+
+    def library(self, **extra):
+        files = {"/02/DISC.GDI": GDI3, "/02/NETGD.ART": art_file(3),
+                 "/03/DISC.GDI": GDI3, "/03/NETGD.ART": art_file(5),
+                 "/04/DISC.GDI": GDI3}
+        files.update(extra)
+        return files
+
+    def test_shown_only_after_the_cursor_stood_still_and_not_before(self):
+        img = self.card(self.library())
+        r = self.ui(img, "scan, t:100, dump, t:700, dump")
+        self.assertEqual(r.rc, 0, r.text)
+        early, late = art_lines(r)
+        self.assertEqual((early["shown"], early["state"]), ("0", "1"), r.text)          # waiting (NM_ART_WAIT)
+        self.assertEqual((late["shown"], late["dirty"], late["layout"]), ("1", "0", "1"), r.text)
+        self.assertEqual(late["crc"], art_crc(self.library()["/02/NETGD.ART"]))
+        self.assertEqual(r.n("cmd_writes"), 0)
+
+    def test_the_list_keeps_clear_of_the_art_block(self):
+        img = self.card(self.library())
+        r = self.ui(img, "scan, t:700, dump")
+        rows = r.rows
+        self.assertEqual(art_lines(r)[0]["shown"], "1")
+        # the rows of the list (2..) end at column 42; the selected row is inverted only that far (no way to see attributes
+        # here: dirty=0 says that every cell of the block was blank and normal at each present)
+        for line in rows[2:5]:
+            self.assertLessEqual(len(line), 42, line)
+        self.assertRegex(rows[2], r"^>0002  02 {1,30}GDI$")
+        self.assertEqual(art_lines(r)[0]["dirty"], "0")
+
+    def test_moving_hides_it_at_once_and_the_next_game_gets_its_own(self):
+        lib = self.library()
+        img = self.card(lib)
+        r = self.ui(img, "scan, t:700, D, dump, t:700, dump")
+        a_moved, a_next = art_lines(r)
+        self.assertEqual(a_moved["shown"], "0", r.text)
+        self.assertEqual((a_next["shown"], a_next["crc"], a_next["dirty"]), ("1", art_crc(lib["/03/NETGD.ART"]), "0"), r.text)
+
+    def test_a_game_without_art_shows_none_and_the_layout_stays(self):
+        img = self.card(self.library())
+        r = self.ui(img, "scan, t:700, D, D, t:900, dump")
+        a = art_lines(r)[0]
+        self.assertEqual((a["shown"], a["layout"], a["state"]), ("0", "1", "4"), r.text)     # FAILED: no file, not retried
+        self.assertRegex(r.rows[4], r"^>0004 ", r.rows[4])
+        self.assertLessEqual(len(r.rows[4]), 42)
+        self.assertNotIn("error", "\n".join(r.rows).lower())
+
+    def test_files_the_menu_cannot_use_are_ignored(self):
+        good = art_file(7)
+        wrong_size = good[:6] + struct.pack("<HH", 64, 64) + good[10:]
+        bad_magic = b"XGAR" + good[4:]
+        version2 = good[:4] + struct.pack("<H", 2) + good[6:]
+        truncated = good[:-2]
+        lib = {"/02/DISC.GDI": GDI3, "/02/NETGD.ART": wrong_size,
+               "/03/DISC.GDI": GDI3, "/03/NETGD.ART": bad_magic,
+               "/04/DISC.GDI": GDI3, "/04/NETGD.ART": version2,
+               "/05/DISC.GDI": GDI3, "/05/NETGD.ART": truncated,
+               "/06/DISC.GDI": GDI3, "/06/NETGD.ART": b"",
+               "/07/DISC.GDI": GDI3, "/07/NETGD.ART": good + b"trailing bytes are fine"}
+        img = self.card(lib)
+        script = "scan, " + ", ".join("t:700, dump, D" for _ in range(6)) + ", t:100, dump"
+        r = self.ui(img, script)
+        a = art_lines(r)
+        self.assertEqual([x["shown"] for x in a[:6]], ["0", "0", "0", "0", "0", "1"], r.text)
+        self.assertEqual(a[5]["crc"], art_crc(good))
+        self.assertEqual(r.head["count"], "6")                                  # the list is whole and was never stopped
+        self.assertEqual({x["dirty"] for x in a}, {"0"})
+        self.assertEqual(r.n("cmd_writes"), 0)
+
+    def test_read_errors_do_not_stop_the_list_and_a_later_visit_works(self):
+        lib = self.library()
+        img = self.card(lib)
+        r = self.ui(img, "scan, rflipboth, t:900, dump, D, U, t:100, dump, rflipoff, D, U, t:900, dump")
+        a = art_lines(r)
+        self.assertEqual((a[0]["shown"], a[0]["state"]), ("0", "4"), r.text)        # the load failed: FAILED, nothing shown
+        self.assertEqual(r.head["cursor"], "0")
+        self.assertEqual((a[2]["shown"], a[2]["crc"]), ("1", art_crc(lib["/02/NETGD.ART"])), r.text)
+        status = r.rows[17]
+        self.assertNotIn("unreadable", status)
+        self.assertNotIn("read error", status)
+
+    def test_the_picture_goes_with_the_list_and_comes_back(self):
+        img = self.card(self.library())
+        r = self.ui(img, "scan, t:700, X, dump, B, dump")
+        in_info, back = art_lines(r)
+        self.assertEqual(in_info["shown"], "0", r.text)
+        self.assertEqual((back["shown"], back["dirty"]), ("1", "0"), r.text)
+
+    def test_launching_while_the_art_loads_or_is_shown(self):
+        img = self.card(self.library())
+        for script in ("scan, t:700, A, t:3000", "scan, t:330, A, t:3000", "scan, t:330, S, A, t:300"):
+            r = self.ui(img, script, "--slots", "2,3,4")
+            self.assertEqual(r.handoff, ["bios"], script + "\n" + r.text)
+            self.assertEqual((r.n("cmd_writes"), r.n("violations")), (0, 0), script)
+
+    def test_no_art_files_no_change_to_the_list(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/03/DISC.GDI": GDI3})
+        r = self.ui(img, "scan, t:900, dump")
+        a = art_lines(r)[0]
+        self.assertEqual((a["shown"], a["layout"]), ("0", "0"))
+        self.assertEqual(r.rows[2], exp_row(True, 2, "02", "GDI"))                  # the full 38-column title as before
+
+
+def solid_png(w, h, rgb):
+    """a w x h PNG of one colour (colour type 2, 8 bit, no filter)"""
+    def chunk(typ, body):
+        return struct.pack(">I", len(body)) + typ + body + struct.pack(">I", zlib.crc32(typ + body) & 0xFFFFFFFF)
+    raw = (b"\0" + bytes(rgb) * w) * h
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b""))
+
+
+class TestPushArt(NetBase):
+    """step 11 end to end: netgd-send push --art -> the card -> the menu shows the picture"""
+    make_gdi = TestPush.make_gdi
+    push = TestPush.push
+
+    def test_push_art_png_then_the_menu_shows_it(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, _tracks = self.make_gdi()
+        png = os.path.join(self.work, "cover.png")
+        with open(png, "wb") as f:
+            f.write(solid_png(40, 30, (255, 0, 0)))
+        srv = NgtServe(self, img, "--slots", "2")
+        r = self.push(srv, gdi, "--slot", "3", "--art", png)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertIn("netgd.art", [k.lower() for k in fc.folder_files("/03")])
+        data = self.read(fc, "/03", "netgd.art")
+        self.assertEqual(len(data), 16 + 128 * 128 * 2)
+        px = artmod.parse(data)
+        self.assertEqual(px[64 * 128 + 64], 0xF800)                                  # red in the middle
+        self.assertEqual(px[0], 0)                                                   # 40 x 30 is wider than high: black bars above
+        # the menu shows exactly these bytes
+        run = self.ui(img, "scan, D, t:900, dump")
+        a = art_lines(run)[0]
+        self.assertEqual((a["shown"], a["crc"], a["dirty"]), ("1", art_crc(data), "0"), run.text)
+
+    def test_push_a_finished_art_file_and_without_art(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, _tracks = self.make_gdi()
+        finished = art_file(11)
+        p = os.path.join(self.work, "NETGD.ART")
+        with open(p, "wb") as f:
+            f.write(finished)
+        srv = NgtServe(self, img, "--slots", "2")
+        r = self.push(srv, gdi, "--slot", "3", "--art", p, "--no-finish")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.push(srv, self.make_gdi("src2", stem="other")[0], "--slot", "4")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/03", "netgd.art"), finished)
+        self.assertNotIn("netgd.art", [k.lower() for k in fc.folder_files("/04")])
 
 
 if __name__ == "__main__":

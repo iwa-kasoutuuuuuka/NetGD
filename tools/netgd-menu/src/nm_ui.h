@@ -8,6 +8,7 @@
 #include "nm_list.h"
 #include "nm_scan.h"
 #include "nm_launch.h"
+#include "nm_art.h"
 #include "ngtp_srv.h"
 #include "fwctl.h"
 
@@ -74,6 +75,8 @@ typedef struct {
     char fatal[NM_COLS + 1];
 
     int sd_mounted;                     /* the light mount is active */
+    nm_art_t art;                       /* the box art of the game under the cursor (step 11) */
+    int art_layout;                     /* a picture has been shown: the list rows keep clear of the art block from now on */
     nm_launch_t launch;
     int dialog;                         /* nm_dialog_t */
     unsigned dlg_number;

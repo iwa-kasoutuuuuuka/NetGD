@@ -18,6 +18,8 @@
 #include "ngtp.h"
 #include "nm_ui.h"
 #include "nm_disc.h"
+#include "nm_art.h"
+#include "crc32.h"
 #include "nm_plat.h"
 #include "plat_host.h"
 #include "ngdev.h"
@@ -314,6 +316,15 @@ static void dump_screen(void)
         printf("S%02d|%s\n", r, row);
     }
     printf("END\n");
+    {
+        uint8_t le[NM_ART_BYTES];
+        uint32_t crc = 0;
+        if (nm_host_art) {
+            for (int i = 0; i < NM_ART_PW * NM_ART_PH; i++) { le[i * 2] = (uint8_t)nm_host_art[i]; le[i * 2 + 1] = (uint8_t)(nm_host_art[i] >> 8); }
+            crc = ng_crc32(0, le, sizeof le);
+        }
+        printf("ART shown=%d crc=%08X dirty=%d layout=%d state=%d\n", nm_host_art ? 1 : 0, (unsigned)crc, nm_host_art_dirty, ui.art_layout, ui.art.state);
+    }
 }
 
 static uint32_t button_by_name(const char *n)
@@ -339,6 +350,8 @@ static void run_event(char *ev)
         return;
     }
     if (!strcmp(ev, "rflipall")) { sim_rflip_every = 1; return; }
+    if (!strcmp(ev, "rflipboth")) { sim_rflip_every = 1; sim_rflipn_every = 1; return; }
+    if (!strcmp(ev, "rflipoff")) { sim_rflip_every = 0; sim_rflipn_every = 0; return; }
     if (!strcmp(ev, "ua")) { sim_ua_mode = 1; sim_ua_pending = 1; return; }
     if (!strcmp(ev, "nocontroller")) { nm_host_controller = 0; return; }
     if (!strcmp(ev, "controller")) { nm_host_controller = 1; return; }
@@ -476,6 +489,26 @@ static void u8_frame(void)
     for (uint32_t s = 0; s < 1000; s++) CHECK(nm_ui_code_from_seed(s) < 10000 && nm_ui_code_from_seed(s) == nm_ui_code_from_seed(s));
 }
 
+/* U10: the header of a box art file (step 11) */
+static void u10_art(void)
+{
+    uint8_t h[16] = { 'N', 'G', 'A', 'R', 1, 0, 128, 0, 128, 0, 0, 0, 0, 0, 0, 0 };
+    CHECK(nm_art_check_header(h) == 0);
+    h[10] = 0xAA; h[15] = 0x55;
+    CHECK(nm_art_check_header(h) == 0);                 /* the reserved bytes are not looked at */
+    h[0] = 'X'; CHECK(nm_art_check_header(h) != 0); h[0] = 'N';
+    h[3] = 'r'; CHECK(nm_art_check_header(h) != 0); h[3] = 'R';
+    h[4] = 0; CHECK(nm_art_check_header(h) != 0);       /* version 0 */
+    h[4] = 2; CHECK(nm_art_check_header(h) != 0);       /* version 2: a newer file than this menu knows */
+    h[4] = 1; h[5] = 1; CHECK(nm_art_check_header(h) != 0); h[5] = 0;
+    h[6] = 64; CHECK(nm_art_check_header(h) != 0); h[6] = 128;
+    h[7] = 1; CHECK(nm_art_check_header(h) != 0); h[7] = 0;
+    h[8] = 127; CHECK(nm_art_check_header(h) != 0); h[8] = 128;
+    h[9] = 1; CHECK(nm_art_check_header(h) != 0); h[9] = 0;
+    CHECK(nm_art_check_header(h) == 0);
+    CHECK(NM_ART_COL + NM_ART_COLS == NM_COLS && NM_ART_COLS * 12 >= NM_ART_PW && NM_ART_ROWS * 24 >= NM_ART_PH);
+}
+
 /* U9: the discovery request and reply (step 9) */
 static void u9_disc(void)
 {
@@ -589,6 +622,7 @@ static int selftest(void)
     u7_input();
     u8_frame();
     u9_disc();
+    u10_art();
     printf(bad ? "SELFTEST FAIL (%d)\n" : "SELFTEST OK\n", bad);
     return bad ? 1 : 0;
 }

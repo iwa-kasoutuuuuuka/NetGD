@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nm_plat.h"
+#include "nm_art.h"
 #include "ng_plat.h"
 #include "ff.h"
 #include "plat_host.h"
@@ -12,6 +13,8 @@ uint32_t nm_host_now;
 uint32_t nm_host_buttons;
 int nm_host_controller = 1;
 nm_screen_t nm_host_screen;
+const uint16_t *nm_host_art;           /* what the core asked to show */
+int nm_host_art_dirty;                  /* presents in which a cell of the art block was not blank while a picture was set */
 int nm_host_frames;
 int nm_host_dcload;
 uint32_t nm_host_entropy = 4821;
@@ -42,8 +45,14 @@ int nm_plat_controller(void) { return nm_host_controller; }
 int nm_plat_dcload(void) { return nm_host_dcload; }
 uint32_t nm_plat_entropy(void) { return nm_host_entropy; }
 
+void nm_plat_set_art(const uint16_t *px) { nm_host_art = px; }
+
 void nm_plat_present(const nm_screen_t *s)
 {
+    if (nm_host_art)
+        for (int r = NM_ART_ROW; r < NM_ART_ROW + NM_ART_ROWS; r++)
+            for (int c = NM_ART_COL; c < NM_COLS; c++)
+                if (s->ch[r][c] != ' ' || s->attr[r][c] != NM_ATTR_NORMAL) nm_host_art_dirty++;
     nm_host_screen = *s;
     nm_host_frames++;
 }

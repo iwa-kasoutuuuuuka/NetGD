@@ -11,6 +11,7 @@ import os
 import re
 import sys
 
+from . import art as artmod
 from . import image as imgmod
 from . import job as jobmod
 from . import ngtp
@@ -47,8 +48,9 @@ def sibling_name_txt(image_path):
     return None
 
 
-def plan_push(image_path, title=None):
-    """-> (kind, descriptor, [PushFile]).  Files are read from where they are; a rewritten .gdi is held in memory."""
+def plan_push(image_path, title=None, art=None):
+    """-> (kind, descriptor, [PushFile]).  Files are read from where they are; a rewritten .gdi is held in memory.
+    art: the bytes of a NETGD.ART (netgd_send.art.make_art) to put next to the image, or None."""
     image_path = os.path.abspath(image_path)
     if not os.path.isfile(image_path):
         raise imgmod.ImageError("%s not found" % image_path)
@@ -58,6 +60,10 @@ def plan_push(image_path, title=None):
         files.append(PushFile(target, None, text.encode("latin-1")) if text is not None else PushFile(target, src, None))
     if any(f.name.lower() == NAME_TXT for f in files):
         raise imgmod.ImageError("the image already has a file called %s: rename it" % NAME_TXT)
+    if art is not None:
+        if any(f.name.lower() == artmod.FILE_NAME for f in files):
+            raise imgmod.ImageError("the image already has a file called %s: rename it" % artmod.FILE_NAME)
+        files.append(PushFile(artmod.FILE_NAME, None, art))
     if title is not None:
         files.append(PushFile(NAME_TXT, None, (ascii_title(title) + "\n").encode("ascii")))
     else:
@@ -160,7 +166,8 @@ def cmd_push(a, out=print):
     if a.mode not in jobmod.MODES:
         raise jobmod.JobError("mode must be one of %s" % (jobmod.MODES,))
     out("checking and hashing %s ..." % a.image)
-    kind, desc, files = plan_push(a.image, a.title)
+    art = artmod.make_art(a.art) if a.art else None
+    kind, desc, files = plan_push(a.image, a.title, art)
     total = sum(f.size for f in files)
     host = resolve_host(a, out)
     if host is None:

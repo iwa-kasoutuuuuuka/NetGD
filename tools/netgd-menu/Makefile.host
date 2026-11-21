@@ -7,7 +7,7 @@ RECV     = ../netgd-recv
 FATFS    = $(RECV)/third_party/fatfs
 CFLAGS  += -DNG_HOST -Isrc -I$(RECV)/src -I$(FATFS) -I$(RECV)/test -Itest
 MENU     = src/nm_text.c src/nm_slot.c src/nm_cfgparse.c src/nm_ipbin.c src/nm_list.c src/nm_input.c \
-           src/nm_screen.c src/nm_scan.c src/nm_launch.c src/nm_disc.c src/ngtp_frame.c src/ngtp_srv.c src/nm_ui.c
+           src/nm_screen.c src/nm_scan.c src/nm_launch.c src/nm_disc.c src/nm_art.c src/ngtp_frame.c src/ngtp_srv.c src/nm_ui.c
 RECVSRC  = $(RECV)/src/crc32.c $(RECV)/src/manifest.c $(RECV)/src/ngblk.c $(RECV)/src/fwctl.c $(RECV)/src/ngfs.c \
            $(RECV)/src/recv_core.c $(RECV)/src/diskio.c $(FATFS)/ff.c $(FATFS)/ffunicode.c $(FATFS)/ffsystem.c \
            $(RECV)/test/dev_file.c $(RECV)/test/fwctl_sim.c
