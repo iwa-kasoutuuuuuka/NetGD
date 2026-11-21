@@ -1184,6 +1184,163 @@ async def tb_hw_info_numbered_write_forms(ctx, dut):
     await ide_write(ctx, dut, CSN_CTRL, ADDR_DEVICE_CONTROL, 0x00)
     assert ((await mcu_read(ctx, dut, MCU_HW_INFO)) >> 8) & 0x7F == after
 
+# -- Status writes by number (the window R100 left open) ---------------------
+
+def status_token(hw_info):
+    """What the firmware ORs into a slot 1 write: bit 15 plus the low six
+    bits of the sequence number in bits 9-14, from the HW_INFO word it read
+    when it took the command. 0 against a bitstream without the number --
+    the plain, unconditional status write."""
+    if not hw_info & 0x8000:
+        return 0
+    return 0x8000 | ((hw_info << 1) & 0x7E00)
+
+
+async def tb_stale_status_keeps_bsy_of_next_command(ctx, dut):
+    """A handler's Status write that lands after the host has written the
+    next command must not touch that command's BSY/DRQ or raise INTRQ.
+
+    The handler read its command, decided "0x50 + INTRQ", and the host wrote
+    again before the write reached slot 1. The plain write cleared the BSY
+    the Command write had just raised (the host then read an idle status for
+    a command nobody had looked at), and on a PACKET it cleared the DRQ of
+    the CDB phase, so the CDB never came."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+
+    # Command A, taken by the MCU.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EF)
+    hw_a = await mcu_read(ctx, dut, MCU_HW_INFO)
+    assert hw_a & 0x2
+
+    # The host writes B while A is still BSY.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+    # A's completion arrives late.
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0150 | status_token(hw_a))
+    st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+    assert st & 0x80, (
+        f"A's stale Status cleared the BSY of unserved command B ({st:#04x})"
+    )
+    assert ctx.get(dut.ide_intrq) == 0, "A's stale completion raised INTRQ on B"
+    assert (await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2, "B must stay pending"
+
+    # The MCU takes B; its own Status write lands, INTRQ with it.
+    hw_b = await mcu_read(ctx, dut, MCU_HW_INFO)
+    assert status_token(hw_b) != status_token(hw_a)
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0158 | status_token(hw_b))
+    st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+    assert st == 0x58, f"B's own Status should land, got {st:#04x}"
+    assert ctx.get(dut.ide_intrq) == 1, "B's own Status should raise INTRQ"
+    # Later phases of the same command keep the number.
+    await mcu_write(ctx, dut, MCU_STATUS, 0x00D0 | status_token(hw_b))
+    st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+    assert st == 0xD0, f"got {st:#04x}"
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0150 | status_token(hw_b))
+    await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_b))
+
+    # PACKET: the FPGA opens the CDB phase (BSY=0, DRQ=1) on the Command
+    # write. B's late completion must not close it.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00A0)
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0150 | status_token(hw_b))
+    st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+    assert st & 0x88 == 0x08, (
+        f"stale Status closed the CDB phase of the next PACKET ({st:#04x})"
+    )
+    assert ctx.get(dut.ide_intrq) == 0, "stale completion raised INTRQ in the CDB phase"
+
+
+async def tb_status_strobe_does_not_clear_bsy_of_command_write(ctx, dut):
+    """The same race inside one bus access: the Status write is a level
+    several core clocks wide and the later assignment, so a Command write
+    landing under it lost its BSY (and kept the stale INTRQ).
+
+    Swept over every alignment of the two strobes. Wherever the Command
+    write falls, the host must end up with BSY=1 and no interrupt."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+    for lead in range(0, 12):
+        # Command A, taken by the MCU.
+        await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EF)
+        hw_a = await mcu_read(ctx, dut, MCU_HW_INFO)
+        assert hw_a & 0x2
+
+        # Host starts writing command B...
+        ctx.set(dut.ide_csn, CSN_CMD)
+        ctx.set(dut.ide_addr, ADDR_COMMAND)
+        ctx.set(dut.ide_data_in, 0x00A1)
+        await ctx.tick()
+        ctx.set(dut.ide_wr, 1); ctx.set(dut.ide_wr_h, 1)
+        for _ in range(5):
+            await ctx.tick()
+        # ...and the MCU's completion of A overlaps the end of that write.
+        for t in range(24):
+            if t == 12 - lead:
+                ctx.set(dut.mcu_cs, 1)
+                ctx.set(dut.mcu_addr, MCU_STATUS)
+                ctx.set(dut.mcu_data_in, 0x0150 | status_token(hw_a))
+                ctx.set(dut.mcu_wr, 1)
+            if t == 8:
+                ctx.set(dut.ide_wr, 0); ctx.set(dut.ide_wr_h, 0)
+            if t == 12 - lead + 10:
+                ctx.set(dut.mcu_wr, 0)
+            await ctx.tick()
+        await mcu_idle(ctx, dut)
+        await ide_idle(ctx, dut)
+
+        hw_b = await mcu_read(ctx, dut, MCU_HW_INFO)
+        assert hw_b & 0x2, f"lead={lead}: command B not latched"
+        st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+        assert st & 0x80, (
+            f"lead={lead}: A's Status strobe cleared the BSY of command B "
+            f"({st:#04x})"
+        )
+        assert ctx.get(dut.ide_intrq) == 0, (
+            f"lead={lead}: A's completion INTRQ survived the Command write of B"
+        )
+        # B is then completed and acknowledged normally.
+        await mcu_write(ctx, dut, MCU_STATUS, 0x0150 | status_token(hw_b))
+        st = await ide_read(ctx, dut, CSN_CMD, ADDR_STATUS) & 0xFF
+        assert st == 0x50, f"lead={lead}: got {st:#04x}"
+        await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_b))
+
+
+async def tb_status_write_forms(ctx, dut):
+    """Slot 1 write forms: the plain one (bit 15 = 0) is unconditional, as
+    old firmware expects; the numbered one compares six bits."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+
+    # Before any command (boot): the number read back is accepted.
+    hw = await mcu_read(ctx, dut, MCU_HW_INFO)
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0040 | status_token(hw))
+    st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+    assert st == 0x40, f"got {st:#04x}"
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0050 | status_token(hw))
+
+    # Old firmware: a plain write lands whatever command is current.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0150)
+    st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+    assert st == 0x50, f"plain Status write should be unconditional, got {st:#04x}"
+    assert ctx.get(dut.ide_intrq) == 1
+
+    # Every number but the current one is refused, through the wrap of the
+    # six bits written (bit 6 of the sequence number is not compared).
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+    hw = await mcu_read(ctx, dut, MCU_HW_INFO)
+    for n in range(1, 64):
+        stale = (hw & 0x8000) | ((hw + (n << 8)) & 0x7F00)
+        await mcu_write(ctx, dut, MCU_STATUS, 0x0150 | status_token(stale))
+        st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+        assert st & 0x80, f"number off by {n} was accepted ({st:#04x})"
+    for _ in range(70):
+        await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+        hw = await mcu_read(ctx, dut, MCU_HW_INFO)
+        await mcu_write(ctx, dut, MCU_STATUS, 0x0050 | status_token(hw))
+        st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+        assert st == 0x50, f"current number refused at HW_INFO={hw:#06x} ({st:#04x})"
+
 
 async def tb_slot19_masked_write(ctx, dut):
     """Slot 19 bits 8-12 mask the write of bits 0-4; a zero mask writes all
@@ -1378,6 +1535,9 @@ TESTBENCHES = [
     ("slot19_masked_write", tb_slot19_masked_write, True),
     ("disarm_keeps_packet_phase", tb_disarm_keeps_packet_phase, True),
     ("irr_write_keeps_sector_count_prev", tb_irr_write_keeps_sector_count_prev, True),
+    ("stale_status_keeps_bsy_of_next_command", tb_stale_status_keeps_bsy_of_next_command, True),
+    ("status_strobe_does_not_clear_bsy_of_command_write", tb_status_strobe_does_not_clear_bsy_of_command_write, True),
+    ("status_write_forms", tb_status_write_forms, True),
 ]
 
 

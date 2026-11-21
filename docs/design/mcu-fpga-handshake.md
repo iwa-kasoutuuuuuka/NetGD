@@ -1,6 +1,6 @@
-# MCU と FPGA のコマンド受け渡し（番号つき ack、スロット 19 のマスク、スロット 5）
+# MCU と FPGA のコマンド受け渡し（番号つき ack、番号つき Status、スロット 19 のマスク、スロット 5）
 
-対象：`fpga/amaranth/hw/ide_device.py`（スロット 0・5・19）、`mcu/netgd/src/ide.rs`（`take_command`・`ack_command`・`clear_reset_seen`・`disarm`・`set_dma_mode`・`set_pio_flow_control`）。
+対象：`fpga/amaranth/hw/ide_device.py`（スロット 0・1・5・19）、`mcu/netgd/src/ide.rs`（`take_command`・`ack_command`・`post_status`・`clear_reset_seen`・`disarm`・`set_dma_mode`・`set_pio_flow_control`）。
 レジスタの細部は `docs/AddressMapMCU.md`。きっかけは R89 の A-c と `docs/PLAN.md` の「将来の地雷メモ」。
 
 **確認の範囲：FPGA のシミュレーションとファームのビルドだけ。実機では確かめていない。**
@@ -56,9 +56,61 @@ FPGA にコマンドの番号 `cmd_seq`（7 ビット、Command 書き込みご�
 
 ### 直していないこと
 
-- 単純なハンドラは `complete()` を通さずに Status を書く。ホストが BSY=1 の間に次のコマンドを書いた場合（規格違反。DEVICE RESET を除く）、古いコマンドの Status が新しいコマンドの BSY を消す。新しいコマンド自体は失われなくなったので、そのあと普通に処理される。
+- ~~単純なハンドラは `complete()` を通さずに Status を書く。古いコマンドの Status が新しいコマンドの BSY を消す。~~ → 2.1 で対処した。
+- Error（スロット 3）、割り込み理由（スロット 5）、バイト数など、Status より前に書くレジスタには番号を付けていない。古いコマンドの値が新しいコマンドのレジスタに乗りうる。Status が落とされるのでホストはまだ BSY=1（PACKET なら CDB フェーズ）を見ており、新しいコマンドのハンドラが完了の前にこれらを書き直す。
 - `handle_packet` は最初にレジスタをもう一度読む。`take_command` のあとにホストがレジスタを書き換えていれば、そちらを見る。
 - ホストが処理中にタスクファイル（LBA など）だけを書き換えた場合は検出しない。番号は Command 書き込みしか数えない。
+
+## 2.1 Status の書き込みにも番号を付ける
+
+### 残っていた競合
+
+ファームがコマンド A の Status を決めてからスロット 1 に書くまでの間に、ホストがコマンド B を書く場合。
+
+1. ホストが B を Command に書く。FPGA は BSY=1・DRQ=0・`command_pend`=1・`cmd_seq`+1 にする（PACKET なら BSY=0・DRQ=1 で CDB フェーズを開く）。
+2. A の Status（たとえば 0x50 と INTRQ）がスロット 1 に届く。従来の書き込みは無条件なので、B の BSY が落ち、INTRQ が立つ。
+3. ホストは B の結果として A の Status を読む。PACKET では DRQ が消えるので CDB を送れない。B の `command_pend` は残っているので、ファームはそのあと B を処理するが、ホストはもう先へ進んでいる。
+
+窓は ack と同じく2つある。
+
+- **ソフトの窓**：ファームが Status を決めてから書くまで。`complete()` は書く直前に COMMAND_PEND を見るが、見てから書くまでの間は残る。単純なハンドラは見ずに書く。
+- **ハードの窓**：Status の書き込みストローブは FPGA の数クロック分あり、`ide_device.py` では MCU 側の代入が後ろにある。ストローブの最中に来た Command 書き込みの `bsy.eq(1)` と `intrq_pending.eq(0)` が負ける。
+
+ハードの窓はファームからは閉じられない。ファームがどれだけ直前に確かめても、確かめた読みと書き込みは別のバスアクセスで、その間とストローブの最中に FPGA のクロックは進む。比較と書き込みを同じクロックで行えるのは FPGA だけなので、FPGA 側で直した。
+
+### 取り決め
+
+スロット 1 の書き込みの bit 15:9 を使う（bit 7:0 が Status、bit 8 が INTRQ なのは従来どおり）。
+
+| 書き込み | 動作 |
+|---|---|
+| bit15=0（従来の形式） | 無条件に書く |
+| bit15=1 | bit 14:9 が現在の `cmd_seq` の下位 6 ビットと同じで、かつそのクロックに Command 書き込みが無いときだけ書く。違えば Status も INTRQ も変えない |
+
+- ファームは `post_status` 1か所で `ACK_TOKEN`（`take_command` が取った上位バイト）から bit 15:9 を作る：`(t & 0x8000) | ((t << 1) & 0x7E00)`。`set_status`・`set_status_intrq` はどちらもここを通るので、ハンドラの呼び出し側は変えていない。
+- 落とされた書き込みの後始末は要らない。B は latch されたままで、`sweep` が次に取り、B の番号で Status を書く。
+- 6 ビットなのは bit 8 が INTRQ で埋まっているため。古い Status が通るのは、取り込みから書き込みまでの間に Command 書き込みがちょうど 64 回（または 128 回）あったときだけ。
+- `complete()` の「COMMAND_PEND が立っているのに Command レジスタが 0x00」の経路だけは従来の形式で書く。この latch が Command 書き込みを伴っていた場合、番号が進んでいて番号つきの書き込みは落とされるため。この経路の動作は変えていない。
+- `complete()` の COMMAND_PEND の確認は残した。古いビットストリームではこれだけが頼りで、新しいビットストリームでもログが出る。
+
+### 新旧の組み合わせ
+
+| ファーム | ビットストリーム | 動作 |
+|---|---|---|
+| 新 | 新 | 番号つき Status |
+| 新 | R100（番号つき ack だけ） | bit 15:9 は無視される → 従来の無条件の書き込み |
+| 新 | R100 より前 | スロット 0 の上位バイトが 0 → bit 15:9 も 0 → 従来の形式 |
+| 旧 | 新 | bit 15=0 → 従来の形式 |
+
+### 確認
+
+`fpga/amaranth/test.py` に 3 件追加。変更前の `ide_device.py` では 3 件とも失敗し、変更後は通る。
+
+- `stale_status_keeps_bsy_of_next_command`：ソフトの窓。B の BSY と、PACKET の CDB フェーズの DRQ が残ること、INTRQ が立たないこと、B の番号で書けば届くこと。
+- `status_strobe_does_not_clear_bsy_of_command_write`：ハードの窓。ストローブと Command 書き込みの位置関係を 12 通り。`& ~cmd_wr` を外すと失敗することも確かめた。
+- `status_write_forms`：従来の形式が無条件のままであること、ずれた番号 63 通りがすべて落とされること、番号が 6 ビットを一周しても現在の番号は通ること。
+
+実機では確かめていない。同梱の `.rbf` は作り直していない。
 
 ## 3. スロット 19（DMA モード、PIO フロー制御、PKT_PHASE）
 

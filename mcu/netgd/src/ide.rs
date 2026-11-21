@@ -107,7 +107,8 @@ const HW_ACK_TOKEN: u16 = 0xFF00;
 /// made here. An older bitstream ignores the mask and writes all five.
 const XFER_MASK: u16 = 0x0F00;
 
-/// `HW_ACK_TOKEN` of the command `sweep` last took, for `ack_command`. One
+/// `HW_ACK_TOKEN` of the command `sweep` last took, for `ack_command` and
+/// `post_status`. One
 /// cell serves both devices: `ide_task` takes, serves and acknowledges one
 /// command at a time, and nothing acknowledges outside that.
 static ACK_TOKEN: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
@@ -308,7 +309,27 @@ impl IdeDevice {
     }
 
     fn set_status(&self, status: u8) {
-        self.write(REG_STATUS, status as u16);
+        self.post_status(status as u16);
+    }
+
+    /// Every Status write of a command being served: slot 1, marked with the
+    /// number of the command `take_command` took (bit 15, and the number's
+    /// low six bits in 9-14 -- `ACK_TOKEN` moved up one, past the INTRQ bit).
+    /// The FPGA drops the write, INTRQ included, if the host has written
+    /// another command since. Otherwise a handler that had already decided
+    /// its status would post it over the new command: BSY down with nothing
+    /// served yet, or the DRQ of a PACKET's CDB phase closed. `complete`
+    /// looks before it writes, but a look cannot cover the time up to the
+    /// write, nor the write strobe itself; the comparison in the FPGA does.
+    ///
+    /// The dropped write needs no follow-up: the new command is latched and
+    /// `sweep` serves it. On a bitstream without the number the token is 0
+    /// and this is the plain write; one with the number but without this
+    /// check ignores the upper bits.
+    #[inline(never)]
+    fn post_status(&self, val: u16) {
+        let t = ACK_TOKEN.load(core::sync::atomic::Ordering::Relaxed);
+        self.write(REG_STATUS, val | (t & 0x8000) | ((t << 1) & 0x7E00));
     }
 
     /// Post a new status and assert INTRQ in the same FPGA clock (slot 1
@@ -321,7 +342,7 @@ impl IdeDevice {
     /// III's WinCE driver, hit that way, slept through the real DRQ
     /// interrupt of its next small PIO read and dropped to the BIOS menu.
     fn set_status_intrq(&self, status: u8) {
-        self.write(REG_STATUS, status as u16 | 0x0100);
+        self.post_status(status as u16 | 0x0100);
     }
 
     /// Post a command's *completion* (error + status + INTRQ) -- unless the
@@ -354,7 +375,9 @@ impl IdeDevice {
                 if self.is_primary() { "primary" } else { "secondary" }
             );
             self.set_error(error);
-            self.set_status_intrq(status);
+            // The plain form: if that latch came with a Command write, the
+            // number has moved and a numbered write would be dropped.
+            self.write(REG_STATUS, status as u16 | 0x0100);
             return true;
         }
         if self.command_pending() {

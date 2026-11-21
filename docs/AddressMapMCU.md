@@ -41,7 +41,7 @@ offsets are the slot number times two, for comparison with the old version of th
 | Slot | Byte | Name | Access | Purpose |
 |------|------|------|--------|---------|
 | 0 | 0x00 | HW_INFO | R/W | Device id, COMMAND_PEND, RESET_SEEN, nIEN, IN_RESET, command number |
-| 1 | 0x02 | STATUS | R/W (bit 8 W) | ATA status; write bit 8 to raise INTRQ |
+| 1 | 0x02 | STATUS | R/W (bits 8-15 W) | ATA status; write bit 8 to raise INTRQ; bits 9-15 tie the write to a command number |
 | 2 | 0x04 | DEVICE | R/W | Device register (bit 4 = DEV) |
 | 3 | 0x06 | ERROR | R/W | ABRT and sense key |
 | 4 | 0x08 | COMMAND / FEATURES | R/W | Latched command (low), features (high) |
@@ -118,6 +118,30 @@ FPGA cycle as the new status. Writing bit 8 as 0 does nothing.
 Firmware uses bit 8 for every completion and every DRQ transition (`set_status_intrq`). Posting status and
 INTRQ as two writes left a window where the host could read Status and issue its next command before the
 interrupt, so the interrupt landed on that command.
+
+Bits 9-15 (write only) tie the write to a command:
+
+| Bit | Meaning |
+|-----|---------|
+| 14:9 | The low six bits of CMD_SEQ (slot 0 bits 13:8) of the command this status belongs to. |
+| 15 | 0 = plain write, always applied. 1 = apply the write only if bits 14:9 equal the low six bits of the current CMD_SEQ, and not in the FPGA cycle of a host Command write. |
+
+A write that fails the comparison is dropped whole: no status bit changes and bit 8 raises nothing.
+
+Why: the host can write its next command between the firmware deciding a status and the write reaching the
+FPGA, or inside the write strobe (several FPGA cycles wide, and applied after the IDE-side logic). The plain
+write then cleared the BSY the Command write had just raised, with that command not yet looked at; on a
+PACKET it cleared the DRQ of the CDB phase. The firmware's `post_status` builds bits 9-15 from the upper byte
+`take_command` kept (bit 15 as read, bits 14:8 shifted up one), so every `set_status` / `set_status_intrq`
+of a command carries its number. Nothing needs to follow a dropped write: the new command stays latched and
+is served next.
+
+Six bits, because bit 8 is taken: a stale write is applied only if exactly 64 (or 128) Command writes came
+in between. Compatibility is the same as slot 0. Old firmware writes bit 15 = 0. A bitstream without the
+check ignores bits 9-15. A bitstream without CMD_SEQ reads as 0 in slot 0, so the firmware writes 0 here.
+
+`complete` writes the plain form in one case: COMMAND_PEND set with the Command register reading 0x00, which
+it treats as a latch without a command and completes over.
 
 ### Slot 2 (0x04): DEVICE
 
