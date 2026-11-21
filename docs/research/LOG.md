@@ -1793,6 +1793,22 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：記録を読み、R117・R118 と PLAN の D-1〜D-5 と照合。
 - 関連：R18、R71、R117、R118、`tools/mksdcard/README_ja.md`、`docs/research/stock-gdemu-flow.md`。
 
+### R120 純正 GDEMU 6.0 の CDI の読み出し速度を測り直した（R119 の設定の不備の補い）（Opus）
+
+- 担当：Opus。問いは、R119 で測れなかった CDI（04・05）の CD_READ の速さ。
+- 設定：`images=4,5`、`return_to=2`、**`cdread_flags=0x20`**（R119 は 0x24 のままで、Mode 2 の CDI では純正に CHECK で断られていた）。SD は R119 と同じ。
+- 記録：`docs/research/probe-records/stock_20261121_05_cdi-tp.txt`（`abort=0`）。`compare.py --manifest` で **HASH 2,098 件一致、不一致 0**、2 件は照合できず（下の postgap）。
+- 結論：
+  - **速さは GD-ROM と同じ**：CD_READ 16 セクタずつ 64 回で 04 = 2,273 KiB/s、05 = 2,281 KiB/s（1 回 13.9〜16.5 ms、中央値 13.98 ms）。
+    R117（dcload-ip の CDI）・R119（GD-ROM の GDI、2,278〜2,285 KiB/s）と変わらないので、**純正の速さはイメージの種類によらず、1 回 32 KB の PIO で約 14 ms** と見てよい。
+  - 1 セクタのシーク読みは 1.3〜3.1 ms。切替は 04・05・02 とも約 0.35 秒で READY（R119 と同じ）。
+  - **postgap のセクタは 2,324 バイトで返る**：シーク試験の最後の点（04 = FAD 15853、05 = FAD 16405。lead-out の直前、mkdcdisc が置く 2 セクタの postgap）を
+    `0x20` で読むと、純正は **2,324 バイト（Mode 2 Form 2 のユーザーデータの大きさ）**を返した。マニフェストに無い領域なので照合はできない。
+    NetGD がこのセクタに何バイト返すかは未確認（次に比較するときの項目）。
+- 信頼度：確認済み（実機の記録）。「速さはイメージによらない」は 4 種類のイメージ（dcload-ip の CDI、03、04、05）での観察。
+- Opus による検証：記録を読み、R117・R119 の値と比較。
+- 関連：R117、R118、R119、`tools/mksdcard/README_ja.md`（postgap の注意）。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
