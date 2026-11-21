@@ -1,4 +1,4 @@
-# NetGD 計画（2026-11-20 立て直し、R109 まで反映）
+# NetGD 計画（2026-11-20 立て直し、R111 まで反映）
 
 NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。ドリームキャストの GD-ROM ドライブを
 置き換える基板（GDEMU 系）のファームウェアと FPGA コアを、オープンソースで作る。
@@ -84,7 +84,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - R88 で進行中：古いコメントの修正、`read_ip_header` の起動トラックの推定を起動領域の判定にそろえる、`trim` の共用（2E −0.5 KB）。
 - 2E のフラッシュの削減案 2（`opt-level="z"`、約 −7.5 KB）は、オプトインのプロファイル `release-z`・`release-z-hot-s` として用意済み（R98）。既定にするかは実機で速度を比べてから（`docs/research/flash-budget-2e.md` §7）。
 - NetGD 専用メニュー `tools/netgd-menu`：設計（R97）、手順 1〜8（R101）、手順 9 の UDP 探索と手順 11 の箱絵（R108）、レビュー（R104）の指摘の修正（R109）。手順 10（ファーム更新）と 12（実機の数字で決めるもの）が残る。KOS の層は CI でコンパイルを確かめるだけで、実機は未確認。
-- v5.5 用の `OpenGDEMU.rbf` は、CI（`.github/workflows/fpga.yaml`、上流の公開の Quartus のイメージ）で作れる（R103）。リポジトリの rbf は R100 の番号つき ack 入り。R105 の番号つき Status 入りの rbf は、2E の `resident,sd-fast` に 788 B 入らないので保留（R107、扱いはユーザーが判断）。
+- v5.5 用の `OpenGDEMU.rbf` は、CI（`.github/workflows/fpga.yaml`、上流の公開の Quartus のイメージ）で作れる（R103）。リポジトリの rbf は R105 のもの（番号つき ack と Status）。2E の `resident,sd-fast` は `release-z` でしか入らないので、CI もそれで確かめる（R111）。
 - AG16K：Supra での手順は `fpga/agm/`（R106）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作ってファームに埋め込める（埋め込んでも約 10 KB 余る）。PS で流す時間は約 1.2〜1.7 秒と見積もった（実機で測る）。
 - `embedded_sdmmc` を自前の FAT に置き換える（−4〜−7 KB の見積もり、作業は大きい）。ビットストリームを埋め込むことになった場合に検討。
 - それ以外の大きな課題はすべて実機・純正の記録が要る（下の P5.5・P6）。

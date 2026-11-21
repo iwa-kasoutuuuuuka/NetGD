@@ -64,12 +64,21 @@ jobs:
 
       # The tightest fit: 2E with the v5.5 bitstream, the resident layout and
       # the speed features (LOG R81). Fails here first if the app outgrows
-      # the 122,880-byte app area.
-      - name: Build netgd (2E, resident, sd-fast)
+      # the 122,880-byte app area. Since the R105 bitstream (LOG R111) it only
+      # fits with the opt-in size profile `release-z` (LOG R98); its speed is
+      # not yet compared on hardware.
+      - name: Build netgd (2E, resident, sd-fast, release-z)
         working-directory: mcu/netgd
         env:
           DEFMT_LOG: "off"
-        run: cargo build --release --features sam3u2e,resident,sd-fast
+        run: cargo build --profile release-z --features sam3u2e,resident,sd-fast
+
+      # The 2E image that is actually distributed (no resident layout).
+      - name: Build netgd (2E)
+        working-directory: mcu/netgd
+        env:
+          DEFMT_LOG: "off"
+        run: cargo build --release --features sam3u2e
 
   host-tests:
     name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, fwupdater)
