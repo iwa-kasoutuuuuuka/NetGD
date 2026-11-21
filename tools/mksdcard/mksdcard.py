@@ -304,6 +304,26 @@ def gdi_spec_06(small):
     return s
 
 
+# Variant set (--set variants, LOG R121): why does the stock firmware refuse 06?
+# 08 = normal low-density area (data + 1 audio) and three tracks in the high-density
+#      area (data, audio, data), 5 tracks in all: does the total track count matter?
+# 09 = two audio tracks in the low-density area, so the high-density area starts at
+#      track 4 (like 06, but 4 tracks in all): does a high-density start other than
+#      track 3 matter?
+def gdi_spec_08(small):
+    t1, a, d = (150, 150, 550) if small else (600, 600, 10000)
+    d2 = 45000 + d + 150 + a + 150
+    return [('data', 0, t1, None), ('audio', 756, a, None),
+            ('data', 45000, d, 'NETGD PROBE 08'), ('audio', 45000 + d + 150, a, None),
+            ('data', d2, d, None)]
+
+
+def gdi_spec_09(small):
+    t1, a, d = (150, 150, 1100) if small else (600, 600, 20000)
+    return [('data', 0, t1, None), ('audio', 756, a, None), ('audio', 756 + a + 150, a, None),
+            ('data', 45000, d, 'NETGD PROBE 09')]
+
+
 # ----------------------------------------------------------------------------
 # CDI (DiscJuggler), after mkdcdisc src/disc_image/formats/cdi.c
 # ----------------------------------------------------------------------------
@@ -444,6 +464,24 @@ def crc_file(path):
     return '%08x' % (c & 0xFFFFFFFF)
 
 
+def make_variants(outdir, small=False, force=False):
+    """--set variants: only the extra GDIs 08 and 09 (copied next to an existing card's 01-07)."""
+    if os.path.exists(outdir) and os.listdir(outdir) and not force:
+        raise SystemExit('error: %s is not empty (use --force to write into it)' % outdir)
+    os.makedirs(outdir, exist_ok=True)
+    manifest = {'tool': 'mksdcard', 'version': VERSION, 'small': bool(small), 'set': 'variants',
+                'folders': {}, 'images': {}}
+    for n, spec in ((8, gdi_spec_08), (9, gdi_spec_09)):
+        folder = os.path.join(outdir, '%02d' % n)
+        e = build_gdi(folder, n, spec(small))
+        e['file_crc32'] = {fn: crc_file(os.path.join(folder, fn)) for fn in e['files']}
+        manifest['images']['%02d' % n] = e
+    with open(os.path.join(outdir, MANIFEST_NAME), 'w') as f:
+        json.dump(manifest, f, indent=1, sort_keys=True)
+        f.write('\n')
+    return manifest
+
+
 def make_card(outdir, menu=None, dcload=None, small=False, force=False):
     if os.path.exists(outdir) and os.listdir(outdir) and not force:
         raise SystemExit('error: %s is not empty (use --force to write into it)' % outdir)
@@ -501,8 +539,13 @@ def main(argv=None):
     ap.add_argument('--dcload', help='dcload-ip CDI to copy as OUTDIR/02/disc.cdi')
     ap.add_argument('--small', action='store_true', help='a few MB instead of ~100 MB (for tests)')
     ap.add_argument('--force', action='store_true', help='write into a non-empty OUTDIR')
+    ap.add_argument('--set', choices=('card', 'variants'), default='card',
+                    help='card = the full 01-07 card (default); variants = only the extra GDIs 08 and 09')
     a = ap.parse_args(argv)
-    m = make_card(a.outdir, a.menu, a.dcload, a.small, a.force)
+    if a.set == 'variants':
+        m = make_variants(a.outdir, a.small, a.force)
+    else:
+        m = make_card(a.outdir, a.menu, a.dcload, a.small, a.force)
     total = 0
     for n, e in sorted(m['images'].items()):
         sz = sum(os.path.getsize(os.path.join(a.outdir, n, fn)) for fn in e['files'])
