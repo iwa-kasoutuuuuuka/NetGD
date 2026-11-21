@@ -1398,6 +1398,36 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：該当なし（Opus 自身の作業）。
 - 関連：R91、R96。
 
+### R103 v5.5 の FPGA ビットストリームを CI の Quartus で作り直した（Sonnet がワークフロー、Opus が実行・確認）
+
+- 担当：
+  - Sonnet：ワークフロー `.github/workflows/fpga.yaml` を書いた（a1a945ca）。
+  - Opus：イメージを取れなかったときに切り替える処理を足し、CI で実行して rbf を取り込んだ。
+- 問い：R100 の番号つき ack を実機で効かせるには、v5.5 の `OpenGDEMU.rbf` を作り直す必要がある。この PC には Quartus が無い。CI で作れるか。
+- 結論：**作れた**。新しい rbf をリポジトリに入れた。
+  - このフォークの GHCR には Quartus のイメージが無い（`quartus_container.yaml` をこのフォークで実行したことが無い）。
+    上流の `ghcr.io/cepawiel/opengdemu/quartus2:latest` は、誰でも取得できる公開イメージだった（匿名のトークンで manifest が 200）。
+    そこで、このフォークのイメージが無いときは上流のものを使うようにした。
+  - 実行 44852741531（Quartus II 13.0 SP1、上流のイメージ digest `sha256:d468cf04…`）の結果：
+    - Full Compilation は成功。エラー 0、警告 259。
+    - 最悪の setup slack は +3.865 ns、hold は +0.215 ns。
+  - 新しい rbf は 73,713 B（SHA-256 `6618252f…`）。前の rbf は 73,821 B（`04d9c2f7…`）。
+    `build.rs` と同じ設定の LZMA では 48,772 B で、前の 49,629 B より 857 B 小さい。
+  - ファームの大きさ（text+data、新しい rbf を入れたもの）：
+
+    | ビルド | 大きさ |
+    |---|---|
+    | 4E | 161,708+144 |
+    | 4E resident | 161,412+300 |
+    | 2E | 120,924+156 |
+    | 2E `resident,sd-fast` | 121,088+156 |
+
+    2E の `resident,sd-fast` は約 1.1 KB 空いた。
+- 根拠：CI のログ（上の slack の値と「Quartus II Full Compilation was successful」）、`sha256sum`、`xz … | wc -c`、`llvm-size`。
+- 信頼度：ビルドは確認済み。**実機は未確認**。古い rbf は git の履歴に残っているので、実機で問題が出たら戻せる。
+- Opus による検証：あり（ログ・ハッシュ・大きさ）。
+- 関連：R100、`.github/workflows/fpga.yaml`、`.github/workflows/quartus_container.yaml`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -1439,3 +1469,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-21 | Supra は WSL の Linux 版を `unshare -rn`（ネットワークなし）で動かす。Windows 版とシステム設定を変える仮想化は使わない | 隔離ができて、ホストの設定を変えない（R99） | Opus |
 | 2026-11-21 | AG16K のビットストリームは、大きさの面では埋め込みが成り立つ（LZMA 37.7 KB、しきい値 53 KB）。埋め込むか SD に置くかの最終判断は、PS の転送時間と実ピンでの再測定の後に行う。それまで R66 の判断（SD 優先）は変えない | R99。非圧縮で 4.42 Mbit あり、PS の時間が未知 | Opus（判断はユーザー） |
 | 2026-11-21 | ack は番号つきにする（スロット 0 の bit 15 で新旧を見分け、互換を保つ）。slot 19 はビットごとのマスク、slot 5 は下位バイトだけ | 新旧のファームとビットストリームのどの組み合わせでも動く（R100） | Fable 設計、Opus 承認 |
+| 2026-11-21 | v5.5 の `OpenGDEMU.rbf` を、CI の Quartus（上流の公開イメージ）で作った新しいものに差し替える | R100 の修正を実機で効かせるため。番号つき ack は新旧の組み合わせで動き、古い rbf は履歴から戻せる（R103） | Opus |
