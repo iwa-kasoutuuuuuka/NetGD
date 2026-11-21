@@ -49,6 +49,11 @@ typedef void (*ngfs_scan_tick)(void *ctx, uint32_t done, uint32_t total);
    after every command pair, the last call has done == total.  NULL = silent. */
 void ngfs_set_scan_progress(ngfs_scan_tick tick, void *ctx);
 ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx);
+/* Read-only mount for the menu (netgd-menu): the same checks as ngfs_mount, but the FAT is NOT scanned
+   (no free-space count, no run table) and ngblk_readonly is set, so nothing is ever written.  Only
+   f_opendir/f_readdir/f_closedir, f_open(FA_READ)/f_read/f_lseek/f_close/f_stat, ngfs_default_image
+   and ngfs_classify may be used while mounted this way.  ngfs_unmount ends it. */
+ng_err_t ngfs_mount_light(char *why, size_t whyn);
 void ngfs_unmount(void);
 int ngfs_statfs(uint64_t *free_bytes, uint64_t *total_bytes, uint32_t *cluster_bytes);
 FATFS *ngfs_volume(void);

@@ -148,7 +148,8 @@ static int scan_fat(ngfs_scan_tick tick, void *ctx, int mount)
     return 0;
 }
 
-ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx)
+/* the checks shared by both mounts: sector 0, the partition type, f_mount, FAT32 at the partition start */
+static ng_err_t mount_checked(char *why, size_t whyn)
 {
     uint32_t start;
     FRESULT r;
@@ -167,11 +168,29 @@ ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx)
         f_mount(NULL, "0:", 0);
         return NG_E_FS;
     }
+    return NG_OK;
+}
+
+ng_err_t ngfs_mount(char *why, size_t whyn, ngfs_scan_tick tick, void *ctx)
+{
+    ng_err_t e;
+    ngblk_readonly = 0;
+    if ((e = mount_checked(why, whyn)) != NG_OK) return e;
     if (scan_fat(tick, ctx, 1)) {
         snprintf(why, whyn, "cannot read the FAT (no two reads agree)");
         f_mount(NULL, "0:", 0);
         return NG_E_IO;
     }
+    g_mounted = 1;
+    return NG_OK;
+}
+
+ng_err_t ngfs_mount_light(char *why, size_t whyn)
+{
+    ng_err_t e;
+    ngblk_readonly = 1;                 /* before the first FatFs call: nothing below may write */
+    if ((e = mount_checked(why, whyn)) != NG_OK) { ngblk_readonly = 0; return e; }
+    runs_reset();                       /* no FAT scan: there is no run table */
     g_mounted = 1;
     return NG_OK;
 }
@@ -182,7 +201,8 @@ void ngfs_unmount(void)
     g_mounted = 0;
     g_alloc_tick = NULL;
     g_alloc_ctx = NULL;
-    ngdev_flush();
+    if (!ngblk_readonly) ngdev_flush();
+    ngblk_readonly = 0;
 }
 
 int ngfs_statfs(uint64_t *free_bytes, uint64_t *total_bytes, uint32_t *cluster_bytes)

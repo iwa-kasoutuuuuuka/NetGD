@@ -29,6 +29,8 @@ typedef struct {
 } ngblk_stats_t;
 extern ngblk_stats_t ngblk_stats;
 extern int ngblk_check_fnv;     /* 1 when the firmware offers FW_CAP_CHECKSUM */
+/* 1 while the volume is mounted with ngfs_mount_light (the NetGD menu): ngblk_write touches no device and returns -1 */
+extern int ngblk_readonly;
 
 /* n == 1 (FatFs window: FAT, directory, FSInfo, and every sector a commit rewrites): read twice and
    compare, repeat up to NGBLK_READ_TRIES times, -1 if never two identical reads (G1 read bit flips,

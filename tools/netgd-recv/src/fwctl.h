@@ -47,4 +47,15 @@ int fw_session_end(const ng_fwinfo_t *fw, int mode, const char *name);
 
 int fw_status(ng_fwstatus_t *out);
 
+/* ---- commands for the menu (netgd-menu), design docs/design/menu-app.md 5.2 ----
+   All return 0 = success, -1 = failure.  `sense` (may be NULL) gets the sense key of the failure:
+   5 ILLEGAL REQUEST (no such folder / no image / mount failed), 2 NOT READY, 6 UNIT ATTENTION.
+   A UNIT ATTENTION is repeated once inside (not executed), except in fw_test_unit_ready. */
+int fw_gdemu_mount(uint16_t n, uint8_t *sense);             /* 52 82 lo hi; n = 0: the default image */
+int fw_gdemu_step(int prev, uint8_t *sense);                /* 52 81 55 (next) / 52 81 44 (prev) */
+int fw_gdemu_version(uint32_t *boot, uint32_t *fw);         /* 52 00 00 00 08: two LE u32 (major<<24|minor<<16|patch<<8) */
+int fw_mount_named(const char *name, uint8_t *sense);       /* E0 05 chunks, then E0 02 00 */
+int fw_mount_default(uint8_t *sense);                       /* E0 02 FF */
+int fw_test_unit_ready(uint8_t *sense);                     /* 00: 0 = READY; never repeated on UNIT ATTENTION */
+
 #endif

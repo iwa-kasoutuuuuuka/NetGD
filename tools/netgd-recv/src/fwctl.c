@@ -18,12 +18,20 @@
 /* One command.  A PACKET that ends in CHECK CONDITION with sense key 6 (UNIT ATTENTION --
    the firmware raises one after a load / mount / END, and at power-up) was NOT executed:
    send it once more.  Any other error is the caller's. */
-static int atapi(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got)
+/* sense: the sense key of the last attempt (err >> 4; 0 for a transport failure), may be NULL.
+   retry_ua = 0: a UNIT ATTENTION is reported to the caller instead of repeated (fw_test_unit_ready). */
+static int atapi_s(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, uint8_t *sense, int retry_ua)
 {
     uint8_t err = 0;
     int rc = fw_xfer(pkt, data, alloc, got, &err);
-    if (rc != 0 && (err >> 4) == 6) rc = fw_xfer(pkt, data, alloc, got, &err);
+    if (rc != 0 && retry_ua && (err >> 4) == 6) rc = fw_xfer(pkt, data, alloc, got, &err);
+    if (sense) *sense = rc ? (uint8_t)(err >> 4) : 0;
     return rc;
+}
+
+static int atapi(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got)
+{
+    return atapi_s(pkt, data, alloc, got, NULL, 1);
 }
 
 static int ctl(uint8_t sub, uint8_t b2, uint8_t b3, uint8_t b4, void *data, uint32_t alloc, uint32_t *got)
@@ -95,4 +103,50 @@ int fw_status(ng_fwstatus_t *out)
     out->last_fnv = LE32(24);
     out->part_lba = LE32(28);
     return 0;
+}
+
+/* ---- the menu's commands: GDEMU 0x52 (mount by number, step, version), MOUNT_NAME + MOUNT, TEST UNIT READY ---- */
+
+int fw_gdemu_mount(uint16_t n, uint8_t *sense)
+{
+    uint8_t p[12] = { 0x52, 0x82, (uint8_t)n, (uint8_t)(n >> 8) };
+    return atapi_s(p, NULL, 0, NULL, sense, 1);
+}
+
+int fw_gdemu_step(int prev, uint8_t *sense)
+{
+    uint8_t p[12] = { 0x52, 0x81, (uint8_t)(prev ? 0x44 : 0x55) };
+    return atapi_s(p, NULL, 0, NULL, sense, 1);
+}
+
+int fw_gdemu_version(uint32_t *boot, uint32_t *fw)
+{
+    uint8_t p[12] = { 0x52, 0x00, 0x00, 0x00, 0x08 };
+    uint8_t b[8] = { 0 };
+    uint32_t got = 0;
+    if (atapi(p, b, 8, &got) != 0 || got < 8) return -1;
+    if (boot) *boot = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    if (fw) *fw = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+    return 0;
+}
+
+int fw_mount_named(const char *name, uint8_t *sense)
+{
+    uint8_t s = 0;
+    if (stage_name(name) != 0) { if (sense) *sense = 0; return -1; }
+    if (atapi_s((const uint8_t[12]){ 0xE0, 2, 0 }, NULL, 0, NULL, &s, 1) != 0) { if (sense) *sense = s; return -1; }
+    if (sense) *sense = 0;
+    return 0;
+}
+
+int fw_mount_default(uint8_t *sense)
+{
+    uint8_t p[12] = { 0xE0, 2, 0xFF };
+    return atapi_s(p, NULL, 0, NULL, sense, 1);
+}
+
+int fw_test_unit_ready(uint8_t *sense)
+{
+    uint8_t p[12] = { 0x00 };
+    return atapi_s(p, NULL, 0, NULL, sense, 0);
 }
