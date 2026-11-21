@@ -67,16 +67,17 @@ class ExpectTest(unittest.TestCase):
                 self.assertEqual(e.get('us'), '-', e['_line'][:80])   # timings are never invented
 
     def test_bytes_match_discimg_test_expectations(self):
-        # tests/atapi.rs: standby REQ_STAT of a GDI, and the standby GET_SCD format 1
-        self.assertEqual(self.one(3, 'REQ_STAT')['data'], '028f4101010000960000')   # repeat nibble F when idle (D3)
-        self.assertEqual(self.one(3, 'GET_SCD_1')['data'], '0015000e41010100000000000096')
+        # tests/atapi.rs: REQ_STAT of a GDI after a switch (paused, head at track 3's start, D2/D4; stock 01 8f 41 03 01 00 b0 5e),
+        # and GET_SCD format 1 there (audio status still 0x15)
+        self.assertEqual(self.one(3, 'REQ_STAT')['data'], '018f41030100b05e0000')   # repeat nibble F when idle (D3)
+        self.assertEqual(self.one(3, 'GET_SCD_1')['data'], '0015000e4103010000000000b05e')
         # TOC area 0 of the GDI: track 1 = 0x41 at FAD 150, track 2 audio at FAD 906 (LBA 756 + 150)
         self.assertTrue(self.one(3, 'GET_TOC_0')['data'].startswith('410000960100038a'))
         # REQ_SES(0): session count 1, lead-out = end of track 3 (D1, stock): 45000 + 1100 + 150 = 0x00b4aa
         # (it was 549150 + 150 = 0x0861b4); REQ_SES(1): track 1 at FAD 150
-        self.assertEqual(self.one(3, 'REQ_SES_0')['data'], '02000100b4aa')
+        self.assertEqual(self.one(3, 'REQ_SES_0')['data'], '01000100b4aa')
         self.assertEqual(self.one(3, 'GET_TOC_1')['data'][-8:], '4100b4aa')
-        self.assertEqual(self.one(3, 'REQ_SES_1')['data'], '020001000096')
+        self.assertEqual(self.one(3, 'REQ_SES_1')['data'], '010001000096')
         # a GDI has no session 2 / 3: CHECK, ILLEGAL REQUEST in stock's form (status 0x11, err 0x50; D5)
         for s in (2, 3):
             e = self.one(3, 'REQ_SES_%d' % s)

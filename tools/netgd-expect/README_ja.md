@@ -14,8 +14,8 @@
 | 切替直後 | 切替の窓（D13）：TUR は NOT READY `2/3a/00` → `2/04/01` → UNIT ATTENTION `6/28/00` を 1 回 → READY。`SW_POLL` はこの 4 行（時刻は `-`） |
 | REQ_MODE | 純正の 32 バイト（`00 00 00 00 00 b4 19 00 00 08` + `SE      ` + `Rev 6.42` + `990316`、R117）の窓。32 バイトを越える窓と長さ 0 は ILLEGAL REQUEST（`err=0x50`） |
 | REQ_ERROR | `F0`、バイト 2 = 保留中のセンスキー、バイト 8・9 = ASC/ASCQ（D7） |
-| REQ_STAT / GET_SCD | 待機状態（FAD 150、トラック 1）。REQ_STAT バイト 1 の上位 = ディスク形式（CDI 0x2、GDI 0x8。SECNR と同じ）、GET_SCD 形式 1 の位置はバイナリ FAD、形式 0 は Q = 0x40・ほか 0 |
-| REQ_SES | `req_ses_reply` どおり（バイト 0 = ドライブ状態、待機中は 0x02）。範囲外のセッションは ILLEGAL REQUEST（`status=0x11 err=0x50`、`bytes=0`） |
+| REQ_STAT / GET_SCD | CD-DA なしの位置。`--switch` のあと（`expect_sd.py` の全 `img=n`）は一時停止 0x01・GDI はトラック 3 の先頭（FAD = 開始 LBA + 150）・CDI はトラック 1 FAD 150（D2/D4、純正どおり）、`--switch` なし（電源投入直後）は待機 0x02・FAD 150・トラック 1。GET_SCD のオーディオ状態はどちらも 0x15。REQ_STAT バイト 1 の上位 = ディスク形式（CDI 0x2、GDI 0x8。SECNR と同じ）、GET_SCD 形式 1 の位置はバイナリ FAD、形式 0 は Q = 0x40・ほか 0 |
+| REQ_SES | `req_ses_reply` どおり（バイト 0 = ドライブ状態、切替後 0x01・電源投入直後 0x02）。範囲外のセッションは ILLEGAL REQUEST（`status=0x11 err=0x50`、`bytes=0`） |
 | `52 00` | `00 00 00 00 00 00 20 05`（バージョン 5.20.0） |
 | CD_READ | CDB のバイト 1 は見ない。常に 1 セクタ 2048 バイト（`ssz=2048`、`0x10` でも 2352 にならない）。データは `file_offset + (LBA − 開始 LBA) × セクタ長 + 16`（2352）/ `+ 8`（2336）の 2048 バイト。要求がトラックの残りを越えると ILLEGAL REQUEST（`err=0x50`、`sense=5/00/00`） |
 | `52 82 n`（n が空フォルダ） | 純正どおり受け付ける（`status=0x50`、D12）。同じ窓のあと `2/3a/00` のまま（`SW_RESULT rc=timeout`）。そのあとの `img=7` は「ディスクなし」の試験：TUR・REQ_STAT・GET_TOC・REQ_SES_0・GET_SCD は `0x11/0x20`、REQ_SES_1〜3 は `0x11/0x50`、REQ_MODE・REQ_ERROR・`52 00` は通常どおり、読み出しなし |

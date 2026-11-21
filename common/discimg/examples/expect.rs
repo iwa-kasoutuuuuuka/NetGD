@@ -412,7 +412,7 @@ fn hash_sectors(o: &mut Out, fad: u32, count: u32, data: &Option<Vec<u8>>) {
 
 // ------------------------------------------------------------------ the battery
 
-fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
+fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
     // warmup(): TUR until READY. A pending UNIT ATTENTION is answered by the first command and cleared.
     let tur = [0u8; 12];
     let req_err = cdb_simple(0x13, 0, 0, 10);
@@ -428,11 +428,16 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
     // battery_info
     o.probe("TUR", None, Some(&tur), &Res::ok(&[]), false);
 
-    let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0);
+    // Nothing plays: the idle status and head (D2/D4) -- pause and the switch's park position after a
+    // `52 82` (`switched`), standby at FAD 150 on a unit that has not switched since power-on (ide.rs
+    // `IDLE_STATUS` / `SWITCHED`). CD_READ moves neither, in the firmware or here.
+    let idle = if switched { atapi::DRIVE_PAUSE } else { atapi::DRIVE_STANDBY };
+    let idle_fad = atapi::idle_fad(&d.tracks, d.is_cdi, switched);
+    let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, idle_fad);
     // disc_format() in ide.rs: CDI -> CD-ROM XA, anything else -> GD-ROM; the repeat
     // nibble is F whenever nothing plays (req_stat_reply).
     let fmt = if d.is_cdi { atapi::DISC_FORMAT_CDROM_XA } else { atapi::DISC_FORMAT_GDROM };
-    let stat = atapi::req_stat_reply(AudioState::Standby, fmt, 0, fad, track);
+    let stat = atapi::req_stat_reply(AudioState::Standby, idle, fmt, 0, fad, track);
     let c = cdb_simple(0x10, 0, 0, 10);
     o.probe("REQ_STAT", None, Some(&c), &cut(&stat, 10), true);
 
@@ -471,7 +476,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
     let mut ses_ip = 0u32;
     for s in 0..4u8 {
         let c = cdb_simple(0x15, 0, s, 6);
-        let r = match atapi::req_ses_reply(&d.tracks, d.is_cdi, d.boot_area_lba, d.sessions, s, atapi::DRIVE_STANDBY) {
+        let r = match atapi::req_ses_reply(&d.tracks, d.is_cdi, d.boot_area_lba, d.sessions, s, idle) {
             Some(rep) => {
                 if s == 2 {
                     let f = fad3(&rep[3..6]);
@@ -486,10 +491,10 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
         o.probe(&format!("REQ_SES_{}", s), None, Some(&c), &r, true);
     }
 
-    // GET_SCD at standby: fad 150, format = CDB byte 1 & 0x0F, cut to the allocation length.
+    // GET_SCD with no CD-DA (audio status 0x15) at the idle head, format = CDB byte 1 & 0x0F, cut to the
+    // allocation length.
     for (name, fmt, alloc) in [("GET_SCD_0", 0u8, 100u32), ("GET_SCD_1", 1u8, 14u32)] {
         let c = cdb_be16(0x40, fmt, alloc);
-        let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0);
         let mut rep = [0u8; 100];
         let len = atapi::get_scd_reply(fmt & 0x0F, AudioState::Standby, fad, track, &mut rep);
         o.probe(name, None, Some(&c), &cut(&rep[..len], alloc as usize), true);
@@ -716,7 +721,10 @@ fn main() {
             Some(d) => {
                 // A switch consumes the UNIT ATTENTION in its polls; a bare run on a freshly booted unit sees it.
                 let ua = opt.ua.unwrap_or(!opt.switch);
-                battery(&opt, d, &mut o, ua);
+                // --switch: the battery runs after a switch (pause, park position); without it, on a unit
+                // fresh from power-on (standby, FAD 150). A refused switch (--missing-folder) keeps the old
+                // image, which expect_sd.py only does after an earlier switch.
+                battery(&opt, d, &mut o, ua, opt.switch);
             }
             None => battery_no_medium(&mut o),
         }

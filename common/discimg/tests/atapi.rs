@@ -216,32 +216,32 @@ fn req_ses_no_sda_track() {
 #[test]
 fn head_position_idle_is_fad_150_in_track_1() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Standby, 12345);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 12345, 150);
     assert_eq!(fad, 150);
     assert_eq!(tr.unwrap().number, 1);
     // Playing at FAD 1000 -> LBA 850 -> track 2 (starts at 450).
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
     assert_eq!((fad, tr.unwrap().number), (1000, 2));
     // Before the first track (FAD < 150 saturates to LBA 0), and past the end.
-    let (_, tr) = head_position(&g, AudioState::Paused, 10);
+    let (_, tr) = head_position(&g, AudioState::Paused, 10, 150);
     assert_eq!(tr.unwrap().number, 1);
-    let (_, tr) = head_position(&g, AudioState::Paused, 600_000);
+    let (_, tr) = head_position(&g, AudioState::Paused, 600_000, 150);
     assert_eq!(tr.unwrap().number, 3);
     // No tracks.
-    assert!(head_position(&[] as &[TrackDesc], AudioState::Playing, 5).1.is_none());
+    assert!(head_position(&[] as &[TrackDesc], AudioState::Playing, 5, 150).1.is_none());
 }
 
 #[test]
 fn req_stat() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Standby, 777);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 777, 150);
     assert_eq!(
-        req_stat_reply(AudioState::Standby, DISC_FORMAT_GDROM, 0, fad, tr),
+        req_stat_reply(AudioState::Standby, DRIVE_STANDBY, DISC_FORMAT_GDROM, 0, fad, tr),
         [0x02, 0x8F, 0x41, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
     );
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
     assert_eq!(
-        req_stat_reply(AudioState::Playing, DISC_FORMAT_CDROM_XA, 3, fad, tr),
+        req_stat_reply(AudioState::Playing, DRIVE_STANDBY, DISC_FORMAT_CDROM_XA, 3, fad, tr),
         [0x03, 0x23, 0x01, 0x02, 0x01, 0x00, 0x03, 0xE8, 0x00, 0x00]
     );
     for (s, code) in [
@@ -251,25 +251,25 @@ fn req_stat() {
         (AudioState::Error, 9),
         (AudioState::Standby, 2),
     ] {
-        assert_eq!(req_stat_reply::<TrackDesc>(s, 0, 0, 0, None)[0], code);
-        assert_eq!(drive_status(s), code);
+        assert_eq!(req_stat_reply::<TrackDesc>(s, DRIVE_STANDBY, 0, 0, 0, None)[0], code);
+        assert_eq!(drive_status(s, DRIVE_STANDBY), code);
     }
     // No track under the head: CTRL/ADR 0x41, track 1; FAD is full 24-bit BE.
     // Paused: the repeat nibble is F whatever the count (stock, D3).
     assert_eq!(
-        req_stat_reply::<TrackDesc>(AudioState::Paused, 0, 9, 0x01_02_03, None),
+        req_stat_reply::<TrackDesc>(AudioState::Paused, DRIVE_STANDBY, 0, 9, 0x01_02_03, None),
         [0x01, 0x0F, 0x41, 0x01, 0x01, 0x01, 0x02, 0x03, 0x00, 0x00]
     );
     // Byte 1: disc format high nibble, repeat count low while playing (the
     // firmware's repeat is 4 bits; anything above is masked so it cannot
     // spill into the format).
-    assert_eq!(req_stat_reply::<TrackDesc>(AudioState::Playing, DISC_FORMAT_CDROM_XA, 0x13, 0, None)[1], 0x23);
+    assert_eq!(req_stat_reply::<TrackDesc>(AudioState::Playing, DRIVE_STANDBY, DISC_FORMAT_CDROM_XA, 0x13, 0, None)[1], 0x23);
     // Not playing: F (stock GDEMU 6.0 sends 2f for a CDI and 8f for a GDI in
     // standby and pause, records 02-07; there is no stock record of playback).
     for s in [AudioState::Standby, AudioState::Paused, AudioState::Finished, AudioState::Error] {
         for rep in [0u8, 3, 0x0F] {
-            assert_eq!(req_stat_reply::<TrackDesc>(s, DISC_FORMAT_GDROM, rep, 0, None)[1], 0x8F);
-            assert_eq!(req_stat_reply::<TrackDesc>(s, DISC_FORMAT_CDROM_XA, rep, 0, None)[1], 0x2F);
+            assert_eq!(req_stat_reply::<TrackDesc>(s, DRIVE_STANDBY, DISC_FORMAT_GDROM, rep, 0, None)[1], 0x8F);
+            assert_eq!(req_stat_reply::<TrackDesc>(s, DRIVE_STANDBY, DISC_FORMAT_CDROM_XA, rep, 0, None)[1], 0x2F);
         }
     }
 }
@@ -277,7 +277,7 @@ fn req_stat() {
 #[test]
 fn get_scd_format_1_is_14_bytes() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
     let mut r = [0xEEu8; 100];
     assert_eq!(get_scd_reply(1, AudioState::Playing, fad, tr, &mut r), 14);
     // Q: ctrl/adr 01, track 02, index 01, rel FAD 400 (1000-600) = 0x000190, 00,
@@ -293,7 +293,7 @@ fn get_scd_format_1_is_14_bytes() {
 #[test]
 fn get_scd_idle_and_trackless() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Standby, 0);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, 150);
     let mut r = [0u8; 100];
     assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
     // Track 1, data; relative 0; absolute FAD 150 = 0x000096.
@@ -340,7 +340,7 @@ fn the_independent_crc_matches_the_standard_check_value() {
 #[test]
 fn get_scd_format_0_is_100_bytes_with_bit_expanded_q_and_inverted_crc() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
     let mut r = [0u8; 100];
     assert_eq!(get_scd_reply(0, AudioState::Playing, fad, tr, &mut r), 100);
     assert_eq!(&r[..4], &[0x00, 0x11, 0x00, 100]);
@@ -437,7 +437,7 @@ fn sweep_matches_the_original_code() {
             let fad = if rnd(4) == 0 { rnd(400) as u32 } else { rnd(700000) as u32 };
             let repeat = rnd(256) as u8;
             let snap = Snapshot { status: os, repeat, fad };
-            let (hf, ht) = head_position(&new, ns, fad);
+            let (hf, ht) = head_position(&new, ns, fad, 150);
             let (of, ot) = oracle::head_position(&snap, Some(&og));
             assert_eq!(hf, of);
             assert_eq!(ht.map(|t| t.number), ot.map(|t| t.number));
@@ -448,7 +448,7 @@ fn sweep_matches_the_original_code() {
             // Repeat nibble F unless playing (D3).
             let rep = if ns == AudioState::Playing { want[1] & 0x0F } else { 0x0F };
             want[1] = fmt | rep;
-            assert_eq!(req_stat_reply(ns, fmt, repeat, hf, ht), want);
+            assert_eq!(req_stat_reply(ns, DRIVE_STANDBY, fmt, repeat, hf, ht), want);
             for format in [0u8, 1, 2] {
                 let mut a = [0xCCu8; 100];
                 let mut b = [0xDDu8; 100];
@@ -556,12 +556,12 @@ fn the_stock_record_of_the_dcload_cdi() {
     let c = dcload_cdi();
     let boot = cdi_boot_area_lba(&c, 2);
     assert_eq!(boot, 11702);
-    let (fad, tr) = head_position(&c, AudioState::Standby, 0);
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, 150);
 
     // REQ_STAT: 02 2f 01 01 01 00 00 96 00 00. The low nibble of byte 1 (F) is
     // the repeat field, F whenever nothing plays (D3), whatever count the
     // player holds.
-    let stat = req_stat_reply(AudioState::Standby, DISC_FORMAT_CDROM_XA, 0, fad, tr);
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_STANDBY, DISC_FORMAT_CDROM_XA, 0, fad, tr);
     assert_eq!(&stat[..], &hex("022f0101010000960000")[..]);
 
     // GET_TOC area 0 and 1: the same 408 bytes.
@@ -572,7 +572,7 @@ fn the_stock_record_of_the_dcload_cdi() {
     assert_eq!(toc(&c, true, boot, 1), want);
 
     // REQ_SES 0..3.
-    let st = drive_status(AudioState::Standby);
+    let st = drive_status(AudioState::Standby, DRIVE_STANDBY);
     assert_eq!(req_ses_reply(&c, true, boot, 2, 0, st).unwrap()[..], hex("02000205017c")[..]);
     assert_eq!(req_ses_reply(&c, true, boot, 2, 1, st).unwrap()[..], hex("020001000096")[..]);
     assert_eq!(req_ses_reply(&c, true, boot, 2, 2, st).unwrap()[..], hex("020002002e4c")[..]);
@@ -632,8 +632,71 @@ fn the_stock_record_of_gdi_08_leadout() {
 #[test]
 fn the_stock_record_of_gdi_req_stat_repeat_nibble() {
     // stock_20261121_04_img3-7.txt img=3 REQ_STAT: 01 8f ... (paused, GD-ROM).
-    let stat = req_stat_reply::<TrackDesc>(AudioState::Paused, DISC_FORMAT_GDROM, 0, 0, None);
+    let stat = req_stat_reply::<TrackDesc>(AudioState::Paused, DRIVE_STANDBY, DISC_FORMAT_GDROM, 0, 0, None);
     assert_eq!(stat[1], 0x8F);
+}
+
+/// GET_SCD format 0 of GDI 03 after `52 82 03` (`stock_20261121_04_img3-7.txt`
+/// img=3, also records 03/06/08): track 3, FAD 45150 = 00:10:00 absolute.
+const STOCK_GDI03_GET_SCD_0: &str = "00150064004000000000004000000000000040400000000000000040000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000004000000000000000000040004000404000400000404000404000";
+
+#[test]
+fn idle_status_and_head_after_power_on_and_after_a_switch() {
+    // D2: no CD-DA started -> the idle status; CD-DA states keep theirs.
+    assert_eq!(drive_status(AudioState::Standby, DRIVE_STANDBY), DRIVE_STANDBY);
+    assert_eq!(drive_status(AudioState::Standby, DRIVE_PAUSE), DRIVE_PAUSE);
+    for (s, code) in [(AudioState::Playing, 3), (AudioState::Paused, 1), (AudioState::Finished, 1), (AudioState::Error, 9)] {
+        assert_eq!(drive_status(s, DRIVE_STANDBY), code);
+        assert_eq!(drive_status(s, DRIVE_PAUSE), code);
+    }
+    // D4: the idle head. Power-on: FAD 150 for both formats (no stock record of
+    // a GDI at power-on; NetGD keeps 150). After a switch: GDI = track 3's
+    // start, CDI = 150; a GDI without a track 3 stays at 150.
+    let g = stock_gdi03();
+    assert_eq!(idle_fad(&g, false, false), 150);
+    assert_eq!(idle_fad(&g, false, true), 45150);
+    assert_eq!(idle_fad(&dcload_cdi(), true, true), 150);
+    assert_eq!(idle_fad(&dcload_cdi(), true, false), 150);
+    assert_eq!(idle_fad(&[t(1, 0, 4, 600), t(2, 756, 0, 600)], false, true), 150);
+    // The idle position only applies while no CD-DA was started.
+    assert_eq!(head_position(&g, AudioState::Paused, 1000, 45150).0, 1000);
+}
+
+#[test]
+fn the_stock_record_of_gdi_03_after_a_switch() {
+    // stock_20261121_04_img3-7.txt img=3 (and 03/06/08): paused, track 3, FAD 45150.
+    let g = stock_gdi03();
+    let boot = gdi_boot_area_lba(&g);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, idle_fad(&g, false, true));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_GDROM, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("018f41030100b05e0000")[..]);
+    let st = drive_status(AudioState::Standby, DRIVE_PAUSE);
+    assert_eq!(req_ses_reply(&g, false, boot, 1, 0, st).unwrap()[..], hex("01000100fe7e")[..]);
+    assert_eq!(req_ses_reply(&g, false, boot, 1, 1, st).unwrap()[..], hex("010001000096")[..]);
+    // GET_SCD keeps audio status 0x15 (no CD-DA) while REQ_STAT says pause.
+    let mut r = [0u8; 100];
+    assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
+    assert_eq!(&r[..14], &hex("0015000e4103010000000000b05e")[..]);
+    assert_eq!(get_scd_reply(0, AudioState::Standby, fad, tr, &mut r), 100);
+    assert_eq!(&r[..], &hex(STOCK_GDI03_GET_SCD_0)[..]);
+}
+
+#[test]
+fn the_stock_record_of_a_cdi_after_a_switch() {
+    // stock_20261121_04_img3-7.txt img=0 (after record 03's return to 2), and
+    // img=4/5 (CDI 04/05): paused, track 1, FAD 150. The dcload CDI's tables.
+    let c = dcload_cdi();
+    let boot = cdi_boot_area_lba(&c, 2);
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, idle_fad(&c, true, true));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("012f0101010000960000")[..]);
+    let st = drive_status(AudioState::Standby, DRIVE_PAUSE);
+    assert_eq!(req_ses_reply(&c, true, boot, 2, 0, st).unwrap()[..], hex("01000205017c")[..]);
+    assert_eq!(req_ses_reply(&c, true, boot, 2, 1, st).unwrap()[..], hex("010001000096")[..]);
+    assert_eq!(req_ses_reply(&c, true, boot, 2, 2, st).unwrap()[..], hex("010002002e4c")[..]);
+    let mut r = [0u8; 100];
+    assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
+    assert_eq!(&r[..14], &hex("0015000e01010100000000000096")[..]);
 }
 
 #[test]

@@ -537,7 +537,9 @@ impl IdeDevice {
         // than being pinned to GD-ROM: the FPGA's reset state machine can
         // only load one fixed value, so a MIL-CD's CD-ROM XA format has to
         // be (re)asserted from here.
-        self.write(REG_LBA_LOW_MID, 0x1400 | secnr(GD_STANDBY) as u16);
+        // Status = REQ_STAT's idle status (standby until the first image
+        // switch, pause after one, D2).
+        self.write(REG_LBA_LOW_MID, 0x1400 | secnr(idle_status()) as u16);
         // LBA_HIGH=0xEB low byte (LBA_LOW_PREV in high byte we leave alone).
         let high_lowp = self.read(REG_LBA_HIGH_LOWP);
         self.write(REG_LBA_HIGH_LOWP, (high_lowp & 0xFF00) | 0x00EB);
@@ -1273,6 +1275,12 @@ async fn load_media(state: &mut DeviceState) -> bool {
 /// swap window -- opened whether or not anything mounted, as stock does for
 /// an empty folder too (D12, D13).
 fn mounted(state: &mut DeviceState, ok: bool) {
+    if ok {
+        // D2/D4: after a switch stock is paused, the head parked (GDI: track
+        // 3's start, CDI: FAD 150), until the next power-on.
+        SWITCHED.store(true, core::sync::atomic::Ordering::Relaxed);
+        IDLE_STATUS.store(GD_PAUSE, core::sync::atomic::Ordering::Relaxed);
+    }
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
     IdeDevice::primary().reassert_disc_format();
@@ -1545,6 +1553,22 @@ pub const GD_PAUSE: u8 = 0x01;
 pub const GD_STANDBY: u8 = 0x02;
 pub const GD_PLAY: u8 = 0x03;
 
+/// Drive status while no CD-DA has been started (REQ_STAT / REQ_SES byte 0,
+/// SECNR): standby from power-on -- the boot mount included -- until the
+/// first successful image switch, pause after one (D2, stock GDEMU 6.0:
+/// records 02/05/06 img=0 vs every `img=n` after `52 82 n`). CD_READ leaves
+/// it alone (no stock record shows REQ_STAT after a read without a switch or
+/// a Dreamcast reset in between). CD_SEEK stop (types other than 4) sets
+/// standby again, as SECNR already did.
+static IDLE_STATUS: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(GD_STANDBY);
+/// An image was switched in since power-on: the idle head is the switch's
+/// park position (`discimg::atapi::idle_fad`, D4), not FAD 150.
+static SWITCHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn idle_status() -> u8 {
+    IDLE_STATUS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// The disc format to report for whatever is mounted.
 ///
 /// A GDI is a GD-ROM. A CDI is a MIL-CD, and a MIL-CD is a CD: its data
@@ -1800,6 +1824,8 @@ async fn handle_packet(
                 dev.set_secnr(secnr(GD_PAUSE));
             } else {
                 crate::cdda::stop();
+                // Stopped: standby in REQ_STAT too, not the idle pause of a switch.
+                IDLE_STATUS.store(GD_STANDBY, core::sync::atomic::Ordering::Relaxed);
                 dev.set_secnr(secnr(GD_STANDBY));
             }
             dev.set_irr(0x03);
@@ -4028,8 +4054,16 @@ fn build_req_stat_reply() -> [u8; 10] {
     let s = crate::cdda::snapshot();
     let state = audio_state(s.status);
     let tracks = mounted_tracks();
-    let (fad, track) = discimg::atapi::head_position(tracks, state, s.fad);
-    discimg::atapi::req_stat_reply(state, disc_format(), s.repeat, fad, track)
+    let (fad, track) = discimg::atapi::head_position(tracks, state, s.fad, idle_fad());
+    discimg::atapi::req_stat_reply(state, idle_status(), disc_format(), s.repeat, fad, track)
+}
+
+/// Idle head position (D4): FAD 150 until the first switch, then the
+/// mounted image's park position (GDI: track 3's start).
+fn idle_fad() -> u32 {
+    let switched = SWITCHED.load(core::sync::atomic::Ordering::Relaxed);
+    let is_cdi = matches!(gdi_ref(), Some(g) if g.is_cdi);
+    discimg::atapi::idle_fad(mounted_tracks(), is_cdi, switched)
 }
 
 /// Build a 6-byte REQ_SES reply describing one session (0-indexed).
@@ -4055,7 +4089,7 @@ fn build_req_ses_reply(_gdi: Option<&'static crate::gdi::Gdi>, session: u8) -> O
     // The per-subcommand reasoning (session count vs first track number,
     // MIL-CD's second session) lives with the builder, in discimg::atapi.
     let g = gdi_ref()?;
-    let status = discimg::atapi::drive_status(audio_state(crate::cdda::snapshot().status));
+    let status = discimg::atapi::drive_status(audio_state(crate::cdda::snapshot().status), idle_status());
     discimg::atapi::req_ses_reply(g.tracks(), g.is_cdi, g.boot_area_lba, g.sessions, session, status)
 }
 
@@ -4077,7 +4111,7 @@ fn build_req_ses_reply(_gdi: Option<&'static crate::gdi::Gdi>, session: u8) -> O
 fn build_get_scd_reply(format: u8, r: &mut [u8; 100]) -> usize {
     let s = crate::cdda::snapshot();
     let state = audio_state(s.status);
-    let (fad, track) = discimg::atapi::head_position(mounted_tracks(), state, s.fad);
+    let (fad, track) = discimg::atapi::head_position(mounted_tracks(), state, s.fad, idle_fad());
     discimg::atapi::get_scd_reply(format, state, fad, track, r)
 }
 

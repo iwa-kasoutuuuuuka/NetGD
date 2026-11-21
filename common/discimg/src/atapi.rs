@@ -168,19 +168,40 @@ pub fn build_toc<T: TrackInfo>(
 }
 
 /// Where the pickup "is" for REQ_STAT / GET_SCD: `(fad, track)` -- the
-/// sector CDDA is playing or paused at (`cdda_fad`), or FAD 150 when idle.
+/// sector CDDA is playing or paused at (`cdda_fad`), or `idle_fad` when no
+/// CD-DA has been started ([`idle_fad`]: FAD 150 after power-on, the park
+/// position after an image switch, D4).
 #[inline(never)] // shared by REQ_STAT and GET_SCD; inlined twice it costs ~100 bytes
 pub fn head_position<T: TrackInfo>(
     tracks: &[T],
     state: AudioState,
     cdda_fad: u32,
+    idle_fad: u32,
 ) -> (u32, Option<&T>) {
     let fad = match state {
-        AudioState::Standby => 150,
+        AudioState::Standby => idle_fad,
         _ => cdda_fad,
     };
     let track = track_for_lba(tracks, fad.saturating_sub(150));
     (fad, track)
+}
+
+/// The idle head position (no CD-DA started) for REQ_STAT / GET_SCD (D4).
+/// Stock GDEMU 6.0 after an image switch (`switched`; records 03-08, every
+/// `img=n` after `52 82 n`): a GDI at the start of its first high-density
+/// track (track 3: REQ_STAT `01 8f 41 03 01 00 b0 5e`, FAD 45150), a CDI at
+/// track 1, FAD 150 (`01 2f 01 01 01 00 00 96`, not its data session). After
+/// power-on, before any switch, FAD 150 (`02 2f 01 01 01 00 00 96`, the
+/// dcload CDI, records 02/05/06). Stock has no power-on record of a GDI;
+/// NetGD keeps FAD 150 there too (the power-on rule, not the switch rule). A
+/// GDI without a track 3 parks at 150.
+pub fn idle_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool) -> u32 {
+    if switched && !is_cdi {
+        if let Some(t) = tracks.iter().find(|t| t.number() >= 3) {
+            return t.start_lba().wrapping_add(150);
+        }
+    }
+    150
 }
 
 /// Drive status codes (low nibble of SECNR, byte 0 of REQ_STAT / REQ_SES).
@@ -199,17 +220,22 @@ pub const DISC_FORMAT_CDROM_XA: u8 = 0x20;
 pub const DISC_FORMAT_GDROM: u8 = 0x80;
 
 /// Drive status for the pickup state: what REQ_STAT and REQ_SES put in
-/// byte 0.
-pub fn drive_status(state: AudioState) -> u8 {
+/// byte 0 (and SECNR's low nibble). `idle` is the status while no CD-DA has
+/// been started ([`AudioState::Standby`]): [`DRIVE_STANDBY`] after power-on
+/// until the first image switch, [`DRIVE_PAUSE`] after a switch (D2: stock
+/// GDEMU 6.0 answers `02` before any switch, records 02/05/06 img=0, and `01`
+/// after every `52 82 n`, records 03-08, before and after its CD_READs).
+pub fn drive_status(state: AudioState, idle: u8) -> u8 {
     match state {
         AudioState::Playing => DRIVE_PLAY,
         AudioState::Paused | AudioState::Finished => DRIVE_PAUSE,
         AudioState::Error => 9,
-        AudioState::Standby => DRIVE_STANDBY,
+        AudioState::Standby => idle,
     }
 }
 
-/// 10-byte Sega REQ_STAT reply: drive status, disc format | repeat count,
+/// 10-byte Sega REQ_STAT reply: drive status ([`drive_status`] of `state`
+/// and `idle`), disc format | repeat count,
 /// CTRL/ADR, TNO, index, FAD MSB..LSB, max retry, 0. `disc_format` is a
 /// `DISC_FORMAT_*` value (high nibble; D-3, stock GDEMU 6.0 sends 0x2_ for a
 /// CDI, R117); `repeat` is the 4-bit CDDA repeat count, sent only while
@@ -219,12 +245,13 @@ pub fn drive_status(state: AudioState) -> u8 {
 /// from [`head_position`].
 pub fn req_stat_reply<T: TrackInfo>(
     state: AudioState,
+    idle: u8,
     disc_format: u8,
     repeat: u8,
     fad: u32,
     track: Option<&T>,
 ) -> [u8; 10] {
-    let status = drive_status(state);
+    let status = drive_status(state, idle);
     let repeat = if state == AudioState::Playing { repeat } else { 0x0F };
     let (ctrl_adr, tno) = track
         .map(|t| ((t.ctrl() << 4) | 1, t.number()))
@@ -421,7 +448,8 @@ CD-ROM DRIVE    \
 /// 6-byte REQ_SES reply for one session (see the firmware's `ide.rs` for
 /// the history of why each subcommand reports what it does).
 ///   byte 0 = `status`, the drive status ([`drive_status`]; stock GDEMU 6.0
-///   sends 0x02 in standby, R117 -- this was a constant 0x01), byte 1 = 0,
+///   sends 0x02 in standby, R117, and 0x01 after a switch, D2 -- this was a
+///   constant 0x01), byte 1 = 0,
 ///   byte 2 = track, bytes 3..6 = FAD BE
 ///   session 0: session count + lead-out FAD
 ///   session 1: GDI: first track below `boot_area_lba`; CDI: the first track
