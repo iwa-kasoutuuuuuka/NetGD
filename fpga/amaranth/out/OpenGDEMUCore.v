@@ -174,7 +174,7 @@ module OpenGDEMUCore(io_MCU_BS, io_MCU_RD, io_MCU_WR, io_MCU_ADDR, io_MCU_DATA_I
     .mcu_irq(mcu_irq),
     .mcu_rd(io_MCU_RD),
     .mcu_wr(io_MCU_WR),
-    .\port$1597$0 (\$2 ),
+    .\port$1635$0 (\$2 ),
     .rst(rst)
   );
   \OpenGDEMUCore.dev1  dev1 (
@@ -1501,7 +1501,7 @@ endmodule
 
 (* generator = "Amaranth" *)
 module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr, ide_rd, ide_rd_h, ide_wr_h, addr, ide_data_in, ide_dmackn, audio_tick, clk, rst, mcu_cs, ide_iordy, ide_intrq, ide_out, aux_ctrl_we, aux_push
-, ide_dmarq, mcu_data_out, mcu_irq, aux_ctrl_rd, \port$1597$0 , mcu_rd);
+, ide_dmarq, mcu_data_out, mcu_irq, aux_ctrl_rd, \port$1635$0 , mcu_rd);
   reg \$auto$verilog_backend.cc:2355:dump_module$3  = 0;
   wire \$1 ;
   wire \$10 ;
@@ -1524,13 +1524,13 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$115 ;
   wire \$116 ;
   wire \$117 ;
-  wire [7:0] \$118 ;
+  wire \$118 ;
   wire \$119 ;
   wire \$12 ;
-  wire \$120 ;
-  wire [8:0] \$121 ;
+  wire [7:0] \$120 ;
+  wire \$121 ;
   wire \$122 ;
-  wire \$123 ;
+  wire [8:0] \$123 ;
   wire \$124 ;
   wire \$125 ;
   wire \$126 ;
@@ -1538,7 +1538,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$128 ;
   wire \$129 ;
   wire \$13 ;
-  wire \$130 ;
+  wire [7:0] \$130 ;
   wire \$131 ;
   wire \$132 ;
   wire \$133 ;
@@ -1619,40 +1619,40 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$200 ;
   wire \$201 ;
   wire \$202 ;
-  wire \$203 ;
+  wire [8:0] \$203 ;
   wire \$204 ;
   wire \$205 ;
   wire \$206 ;
-  wire [8:0] \$207 ;
+  wire \$207 ;
   wire \$208 ;
   wire \$209 ;
   wire \$21 ;
   wire \$210 ;
   wire \$211 ;
   wire \$212 ;
-  wire \$213 ;
+  wire [8:0] \$213 ;
   wire \$214 ;
   wire \$215 ;
   wire \$216 ;
-  wire [8:0] \$217 ;
+  wire \$217 ;
   wire \$218 ;
   wire \$219 ;
   wire \$22 ;
   wire \$220 ;
-  wire \$221 ;
+  wire [16:0] \$221 ;
   wire \$222 ;
   wire \$223 ;
   wire \$224 ;
-  wire [16:0] \$225 ;
+  wire \$225 ;
   wire \$226 ;
   wire \$227 ;
-  wire \$228 ;
-  wire \$229 ;
+  wire [8:0] \$228 ;
+  wire [16:0] \$229 ;
   wire \$23 ;
   wire \$230 ;
   wire \$231 ;
-  wire [8:0] \$232 ;
-  wire [16:0] \$233 ;
+  wire \$232 ;
+  wire \$233 ;
   wire \$234 ;
   wire \$235 ;
   wire \$236 ;
@@ -1661,20 +1661,20 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$239 ;
   wire \$24 ;
   wire \$240 ;
-  wire \$241 ;
+  wire [16:0] \$241 ;
   wire \$242 ;
   wire \$243 ;
-  wire \$244 ;
-  wire [16:0] \$245 ;
+  wire [8:0] \$244 ;
+  wire \$245 ;
   wire \$246 ;
-  wire \$247 ;
-  wire [8:0] \$248 ;
-  wire \$249 ;
+  wire [8:0] \$247 ;
+  wire \$248 ;
+  wire [16:0] \$249 ;
   wire \$25 ;
   wire \$250 ;
-  wire [8:0] \$251 ;
+  wire \$251 ;
   wire \$252 ;
-  wire [16:0] \$253 ;
+  wire \$253 ;
   wire \$254 ;
   wire \$255 ;
   wire \$256 ;
@@ -1688,8 +1688,8 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$263 ;
   wire \$264 ;
   wire \$265 ;
-  wire [16:0] \$266 ;
-  wire \$267 ;
+  wire \$266 ;
+  wire [16:0] \$267 ;
   wire \$268 ;
   wire \$269 ;
   wire \$27 ;
@@ -1699,15 +1699,15 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$273 ;
   wire \$274 ;
   wire \$275 ;
-  wire [24:0] \$276 ;
-  reg [2:0] \$277 ;
+  wire \$276 ;
+  wire [24:0] \$277 ;
   reg [2:0] \$278 ;
-  reg [1:0] \$279 ;
+  reg [2:0] \$279 ;
   wire \$28 ;
   reg [1:0] \$280 ;
-  reg [15:0] \$281 ;
+  reg [1:0] \$281 ;
   reg [15:0] \$282 ;
-  reg \$283 ;
+  reg [15:0] \$283 ;
   reg \$284 ;
   reg \$285 ;
   reg \$286 ;
@@ -1720,75 +1720,77 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg \$292 ;
   reg \$293 ;
   reg \$294 ;
-  reg [1:0] \$295 ;
-  reg \$296 ;
-  reg [4:0] \$297 ;
-  reg \$298 ;
-  reg [7:0] \$299 ;
+  reg \$295 ;
+  reg [1:0] \$296 ;
+  reg \$297 ;
+  reg [4:0] \$298 ;
+  reg \$299 ;
   wire \$3 ;
   wire \$30 ;
-  reg \$300 ;
+  reg [7:0] \$300 ;
   reg \$301 ;
   reg \$302 ;
-  reg [7:0] \$303 ;
+  reg \$303 ;
   reg [7:0] \$304 ;
-  reg \$305 ;
+  reg [7:0] \$305 ;
   reg \$306 ;
-  reg [15:0] \$307 ;
+  reg [6:0] \$307 ;
   reg \$308 ;
-  reg [3:0] \$309 ;
+  reg [15:0] \$309 ;
   wire \$31 ;
-  reg [7:0] \$310 ;
-  reg [7:0] \$311 ;
+  reg \$310 ;
+  reg [3:0] \$311 ;
   reg [7:0] \$312 ;
   reg [7:0] \$313 ;
   reg [7:0] \$314 ;
   reg [7:0] \$315 ;
   reg [7:0] \$316 ;
-  reg \$317 ;
-  reg \$318 ;
+  reg [7:0] \$317 ;
+  reg [7:0] \$318 ;
   reg \$319 ;
   wire \$32 ;
   reg \$320 ;
-  reg [7:0] \$321 ;
-  reg [7:0] \$322 ;
-  reg [15:0] \$323 ;
+  reg \$321 ;
+  reg \$322 ;
+  reg [7:0] \$323 ;
   reg [7:0] \$324 ;
-  reg [7:0] \$325 ;
-  reg [15:0] \$326 ;
+  reg [15:0] \$325 ;
+  reg [7:0] \$326 ;
   reg [7:0] \$327 ;
-  reg [7:0] \$328 ;
-  reg [15:0] \$329 ;
+  reg [15:0] \$328 ;
+  reg [7:0] \$329 ;
   wire \$33 ;
-  reg [15:0] \$330 ;
+  reg [7:0] \$330 ;
   reg [15:0] \$331 ;
-  reg [1:0] \$332 ;
-  reg \$333 ;
-  reg [7:0] \$334 ;
-  reg [7:0] \$335 ;
-  reg [1:0] \$336 ;
-  reg \$337 ;
-  reg [15:0] \$338 ;
+  reg [15:0] \$332 ;
+  reg [15:0] \$333 ;
+  reg [1:0] \$334 ;
+  reg \$335 ;
+  reg [7:0] \$336 ;
+  reg [7:0] \$337 ;
+  reg [1:0] \$338 ;
   reg \$339 ;
   wire \$34 ;
-  reg \$340 ;
+  reg [15:0] \$340 ;
   reg \$341 ;
   reg \$342 ;
   reg \$343 ;
   reg \$344 ;
-  reg [15:0] \$345 ;
-  reg [15:0] \$346 ;
-  reg \$347 ;
-  reg \$348 ;
-  reg [9:0] \$349 ;
+  reg \$345 ;
+  reg \$346 ;
+  reg [15:0] \$347 ;
+  reg [15:0] \$348 ;
+  reg \$349 ;
   wire \$35 ;
-  reg [8:0] \$350 ;
-  reg [1:0] \$351 ;
-  reg \$352 ;
-  reg \$353 ;
-  reg [3:0] \$354 ;
+  reg \$350 ;
+  reg [9:0] \$351 ;
+  reg [8:0] \$352 ;
+  reg [1:0] \$353 ;
+  reg \$354 ;
   reg \$355 ;
-  reg [23:0] \$356 ;
+  reg [3:0] \$356 ;
+  reg \$357 ;
+  reg [23:0] \$358 ;
   wire \$36 ;
   wire \$37 ;
   wire \$38 ;
@@ -1809,11 +1811,11 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$51 ;
   wire \$52 ;
   wire \$53 ;
-  wire \$54 ;
+  wire [7:0] \$54 ;
   wire [7:0] \$55 ;
   wire [7:0] \$56 ;
   wire [7:0] \$57 ;
-  wire [7:0] \$58 ;
+  wire \$58 ;
   wire \$59 ;
   wire \$6 ;
   wire \$60 ;
@@ -1844,7 +1846,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$83 ;
   wire \$84 ;
   wire \$85 ;
-  wire \$86 ;
+  wire [4:0] \$86 ;
   wire \$87 ;
   wire \$88 ;
   wire \$89 ;
@@ -1854,10 +1856,10 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$92 ;
   wire \$93 ;
   wire \$94 ;
-  wire [5:0] \$95 ;
-  wire [5:0] \$96 ;
-  wire \$97 ;
-  wire \$98 ;
+  wire \$95 ;
+  wire \$96 ;
+  wire [5:0] \$97 ;
+  wire [5:0] \$98 ;
   wire \$99 ;
   reg abrt = 1'h0;
   input [2:0] addr;
@@ -1884,8 +1886,10 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg [9:0] cap_wptr = 10'h000;
   input clk;
   wire clk;
+  reg [6:0] cmd_seq = 7'h00;
+  wire cmd_wr;
   reg [7:0] command = 8'h00;
-  wire \command$128 ;
+  wire \command$131 ;
   reg command_pend = 1'h0;
   input [1:0] csn;
   wire [1:0] csn;
@@ -1907,7 +1911,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg [7:0] devctl_last = 8'h00;
   reg [7:0] devctl_writes = 8'h00;
   reg [7:0] device = 8'h00;
-  wire \device$50 ;
+  wire \device$51 ;
   wire device_control;
   wire device_selected;
   reg df = 1'h0;
@@ -1931,7 +1935,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg err = 1'h0;
   wire error;
   reg [7:0] features = 8'h00;
-  wire \features$130 ;
+  wire \features$133 ;
   reg fifo_clear;
   reg hob = 1'h0;
   reg [7:0] host_altstat_rds = 8'h00;
@@ -1968,13 +1972,13 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg intrq_pending = 1'h0;
   reg [3:0] irq_delay = 4'h0;
   wire lba_high;
-  reg [7:0] \lba_high$63  = 8'heb;
+  reg [7:0] \lba_high$64  = 8'heb;
   reg [7:0] lba_high_prev = 8'h00;
   wire lba_low;
-  reg [7:0] \lba_low$59  = 8'h81;
+  reg [7:0] \lba_low$60  = 8'h81;
   reg [7:0] lba_low_prev = 8'h00;
   wire lba_mid;
-  reg [7:0] \lba_mid$61  = 8'h14;
+  reg [7:0] \lba_mid$62  = 8'h14;
   reg [7:0] lba_mid_prev = 8'h00;
   wire [12:0] level;
   wire [5:0] \level$16 ;
@@ -2004,15 +2008,15 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg pio_wr_fc = 1'h0;
   reg [7:0] pio_wr_words = 8'h00;
   reg pkt_phase = 1'h0;
-  input [9:0] \port$1597$0 ;
-  wire [9:0] \port$1597$0 ;
+  input [9:0] \port$1635$0 ;
+  wire [9:0] \port$1635$0 ;
   reg [23:0] post_reset_count = 24'h000000;
   reg post_reset_done_prev = 1'h0;
   reg [7:0] prev_altstat_rds = 8'h00;
   reg [15:0] prev_data_rds = 16'h0000;
   reg [7:0] prev_status_rds = 8'h00;
   wire [15:0] r_data;
-  wire [15:0] \r_data$86 ;
+  wire [15:0] \r_data$88 ;
   reg r_en;
   reg \r_en$3 ;
   wire r_rdy;
@@ -2027,15 +2031,16 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg rstn_clean_prev = 1'h1;
   reg [1:0] rstn_sync = 2'h3;
   wire sector_count;
-  reg [15:0] \sector_count$58  = 16'h0001;
+  reg [15:0] \sector_count$59  = 16'h0001;
   reg [3:0] sense_key = 4'h0;
   reg srst = 1'h0;
   wire status;
   reg [15:0] w_data;
-  reg [15:0] \w_data$92 ;
+  reg [15:0] \w_data$94 ;
   reg w_en;
   reg \w_en$2 ;
   wire w_rdy;
+  reg [4:0] wmask;
   reg [1:0] wr_h_sync = 2'h3;
   wire wr_has_room;
   reg [2:0] wr_sync = 3'h7;
@@ -2083,229 +2088,230 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   assign \$36  = wr_h_sync[1] & \$35 ;
   assign \$37  = \$34  | \$36 ;
   assign \$38  = \$37  & device_selected;
-  assign \$39  = \$38  & decode_command_lat;
-  assign \$40  = ~ ide_rstn;
-  assign \$41  = \$40  | srst;
-  assign \$42  = ~ w_rdy;
-  assign \$43  = pio_wr_fc & \$42 ;
-  assign \$44  = ~ \$43 ;
-  assign \$45  = drq & \$44 ;
-  assign \$46  = ~ r_rdy;
-  assign \$47  = pio_rd_fc & \$46 ;
-  assign \$48  = ~ \$47 ;
-  assign drq_out = \$45  & \$48 ;
-  assign \$49  = drq & pio_rd_fc;
-  assign \$50  = ~ r_rdy;
-  assign \$51  = \$49  & \$50 ;
-  assign bsy_out = bsy | \$51 ;
-  assign \$52  = ~ dmackn_sync[1];
-  assign \$53  = \$52  & dma_rd_mode;
-  assign \$54  = status | alt_status;
-  assign \$55  = hob ? \sector_count$58 [15:8] : \sector_count$58 [7:0];
-  assign \$56  = hob ? lba_low_prev : \lba_low$59 ;
-  assign \$57  = hob ? lba_mid_prev : \lba_mid$61 ;
-  assign \$58  = hob ? lba_high_prev : \lba_high$63 ;
-  assign \$59  = device_selected & ide_rd;
-  assign \$60  = data | error;
-  assign \$61  = \$60  | sector_count;
-  assign \$62  = \$61  | lba_low;
-  assign \$63  = \$62  | lba_mid;
-  assign \$64  = \$63  | lba_high;
-  assign \$65  = \$64  | \device$50 ;
-  assign \$66  = \$65  | status;
-  assign \$67  = \$66  | alt_status;
-  assign \$68  = \$67  | debug_testpad;
-  assign \$69  = ~ dmackn_sync[1];
-  assign \$70  = \$69  & dma_rd_mode;
-  assign \$71  = \$68  | \$70 ;
-  assign ide_data_out_en = \$59  & \$71 ;
-  assign \$72  = ~ n_ien;
-  assign \$73  = device_selected & \$72 ;
-  assign ide_intrq = \$73  & intrq_pending;
-  assign \$74  = ~ ide_rstn;
-  assign \$75  = \$74  | srst;
-  assign \$76  = mcu_cs & mcu_rd;
-  assign \$77  = ~ \$76 ;
-  assign \$78  = mcu_rd_active_prev & \$77 ;
-  assign \$79  = mcu_cs & mcu_wr;
-  assign \$80  = ~ \$79 ;
-  assign \$81  = mcu_wr_active_prev & \$80 ;
-  assign \$82  = cap_wptr == 10'h200;
-  assign \$83  = ~ cap_run;
-  assign \$84  = \$82  & \$83 ;
-  assign \$85  = mcu_cs & mcu_wr;
-  assign \$86  = mcu_cs & mcu_wr;
-  assign \$87  = ~ \$86 ;
-  assign \$88  = mcu_wr_active_prev & \$87 ;
-  assign \$89  = rd_sync[1] | wr_sync[1];
-  assign \$90  = ~ dmackn_sync[1];
-  assign \$91  = ! rd_burst_left;
-  assign \$92  = \$91  & rd_has_burst;
-  assign \$93  = \$92  & dma_rd_mode;
-  assign \$94  = ! rd_burst_left;
-  assign \$95  = rd_burst_left - 1'h1;
-  assign \$96  = \$94  ? 6'h0f : \$95 ;
-  assign \$97  = ~ dma_rd_mode;
-  assign \$98  = ~ rd_sync[1];
-  assign \$99  = ~ rd_h_sync[1];
-  assign \$100  = \$98  & \$99 ;
-  assign \$101  = ~ wr_sync[1];
+  assign cmd_wr = \$38  & decode_command_lat;
+  assign \$39  = ~ ide_rstn;
+  assign \$40  = \$39  | srst;
+  assign \$41  = ~ w_rdy;
+  assign \$42  = pio_wr_fc & \$41 ;
+  assign \$43  = ~ \$42 ;
+  assign \$44  = drq & \$43 ;
+  assign \$45  = ~ r_rdy;
+  assign \$46  = pio_rd_fc & \$45 ;
+  assign \$47  = ~ \$46 ;
+  assign drq_out = \$44  & \$47 ;
+  assign \$48  = drq & pio_rd_fc;
+  assign \$49  = ~ r_rdy;
+  assign \$50  = \$48  & \$49 ;
+  assign bsy_out = bsy | \$50 ;
+  assign \$51  = ~ dmackn_sync[1];
+  assign \$52  = \$51  & dma_rd_mode;
+  assign \$53  = status | alt_status;
+  assign \$54  = hob ? \sector_count$59 [15:8] : \sector_count$59 [7:0];
+  assign \$55  = hob ? lba_low_prev : \lba_low$60 ;
+  assign \$56  = hob ? lba_mid_prev : \lba_mid$62 ;
+  assign \$57  = hob ? lba_high_prev : \lba_high$64 ;
+  assign \$58  = device_selected & ide_rd;
+  assign \$59  = data | error;
+  assign \$60  = \$59  | sector_count;
+  assign \$61  = \$60  | lba_low;
+  assign \$62  = \$61  | lba_mid;
+  assign \$63  = \$62  | lba_high;
+  assign \$64  = \$63  | \device$51 ;
+  assign \$65  = \$64  | status;
+  assign \$66  = \$65  | alt_status;
+  assign \$67  = \$66  | debug_testpad;
+  assign \$68  = ~ dmackn_sync[1];
+  assign \$69  = \$68  & dma_rd_mode;
+  assign \$70  = \$67  | \$69 ;
+  assign ide_data_out_en = \$58  & \$70 ;
+  assign \$71  = ~ n_ien;
+  assign \$72  = device_selected & \$71 ;
+  assign ide_intrq = \$72  & intrq_pending;
+  assign \$73  = ~ ide_rstn;
+  assign \$74  = \$73  | srst;
+  assign \$75  = mcu_cs & mcu_rd;
+  assign \$76  = ~ \$75 ;
+  assign \$77  = mcu_rd_active_prev & \$76 ;
+  assign \$78  = mcu_cs & mcu_wr;
+  assign \$79  = ~ \$78 ;
+  assign \$80  = mcu_wr_active_prev & \$79 ;
+  assign \$81  = cap_wptr == 10'h200;
+  assign \$82  = ~ cap_run;
+  assign \$83  = \$81  & \$82 ;
+  assign \$84  = mcu_cs & mcu_wr;
+  assign \$85  = ! mcu_data_in[12:8];
+  assign \$86  = \$85  ? 5'h1f : mcu_data_in[12:8];
+  assign \$87  = mcu_cs & mcu_wr;
+  assign \$88  = mcu_cs & mcu_wr;
+  assign \$89  = ~ \$88 ;
+  assign \$90  = mcu_wr_active_prev & \$89 ;
+  assign \$91  = rd_sync[1] | wr_sync[1];
+  assign \$92  = ~ dmackn_sync[1];
+  assign \$93  = ! rd_burst_left;
+  assign \$94  = \$93  & rd_has_burst;
+  assign \$95  = \$94  & dma_rd_mode;
+  assign \$96  = ! rd_burst_left;
+  assign \$97  = rd_burst_left - 1'h1;
+  assign \$98  = \$96  ? 6'h0f : \$97 ;
+  assign \$99  = ~ dma_rd_mode;
+  assign \$100  = ~ rd_sync[1];
+  assign \$101  = ~ rd_h_sync[1];
   assign \$102  = \$100  & \$101 ;
-  assign \$103  = | rd_burst_left;
-  assign \$104  = \$103  & r_rdy;
-  assign \$105  = rd_has_burst | \$104 ;
-  assign \$106  = dma_rd_mode & \$105 ;
-  assign \$107  = dma_wr_mode & wr_has_room;
-  assign \$108  = \$106  | \$107 ;
-  assign \$109  = device_selected & \$108 ;
-  assign \$110  = ~ wr_h_sync[1];
-  assign \$111  = wr_sync[2] & \$110 ;
-  assign \$112  = ~ wr_sync[1];
-  assign \$113  = wr_h_sync[1] & \$112 ;
-  assign \$114  = \$111  | \$113 ;
-  assign \$115  = \$114  & decode_data_lat;
-  assign \$116  = \$115  & device_selected;
-  assign \$117  = \$116  & w_rdy;
-  assign \$118  = pkt_phase ? 8'h05 : 8'hff;
-  assign \$119  = pio_wr_words == \$118 ;
-  assign \$120  = pio_wr_fc | pkt_phase;
-  assign \$121  = pio_wr_words + 1'h1;
-  assign \$122  = ~ wr_h_sync[1];
-  assign \$123  = wr_sync[2] & \$122 ;
-  assign \$124  = ~ wr_sync[1];
-  assign \$125  = wr_h_sync[1] & \$124 ;
-  assign \$126  = \$123  | \$125 ;
-  assign \$127  = \$126  & decode_device_lat;
-  assign \$128  = ~ wr_h_sync[1];
-  assign \$129  = wr_sync[2] & \$128 ;
-  assign \$130  = ~ wr_sync[1];
-  assign \$131  = wr_h_sync[1] & \$130 ;
-  assign \$132  = \$129  | \$131 ;
-  assign \$133  = \$132  & device_selected;
-  assign \$134  = \$133  & decode_command_lat;
-  assign \$135  = ide_data_latch[7:0] == 8'ha0;
-  assign \$136  = ~ wr_h_sync[1];
-  assign \$137  = wr_sync[2] & \$136 ;
-  assign \$138  = ~ wr_sync[1];
-  assign \$139  = wr_h_sync[1] & \$138 ;
-  assign \$140  = \$137  | \$139 ;
-  assign \$141  = \$140  & device_selected;
-  assign \$142  = \$141  & decode_features_lat;
-  assign \$143  = ~ wr_h_sync[1];
-  assign \$144  = wr_sync[2] & \$143 ;
-  assign \$145  = ~ wr_sync[1];
-  assign \$146  = wr_h_sync[1] & \$145 ;
-  assign \$147  = \$144  | \$146 ;
-  assign \$148  = \$147  & device_selected;
-  assign \$149  = \$148  & decode_sector_count_lat;
-  assign \$150  = ~ wr_h_sync[1];
-  assign \$151  = wr_sync[2] & \$150 ;
-  assign \$152  = ~ wr_sync[1];
-  assign \$153  = wr_h_sync[1] & \$152 ;
-  assign \$154  = \$151  | \$153 ;
-  assign \$155  = \$154  & device_selected;
-  assign \$156  = \$155  & decode_lba_low_lat;
-  assign \$157  = ~ wr_h_sync[1];
-  assign \$158  = wr_sync[2] & \$157 ;
-  assign \$159  = ~ wr_sync[1];
-  assign \$160  = wr_h_sync[1] & \$159 ;
-  assign \$161  = \$158  | \$160 ;
-  assign \$162  = \$161  & device_selected;
-  assign \$163  = \$162  & decode_lba_mid_lat;
-  assign \$164  = ~ wr_h_sync[1];
-  assign \$165  = wr_sync[2] & \$164 ;
-  assign \$166  = ~ wr_sync[1];
-  assign \$167  = wr_h_sync[1] & \$166 ;
-  assign \$168  = \$165  | \$167 ;
-  assign \$169  = \$168  & device_selected;
-  assign \$170  = \$169  & decode_lba_high_lat;
-  assign \$171  = ~ wr_h_sync[1];
-  assign \$172  = wr_sync[2] & \$171 ;
-  assign \$173  = ~ wr_sync[1];
-  assign \$174  = wr_h_sync[1] & \$173 ;
-  assign \$175  = \$172  | \$174 ;
-  assign \$176  = \$175  & decode_device_control_lat;
-  assign \$177  = ~ rd_h_sync[1];
-  assign \$178  = rd_sync[2] & \$177 ;
-  assign \$179  = ~ rd_sync[1];
-  assign \$180  = rd_h_sync[1] & \$179 ;
-  assign \$181  = \$178  | \$180 ;
-  assign \$182  = \$181  & decode_rd_status_lat;
-  assign \$183  = \$182  & device_selected;
-  assign \$184  = ~ wr_h_sync[1];
-  assign \$185  = wr_sync[2] & \$184 ;
-  assign \$186  = ~ wr_sync[1];
-  assign \$187  = wr_h_sync[1] & \$186 ;
-  assign \$188  = \$185  | \$187 ;
-  assign \$189  = \$188  & device_selected;
-  assign \$190  = \$189  & decode_command_lat;
-  assign \$191  = ~ wr_h_sync[1];
-  assign \$192  = wr_sync[2] & \$191 ;
-  assign \$193  = ~ wr_sync[1];
-  assign \$194  = wr_h_sync[1] & \$193 ;
-  assign \$195  = \$192  | \$194 ;
-  assign \$196  = \$195  & device_selected;
-  assign \$197  = \$196  & decode_command_lat;
-  assign \$198  = ~ rd_h_sync[1];
-  assign \$199  = rd_sync[2] & \$198 ;
-  assign \$200  = ~ rd_sync[1];
-  assign \$201  = rd_h_sync[1] & \$200 ;
-  assign \$202  = \$199  | \$201 ;
-  assign \$203  = \$202  & device_selected;
-  assign \$204  = \$203  & decode_rd_status_lat;
-  assign \$205  = host_status_rds != 8'hff;
-  assign \$206  = \$204  & \$205 ;
-  assign \$207  = host_status_rds + 1'h1;
-  assign \$208  = ~ rd_h_sync[1];
-  assign \$209  = rd_sync[2] & \$208 ;
-  assign \$210  = ~ rd_sync[1];
-  assign \$211  = rd_h_sync[1] & \$210 ;
-  assign \$212  = \$209  | \$211 ;
-  assign \$213  = \$212  & device_selected;
-  assign \$214  = \$213  & decode_rd_alt_status_lat;
-  assign \$215  = host_altstat_rds != 8'hff;
-  assign \$216  = \$214  & \$215 ;
-  assign \$217  = host_altstat_rds + 1'h1;
-  assign \$218  = ~ rd_h_sync[1];
-  assign \$219  = rd_sync[2] & \$218 ;
-  assign \$220  = ~ rd_sync[1];
-  assign \$221  = rd_h_sync[1] & \$220 ;
-  assign \$222  = \$219  | \$221 ;
-  assign \$223  = \$222  & device_selected;
-  assign \$224  = \$223  & decode_rd_data_lat;
-  assign \$225  = host_data_rds + 1'h1;
-  assign \$226  = ~ wr_h_sync[1];
-  assign \$227  = wr_sync[2] & \$226 ;
-  assign \$228  = ~ wr_sync[1];
-  assign \$229  = wr_h_sync[1] & \$228 ;
-  assign \$230  = \$227  | \$229 ;
-  assign \$231  = \$230  & decode_device_control_lat;
-  assign \$232  = devctl_writes + 1'h1;
-  assign \$233  = diag_free_run + 1'h1;
-  assign \$234  = ~ wr_h_sync[1];
-  assign \$235  = wr_sync[2] & \$234 ;
-  assign \$236  = ~ wr_sync[1];
-  assign \$237  = wr_h_sync[1] & \$236 ;
-  assign \$238  = \$235  | \$237 ;
-  assign \$239  = ~ rd_h_sync[1];
-  assign \$240  = rd_sync[2] & \$239 ;
-  assign \$241  = ~ rd_sync[1];
-  assign \$242  = rd_h_sync[1] & \$241 ;
-  assign \$243  = \$240  | \$242 ;
-  assign \$244  = \$238  | \$243 ;
-  assign \$245  = diag_ide_strobes + 1'h1;
-  assign \$246  = ~ rstn_sync[1];
-  assign \$247  = rstn_clean_prev & \$246 ;
-  assign \$248  = diag_rstn_falls + 1'h1;
-  assign \$249  = ~ rstn_clean_prev;
-  assign \$250  = \$249  & rstn_sync[1];
-  assign \$251  = diag_rstn_rises + 1'h1;
-  assign \$252  = audio_sync[1] ^ audio_clean_prev;
-  assign \$253  = diag_audio_alive + 1'h1;
-  assign \$254  = mcu_cs & mcu_wr;
-  assign \$255  = mcu_cs & mcu_rd;
-  assign \$256  = mcu_cs & mcu_wr;
-  assign \$257  = mcu_cs & mcu_wr;
+  assign \$103  = ~ wr_sync[1];
+  assign \$104  = \$102  & \$103 ;
+  assign \$105  = | rd_burst_left;
+  assign \$106  = \$105  & r_rdy;
+  assign \$107  = rd_has_burst | \$106 ;
+  assign \$108  = dma_rd_mode & \$107 ;
+  assign \$109  = dma_wr_mode & wr_has_room;
+  assign \$110  = \$108  | \$109 ;
+  assign \$111  = device_selected & \$110 ;
+  assign \$112  = ~ wr_h_sync[1];
+  assign \$113  = wr_sync[2] & \$112 ;
+  assign \$114  = ~ wr_sync[1];
+  assign \$115  = wr_h_sync[1] & \$114 ;
+  assign \$116  = \$113  | \$115 ;
+  assign \$117  = \$116  & decode_data_lat;
+  assign \$118  = \$117  & device_selected;
+  assign \$119  = \$118  & w_rdy;
+  assign \$120  = pkt_phase ? 8'h05 : 8'hff;
+  assign \$121  = pio_wr_words == \$120 ;
+  assign \$122  = pio_wr_fc | pkt_phase;
+  assign \$123  = pio_wr_words + 1'h1;
+  assign \$124  = ~ wr_h_sync[1];
+  assign \$125  = wr_sync[2] & \$124 ;
+  assign \$126  = ~ wr_sync[1];
+  assign \$127  = wr_h_sync[1] & \$126 ;
+  assign \$128  = \$125  | \$127 ;
+  assign \$129  = \$128  & decode_device_lat;
+  assign \$130  = cmd_seq + 1'h1;
+  assign \$131  = ide_data_latch[7:0] == 8'ha0;
+  assign \$132  = ~ wr_h_sync[1];
+  assign \$133  = wr_sync[2] & \$132 ;
+  assign \$134  = ~ wr_sync[1];
+  assign \$135  = wr_h_sync[1] & \$134 ;
+  assign \$136  = \$133  | \$135 ;
+  assign \$137  = \$136  & device_selected;
+  assign \$138  = \$137  & decode_features_lat;
+  assign \$139  = ~ wr_h_sync[1];
+  assign \$140  = wr_sync[2] & \$139 ;
+  assign \$141  = ~ wr_sync[1];
+  assign \$142  = wr_h_sync[1] & \$141 ;
+  assign \$143  = \$140  | \$142 ;
+  assign \$144  = \$143  & device_selected;
+  assign \$145  = \$144  & decode_sector_count_lat;
+  assign \$146  = ~ wr_h_sync[1];
+  assign \$147  = wr_sync[2] & \$146 ;
+  assign \$148  = ~ wr_sync[1];
+  assign \$149  = wr_h_sync[1] & \$148 ;
+  assign \$150  = \$147  | \$149 ;
+  assign \$151  = \$150  & device_selected;
+  assign \$152  = \$151  & decode_lba_low_lat;
+  assign \$153  = ~ wr_h_sync[1];
+  assign \$154  = wr_sync[2] & \$153 ;
+  assign \$155  = ~ wr_sync[1];
+  assign \$156  = wr_h_sync[1] & \$155 ;
+  assign \$157  = \$154  | \$156 ;
+  assign \$158  = \$157  & device_selected;
+  assign \$159  = \$158  & decode_lba_mid_lat;
+  assign \$160  = ~ wr_h_sync[1];
+  assign \$161  = wr_sync[2] & \$160 ;
+  assign \$162  = ~ wr_sync[1];
+  assign \$163  = wr_h_sync[1] & \$162 ;
+  assign \$164  = \$161  | \$163 ;
+  assign \$165  = \$164  & device_selected;
+  assign \$166  = \$165  & decode_lba_high_lat;
+  assign \$167  = ~ wr_h_sync[1];
+  assign \$168  = wr_sync[2] & \$167 ;
+  assign \$169  = ~ wr_sync[1];
+  assign \$170  = wr_h_sync[1] & \$169 ;
+  assign \$171  = \$168  | \$170 ;
+  assign \$172  = \$171  & decode_device_control_lat;
+  assign \$173  = ~ rd_h_sync[1];
+  assign \$174  = rd_sync[2] & \$173 ;
+  assign \$175  = ~ rd_sync[1];
+  assign \$176  = rd_h_sync[1] & \$175 ;
+  assign \$177  = \$174  | \$176 ;
+  assign \$178  = \$177  & decode_rd_status_lat;
+  assign \$179  = \$178  & device_selected;
+  assign \$180  = ~ wr_h_sync[1];
+  assign \$181  = wr_sync[2] & \$180 ;
+  assign \$182  = ~ wr_sync[1];
+  assign \$183  = wr_h_sync[1] & \$182 ;
+  assign \$184  = \$181  | \$183 ;
+  assign \$185  = \$184  & device_selected;
+  assign \$186  = \$185  & decode_command_lat;
+  assign \$187  = ~ wr_h_sync[1];
+  assign \$188  = wr_sync[2] & \$187 ;
+  assign \$189  = ~ wr_sync[1];
+  assign \$190  = wr_h_sync[1] & \$189 ;
+  assign \$191  = \$188  | \$190 ;
+  assign \$192  = \$191  & device_selected;
+  assign \$193  = \$192  & decode_command_lat;
+  assign \$194  = ~ rd_h_sync[1];
+  assign \$195  = rd_sync[2] & \$194 ;
+  assign \$196  = ~ rd_sync[1];
+  assign \$197  = rd_h_sync[1] & \$196 ;
+  assign \$198  = \$195  | \$197 ;
+  assign \$199  = \$198  & device_selected;
+  assign \$200  = \$199  & decode_rd_status_lat;
+  assign \$201  = host_status_rds != 8'hff;
+  assign \$202  = \$200  & \$201 ;
+  assign \$203  = host_status_rds + 1'h1;
+  assign \$204  = ~ rd_h_sync[1];
+  assign \$205  = rd_sync[2] & \$204 ;
+  assign \$206  = ~ rd_sync[1];
+  assign \$207  = rd_h_sync[1] & \$206 ;
+  assign \$208  = \$205  | \$207 ;
+  assign \$209  = \$208  & device_selected;
+  assign \$210  = \$209  & decode_rd_alt_status_lat;
+  assign \$211  = host_altstat_rds != 8'hff;
+  assign \$212  = \$210  & \$211 ;
+  assign \$213  = host_altstat_rds + 1'h1;
+  assign \$214  = ~ rd_h_sync[1];
+  assign \$215  = rd_sync[2] & \$214 ;
+  assign \$216  = ~ rd_sync[1];
+  assign \$217  = rd_h_sync[1] & \$216 ;
+  assign \$218  = \$215  | \$217 ;
+  assign \$219  = \$218  & device_selected;
+  assign \$220  = \$219  & decode_rd_data_lat;
+  assign \$221  = host_data_rds + 1'h1;
+  assign \$222  = ~ wr_h_sync[1];
+  assign \$223  = wr_sync[2] & \$222 ;
+  assign \$224  = ~ wr_sync[1];
+  assign \$225  = wr_h_sync[1] & \$224 ;
+  assign \$226  = \$223  | \$225 ;
+  assign \$227  = \$226  & decode_device_control_lat;
+  assign \$228  = devctl_writes + 1'h1;
+  assign \$229  = diag_free_run + 1'h1;
+  assign \$230  = ~ wr_h_sync[1];
+  assign \$231  = wr_sync[2] & \$230 ;
+  assign \$232  = ~ wr_sync[1];
+  assign \$233  = wr_h_sync[1] & \$232 ;
+  assign \$234  = \$231  | \$233 ;
+  assign \$235  = ~ rd_h_sync[1];
+  assign \$236  = rd_sync[2] & \$235 ;
+  assign \$237  = ~ rd_sync[1];
+  assign \$238  = rd_h_sync[1] & \$237 ;
+  assign \$239  = \$236  | \$238 ;
+  assign \$240  = \$234  | \$239 ;
+  assign \$241  = diag_ide_strobes + 1'h1;
+  assign \$242  = ~ rstn_sync[1];
+  assign \$243  = rstn_clean_prev & \$242 ;
+  assign \$244  = diag_rstn_falls + 1'h1;
+  assign \$245  = ~ rstn_clean_prev;
+  assign \$246  = \$245  & rstn_sync[1];
+  assign \$247  = diag_rstn_rises + 1'h1;
+  assign \$248  = audio_sync[1] ^ audio_clean_prev;
+  assign \$249  = diag_audio_alive + 1'h1;
+  assign \$250  = mcu_cs & mcu_wr;
+  assign \$251  = mcu_cs & mcu_rd;
+  assign \$252  = mcu_cs & mcu_wr;
+  assign \$253  = ~ mcu_data_in[1];
+  assign \$254  = mcu_data_in[14:8] == cmd_seq;
+  assign \$255  = \$253  & \$254 ;
+  assign \$256  = ~ cmd_wr;
+  assign \$257  = \$255  & \$256 ;
   assign \$258  = mcu_cs & mcu_wr;
   assign \$259  = mcu_cs & mcu_wr;
   assign \$260  = mcu_cs & mcu_wr;
@@ -2313,189 +2319,192 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   assign \$262  = mcu_cs & mcu_wr;
   assign \$263  = mcu_cs & mcu_wr;
   assign \$264  = mcu_cs & mcu_wr;
-  assign \$265  = mcu_cs & mcu_rd;
-  assign \$266  = lvl_read_count + 1'h1;
-  assign \$267  = mcu_cs & mcu_wr;
+  assign \$265  = mcu_cs & mcu_wr;
+  assign \$266  = mcu_cs & mcu_rd;
+  assign \$267  = lvl_read_count + 1'h1;
   assign \$268  = mcu_cs & mcu_wr;
   assign \$269  = mcu_cs & mcu_wr;
   assign \$270  = mcu_cs & mcu_wr;
-  assign \$271  = ~ ide_rstn;
-  assign \$272  = \$271  | srst;
-  assign \$273  = ~ post_reset_count[23];
-  assign \$274  = ~ post_reset_done_prev;
-  assign \$275  = post_reset_count[23] & \$274 ;
-  assign \$276  = post_reset_count + 1'h1;
+  assign \$271  = mcu_cs & mcu_wr;
+  assign \$272  = ~ ide_rstn;
+  assign \$273  = \$272  | srst;
+  assign \$274  = ~ post_reset_count[23];
+  assign \$275  = ~ post_reset_done_prev;
+  assign \$276  = post_reset_count[23] & \$275 ;
+  assign \$277  = post_reset_count + 1'h1;
   always @(posedge clk)
-    wr_sync <= \$277 ;
+    wr_sync <= \$278 ;
   always @(posedge clk)
-    rd_sync <= \$278 ;
+    rd_sync <= \$279 ;
   always @(posedge clk)
-    wr_h_sync <= \$279 ;
+    wr_h_sync <= \$280 ;
   always @(posedge clk)
-    rd_h_sync <= \$280 ;
+    rd_h_sync <= \$281 ;
   always @(posedge clk)
-    ide_data_latch_d <= \$281 ;
+    ide_data_latch_d <= \$282 ;
   always @(posedge clk)
-    ide_data_latch <= \$282 ;
+    ide_data_latch <= \$283 ;
   always @(posedge clk)
-    decode_data_lat <= \$283 ;
+    decode_data_lat <= \$284 ;
   always @(posedge clk)
-    decode_device_lat <= \$284 ;
+    decode_device_lat <= \$285 ;
   always @(posedge clk)
-    decode_command_lat <= \$285 ;
+    decode_command_lat <= \$286 ;
   always @(posedge clk)
-    decode_features_lat <= \$286 ;
+    decode_features_lat <= \$287 ;
   always @(posedge clk)
-    decode_sector_count_lat <= \$287 ;
+    decode_sector_count_lat <= \$288 ;
   always @(posedge clk)
-    decode_lba_low_lat <= \$288 ;
+    decode_lba_low_lat <= \$289 ;
   always @(posedge clk)
-    decode_lba_mid_lat <= \$289 ;
+    decode_lba_mid_lat <= \$290 ;
   always @(posedge clk)
-    decode_lba_high_lat <= \$290 ;
+    decode_lba_high_lat <= \$291 ;
   always @(posedge clk)
-    decode_device_control_lat <= \$291 ;
+    decode_device_control_lat <= \$292 ;
   always @(posedge clk)
-    decode_rd_data_lat <= \$292 ;
+    decode_rd_data_lat <= \$293 ;
   always @(posedge clk)
-    decode_rd_status_lat <= \$293 ;
+    decode_rd_status_lat <= \$294 ;
   always @(posedge clk)
-    decode_rd_alt_status_lat <= \$294 ;
+    decode_rd_alt_status_lat <= \$295 ;
   always @(posedge clk)
-    dmackn_sync <= \$295 ;
+    dmackn_sync <= \$296 ;
   always @(posedge clk)
-    dmack_held <= \$296 ;
+    dmack_held <= \$297 ;
   always @(posedge clk)
-    rd_burst_left <= \$297 ;
+    rd_burst_left <= \$298 ;
   always @(posedge clk)
-    ide_dmarq <= \$298 ;
+    ide_dmarq <= \$299 ;
   always @(posedge clk)
-    pio_wr_words <= \$299 ;
+    pio_wr_words <= \$300 ;
   always @(posedge clk)
-    bsy <= \$300 ;
+    bsy <= \$301 ;
   always @(posedge clk)
-    drq <= \$301 ;
+    drq <= \$302 ;
   always @(posedge clk)
-    pkt_phase <= \$302 ;
+    pkt_phase <= \$303 ;
   always @(posedge clk)
-    device <= \$303 ;
+    device <= \$304 ;
   always @(posedge clk)
-    command <= \$304 ;
+    command <= \$305 ;
   always @(posedge clk)
-    command_pend <= \$305 ;
+    command_pend <= \$306 ;
   always @(posedge clk)
-    err <= \$306 ;
+    cmd_seq <= \$307 ;
   always @(posedge clk)
-    \sector_count$58  <= \$307 ;
+    err <= \$308 ;
   always @(posedge clk)
-    abrt <= \$308 ;
+    \sector_count$59  <= \$309 ;
   always @(posedge clk)
-    sense_key <= \$309 ;
+    abrt <= \$310 ;
   always @(posedge clk)
-    features <= \$310 ;
+    sense_key <= \$311 ;
   always @(posedge clk)
-    lba_low_prev <= \$311 ;
+    features <= \$312 ;
   always @(posedge clk)
-    \lba_low$59  <= \$312 ;
+    lba_low_prev <= \$313 ;
   always @(posedge clk)
-    lba_mid_prev <= \$313 ;
+    \lba_low$60  <= \$314 ;
   always @(posedge clk)
-    \lba_mid$61  <= \$314 ;
+    lba_mid_prev <= \$315 ;
   always @(posedge clk)
-    lba_high_prev <= \$315 ;
+    \lba_mid$62  <= \$316 ;
   always @(posedge clk)
-    \lba_high$63  <= \$316 ;
+    lba_high_prev <= \$317 ;
   always @(posedge clk)
-    hob <= \$317 ;
+    \lba_high$64  <= \$318 ;
   always @(posedge clk)
-    srst <= \$318 ;
+    hob <= \$319 ;
   always @(posedge clk)
-    n_ien <= \$319 ;
+    srst <= \$320 ;
   always @(posedge clk)
-    intrq_pending <= \$320 ;
+    n_ien <= \$321 ;
   always @(posedge clk)
-    prev_status_rds <= \$321 ;
+    intrq_pending <= \$322 ;
   always @(posedge clk)
-    prev_altstat_rds <= \$322 ;
+    prev_status_rds <= \$323 ;
   always @(posedge clk)
-    prev_data_rds <= \$323 ;
+    prev_altstat_rds <= \$324 ;
   always @(posedge clk)
-    host_status_rds <= \$324 ;
+    prev_data_rds <= \$325 ;
   always @(posedge clk)
-    host_altstat_rds <= \$325 ;
+    host_status_rds <= \$326 ;
   always @(posedge clk)
-    host_data_rds <= \$326 ;
+    host_altstat_rds <= \$327 ;
   always @(posedge clk)
-    devctl_last <= \$327 ;
+    host_data_rds <= \$328 ;
   always @(posedge clk)
-    devctl_writes <= \$328 ;
+    devctl_last <= \$329 ;
   always @(posedge clk)
-    mcu_data_out <= \$329 ;
+    devctl_writes <= \$330 ;
   always @(posedge clk)
-    diag_free_run <= \$330 ;
+    mcu_data_out <= \$331 ;
   always @(posedge clk)
-    diag_ide_strobes <= \$331 ;
+    diag_free_run <= \$332 ;
   always @(posedge clk)
-    rstn_sync <= \$332 ;
+    diag_ide_strobes <= \$333 ;
   always @(posedge clk)
-    rstn_clean_prev <= \$333 ;
+    rstn_sync <= \$334 ;
   always @(posedge clk)
-    diag_rstn_falls <= \$334 ;
+    rstn_clean_prev <= \$335 ;
   always @(posedge clk)
-    diag_rstn_rises <= \$335 ;
+    diag_rstn_falls <= \$336 ;
   always @(posedge clk)
-    audio_sync <= \$336 ;
+    diag_rstn_rises <= \$337 ;
   always @(posedge clk)
-    audio_clean_prev <= \$337 ;
+    audio_sync <= \$338 ;
   always @(posedge clk)
-    diag_audio_alive <= \$338 ;
+    audio_clean_prev <= \$339 ;
   always @(posedge clk)
-    mcu_wr_active_prev <= \$339 ;
+    diag_audio_alive <= \$340 ;
   always @(posedge clk)
-    mcu_rd_active_prev <= \$340 ;
+    mcu_wr_active_prev <= \$341 ;
   always @(posedge clk)
-    reset_seen <= \$341 ;
+    mcu_rd_active_prev <= \$342 ;
   always @(posedge clk)
-    dsc <= \$342 ;
+    reset_seen <= \$343 ;
   always @(posedge clk)
-    df <= \$343 ;
+    dsc <= \$344 ;
   always @(posedge clk)
-    drdy <= \$344 ;
+    df <= \$345 ;
   always @(posedge clk)
-    lvl_at_read <= \$345 ;
+    drdy <= \$346 ;
   always @(posedge clk)
-    lvl_read_count <= \$346 ;
+    lvl_at_read <= \$347 ;
   always @(posedge clk)
-    cap_arm <= \$347 ;
+    lvl_read_count <= \$348 ;
   always @(posedge clk)
-    cap_run <= \$348 ;
+    cap_arm <= \$349 ;
   always @(posedge clk)
-    cap_wptr <= \$349 ;
+    cap_run <= \$350 ;
   always @(posedge clk)
-    cap_rptr <= \$350 ;
+    cap_wptr <= \$351 ;
   always @(posedge clk)
-    dma_mode <= \$351 ;
+    cap_rptr <= \$352 ;
   always @(posedge clk)
-    pio_wr_fc <= \$352 ;
+    dma_mode <= \$353 ;
   always @(posedge clk)
-    pio_rd_fc <= \$353 ;
+    pio_wr_fc <= \$354 ;
   always @(posedge clk)
-    irq_delay <= \$354 ;
+    pio_rd_fc <= \$355 ;
   always @(posedge clk)
-    post_reset_done_prev <= \$355 ;
+    irq_delay <= \$356 ;
   always @(posedge clk)
-    post_reset_count <= \$356 ;
+    post_reset_done_prev <= \$357 ;
+  always @(posedge clk)
+    post_reset_count <= \$358 ;
   \OpenGDEMUCore.dev0.decode  decode (
     .addr(addr),
     .alt_status(alt_status),
-    .command(\command$128 ),
+    .command(\command$131 ),
     .csn(csn),
     .data(data),
     .debug_testpad(debug_testpad),
-    .device(\device$50 ),
+    .device(\device$51 ),
     .device_control(device_control),
     .error(error),
-    .features(\features$130 ),
+    .features(\features$133 ),
     .lba_high(lba_high),
     .lba_low(lba_low),
     .lba_mid(lba_mid),
@@ -2511,13 +2520,13 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
     .r_rdy(r_rdy),
     .rst(rst),
     .w_en(w_en),
-    .w_port__data(\w_data$92 )
+    .w_port__data(\w_data$94 )
   );
   \OpenGDEMUCore.dev0.write_fifo  write_fifo (
     .clk(clk),
     .fifo_clear(fifo_clear),
     .level(\level$16 ),
-    .r_data(\r_data$86 ),
+    .r_data(\r_data$88 ),
     .r_en(\r_en$3 ),
     .rst(rst),
     .w_en(\w_en$2 ),
@@ -2547,7 +2556,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h08:
           /* empty */;
       7'h09:
-          if (\$81 ) begin
+          if (\$80 ) begin
             w_en = 1'h1;
           end
     endcase
@@ -2595,7 +2604,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h08:
           /* empty */;
       7'h09:
-          if (\$78 ) begin
+          if (\$77 ) begin
             \r_en$3  = 1'h1;
           end
     endcase
@@ -2620,33 +2629,33 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
     fifo_clear = 1'h0;
-    if (\$39 ) begin
+    if (cmd_wr) begin
       fifo_clear = 1'h1;
     end
-    if (\$41 ) begin
+    if (\$40 ) begin
       fifo_clear = 1'h1;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
     ide_out = 16'hffff;
-    if (\$53 ) begin
+    if (\$52 ) begin
       ide_out = r_data;
     end else if (data) begin
       ide_out = r_data;
     end else if (error) begin
       ide_out[7:0] = { sense_key, 1'h0, abrt, 2'h0 };
     end else if (sector_count) begin
-      ide_out[7:0] = \$55 ;
+      ide_out[7:0] = \$54 ;
     end else if (lba_low) begin
-      ide_out[7:0] = \$56 ;
+      ide_out[7:0] = \$55 ;
     end else if (lba_mid) begin
-      ide_out[7:0] = \$57 ;
+      ide_out[7:0] = \$56 ;
     end else if (lba_high) begin
-      ide_out[7:0] = \$58 ;
-    end else if (\device$50 ) begin
+      ide_out[7:0] = \$57 ;
+    end else if (\device$51 ) begin
       ide_out[7:0] = device;
-    end else if (\$54 ) begin
+    end else if (\$53 ) begin
       ide_out[7:0] = { bsy_out, drdy, df, dsc, drq_out, 2'h0, err };
     end
   end
@@ -2660,7 +2669,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
           mcu_out[1] = command_pend;
           mcu_out[2] = reset_seen;
           mcu_out[3] = n_ien;
-          mcu_out[4] = \$75 ;
+          mcu_out[4] = \$74 ;
+          mcu_out[14:8] = cmd_seq;
+          mcu_out[15] = 1'h1;
         end
       7'h01:
           mcu_out[7:0] = { bsy, drdy, df, dsc, drq, 2'h0, err };
@@ -2677,15 +2688,15 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
           mcu_out[15:8] = features;
         end
       7'h05:
-          mcu_out = \sector_count$58 ;
+          mcu_out = \sector_count$59 ;
       7'h06:
         begin
-          mcu_out[7:0] = \lba_low$59 ;
-          mcu_out[15:8] = \lba_mid$61 ;
+          mcu_out[7:0] = \lba_low$60 ;
+          mcu_out[15:8] = \lba_mid$62 ;
         end
       7'h07:
         begin
-          mcu_out[7:0] = \lba_high$63 ;
+          mcu_out[7:0] = \lba_high$64 ;
           mcu_out[15:8] = lba_low_prev;
         end
       7'h08:
@@ -2694,7 +2705,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
           mcu_out[15:8] = lba_high_prev;
         end
       7'h09:
-          mcu_out = \r_data$86 ;
+          mcu_out = \r_data$88 ;
       7'h0a:
           mcu_out = { 3'h0, dbg_rfifo_level };
       7'h0b:
@@ -2731,7 +2742,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
         begin
           mcu_out[0] = cap_arm;
           mcu_out[1] = cap_run;
-          mcu_out[2] = \$84 ;
+          mcu_out[2] = \$83 ;
           mcu_out[15:8] = cap_wptr[8:1];
         end
       7'h15:
@@ -2746,12 +2757,12 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h1d:
           mcu_out = aux_ctrl_rd;
       7'h1e:
-          mcu_out = { 6'h00, \port$1597$0  };
+          mcu_out = { 6'h00, \port$1635$0  };
     endcase
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \w_data$92  = 16'h0000;
+    \w_data$94  = 16'h0000;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -2772,8 +2783,74 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h08:
           /* empty */;
       7'h09:
-          if (\$81 ) begin
-            \w_data$92  = mcu_data_in;
+          if (\$80 ) begin
+            \w_data$94  = mcu_data_in;
+          end
+    endcase
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    wmask = 5'h00;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          /* empty */;
+      7'h15:
+          /* empty */;
+      7'h13:
+          if (\$84 ) begin
+            wmask = \$86 ;
           end
     endcase
   end
@@ -2840,7 +2917,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h13:
           /* empty */;
       7'h1d:
-          aux_ctrl_we = \$85 ;
+          aux_ctrl_we = \$87 ;
     endcase
   end
   always @* begin
@@ -2910,69 +2987,59 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h1e:
           /* empty */;
       7'h1f:
-          aux_push = \$88 ;
+          aux_push = \$90 ;
     endcase
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$277  = { wr_sync[1:0], ide_wr };
+    \$278  = { wr_sync[1:0], ide_wr };
     if (rst) begin
-      \$277  = 3'h7;
+      \$278  = 3'h7;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$278  = { rd_sync[1:0], ide_rd };
+    \$279  = { rd_sync[1:0], ide_rd };
     if (rst) begin
-      \$278  = 3'h0;
+      \$279  = 3'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$279  = { wr_h_sync[0], ide_wr_h };
+    \$280  = { wr_h_sync[0], ide_wr_h };
     if (rst) begin
-      \$279  = 2'h3;
+      \$280  = 2'h3;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$280  = { rd_h_sync[0], ide_rd_h };
+    \$281  = { rd_h_sync[0], ide_rd_h };
     if (rst) begin
-      \$280  = 2'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$281  = ide_data_latch;
-    if (rst) begin
-      \$281  = 16'h0000;
+      \$281  = 2'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
     \$282  = ide_data_latch;
-    if (ide_wr) begin
-      \$282  = ide_data_in;
-    end
     if (rst) begin
       \$282  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$283  = decode_data_lat;
+    \$283  = ide_data_latch;
     if (ide_wr) begin
-      \$283  = data;
+      \$283  = ide_data_in;
     end
     if (rst) begin
-      \$283  = 1'h0;
+      \$283  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$284  = decode_device_lat;
+    \$284  = decode_data_lat;
     if (ide_wr) begin
-      \$284  = \device$50 ;
+      \$284  = data;
     end
     if (rst) begin
       \$284  = 1'h0;
@@ -2980,9 +3047,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$285  = decode_command_lat;
+    \$285  = decode_device_lat;
     if (ide_wr) begin
-      \$285  = \command$128 ;
+      \$285  = \device$51 ;
     end
     if (rst) begin
       \$285  = 1'h0;
@@ -2990,9 +3057,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$286  = decode_features_lat;
+    \$286  = decode_command_lat;
     if (ide_wr) begin
-      \$286  = \features$130 ;
+      \$286  = \command$131 ;
     end
     if (rst) begin
       \$286  = 1'h0;
@@ -3000,9 +3067,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$287  = decode_sector_count_lat;
+    \$287  = decode_features_lat;
     if (ide_wr) begin
-      \$287  = sector_count;
+      \$287  = \features$133 ;
     end
     if (rst) begin
       \$287  = 1'h0;
@@ -3010,9 +3077,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$288  = decode_lba_low_lat;
+    \$288  = decode_sector_count_lat;
     if (ide_wr) begin
-      \$288  = lba_low;
+      \$288  = sector_count;
     end
     if (rst) begin
       \$288  = 1'h0;
@@ -3020,9 +3087,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$289  = decode_lba_mid_lat;
+    \$289  = decode_lba_low_lat;
     if (ide_wr) begin
-      \$289  = lba_mid;
+      \$289  = lba_low;
     end
     if (rst) begin
       \$289  = 1'h0;
@@ -3030,9 +3097,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$290  = decode_lba_high_lat;
+    \$290  = decode_lba_mid_lat;
     if (ide_wr) begin
-      \$290  = lba_high;
+      \$290  = lba_mid;
     end
     if (rst) begin
       \$290  = 1'h0;
@@ -3040,9 +3107,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$291  = decode_device_control_lat;
+    \$291  = decode_lba_high_lat;
     if (ide_wr) begin
-      \$291  = device_control;
+      \$291  = lba_high;
     end
     if (rst) begin
       \$291  = 1'h0;
@@ -3050,9 +3117,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$292  = decode_rd_data_lat;
-    if (ide_rd) begin
-      \$292  = data;
+    \$292  = decode_device_control_lat;
+    if (ide_wr) begin
+      \$292  = device_control;
     end
     if (rst) begin
       \$292  = 1'h0;
@@ -3060,9 +3127,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$293  = decode_rd_status_lat;
+    \$293  = decode_rd_data_lat;
     if (ide_rd) begin
-      \$293  = status;
+      \$293  = data;
     end
     if (rst) begin
       \$293  = 1'h0;
@@ -3070,9 +3137,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$294  = decode_rd_alt_status_lat;
+    \$294  = decode_rd_status_lat;
     if (ide_rd) begin
-      \$294  = alt_status;
+      \$294  = status;
     end
     if (rst) begin
       \$294  = 1'h0;
@@ -3080,144 +3147,154 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$295  = { dmackn_sync[0], ide_dmackn };
+    \$295  = decode_rd_alt_status_lat;
+    if (ide_rd) begin
+      \$295  = alt_status;
+    end
     if (rst) begin
-      \$295  = 2'h3;
+      \$295  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$296  = dmack_held;
-    if (\$89 ) begin
-      \$296  = \$90 ;
-    end
+    \$296  = { dmackn_sync[0], ide_dmackn };
     if (rst) begin
-      \$296  = 1'h0;
+      \$296  = 2'h3;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$297  = rd_burst_left;
+    \$297  = dmack_held;
+    if (\$91 ) begin
+      \$297  = \$92 ;
+    end
+    if (rst) begin
+      \$297  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$298  = rd_burst_left;
     if (rd_dma_pop) begin
-      \$297  = \$96 [4:0];
-    end else if (\$93 ) begin
-      \$297  = 5'h10;
+      \$298  = \$98 [4:0];
+    end else if (\$95 ) begin
+      \$298  = 5'h10;
     end
-    if (\$97 ) begin
-      \$297  = 5'h00;
+    if (\$99 ) begin
+      \$298  = 5'h00;
     end
     if (rst) begin
-      \$297  = 5'h00;
+      \$298  = 5'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$298  = ide_dmarq;
-    if (\$102 ) begin
-      \$298  = \$109 ;
+    \$299  = ide_dmarq;
+    if (\$104 ) begin
+      \$299  = \$111 ;
     end
     if (rst) begin
-      \$298  = 1'h0;
+      \$299  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$299  = pio_wr_words;
-    if (\$117 ) begin
+    \$300  = pio_wr_words;
+    if (\$119 ) begin
       (* full_case = 32'd1 *)
-      if (\$119 ) begin
-        \$299  = 8'h00;
+      if (\$121 ) begin
+        \$300  = 8'h00;
       end else begin
-        \$299  = \$121 [7:0];
+        \$300  = \$123 [7:0];
       end
     end
-    if (\$134 ) begin
-      \$299  = 8'h00;
+    if (cmd_wr) begin
+      \$300  = 8'h00;
     end
-    if (\$272 ) begin
-      \$299  = 8'h00;
+    if (\$273 ) begin
+      \$300  = 8'h00;
     end
     if (rst) begin
-      \$299  = 8'h00;
+      \$300  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$300  = bsy;
-    if (\$117 ) begin
-      if (\$119 ) begin
-        if (\$120 ) begin
-          \$300  = 1'h1;
+    \$301  = bsy;
+    if (\$119 ) begin
+      if (\$121 ) begin
+        if (\$122 ) begin
+          \$301  = 1'h1;
         end
       end
     end
-    if (\$134 ) begin
-      \$300  = 1'h1;
-      if (\$135 ) begin
-        \$300  = 1'h0;
+    if (cmd_wr) begin
+      \$301  = 1'h1;
+      if (\$131 ) begin
+        \$301  = 1'h0;
       end
     end
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          if (\$257 ) begin
-            \$300  = mcu_data_in[7];
+          if (\$258 ) begin
+            \$301  = mcu_data_in[7];
           end
     endcase
-    if (\$272 ) begin
-      \$300  = 1'h1;
-    end else if (\$273 ) begin
-    end else if (\$275 ) begin
-      \$300  = 1'h0;
+    if (\$273 ) begin
+      \$301  = 1'h1;
+    end else if (\$274 ) begin
+    end else if (\$276 ) begin
+      \$301  = 1'h0;
     end
     if (rst) begin
-      \$300  = 1'h1;
+      \$301  = 1'h1;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$301  = drq;
-    if (\$117 ) begin
-      if (\$119 ) begin
-        if (\$120 ) begin
-          \$301  = 1'h0;
+    \$302  = drq;
+    if (\$119 ) begin
+      if (\$121 ) begin
+        if (\$122 ) begin
+          \$302  = 1'h0;
         end
       end
     end
-    if (\$134 ) begin
-      \$301  = 1'h0;
-      if (\$135 ) begin
-        \$301  = 1'h1;
-      end
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          if (\$257 ) begin
-            \$301  = mcu_data_in[3];
-          end
-    endcase
-    if (\$272 ) begin
-      \$301  = 1'h0;
-    end
-    if (rst) begin
-      \$301  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$302  = pkt_phase;
-    if (\$117 ) begin
-      if (\$119 ) begin
-        \$302  = 1'h0;
-      end
-    end
-    if (\$134 ) begin
+    if (cmd_wr) begin
       \$302  = 1'h0;
-      if (\$135 ) begin
+      if (\$131 ) begin
         \$302  = 1'h1;
+      end
+    end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          if (\$258 ) begin
+            \$302  = mcu_data_in[3];
+          end
+    endcase
+    if (\$273 ) begin
+      \$302  = 1'h0;
+    end
+    if (rst) begin
+      \$302  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$303  = pkt_phase;
+    if (\$119 ) begin
+      if (\$121 ) begin
+        \$303  = 1'h0;
+      end
+    end
+    if (cmd_wr) begin
+      \$303  = 1'h0;
+      if (\$131 ) begin
+        \$303  = 1'h1;
       end
     end
     casez (mcu_addr)
@@ -3278,41 +3355,23 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$270 ) begin
-            \$302  = mcu_data_in[4];
+          if (\$271 ) begin
+            if (wmask[4]) begin
+              \$303  = mcu_data_in[4];
+            end
           end
     endcase
-    if (\$272 ) begin
-      \$302  = 1'h0;
+    if (\$273 ) begin
+      \$303  = 1'h0;
     end
     if (rst) begin
-      \$302  = 1'h0;
+      \$303  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$303  = device;
-    if (\$127 ) begin
-      \$303  = ide_data_latch[7:0];
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          if (\$258 ) begin
-            \$303  = mcu_data_in[7:0];
-          end
-    endcase
-    if (rst) begin
-      \$303  = 8'h00;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$304  = command;
-    if (\$134 ) begin
+    \$304  = device;
+    if (\$129 ) begin
       \$304  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
@@ -3321,11 +3380,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h01:
           /* empty */;
       7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          if (\$260 ) begin
+          if (\$259 ) begin
             \$304  = mcu_data_in[7:0];
           end
     endcase
@@ -3335,55 +3390,9 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$305  = command_pend;
-    if (\$134 ) begin
-      \$305  = 1'h1;
-    end
-    casez (mcu_addr)
-      7'h00:
-          if (\$256 ) begin
-            \$305  = mcu_data_in[1];
-          end
-    endcase
-    if (\$272 ) begin
-      \$305  = 1'h0;
-    end
-    if (rst) begin
-      \$305  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$306  = err;
-    if (\$134 ) begin
-      \$306  = 1'h0;
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          if (\$257 ) begin
-            \$306  = mcu_data_in[0];
-          end
-    endcase
-    if (\$272 ) begin
-      \$306  = 1'h0;
-    end
-    if (rst) begin
-      \$306  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$307  = \sector_count$58 ;
-    if (\$134 ) begin
-      if (\$135 ) begin
-        \$307 [7:0] = 8'h01;
-      end
-    end
-    if (\$149 ) begin
-      \$307 [15:8] = \sector_count$58 [7:0];
-      \$307 [7:0] = ide_data_latch[7:0];
+    \$305  = command;
+    if (cmd_wr) begin
+      \$305  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
       7'h00:
@@ -3395,40 +3404,65 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h03:
           /* empty */;
       7'h04:
-          /* empty */;
-      7'h05:
           if (\$261 ) begin
-            \$307  = mcu_data_in;
+            \$305  = mcu_data_in[7:0];
           end
     endcase
-    if (\$272 ) begin
-      \$307  = 16'h0001;
-    end
     if (rst) begin
-      \$307  = 16'h0001;
+      \$305  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$308  = abrt;
-    if (\$134 ) begin
-      if (\$135 ) begin
-        \$308  = 1'h0;
-      end
+    \$306  = command_pend;
+    if (cmd_wr) begin
+      \$306  = 1'h1;
+    end
+    casez (mcu_addr)
+      7'h00:
+          if (\$252 ) begin
+            (* full_case = 32'd1 *)
+            if (mcu_data_in[15]) begin
+              if (\$257 ) begin
+                \$306  = 1'h0;
+              end
+            end else begin
+              \$306  = mcu_data_in[1];
+            end
+          end
+    endcase
+    if (\$273 ) begin
+      \$306  = 1'h0;
+    end
+    if (rst) begin
+      \$306  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$307  = cmd_seq;
+    if (cmd_wr) begin
+      \$307  = \$130 [6:0];
+    end
+    if (rst) begin
+      \$307  = 7'h00;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$308  = err;
+    if (cmd_wr) begin
+      \$308  = 1'h0;
     end
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          if (\$259 ) begin
-            \$308  = mcu_data_in[2];
+          if (\$258 ) begin
+            \$308  = mcu_data_in[0];
           end
     endcase
-    if (\$272 ) begin
+    if (\$273 ) begin
       \$308  = 1'h0;
     end
     if (rst) begin
@@ -3437,60 +3471,15 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$309  = sense_key;
-    if (\$134 ) begin
-      if (\$135 ) begin
-        \$309  = 4'h0;
+    \$309  = \sector_count$59 ;
+    if (cmd_wr) begin
+      if (\$131 ) begin
+        \$309 [7:0] = 8'h01;
       end
     end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          if (\$259 ) begin
-            \$309  = mcu_data_in[7:4];
-          end
-    endcase
-    if (\$272 ) begin
-      \$309  = 4'h0;
-    end
-    if (rst) begin
-      \$309  = 4'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$310  = features;
-    if (\$142 ) begin
-      \$310  = ide_data_latch[7:0];
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          if (\$260 ) begin
-            \$310  = mcu_data_in[15:8];
-          end
-    endcase
-    if (rst) begin
-      \$310  = 8'h00;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$311  = lba_low_prev;
-    if (\$156 ) begin
-      \$311  = \lba_low$59 ;
+    if (\$145 ) begin
+      \$309 [15:8] = \sector_count$59 [7:0];
+      \$309 [7:0] = ide_data_latch[7:0];
     end
     casez (mcu_addr)
       7'h00:
@@ -3504,22 +3493,75 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h04:
           /* empty */;
       7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          if (\$263 ) begin
-            \$311  = mcu_data_in[15:8];
+          if (\$262 ) begin
+            \$309 [7:0] = mcu_data_in[7:0];
           end
     endcase
+    if (\$273 ) begin
+      \$309  = 16'h0001;
+    end
     if (rst) begin
-      \$311  = 8'h00;
+      \$309  = 16'h0001;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$312  = \lba_low$59 ;
-    if (\$156 ) begin
+    \$310  = abrt;
+    if (cmd_wr) begin
+      if (\$131 ) begin
+        \$310  = 1'h0;
+      end
+    end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          if (\$260 ) begin
+            \$310  = mcu_data_in[2];
+          end
+    endcase
+    if (\$273 ) begin
+      \$310  = 1'h0;
+    end
+    if (rst) begin
+      \$310  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$311  = sense_key;
+    if (cmd_wr) begin
+      if (\$131 ) begin
+        \$311  = 4'h0;
+      end
+    end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          if (\$260 ) begin
+            \$311  = mcu_data_in[7:4];
+          end
+    endcase
+    if (\$273 ) begin
+      \$311  = 4'h0;
+    end
+    if (rst) begin
+      \$311  = 4'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$312  = features;
+    if (\$138 ) begin
       \$312  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
@@ -3532,26 +3574,19 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h03:
           /* empty */;
       7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          if (\$262 ) begin
-            \$312  = mcu_data_in[7:0];
+          if (\$261 ) begin
+            \$312  = mcu_data_in[15:8];
           end
     endcase
-    if (\$272 ) begin
-      \$312  = 8'h81;
-    end
     if (rst) begin
-      \$312  = 8'h81;
+      \$312  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$313  = lba_mid_prev;
-    if (\$163 ) begin
-      \$313  = \lba_mid$61 ;
+    \$313  = lba_low_prev;
+    if (\$152 ) begin
+      \$313  = \lba_low$60 ;
     end
     casez (mcu_addr)
       7'h00:
@@ -3569,10 +3604,8 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h06:
           /* empty */;
       7'h07:
-          /* empty */;
-      7'h08:
           if (\$264 ) begin
-            \$313  = mcu_data_in[7:0];
+            \$313  = mcu_data_in[15:8];
           end
     endcase
     if (rst) begin
@@ -3581,8 +3614,8 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$314  = \lba_mid$61 ;
-    if (\$163 ) begin
+    \$314  = \lba_low$60 ;
+    if (\$152 ) begin
       \$314  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
@@ -3599,22 +3632,22 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h05:
           /* empty */;
       7'h06:
-          if (\$262 ) begin
-            \$314  = mcu_data_in[15:8];
+          if (\$263 ) begin
+            \$314  = mcu_data_in[7:0];
           end
     endcase
-    if (\$272 ) begin
-      \$314  = 8'h14;
+    if (\$273 ) begin
+      \$314  = 8'h81;
     end
     if (rst) begin
-      \$314  = 8'h14;
+      \$314  = 8'h81;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$315  = lba_high_prev;
-    if (\$170 ) begin
-      \$315  = \lba_high$63 ;
+    \$315  = lba_mid_prev;
+    if (\$159 ) begin
+      \$315  = \lba_mid$62 ;
     end
     casez (mcu_addr)
       7'h00:
@@ -3634,8 +3667,8 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h07:
           /* empty */;
       7'h08:
-          if (\$264 ) begin
-            \$315  = mcu_data_in[15:8];
+          if (\$265 ) begin
+            \$315  = mcu_data_in[7:0];
           end
     endcase
     if (rst) begin
@@ -3644,8 +3677,8 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$316  = \lba_high$63 ;
-    if (\$170 ) begin
+    \$316  = \lba_mid$62 ;
+    if (\$159 ) begin
       \$316  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
@@ -3662,44 +3695,87 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h05:
           /* empty */;
       7'h06:
-          /* empty */;
-      7'h07:
           if (\$263 ) begin
-            \$316  = mcu_data_in[7:0];
+            \$316  = mcu_data_in[15:8];
           end
     endcase
-    if (\$272 ) begin
-      \$316  = 8'heb;
+    if (\$273 ) begin
+      \$316  = 8'h14;
     end
     if (rst) begin
-      \$316  = 8'heb;
+      \$316  = 8'h14;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$317  = hob;
-    if (\$176 ) begin
-      \$317  = ide_data_latch[7];
+    \$317  = lba_high_prev;
+    if (\$166 ) begin
+      \$317  = \lba_high$64 ;
     end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          if (\$265 ) begin
+            \$317  = mcu_data_in[15:8];
+          end
+    endcase
     if (rst) begin
-      \$317  = 1'h0;
+      \$317  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$318  = srst;
-    if (\$176 ) begin
-      \$318  = ide_data_latch[2];
+    \$318  = \lba_high$64 ;
+    if (\$166 ) begin
+      \$318  = ide_data_latch[7:0];
+    end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          if (\$264 ) begin
+            \$318  = mcu_data_in[7:0];
+          end
+    endcase
+    if (\$273 ) begin
+      \$318  = 8'heb;
     end
     if (rst) begin
-      \$318  = 1'h0;
+      \$318  = 8'heb;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$319  = n_ien;
-    if (\$176 ) begin
-      \$319  = ide_data_latch[1];
+    \$319  = hob;
+    if (\$172 ) begin
+      \$319  = ide_data_latch[7];
     end
     if (rst) begin
       \$319  = 1'h0;
@@ -3707,20 +3783,40 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$320  = intrq_pending;
-    if (\$183 ) begin
+    \$320  = srst;
+    if (\$172 ) begin
+      \$320  = ide_data_latch[2];
+    end
+    if (rst) begin
       \$320  = 1'h0;
     end
-    if (\$190 ) begin
-      \$320  = 1'h0;
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$321  = n_ien;
+    if (\$172 ) begin
+      \$321  = ide_data_latch[1];
+    end
+    if (rst) begin
+      \$321  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$322  = intrq_pending;
+    if (\$179 ) begin
+      \$322  = 1'h0;
+    end
+    if (\$186 ) begin
+      \$322  = 1'h0;
     end
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          if (\$257 ) begin
+          if (\$258 ) begin
             if (mcu_data_in[8]) begin
-              \$320  = 1'h1;
+              \$322  = 1'h1;
             end
           end
       7'h02:
@@ -3760,57 +3856,32 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h0c:
           /* empty */;
       7'h0d:
-          if (\$267 ) begin
-            \$320  = mcu_data_in[0];
+          if (\$268 ) begin
+            \$322  = mcu_data_in[0];
           end
     endcase
-    if (\$272 ) begin
-      \$320  = 1'h0;
+    if (\$273 ) begin
+      \$322  = 1'h0;
     end
     if (rst) begin
-      \$320  = 1'h0;
+      \$322  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$321  = prev_status_rds;
-    if (\$197 ) begin
-      \$321  = host_status_rds;
+    \$323  = prev_status_rds;
+    if (\$193 ) begin
+      \$323  = host_status_rds;
     end
     if (rst) begin
-      \$321  = 8'h00;
+      \$323  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$322  = prev_altstat_rds;
-    if (\$197 ) begin
-      \$322  = host_altstat_rds;
-    end
-    if (rst) begin
-      \$322  = 8'h00;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$323  = prev_data_rds;
-    if (\$197 ) begin
-      \$323  = host_data_rds;
-    end
-    if (rst) begin
-      \$323  = 16'h0000;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$324  = host_status_rds;
-    (* full_case = 32'd1 *)
-    if (\$197 ) begin
-      \$324  = 8'h00;
-    end else begin
-      if (\$206 ) begin
-        \$324  = \$207 [7:0];
-      end
+    \$324  = prev_altstat_rds;
+    if (\$193 ) begin
+      \$324  = host_altstat_rds;
     end
     if (rst) begin
       \$324  = 8'h00;
@@ -3818,39 +3889,39 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$325  = host_altstat_rds;
-    (* full_case = 32'd1 *)
-    if (\$197 ) begin
-      \$325  = 8'h00;
-    end else begin
-      if (\$216 ) begin
-        \$325  = \$217 [7:0];
-      end
+    \$325  = prev_data_rds;
+    if (\$193 ) begin
+      \$325  = host_data_rds;
     end
     if (rst) begin
-      \$325  = 8'h00;
+      \$325  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$326  = host_data_rds;
+    \$326  = host_status_rds;
     (* full_case = 32'd1 *)
-    if (\$197 ) begin
-      \$326  = 16'h0000;
+    if (\$193 ) begin
+      \$326  = 8'h00;
     end else begin
-      if (\$224 ) begin
-        \$326  = \$225 [15:0];
+      if (\$202 ) begin
+        \$326  = \$203 [7:0];
       end
     end
     if (rst) begin
-      \$326  = 16'h0000;
+      \$326  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$327  = devctl_last;
-    if (\$231 ) begin
-      \$327  = ide_data_latch[7:0];
+    \$327  = host_altstat_rds;
+    (* full_case = 32'd1 *)
+    if (\$193 ) begin
+      \$327  = 8'h00;
+    end else begin
+      if (\$212 ) begin
+        \$327  = \$213 [7:0];
+      end
     end
     if (rst) begin
       \$327  = 8'h00;
@@ -3858,162 +3929,148 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$328  = devctl_writes;
-    if (\$231 ) begin
-      \$328  = \$232 [7:0];
+    \$328  = host_data_rds;
+    (* full_case = 32'd1 *)
+    if (\$193 ) begin
+      \$328  = 16'h0000;
+    end else begin
+      if (\$220 ) begin
+        \$328  = \$221 [15:0];
+      end
     end
     if (rst) begin
-      \$328  = 8'h00;
+      \$328  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$329  = mcu_out;
+    \$329  = devctl_last;
+    if (\$227 ) begin
+      \$329  = ide_data_latch[7:0];
+    end
     if (rst) begin
-      \$329  = 16'h0000;
+      \$329  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$330  = \$233 [15:0];
+    \$330  = devctl_writes;
+    if (\$227 ) begin
+      \$330  = \$228 [7:0];
+    end
     if (rst) begin
-      \$330  = 16'h0000;
+      \$330  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$331  = diag_ide_strobes;
-    if (\$244 ) begin
-      \$331  = \$245 [15:0];
-    end
+    \$331  = mcu_out;
     if (rst) begin
       \$331  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$332  = { rstn_sync[0], ide_rstn };
+    \$332  = \$229 [15:0];
     if (rst) begin
-      \$332  = 2'h3;
+      \$332  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$333  = rstn_sync[1];
+    \$333  = diag_ide_strobes;
+    if (\$240 ) begin
+      \$333  = \$241 [15:0];
+    end
     if (rst) begin
-      \$333  = 1'h1;
+      \$333  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$334  = diag_rstn_falls;
-    if (\$247 ) begin
-      \$334  = \$248 [7:0];
-    end
+    \$334  = { rstn_sync[0], ide_rstn };
     if (rst) begin
-      \$334  = 8'h00;
+      \$334  = 2'h3;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$335  = diag_rstn_rises;
-    if (\$250 ) begin
-      \$335  = \$251 [7:0];
-    end
+    \$335  = rstn_sync[1];
     if (rst) begin
-      \$335  = 8'h00;
+      \$335  = 1'h1;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$336  = { audio_sync[0], audio_tick };
+    \$336  = diag_rstn_falls;
+    if (\$243 ) begin
+      \$336  = \$244 [7:0];
+    end
     if (rst) begin
-      \$336  = 2'h0;
+      \$336  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$337  = audio_sync[1];
+    \$337  = diag_rstn_rises;
+    if (\$246 ) begin
+      \$337  = \$247 [7:0];
+    end
     if (rst) begin
-      \$337  = 1'h0;
+      \$337  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$338  = diag_audio_alive;
-    if (\$252 ) begin
-      \$338  = \$253 [15:0];
-    end
+    \$338  = { audio_sync[0], audio_tick };
     if (rst) begin
-      \$338  = 16'h0000;
+      \$338  = 2'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$339  = \$254 ;
+    \$339  = audio_sync[1];
     if (rst) begin
       \$339  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$340  = \$255 ;
+    \$340  = diag_audio_alive;
+    if (\$248 ) begin
+      \$340  = \$249 [15:0];
+    end
     if (rst) begin
-      \$340  = 1'h0;
+      \$340  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$341  = reset_seen;
-    casez (mcu_addr)
-      7'h00:
-          if (\$256 ) begin
-            if (mcu_data_in[2]) begin
-              \$341  = 1'h0;
-            end
-          end
-    endcase
-    if (\$272 ) begin
-      \$341  = 1'h1;
-    end
+    \$341  = \$250 ;
     if (rst) begin
       \$341  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$342  = dsc;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          if (\$257 ) begin
-            \$342  = mcu_data_in[4];
-          end
-    endcase
-    if (\$272 ) begin
-      \$342  = 1'h0;
-    end else if (\$273 ) begin
-    end else if (\$275 ) begin
-      \$342  = 1'h1;
-    end
+    \$342  = \$251 ;
     if (rst) begin
       \$342  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$343  = df;
+    \$343  = reset_seen;
     casez (mcu_addr)
       7'h00:
-          /* empty */;
-      7'h01:
-          if (\$257 ) begin
-            \$343  = mcu_data_in[5];
+          if (\$252 ) begin
+            if (mcu_data_in[2]) begin
+              \$343  = 1'h0;
+            end
           end
     endcase
-    if (\$272 ) begin
-      \$343  = 1'h0;
+    if (\$273 ) begin
+      \$343  = 1'h1;
     end
     if (rst) begin
       \$343  = 1'h0;
@@ -4021,19 +4078,19 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$344  = drdy;
+    \$344  = dsc;
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          if (\$257 ) begin
-            \$344  = mcu_data_in[6];
+          if (\$258 ) begin
+            \$344  = mcu_data_in[4];
           end
     endcase
-    if (\$272 ) begin
+    if (\$273 ) begin
       \$344  = 1'h0;
-    end else if (\$273 ) begin
-    end else if (\$275 ) begin
+    end else if (\$274 ) begin
+    end else if (\$276 ) begin
       \$344  = 1'h1;
     end
     if (rst) begin
@@ -4042,7 +4099,46 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$345  = lvl_at_read;
+    \$345  = df;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          if (\$258 ) begin
+            \$345  = mcu_data_in[5];
+          end
+    endcase
+    if (\$273 ) begin
+      \$345  = 1'h0;
+    end
+    if (rst) begin
+      \$345  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$346  = drdy;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          if (\$258 ) begin
+            \$346  = mcu_data_in[6];
+          end
+    endcase
+    if (\$273 ) begin
+      \$346  = 1'h0;
+    end else if (\$274 ) begin
+    end else if (\$276 ) begin
+      \$346  = 1'h1;
+    end
+    if (rst) begin
+      \$346  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$347  = lvl_at_read;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -4067,17 +4163,17 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h0a:
           /* empty */;
       7'h0b:
-          if (\$265 ) begin
-            \$345  = { 10'h000, \level$16  };
+          if (\$266 ) begin
+            \$347  = { 10'h000, \level$16  };
           end
     endcase
     if (rst) begin
-      \$345  = 16'h0000;
+      \$347  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$346  = lvl_read_count;
+    \$348  = lvl_read_count;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -4102,17 +4198,17 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h0a:
           /* empty */;
       7'h0b:
-          if (\$265 ) begin
-            \$346  = \$266 [15:0];
+          if (\$266 ) begin
+            \$348  = \$267 [15:0];
           end
     endcase
     if (rst) begin
-      \$346  = 16'h0000;
+      \$348  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$347  = cap_arm;
+    \$349  = cap_arm;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -4167,230 +4263,230 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h12:
           /* empty */;
       7'h14:
-          if (\$268 ) begin
-            (* full_case = 32'd1 *)
-            if (mcu_data_in[0]) begin
-              \$347  = 1'h1;
-            end else begin
-              \$347  = 1'h0;
-            end
-          end
-    endcase
-    if (rst) begin
-      \$347  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$348  = cap_run;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          /* empty */;
-      7'h08:
-          /* empty */;
-      7'h09:
-          /* empty */;
-      7'h0a:
-          /* empty */;
-      7'h0b:
-          /* empty */;
-      7'h16:
-          /* empty */;
-      7'h17:
-          /* empty */;
-      7'h18:
-          /* empty */;
-      7'h19:
-          /* empty */;
-      7'h1a:
-          /* empty */;
-      7'h1b:
-          /* empty */;
-      7'h1c:
-          /* empty */;
-      7'h0c:
-          /* empty */;
-      7'h0d:
-          /* empty */;
-      7'h0e:
-          /* empty */;
-      7'h0f:
-          /* empty */;
-      7'h10:
-          /* empty */;
-      7'h11:
-          /* empty */;
-      7'h12:
-          /* empty */;
-      7'h14:
-          if (\$268 ) begin
-            (* full_case = 32'd1 *)
-            if (mcu_data_in[0]) begin
-              \$348  = 1'h0;
-            end else begin
-              \$348  = 1'h0;
-            end
-          end
-    endcase
-    if (rst) begin
-      \$348  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$349  = cap_wptr;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          /* empty */;
-      7'h08:
-          /* empty */;
-      7'h09:
-          /* empty */;
-      7'h0a:
-          /* empty */;
-      7'h0b:
-          /* empty */;
-      7'h16:
-          /* empty */;
-      7'h17:
-          /* empty */;
-      7'h18:
-          /* empty */;
-      7'h19:
-          /* empty */;
-      7'h1a:
-          /* empty */;
-      7'h1b:
-          /* empty */;
-      7'h1c:
-          /* empty */;
-      7'h0c:
-          /* empty */;
-      7'h0d:
-          /* empty */;
-      7'h0e:
-          /* empty */;
-      7'h0f:
-          /* empty */;
-      7'h10:
-          /* empty */;
-      7'h11:
-          /* empty */;
-      7'h12:
-          /* empty */;
-      7'h14:
-          if (\$268 ) begin
-            if (mcu_data_in[0]) begin
-              \$349  = 10'h000;
-            end
-          end
-    endcase
-    if (rst) begin
-      \$349  = 10'h000;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$350  = cap_rptr;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          /* empty */;
-      7'h08:
-          /* empty */;
-      7'h09:
-          /* empty */;
-      7'h0a:
-          /* empty */;
-      7'h0b:
-          /* empty */;
-      7'h16:
-          /* empty */;
-      7'h17:
-          /* empty */;
-      7'h18:
-          /* empty */;
-      7'h19:
-          /* empty */;
-      7'h1a:
-          /* empty */;
-      7'h1b:
-          /* empty */;
-      7'h1c:
-          /* empty */;
-      7'h0c:
-          /* empty */;
-      7'h0d:
-          /* empty */;
-      7'h0e:
-          /* empty */;
-      7'h0f:
-          /* empty */;
-      7'h10:
-          /* empty */;
-      7'h11:
-          /* empty */;
-      7'h12:
-          /* empty */;
-      7'h14:
-          if (\$268 ) begin
-            if (mcu_data_in[0]) begin
-              \$350  = 9'h000;
-            end
-          end
-      7'h15:
           if (\$269 ) begin
-            \$350  = mcu_data_in[8:0];
+            (* full_case = 32'd1 *)
+            if (mcu_data_in[0]) begin
+              \$349  = 1'h1;
+            end else begin
+              \$349  = 1'h0;
+            end
           end
     endcase
     if (rst) begin
-      \$350  = 9'h000;
+      \$349  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$351  = dma_mode;
+    \$350  = cap_run;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          if (\$269 ) begin
+            (* full_case = 32'd1 *)
+            if (mcu_data_in[0]) begin
+              \$350  = 1'h0;
+            end else begin
+              \$350  = 1'h0;
+            end
+          end
+    endcase
+    if (rst) begin
+      \$350  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$351  = cap_wptr;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          if (\$269 ) begin
+            if (mcu_data_in[0]) begin
+              \$351  = 10'h000;
+            end
+          end
+    endcase
+    if (rst) begin
+      \$351  = 10'h000;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$352  = cap_rptr;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          if (\$269 ) begin
+            if (mcu_data_in[0]) begin
+              \$352  = 9'h000;
+            end
+          end
+      7'h15:
+          if (\$270 ) begin
+            \$352  = mcu_data_in[8:0];
+          end
+    endcase
+    if (rst) begin
+      \$352  = 9'h000;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$353  = dma_mode;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -4449,20 +4545,25 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$270 ) begin
-            \$351  = mcu_data_in[1:0];
+          if (\$271 ) begin
+            if (wmask[0]) begin
+              \$353 [0] = mcu_data_in[0];
+            end
+            if (wmask[1]) begin
+              \$353 [1] = mcu_data_in[1];
+            end
           end
     endcase
-    if (\$272 ) begin
-      \$351  = 2'h0;
+    if (\$273 ) begin
+      \$353  = 2'h0;
     end
     if (rst) begin
-      \$351  = 2'h0;
+      \$353  = 2'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$352  = pio_wr_fc;
+    \$354  = pio_wr_fc;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -4521,20 +4622,22 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$270 ) begin
-            \$352  = mcu_data_in[2];
+          if (\$271 ) begin
+            if (wmask[2]) begin
+              \$354  = mcu_data_in[2];
+            end
           end
     endcase
-    if (\$272 ) begin
-      \$352  = 1'h0;
+    if (\$273 ) begin
+      \$354  = 1'h0;
     end
     if (rst) begin
-      \$352  = 1'h0;
+      \$354  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$353  = pio_rd_fc;
+    \$355  = pio_rd_fc;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -4593,28 +4696,13 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$270 ) begin
-            \$353  = mcu_data_in[3];
+          if (\$271 ) begin
+            if (wmask[3]) begin
+              \$355  = mcu_data_in[3];
+            end
           end
     endcase
-    if (\$272 ) begin
-      \$353  = 1'h0;
-    end
-    if (rst) begin
-      \$353  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$354  = { irq_delay[2:0], command_pend };
-    if (rst) begin
-      \$354  = 4'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$355  = post_reset_count[23];
-    if (\$272 ) begin
+    if (\$273 ) begin
       \$355  = 1'h0;
     end
     if (rst) begin
@@ -4623,14 +4711,31 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
-    \$356  = post_reset_count;
-    if (\$272 ) begin
-      \$356  = 24'h000000;
-    end else if (\$273 ) begin
-      \$356  = \$276 [23:0];
+    \$356  = { irq_delay[2:0], command_pend };
+    if (rst) begin
+      \$356  = 4'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$357  = post_reset_count[23];
+    if (\$273 ) begin
+      \$357  = 1'h0;
     end
     if (rst) begin
-      \$356  = 24'h000000;
+      \$357  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$3 ) begin end
+    \$358  = post_reset_count;
+    if (\$273 ) begin
+      \$358  = 24'h000000;
+    end else if (\$274 ) begin
+      \$358  = \$277 [23:0];
+    end
+    if (rst) begin
+      \$358  = 24'h000000;
     end
   end
   assign level = dbg_rfifo_level;
@@ -4641,7 +4746,7 @@ module \OpenGDEMUCore.dev0 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   assign mcu_out_r = mcu_data_out;
   assign diag_bus_state = { 3'h0, ide_wr, ide_rd, csn, ide_rstn };
   assign cap_rdata = 16'h0000;
-  assign aux_level = { 6'h00, \port$1597$0  };
+  assign aux_level = { 6'h00, \port$1635$0  };
   assign aux_wdata = mcu_data_in;
   assign mcu_irq = irq_delay[3];
 endmodule
@@ -9164,13 +9269,13 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$115 ;
   wire \$116 ;
   wire \$117 ;
-  wire [7:0] \$118 ;
+  wire \$118 ;
   wire \$119 ;
   wire \$12 ;
-  wire \$120 ;
-  wire [8:0] \$121 ;
+  wire [7:0] \$120 ;
+  wire \$121 ;
   wire \$122 ;
-  wire \$123 ;
+  wire [8:0] \$123 ;
   wire \$124 ;
   wire \$125 ;
   wire \$126 ;
@@ -9178,7 +9283,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$128 ;
   wire \$129 ;
   wire \$13 ;
-  wire \$130 ;
+  wire [7:0] \$130 ;
   wire \$131 ;
   wire \$132 ;
   wire \$133 ;
@@ -9258,40 +9363,40 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$20 ;
   wire \$200 ;
   wire \$201 ;
-  wire \$202 ;
+  wire [8:0] \$202 ;
   wire \$203 ;
   wire \$204 ;
   wire \$205 ;
-  wire [8:0] \$206 ;
+  wire \$206 ;
   wire \$207 ;
   wire \$208 ;
   wire \$209 ;
   wire \$21 ;
   wire \$210 ;
   wire \$211 ;
-  wire \$212 ;
+  wire [8:0] \$212 ;
   wire \$213 ;
   wire \$214 ;
   wire \$215 ;
-  wire [8:0] \$216 ;
+  wire \$216 ;
   wire \$217 ;
   wire \$218 ;
   wire \$219 ;
   wire \$22 ;
-  wire \$220 ;
+  wire [16:0] \$220 ;
   wire \$221 ;
   wire \$222 ;
   wire \$223 ;
-  wire [16:0] \$224 ;
+  wire \$224 ;
   wire \$225 ;
   wire \$226 ;
-  wire \$227 ;
-  wire \$228 ;
+  wire [8:0] \$227 ;
+  wire [16:0] \$228 ;
   wire \$229 ;
   wire \$23 ;
   wire \$230 ;
-  wire [8:0] \$231 ;
-  wire [16:0] \$232 ;
+  wire \$231 ;
+  wire \$232 ;
   wire \$233 ;
   wire \$234 ;
   wire \$235 ;
@@ -9300,20 +9405,20 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$238 ;
   wire \$239 ;
   wire \$24 ;
-  wire \$240 ;
+  wire [16:0] \$240 ;
   wire \$241 ;
   wire \$242 ;
-  wire \$243 ;
-  wire [16:0] \$244 ;
+  wire [8:0] \$243 ;
+  wire \$244 ;
   wire \$245 ;
-  wire \$246 ;
-  wire [8:0] \$247 ;
-  wire \$248 ;
+  wire [8:0] \$246 ;
+  wire \$247 ;
+  wire [16:0] \$248 ;
   wire \$249 ;
   wire \$25 ;
-  wire [8:0] \$250 ;
+  wire \$250 ;
   wire \$251 ;
-  wire [16:0] \$252 ;
+  wire \$252 ;
   wire \$253 ;
   wire \$254 ;
   wire \$255 ;
@@ -9327,8 +9432,8 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$262 ;
   wire \$263 ;
   wire \$264 ;
-  wire [16:0] \$265 ;
-  wire \$266 ;
+  wire \$265 ;
+  wire [16:0] \$266 ;
   wire \$267 ;
   wire \$268 ;
   wire \$269 ;
@@ -9338,15 +9443,15 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$272 ;
   wire \$273 ;
   wire \$274 ;
-  wire [24:0] \$275 ;
-  reg [2:0] \$276 ;
+  wire \$275 ;
+  wire [24:0] \$276 ;
   reg [2:0] \$277 ;
-  reg [1:0] \$278 ;
+  reg [2:0] \$278 ;
   reg [1:0] \$279 ;
   wire \$28 ;
-  reg [15:0] \$280 ;
+  reg [1:0] \$280 ;
   reg [15:0] \$281 ;
-  reg \$282 ;
+  reg [15:0] \$282 ;
   reg \$283 ;
   reg \$284 ;
   reg \$285 ;
@@ -9359,75 +9464,77 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg \$291 ;
   reg \$292 ;
   reg \$293 ;
-  reg [1:0] \$294 ;
-  reg \$295 ;
-  reg [4:0] \$296 ;
-  reg \$297 ;
-  reg [7:0] \$298 ;
-  reg \$299 ;
+  reg \$294 ;
+  reg [1:0] \$295 ;
+  reg \$296 ;
+  reg [4:0] \$297 ;
+  reg \$298 ;
+  reg [7:0] \$299 ;
   wire \$3 ;
   wire \$30 ;
   reg \$300 ;
   reg \$301 ;
-  reg [7:0] \$302 ;
+  reg \$302 ;
   reg [7:0] \$303 ;
-  reg \$304 ;
+  reg [7:0] \$304 ;
   reg \$305 ;
-  reg [7:0] \$306 ;
-  reg [15:0] \$307 ;
+  reg [6:0] \$306 ;
+  reg \$307 ;
   reg [7:0] \$308 ;
-  reg [7:0] \$309 ;
+  reg [15:0] \$309 ;
   wire \$31 ;
   reg [7:0] \$310 ;
   reg [7:0] \$311 ;
   reg [7:0] \$312 ;
   reg [7:0] \$313 ;
-  reg \$314 ;
-  reg \$315 ;
+  reg [7:0] \$314 ;
+  reg [7:0] \$315 ;
   reg \$316 ;
   reg \$317 ;
-  reg [7:0] \$318 ;
-  reg [7:0] \$319 ;
+  reg \$318 ;
+  reg \$319 ;
   wire \$32 ;
-  reg [15:0] \$320 ;
+  reg [7:0] \$320 ;
   reg [7:0] \$321 ;
-  reg [7:0] \$322 ;
-  reg [15:0] \$323 ;
+  reg [15:0] \$322 ;
+  reg [7:0] \$323 ;
   reg [7:0] \$324 ;
-  reg [7:0] \$325 ;
-  reg [15:0] \$326 ;
-  reg [15:0] \$327 ;
+  reg [15:0] \$325 ;
+  reg [7:0] \$326 ;
+  reg [7:0] \$327 ;
   reg [15:0] \$328 ;
-  reg [1:0] \$329 ;
+  reg [15:0] \$329 ;
   wire \$33 ;
-  reg \$330 ;
-  reg [7:0] \$331 ;
-  reg [7:0] \$332 ;
-  reg [1:0] \$333 ;
-  reg \$334 ;
-  reg [15:0] \$335 ;
+  reg [15:0] \$330 ;
+  reg [1:0] \$331 ;
+  reg \$332 ;
+  reg [7:0] \$333 ;
+  reg [7:0] \$334 ;
+  reg [1:0] \$335 ;
   reg \$336 ;
-  reg \$337 ;
+  reg [15:0] \$337 ;
   reg \$338 ;
   reg \$339 ;
   wire \$34 ;
   reg \$340 ;
   reg \$341 ;
   reg \$342 ;
-  reg [3:0] \$343 ;
-  reg [15:0] \$344 ;
-  reg [15:0] \$345 ;
-  reg \$346 ;
-  reg \$347 ;
-  reg [9:0] \$348 ;
-  reg [8:0] \$349 ;
+  reg \$343 ;
+  reg \$344 ;
+  reg [3:0] \$345 ;
+  reg [15:0] \$346 ;
+  reg [15:0] \$347 ;
+  reg \$348 ;
+  reg \$349 ;
   wire \$35 ;
-  reg [1:0] \$350 ;
-  reg \$351 ;
-  reg \$352 ;
-  reg [3:0] \$353 ;
+  reg [9:0] \$350 ;
+  reg [8:0] \$351 ;
+  reg [1:0] \$352 ;
+  reg \$353 ;
   reg \$354 ;
-  reg [23:0] \$355 ;
+  reg [3:0] \$355 ;
+  reg \$356 ;
+  reg [23:0] \$357 ;
   wire \$36 ;
   wire \$37 ;
   wire \$38 ;
@@ -9448,11 +9555,11 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$51 ;
   wire \$52 ;
   wire \$53 ;
-  wire \$54 ;
+  wire [7:0] \$54 ;
   wire [7:0] \$55 ;
   wire [7:0] \$56 ;
   wire [7:0] \$57 ;
-  wire [7:0] \$58 ;
+  wire \$58 ;
   wire \$59 ;
   wire \$6 ;
   wire \$60 ;
@@ -9483,7 +9590,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$83 ;
   wire \$84 ;
   wire \$85 ;
-  wire \$86 ;
+  wire [4:0] \$86 ;
   wire \$87 ;
   wire \$88 ;
   wire \$89 ;
@@ -9493,10 +9600,10 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   wire \$92 ;
   wire \$93 ;
   wire \$94 ;
-  wire [5:0] \$95 ;
-  wire [5:0] \$96 ;
-  wire \$97 ;
-  wire \$98 ;
+  wire \$95 ;
+  wire \$96 ;
+  wire [5:0] \$97 ;
+  wire [5:0] \$98 ;
   wire \$99 ;
   reg abrt = 1'h0;
   input [2:0] addr;
@@ -9520,8 +9627,10 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg [9:0] cap_wptr = 10'h000;
   input clk;
   wire clk;
+  reg [6:0] cmd_seq = 7'h00;
+  wire cmd_wr;
   reg [7:0] command = 8'h00;
-  wire \command$128 ;
+  wire \command$131 ;
   reg command_pend = 1'h0;
   input [1:0] csn;
   wire [1:0] csn;
@@ -9543,7 +9652,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg [7:0] devctl_last = 8'h00;
   reg [7:0] devctl_writes = 8'h00;
   reg [7:0] device = 8'h00;
-  wire \device$50 ;
+  wire \device$51 ;
   wire device_control;
   wire device_selected;
   reg df = 1'h0;
@@ -9567,7 +9676,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg err = 1'h0;
   wire error;
   reg [7:0] features = 8'h00;
-  wire \features$130 ;
+  wire \features$133 ;
   reg fifo_clear;
   reg hob = 1'h0;
   reg [7:0] host_altstat_rds = 8'h00;
@@ -9605,13 +9714,13 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg intrq_pending = 1'h0;
   reg [3:0] irq_delay = 4'h0;
   wire lba_high;
-  reg [7:0] \lba_high$63  = 8'h00;
+  reg [7:0] \lba_high$64  = 8'h00;
   reg [7:0] lba_high_prev = 8'h00;
   wire lba_low;
-  reg [7:0] \lba_low$59  = 8'h01;
+  reg [7:0] \lba_low$60  = 8'h01;
   reg [7:0] lba_low_prev = 8'h00;
   wire lba_mid;
-  reg [7:0] \lba_mid$61  = 8'h00;
+  reg [7:0] \lba_mid$62  = 8'h00;
   reg [7:0] lba_mid_prev = 8'h00;
   wire [10:0] level;
   wire [9:0] \level$16 ;
@@ -9647,7 +9756,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg [15:0] prev_data_rds = 16'h0000;
   reg [7:0] prev_status_rds = 8'h00;
   wire [15:0] r_data;
-  wire [15:0] \r_data$86 ;
+  wire [15:0] \r_data$88 ;
   reg r_en;
   reg \r_en$3 ;
   wire r_rdy;
@@ -9662,15 +9771,16 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   reg rstn_clean_prev = 1'h1;
   reg [1:0] rstn_sync = 2'h3;
   wire sector_count;
-  reg [15:0] \sector_count$58  = 16'h0001;
+  reg [15:0] \sector_count$59  = 16'h0001;
   reg [3:0] sense_key = 4'h0;
   reg srst = 1'h0;
   wire status;
   reg [15:0] w_data;
-  reg [15:0] \w_data$92 ;
+  reg [15:0] \w_data$94 ;
   reg w_en;
   reg \w_en$2 ;
   wire w_rdy;
+  reg [4:0] wmask;
   reg [1:0] wr_h_sync = 2'h3;
   wire wr_has_room;
   reg [2:0] wr_sync = 3'h7;
@@ -9717,228 +9827,229 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   assign \$36  = wr_h_sync[1] & \$35 ;
   assign \$37  = \$34  | \$36 ;
   assign \$38  = \$37  & device[4];
-  assign \$39  = \$38  & decode_command_lat;
-  assign \$40  = ~ ide_rstn;
-  assign \$41  = \$40  | srst;
-  assign \$42  = ~ w_rdy;
-  assign \$43  = pio_wr_fc & \$42 ;
-  assign \$44  = ~ \$43 ;
-  assign \$45  = drq & \$44 ;
-  assign \$46  = ~ r_rdy;
-  assign \$47  = pio_rd_fc & \$46 ;
-  assign \$48  = ~ \$47 ;
-  assign drq_out = \$45  & \$48 ;
-  assign \$49  = drq & pio_rd_fc;
-  assign \$50  = ~ r_rdy;
-  assign \$51  = \$49  & \$50 ;
-  assign bsy_out = bsy | \$51 ;
-  assign \$52  = ~ dmackn_sync[1];
-  assign \$53  = \$52  & dma_rd_mode;
-  assign \$54  = status | alt_status;
-  assign \$55  = hob ? \sector_count$58 [15:8] : \sector_count$58 [7:0];
-  assign \$56  = hob ? lba_low_prev : \lba_low$59 ;
-  assign \$57  = hob ? lba_mid_prev : \lba_mid$61 ;
-  assign \$58  = hob ? lba_high_prev : \lba_high$63 ;
-  assign \$59  = device[4] & ide_rd;
-  assign \$60  = data | error;
-  assign \$61  = \$60  | sector_count;
-  assign \$62  = \$61  | lba_low;
-  assign \$63  = \$62  | lba_mid;
-  assign \$64  = \$63  | lba_high;
-  assign \$65  = \$64  | \device$50 ;
-  assign \$66  = \$65  | status;
-  assign \$67  = \$66  | alt_status;
-  assign \$68  = \$67  | debug_testpad;
-  assign \$69  = ~ dmackn_sync[1];
-  assign \$70  = \$69  & dma_rd_mode;
-  assign \$71  = \$68  | \$70 ;
-  assign ide_data_out_en = \$59  & \$71 ;
-  assign \$72  = ~ n_ien;
-  assign \$73  = device[4] & \$72 ;
-  assign ide_intrq = \$73  & intrq_pending;
-  assign \$74  = ~ ide_rstn;
-  assign \$75  = \$74  | srst;
-  assign \$76  = mcu_cs & mcu_rd;
-  assign \$77  = ~ \$76 ;
-  assign \$78  = mcu_rd_active_prev & \$77 ;
-  assign \$79  = mcu_cs & mcu_wr;
-  assign \$80  = ~ \$79 ;
-  assign \$81  = mcu_wr_active_prev & \$80 ;
-  assign \$82  = cap_wptr == 10'h200;
-  assign \$83  = ~ cap_run;
-  assign \$84  = \$82  & \$83 ;
-  assign \$85  = mcu_cs & mcu_wr;
-  assign \$86  = mcu_cs & mcu_wr;
-  assign \$87  = ~ \$86 ;
-  assign \$88  = mcu_wr_active_prev & \$87 ;
-  assign \$89  = rd_sync[1] | wr_sync[1];
-  assign \$90  = ~ dmackn_sync[1];
-  assign \$91  = ! rd_burst_left;
-  assign \$92  = \$91  & rd_has_burst;
-  assign \$93  = \$92  & dma_rd_mode;
-  assign \$94  = ! rd_burst_left;
-  assign \$95  = rd_burst_left - 1'h1;
-  assign \$96  = \$94  ? 6'h0f : \$95 ;
-  assign \$97  = ~ dma_rd_mode;
-  assign \$98  = ~ rd_sync[1];
-  assign \$99  = ~ rd_h_sync[1];
-  assign \$100  = \$98  & \$99 ;
-  assign \$101  = ~ wr_sync[1];
+  assign cmd_wr = \$38  & decode_command_lat;
+  assign \$39  = ~ ide_rstn;
+  assign \$40  = \$39  | srst;
+  assign \$41  = ~ w_rdy;
+  assign \$42  = pio_wr_fc & \$41 ;
+  assign \$43  = ~ \$42 ;
+  assign \$44  = drq & \$43 ;
+  assign \$45  = ~ r_rdy;
+  assign \$46  = pio_rd_fc & \$45 ;
+  assign \$47  = ~ \$46 ;
+  assign drq_out = \$44  & \$47 ;
+  assign \$48  = drq & pio_rd_fc;
+  assign \$49  = ~ r_rdy;
+  assign \$50  = \$48  & \$49 ;
+  assign bsy_out = bsy | \$50 ;
+  assign \$51  = ~ dmackn_sync[1];
+  assign \$52  = \$51  & dma_rd_mode;
+  assign \$53  = status | alt_status;
+  assign \$54  = hob ? \sector_count$59 [15:8] : \sector_count$59 [7:0];
+  assign \$55  = hob ? lba_low_prev : \lba_low$60 ;
+  assign \$56  = hob ? lba_mid_prev : \lba_mid$62 ;
+  assign \$57  = hob ? lba_high_prev : \lba_high$64 ;
+  assign \$58  = device[4] & ide_rd;
+  assign \$59  = data | error;
+  assign \$60  = \$59  | sector_count;
+  assign \$61  = \$60  | lba_low;
+  assign \$62  = \$61  | lba_mid;
+  assign \$63  = \$62  | lba_high;
+  assign \$64  = \$63  | \device$51 ;
+  assign \$65  = \$64  | status;
+  assign \$66  = \$65  | alt_status;
+  assign \$67  = \$66  | debug_testpad;
+  assign \$68  = ~ dmackn_sync[1];
+  assign \$69  = \$68  & dma_rd_mode;
+  assign \$70  = \$67  | \$69 ;
+  assign ide_data_out_en = \$58  & \$70 ;
+  assign \$71  = ~ n_ien;
+  assign \$72  = device[4] & \$71 ;
+  assign ide_intrq = \$72  & intrq_pending;
+  assign \$73  = ~ ide_rstn;
+  assign \$74  = \$73  | srst;
+  assign \$75  = mcu_cs & mcu_rd;
+  assign \$76  = ~ \$75 ;
+  assign \$77  = mcu_rd_active_prev & \$76 ;
+  assign \$78  = mcu_cs & mcu_wr;
+  assign \$79  = ~ \$78 ;
+  assign \$80  = mcu_wr_active_prev & \$79 ;
+  assign \$81  = cap_wptr == 10'h200;
+  assign \$82  = ~ cap_run;
+  assign \$83  = \$81  & \$82 ;
+  assign \$84  = mcu_cs & mcu_wr;
+  assign \$85  = ! mcu_data_in[12:8];
+  assign \$86  = \$85  ? 5'h1f : mcu_data_in[12:8];
+  assign \$87  = mcu_cs & mcu_wr;
+  assign \$88  = mcu_cs & mcu_wr;
+  assign \$89  = ~ \$88 ;
+  assign \$90  = mcu_wr_active_prev & \$89 ;
+  assign \$91  = rd_sync[1] | wr_sync[1];
+  assign \$92  = ~ dmackn_sync[1];
+  assign \$93  = ! rd_burst_left;
+  assign \$94  = \$93  & rd_has_burst;
+  assign \$95  = \$94  & dma_rd_mode;
+  assign \$96  = ! rd_burst_left;
+  assign \$97  = rd_burst_left - 1'h1;
+  assign \$98  = \$96  ? 6'h0f : \$97 ;
+  assign \$99  = ~ dma_rd_mode;
+  assign \$100  = ~ rd_sync[1];
+  assign \$101  = ~ rd_h_sync[1];
   assign \$102  = \$100  & \$101 ;
-  assign \$103  = | rd_burst_left;
-  assign \$104  = \$103  & r_rdy;
-  assign \$105  = rd_has_burst | \$104 ;
-  assign \$106  = dma_rd_mode & \$105 ;
-  assign \$107  = dma_wr_mode & wr_has_room;
-  assign \$108  = \$106  | \$107 ;
-  assign \$109  = device[4] & \$108 ;
-  assign \$110  = ~ wr_h_sync[1];
-  assign \$111  = wr_sync[2] & \$110 ;
-  assign \$112  = ~ wr_sync[1];
-  assign \$113  = wr_h_sync[1] & \$112 ;
-  assign \$114  = \$111  | \$113 ;
-  assign \$115  = \$114  & decode_data_lat;
-  assign \$116  = \$115  & device[4];
-  assign \$117  = \$116  & w_rdy;
-  assign \$118  = pkt_phase ? 8'h05 : 8'hff;
-  assign \$119  = pio_wr_words == \$118 ;
-  assign \$120  = pio_wr_fc | pkt_phase;
-  assign \$121  = pio_wr_words + 1'h1;
-  assign \$122  = ~ wr_h_sync[1];
-  assign \$123  = wr_sync[2] & \$122 ;
-  assign \$124  = ~ wr_sync[1];
-  assign \$125  = wr_h_sync[1] & \$124 ;
-  assign \$126  = \$123  | \$125 ;
-  assign \$127  = \$126  & decode_device_lat;
-  assign \$128  = ~ wr_h_sync[1];
-  assign \$129  = wr_sync[2] & \$128 ;
-  assign \$130  = ~ wr_sync[1];
-  assign \$131  = wr_h_sync[1] & \$130 ;
-  assign \$132  = \$129  | \$131 ;
-  assign \$133  = \$132  & device[4];
-  assign \$134  = \$133  & decode_command_lat;
-  assign \$135  = ~ wr_h_sync[1];
-  assign \$136  = wr_sync[2] & \$135 ;
-  assign \$137  = ~ wr_sync[1];
-  assign \$138  = wr_h_sync[1] & \$137 ;
-  assign \$139  = \$136  | \$138 ;
-  assign \$140  = \$139  & device[4];
-  assign \$141  = \$140  & decode_features_lat;
-  assign \$142  = ~ wr_h_sync[1];
-  assign \$143  = wr_sync[2] & \$142 ;
-  assign \$144  = ~ wr_sync[1];
-  assign \$145  = wr_h_sync[1] & \$144 ;
-  assign \$146  = \$143  | \$145 ;
-  assign \$147  = \$146  & device[4];
-  assign \$148  = \$147  & decode_sector_count_lat;
-  assign \$149  = ~ wr_h_sync[1];
-  assign \$150  = wr_sync[2] & \$149 ;
-  assign \$151  = ~ wr_sync[1];
-  assign \$152  = wr_h_sync[1] & \$151 ;
-  assign \$153  = \$150  | \$152 ;
-  assign \$154  = \$153  & device[4];
-  assign \$155  = \$154  & decode_lba_low_lat;
-  assign \$156  = ~ wr_h_sync[1];
-  assign \$157  = wr_sync[2] & \$156 ;
-  assign \$158  = ~ wr_sync[1];
-  assign \$159  = wr_h_sync[1] & \$158 ;
-  assign \$160  = \$157  | \$159 ;
-  assign \$161  = \$160  & device[4];
-  assign \$162  = \$161  & decode_lba_mid_lat;
-  assign \$163  = ~ wr_h_sync[1];
-  assign \$164  = wr_sync[2] & \$163 ;
-  assign \$165  = ~ wr_sync[1];
-  assign \$166  = wr_h_sync[1] & \$165 ;
-  assign \$167  = \$164  | \$166 ;
-  assign \$168  = \$167  & device[4];
-  assign \$169  = \$168  & decode_lba_high_lat;
-  assign \$170  = ~ wr_h_sync[1];
-  assign \$171  = wr_sync[2] & \$170 ;
-  assign \$172  = ~ wr_sync[1];
-  assign \$173  = wr_h_sync[1] & \$172 ;
-  assign \$174  = \$171  | \$173 ;
-  assign \$175  = \$174  & decode_device_control_lat;
-  assign \$176  = ~ rd_h_sync[1];
-  assign \$177  = rd_sync[2] & \$176 ;
-  assign \$178  = ~ rd_sync[1];
-  assign \$179  = rd_h_sync[1] & \$178 ;
-  assign \$180  = \$177  | \$179 ;
-  assign \$181  = \$180  & decode_rd_status_lat;
-  assign \$182  = \$181  & device[4];
-  assign \$183  = ~ wr_h_sync[1];
-  assign \$184  = wr_sync[2] & \$183 ;
-  assign \$185  = ~ wr_sync[1];
-  assign \$186  = wr_h_sync[1] & \$185 ;
-  assign \$187  = \$184  | \$186 ;
-  assign \$188  = \$187  & device[4];
-  assign \$189  = \$188  & decode_command_lat;
-  assign \$190  = ~ wr_h_sync[1];
-  assign \$191  = wr_sync[2] & \$190 ;
-  assign \$192  = ~ wr_sync[1];
-  assign \$193  = wr_h_sync[1] & \$192 ;
-  assign \$194  = \$191  | \$193 ;
-  assign \$195  = \$194  & device[4];
-  assign \$196  = \$195  & decode_command_lat;
-  assign \$197  = ~ rd_h_sync[1];
-  assign \$198  = rd_sync[2] & \$197 ;
-  assign \$199  = ~ rd_sync[1];
-  assign \$200  = rd_h_sync[1] & \$199 ;
-  assign \$201  = \$198  | \$200 ;
-  assign \$202  = \$201  & device[4];
-  assign \$203  = \$202  & decode_rd_status_lat;
-  assign \$204  = host_status_rds != 8'hff;
-  assign \$205  = \$203  & \$204 ;
-  assign \$206  = host_status_rds + 1'h1;
-  assign \$207  = ~ rd_h_sync[1];
-  assign \$208  = rd_sync[2] & \$207 ;
-  assign \$209  = ~ rd_sync[1];
-  assign \$210  = rd_h_sync[1] & \$209 ;
-  assign \$211  = \$208  | \$210 ;
-  assign \$212  = \$211  & device[4];
-  assign \$213  = \$212  & decode_rd_alt_status_lat;
-  assign \$214  = host_altstat_rds != 8'hff;
-  assign \$215  = \$213  & \$214 ;
-  assign \$216  = host_altstat_rds + 1'h1;
-  assign \$217  = ~ rd_h_sync[1];
-  assign \$218  = rd_sync[2] & \$217 ;
-  assign \$219  = ~ rd_sync[1];
-  assign \$220  = rd_h_sync[1] & \$219 ;
-  assign \$221  = \$218  | \$220 ;
-  assign \$222  = \$221  & device[4];
-  assign \$223  = \$222  & decode_rd_data_lat;
-  assign \$224  = host_data_rds + 1'h1;
-  assign \$225  = ~ wr_h_sync[1];
-  assign \$226  = wr_sync[2] & \$225 ;
-  assign \$227  = ~ wr_sync[1];
-  assign \$228  = wr_h_sync[1] & \$227 ;
-  assign \$229  = \$226  | \$228 ;
-  assign \$230  = \$229  & decode_device_control_lat;
-  assign \$231  = devctl_writes + 1'h1;
-  assign \$232  = diag_free_run + 1'h1;
-  assign \$233  = ~ wr_h_sync[1];
-  assign \$234  = wr_sync[2] & \$233 ;
-  assign \$235  = ~ wr_sync[1];
-  assign \$236  = wr_h_sync[1] & \$235 ;
-  assign \$237  = \$234  | \$236 ;
-  assign \$238  = ~ rd_h_sync[1];
-  assign \$239  = rd_sync[2] & \$238 ;
-  assign \$240  = ~ rd_sync[1];
-  assign \$241  = rd_h_sync[1] & \$240 ;
-  assign \$242  = \$239  | \$241 ;
-  assign \$243  = \$237  | \$242 ;
-  assign \$244  = diag_ide_strobes + 1'h1;
-  assign \$245  = ~ rstn_sync[1];
-  assign \$246  = rstn_clean_prev & \$245 ;
-  assign \$247  = diag_rstn_falls + 1'h1;
-  assign \$248  = ~ rstn_clean_prev;
-  assign \$249  = \$248  & rstn_sync[1];
-  assign \$250  = diag_rstn_rises + 1'h1;
-  assign \$251  = audio_sync[1] ^ audio_clean_prev;
-  assign \$252  = diag_audio_alive + 1'h1;
-  assign \$253  = mcu_cs & mcu_wr;
-  assign \$254  = mcu_cs & mcu_rd;
-  assign \$255  = mcu_cs & mcu_wr;
-  assign \$256  = mcu_cs & mcu_wr;
+  assign \$103  = ~ wr_sync[1];
+  assign \$104  = \$102  & \$103 ;
+  assign \$105  = | rd_burst_left;
+  assign \$106  = \$105  & r_rdy;
+  assign \$107  = rd_has_burst | \$106 ;
+  assign \$108  = dma_rd_mode & \$107 ;
+  assign \$109  = dma_wr_mode & wr_has_room;
+  assign \$110  = \$108  | \$109 ;
+  assign \$111  = device[4] & \$110 ;
+  assign \$112  = ~ wr_h_sync[1];
+  assign \$113  = wr_sync[2] & \$112 ;
+  assign \$114  = ~ wr_sync[1];
+  assign \$115  = wr_h_sync[1] & \$114 ;
+  assign \$116  = \$113  | \$115 ;
+  assign \$117  = \$116  & decode_data_lat;
+  assign \$118  = \$117  & device[4];
+  assign \$119  = \$118  & w_rdy;
+  assign \$120  = pkt_phase ? 8'h05 : 8'hff;
+  assign \$121  = pio_wr_words == \$120 ;
+  assign \$122  = pio_wr_fc | pkt_phase;
+  assign \$123  = pio_wr_words + 1'h1;
+  assign \$124  = ~ wr_h_sync[1];
+  assign \$125  = wr_sync[2] & \$124 ;
+  assign \$126  = ~ wr_sync[1];
+  assign \$127  = wr_h_sync[1] & \$126 ;
+  assign \$128  = \$125  | \$127 ;
+  assign \$129  = \$128  & decode_device_lat;
+  assign \$130  = cmd_seq + 1'h1;
+  assign \$131  = ~ wr_h_sync[1];
+  assign \$132  = wr_sync[2] & \$131 ;
+  assign \$133  = ~ wr_sync[1];
+  assign \$134  = wr_h_sync[1] & \$133 ;
+  assign \$135  = \$132  | \$134 ;
+  assign \$136  = \$135  & device[4];
+  assign \$137  = \$136  & decode_features_lat;
+  assign \$138  = ~ wr_h_sync[1];
+  assign \$139  = wr_sync[2] & \$138 ;
+  assign \$140  = ~ wr_sync[1];
+  assign \$141  = wr_h_sync[1] & \$140 ;
+  assign \$142  = \$139  | \$141 ;
+  assign \$143  = \$142  & device[4];
+  assign \$144  = \$143  & decode_sector_count_lat;
+  assign \$145  = ~ wr_h_sync[1];
+  assign \$146  = wr_sync[2] & \$145 ;
+  assign \$147  = ~ wr_sync[1];
+  assign \$148  = wr_h_sync[1] & \$147 ;
+  assign \$149  = \$146  | \$148 ;
+  assign \$150  = \$149  & device[4];
+  assign \$151  = \$150  & decode_lba_low_lat;
+  assign \$152  = ~ wr_h_sync[1];
+  assign \$153  = wr_sync[2] & \$152 ;
+  assign \$154  = ~ wr_sync[1];
+  assign \$155  = wr_h_sync[1] & \$154 ;
+  assign \$156  = \$153  | \$155 ;
+  assign \$157  = \$156  & device[4];
+  assign \$158  = \$157  & decode_lba_mid_lat;
+  assign \$159  = ~ wr_h_sync[1];
+  assign \$160  = wr_sync[2] & \$159 ;
+  assign \$161  = ~ wr_sync[1];
+  assign \$162  = wr_h_sync[1] & \$161 ;
+  assign \$163  = \$160  | \$162 ;
+  assign \$164  = \$163  & device[4];
+  assign \$165  = \$164  & decode_lba_high_lat;
+  assign \$166  = ~ wr_h_sync[1];
+  assign \$167  = wr_sync[2] & \$166 ;
+  assign \$168  = ~ wr_sync[1];
+  assign \$169  = wr_h_sync[1] & \$168 ;
+  assign \$170  = \$167  | \$169 ;
+  assign \$171  = \$170  & decode_device_control_lat;
+  assign \$172  = ~ rd_h_sync[1];
+  assign \$173  = rd_sync[2] & \$172 ;
+  assign \$174  = ~ rd_sync[1];
+  assign \$175  = rd_h_sync[1] & \$174 ;
+  assign \$176  = \$173  | \$175 ;
+  assign \$177  = \$176  & decode_rd_status_lat;
+  assign \$178  = \$177  & device[4];
+  assign \$179  = ~ wr_h_sync[1];
+  assign \$180  = wr_sync[2] & \$179 ;
+  assign \$181  = ~ wr_sync[1];
+  assign \$182  = wr_h_sync[1] & \$181 ;
+  assign \$183  = \$180  | \$182 ;
+  assign \$184  = \$183  & device[4];
+  assign \$185  = \$184  & decode_command_lat;
+  assign \$186  = ~ wr_h_sync[1];
+  assign \$187  = wr_sync[2] & \$186 ;
+  assign \$188  = ~ wr_sync[1];
+  assign \$189  = wr_h_sync[1] & \$188 ;
+  assign \$190  = \$187  | \$189 ;
+  assign \$191  = \$190  & device[4];
+  assign \$192  = \$191  & decode_command_lat;
+  assign \$193  = ~ rd_h_sync[1];
+  assign \$194  = rd_sync[2] & \$193 ;
+  assign \$195  = ~ rd_sync[1];
+  assign \$196  = rd_h_sync[1] & \$195 ;
+  assign \$197  = \$194  | \$196 ;
+  assign \$198  = \$197  & device[4];
+  assign \$199  = \$198  & decode_rd_status_lat;
+  assign \$200  = host_status_rds != 8'hff;
+  assign \$201  = \$199  & \$200 ;
+  assign \$202  = host_status_rds + 1'h1;
+  assign \$203  = ~ rd_h_sync[1];
+  assign \$204  = rd_sync[2] & \$203 ;
+  assign \$205  = ~ rd_sync[1];
+  assign \$206  = rd_h_sync[1] & \$205 ;
+  assign \$207  = \$204  | \$206 ;
+  assign \$208  = \$207  & device[4];
+  assign \$209  = \$208  & decode_rd_alt_status_lat;
+  assign \$210  = host_altstat_rds != 8'hff;
+  assign \$211  = \$209  & \$210 ;
+  assign \$212  = host_altstat_rds + 1'h1;
+  assign \$213  = ~ rd_h_sync[1];
+  assign \$214  = rd_sync[2] & \$213 ;
+  assign \$215  = ~ rd_sync[1];
+  assign \$216  = rd_h_sync[1] & \$215 ;
+  assign \$217  = \$214  | \$216 ;
+  assign \$218  = \$217  & device[4];
+  assign \$219  = \$218  & decode_rd_data_lat;
+  assign \$220  = host_data_rds + 1'h1;
+  assign \$221  = ~ wr_h_sync[1];
+  assign \$222  = wr_sync[2] & \$221 ;
+  assign \$223  = ~ wr_sync[1];
+  assign \$224  = wr_h_sync[1] & \$223 ;
+  assign \$225  = \$222  | \$224 ;
+  assign \$226  = \$225  & decode_device_control_lat;
+  assign \$227  = devctl_writes + 1'h1;
+  assign \$228  = diag_free_run + 1'h1;
+  assign \$229  = ~ wr_h_sync[1];
+  assign \$230  = wr_sync[2] & \$229 ;
+  assign \$231  = ~ wr_sync[1];
+  assign \$232  = wr_h_sync[1] & \$231 ;
+  assign \$233  = \$230  | \$232 ;
+  assign \$234  = ~ rd_h_sync[1];
+  assign \$235  = rd_sync[2] & \$234 ;
+  assign \$236  = ~ rd_sync[1];
+  assign \$237  = rd_h_sync[1] & \$236 ;
+  assign \$238  = \$235  | \$237 ;
+  assign \$239  = \$233  | \$238 ;
+  assign \$240  = diag_ide_strobes + 1'h1;
+  assign \$241  = ~ rstn_sync[1];
+  assign \$242  = rstn_clean_prev & \$241 ;
+  assign \$243  = diag_rstn_falls + 1'h1;
+  assign \$244  = ~ rstn_clean_prev;
+  assign \$245  = \$244  & rstn_sync[1];
+  assign \$246  = diag_rstn_rises + 1'h1;
+  assign \$247  = audio_sync[1] ^ audio_clean_prev;
+  assign \$248  = diag_audio_alive + 1'h1;
+  assign \$249  = mcu_cs & mcu_wr;
+  assign \$250  = mcu_cs & mcu_rd;
+  assign \$251  = mcu_cs & mcu_wr;
+  assign \$252  = ~ mcu_data_in[1];
+  assign \$253  = mcu_data_in[14:8] == cmd_seq;
+  assign \$254  = \$252  & \$253 ;
+  assign \$255  = ~ cmd_wr;
+  assign \$256  = \$254  & \$255 ;
   assign \$257  = mcu_cs & mcu_wr;
   assign \$258  = mcu_cs & mcu_wr;
   assign \$259  = mcu_cs & mcu_wr;
@@ -9946,189 +10057,192 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   assign \$261  = mcu_cs & mcu_wr;
   assign \$262  = mcu_cs & mcu_wr;
   assign \$263  = mcu_cs & mcu_wr;
-  assign \$264  = mcu_cs & mcu_rd;
-  assign \$265  = lvl_read_count + 1'h1;
-  assign \$266  = mcu_cs & mcu_wr;
+  assign \$264  = mcu_cs & mcu_wr;
+  assign \$265  = mcu_cs & mcu_rd;
+  assign \$266  = lvl_read_count + 1'h1;
   assign \$267  = mcu_cs & mcu_wr;
   assign \$268  = mcu_cs & mcu_wr;
   assign \$269  = mcu_cs & mcu_wr;
-  assign \$270  = ~ ide_rstn;
-  assign \$271  = \$270  | srst;
-  assign \$272  = ~ post_reset_count[23];
-  assign \$273  = ~ post_reset_done_prev;
-  assign \$274  = post_reset_count[23] & \$273 ;
-  assign \$275  = post_reset_count + 1'h1;
+  assign \$270  = mcu_cs & mcu_wr;
+  assign \$271  = ~ ide_rstn;
+  assign \$272  = \$271  | srst;
+  assign \$273  = ~ post_reset_count[23];
+  assign \$274  = ~ post_reset_done_prev;
+  assign \$275  = post_reset_count[23] & \$274 ;
+  assign \$276  = post_reset_count + 1'h1;
   always @(posedge clk)
-    wr_sync <= \$276 ;
+    wr_sync <= \$277 ;
   always @(posedge clk)
-    rd_sync <= \$277 ;
+    rd_sync <= \$278 ;
   always @(posedge clk)
-    wr_h_sync <= \$278 ;
+    wr_h_sync <= \$279 ;
   always @(posedge clk)
-    rd_h_sync <= \$279 ;
+    rd_h_sync <= \$280 ;
   always @(posedge clk)
-    ide_data_latch_d <= \$280 ;
+    ide_data_latch_d <= \$281 ;
   always @(posedge clk)
-    ide_data_latch <= \$281 ;
+    ide_data_latch <= \$282 ;
   always @(posedge clk)
-    decode_data_lat <= \$282 ;
+    decode_data_lat <= \$283 ;
   always @(posedge clk)
-    decode_device_lat <= \$283 ;
+    decode_device_lat <= \$284 ;
   always @(posedge clk)
-    decode_command_lat <= \$284 ;
+    decode_command_lat <= \$285 ;
   always @(posedge clk)
-    decode_features_lat <= \$285 ;
+    decode_features_lat <= \$286 ;
   always @(posedge clk)
-    decode_sector_count_lat <= \$286 ;
+    decode_sector_count_lat <= \$287 ;
   always @(posedge clk)
-    decode_lba_low_lat <= \$287 ;
+    decode_lba_low_lat <= \$288 ;
   always @(posedge clk)
-    decode_lba_mid_lat <= \$288 ;
+    decode_lba_mid_lat <= \$289 ;
   always @(posedge clk)
-    decode_lba_high_lat <= \$289 ;
+    decode_lba_high_lat <= \$290 ;
   always @(posedge clk)
-    decode_device_control_lat <= \$290 ;
+    decode_device_control_lat <= \$291 ;
   always @(posedge clk)
-    decode_rd_data_lat <= \$291 ;
+    decode_rd_data_lat <= \$292 ;
   always @(posedge clk)
-    decode_rd_status_lat <= \$292 ;
+    decode_rd_status_lat <= \$293 ;
   always @(posedge clk)
-    decode_rd_alt_status_lat <= \$293 ;
+    decode_rd_alt_status_lat <= \$294 ;
   always @(posedge clk)
-    dmackn_sync <= \$294 ;
+    dmackn_sync <= \$295 ;
   always @(posedge clk)
-    dmack_held <= \$295 ;
+    dmack_held <= \$296 ;
   always @(posedge clk)
-    rd_burst_left <= \$296 ;
+    rd_burst_left <= \$297 ;
   always @(posedge clk)
-    ide_dmarq <= \$297 ;
+    ide_dmarq <= \$298 ;
   always @(posedge clk)
-    pio_wr_words <= \$298 ;
+    pio_wr_words <= \$299 ;
   always @(posedge clk)
-    bsy <= \$299 ;
+    bsy <= \$300 ;
   always @(posedge clk)
-    drq <= \$300 ;
+    drq <= \$301 ;
   always @(posedge clk)
-    pkt_phase <= \$301 ;
+    pkt_phase <= \$302 ;
   always @(posedge clk)
-    device <= \$302 ;
+    device <= \$303 ;
   always @(posedge clk)
-    command <= \$303 ;
+    command <= \$304 ;
   always @(posedge clk)
-    command_pend <= \$304 ;
+    command_pend <= \$305 ;
   always @(posedge clk)
-    err <= \$305 ;
+    cmd_seq <= \$306 ;
   always @(posedge clk)
-    features <= \$306 ;
+    err <= \$307 ;
   always @(posedge clk)
-    \sector_count$58  <= \$307 ;
+    features <= \$308 ;
   always @(posedge clk)
-    lba_low_prev <= \$308 ;
+    \sector_count$59  <= \$309 ;
   always @(posedge clk)
-    \lba_low$59  <= \$309 ;
+    lba_low_prev <= \$310 ;
   always @(posedge clk)
-    lba_mid_prev <= \$310 ;
+    \lba_low$60  <= \$311 ;
   always @(posedge clk)
-    \lba_mid$61  <= \$311 ;
+    lba_mid_prev <= \$312 ;
   always @(posedge clk)
-    lba_high_prev <= \$312 ;
+    \lba_mid$62  <= \$313 ;
   always @(posedge clk)
-    \lba_high$63  <= \$313 ;
+    lba_high_prev <= \$314 ;
   always @(posedge clk)
-    hob <= \$314 ;
+    \lba_high$64  <= \$315 ;
   always @(posedge clk)
-    srst <= \$315 ;
+    hob <= \$316 ;
   always @(posedge clk)
-    n_ien <= \$316 ;
+    srst <= \$317 ;
   always @(posedge clk)
-    intrq_pending <= \$317 ;
+    n_ien <= \$318 ;
   always @(posedge clk)
-    prev_status_rds <= \$318 ;
+    intrq_pending <= \$319 ;
   always @(posedge clk)
-    prev_altstat_rds <= \$319 ;
+    prev_status_rds <= \$320 ;
   always @(posedge clk)
-    prev_data_rds <= \$320 ;
+    prev_altstat_rds <= \$321 ;
   always @(posedge clk)
-    host_status_rds <= \$321 ;
+    prev_data_rds <= \$322 ;
   always @(posedge clk)
-    host_altstat_rds <= \$322 ;
+    host_status_rds <= \$323 ;
   always @(posedge clk)
-    host_data_rds <= \$323 ;
+    host_altstat_rds <= \$324 ;
   always @(posedge clk)
-    devctl_last <= \$324 ;
+    host_data_rds <= \$325 ;
   always @(posedge clk)
-    devctl_writes <= \$325 ;
+    devctl_last <= \$326 ;
   always @(posedge clk)
-    mcu_data_out <= \$326 ;
+    devctl_writes <= \$327 ;
   always @(posedge clk)
-    diag_free_run <= \$327 ;
+    mcu_data_out <= \$328 ;
   always @(posedge clk)
-    diag_ide_strobes <= \$328 ;
+    diag_free_run <= \$329 ;
   always @(posedge clk)
-    rstn_sync <= \$329 ;
+    diag_ide_strobes <= \$330 ;
   always @(posedge clk)
-    rstn_clean_prev <= \$330 ;
+    rstn_sync <= \$331 ;
   always @(posedge clk)
-    diag_rstn_falls <= \$331 ;
+    rstn_clean_prev <= \$332 ;
   always @(posedge clk)
-    diag_rstn_rises <= \$332 ;
+    diag_rstn_falls <= \$333 ;
   always @(posedge clk)
-    audio_sync <= \$333 ;
+    diag_rstn_rises <= \$334 ;
   always @(posedge clk)
-    audio_clean_prev <= \$334 ;
+    audio_sync <= \$335 ;
   always @(posedge clk)
-    diag_audio_alive <= \$335 ;
+    audio_clean_prev <= \$336 ;
   always @(posedge clk)
-    mcu_wr_active_prev <= \$336 ;
+    diag_audio_alive <= \$337 ;
   always @(posedge clk)
-    mcu_rd_active_prev <= \$337 ;
+    mcu_wr_active_prev <= \$338 ;
   always @(posedge clk)
-    reset_seen <= \$338 ;
+    mcu_rd_active_prev <= \$339 ;
   always @(posedge clk)
-    dsc <= \$339 ;
+    reset_seen <= \$340 ;
   always @(posedge clk)
-    df <= \$340 ;
+    dsc <= \$341 ;
   always @(posedge clk)
-    drdy <= \$341 ;
+    df <= \$342 ;
   always @(posedge clk)
-    abrt <= \$342 ;
+    drdy <= \$343 ;
   always @(posedge clk)
-    sense_key <= \$343 ;
+    abrt <= \$344 ;
   always @(posedge clk)
-    lvl_at_read <= \$344 ;
+    sense_key <= \$345 ;
   always @(posedge clk)
-    lvl_read_count <= \$345 ;
+    lvl_at_read <= \$346 ;
   always @(posedge clk)
-    cap_arm <= \$346 ;
+    lvl_read_count <= \$347 ;
   always @(posedge clk)
-    cap_run <= \$347 ;
+    cap_arm <= \$348 ;
   always @(posedge clk)
-    cap_wptr <= \$348 ;
+    cap_run <= \$349 ;
   always @(posedge clk)
-    cap_rptr <= \$349 ;
+    cap_wptr <= \$350 ;
   always @(posedge clk)
-    dma_mode <= \$350 ;
+    cap_rptr <= \$351 ;
   always @(posedge clk)
-    pio_wr_fc <= \$351 ;
+    dma_mode <= \$352 ;
   always @(posedge clk)
-    pio_rd_fc <= \$352 ;
+    pio_wr_fc <= \$353 ;
   always @(posedge clk)
-    irq_delay <= \$353 ;
+    pio_rd_fc <= \$354 ;
   always @(posedge clk)
-    post_reset_done_prev <= \$354 ;
+    irq_delay <= \$355 ;
   always @(posedge clk)
-    post_reset_count <= \$355 ;
+    post_reset_done_prev <= \$356 ;
+  always @(posedge clk)
+    post_reset_count <= \$357 ;
   \OpenGDEMUCore.dev1.decode  decode (
     .addr(addr),
     .alt_status(alt_status),
-    .command(\command$128 ),
+    .command(\command$131 ),
     .csn(csn),
     .data(data),
     .debug_testpad(debug_testpad),
-    .device(\device$50 ),
+    .device(\device$51 ),
     .device_control(device_control),
     .error(error),
-    .features(\features$130 ),
+    .features(\features$133 ),
     .lba_high(lba_high),
     .lba_low(lba_low),
     .lba_mid(lba_mid),
@@ -10144,13 +10258,13 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
     .r_rdy(r_rdy),
     .rst(rst),
     .w_en(w_en),
-    .w_port__data(\w_data$92 )
+    .w_port__data(\w_data$94 )
   );
   \OpenGDEMUCore.dev1.write_fifo  write_fifo (
     .clk(clk),
     .fifo_clear(fifo_clear),
     .level(\level$16 ),
-    .r_data(\r_data$86 ),
+    .r_data(\r_data$88 ),
     .r_en(\r_en$3 ),
     .rst(rst),
     .w_en(\w_en$2 ),
@@ -10180,7 +10294,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h08:
           /* empty */;
       7'h09:
-          if (\$81 ) begin
+          if (\$80 ) begin
             w_en = 1'h1;
           end
     endcase
@@ -10228,7 +10342,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h08:
           /* empty */;
       7'h09:
-          if (\$78 ) begin
+          if (\$77 ) begin
             \r_en$3  = 1'h1;
           end
     endcase
@@ -10253,33 +10367,33 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
     fifo_clear = 1'h0;
-    if (\$39 ) begin
+    if (cmd_wr) begin
       fifo_clear = 1'h1;
     end
-    if (\$41 ) begin
+    if (\$40 ) begin
       fifo_clear = 1'h1;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
     ide_out = 16'hffff;
-    if (\$53 ) begin
+    if (\$52 ) begin
       ide_out = r_data;
     end else if (data) begin
       ide_out = r_data;
     end else if (error) begin
       ide_out[7:0] = { sense_key, 1'h0, abrt, 2'h0 };
     end else if (sector_count) begin
-      ide_out[7:0] = \$55 ;
+      ide_out[7:0] = \$54 ;
     end else if (lba_low) begin
-      ide_out[7:0] = \$56 ;
+      ide_out[7:0] = \$55 ;
     end else if (lba_mid) begin
-      ide_out[7:0] = \$57 ;
+      ide_out[7:0] = \$56 ;
     end else if (lba_high) begin
-      ide_out[7:0] = \$58 ;
-    end else if (\device$50 ) begin
+      ide_out[7:0] = \$57 ;
+    end else if (\device$51 ) begin
       ide_out[7:0] = device;
-    end else if (\$54 ) begin
+    end else if (\$53 ) begin
       ide_out[7:0] = { bsy_out, drdy, df, dsc, drq_out, 2'h0, err };
     end
   end
@@ -10293,7 +10407,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
           mcu_out[1] = command_pend;
           mcu_out[2] = reset_seen;
           mcu_out[3] = n_ien;
-          mcu_out[4] = \$75 ;
+          mcu_out[4] = \$74 ;
+          mcu_out[14:8] = cmd_seq;
+          mcu_out[15] = 1'h1;
         end
       7'h01:
           mcu_out[7:0] = { bsy, drdy, df, dsc, drq, 2'h0, err };
@@ -10310,15 +10426,15 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
           mcu_out[15:8] = features;
         end
       7'h05:
-          mcu_out = \sector_count$58 ;
+          mcu_out = \sector_count$59 ;
       7'h06:
         begin
-          mcu_out[7:0] = \lba_low$59 ;
-          mcu_out[15:8] = \lba_mid$61 ;
+          mcu_out[7:0] = \lba_low$60 ;
+          mcu_out[15:8] = \lba_mid$62 ;
         end
       7'h07:
         begin
-          mcu_out[7:0] = \lba_high$63 ;
+          mcu_out[7:0] = \lba_high$64 ;
           mcu_out[15:8] = lba_low_prev;
         end
       7'h08:
@@ -10327,7 +10443,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
           mcu_out[15:8] = lba_high_prev;
         end
       7'h09:
-          mcu_out = \r_data$86 ;
+          mcu_out = \r_data$88 ;
       7'h0a:
           mcu_out = { 5'h00, dbg_rfifo_level };
       7'h0b:
@@ -10364,7 +10480,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
         begin
           mcu_out[0] = cap_arm;
           mcu_out[1] = cap_run;
-          mcu_out[2] = \$84 ;
+          mcu_out[2] = \$83 ;
           mcu_out[15:8] = cap_wptr[8:1];
         end
       7'h15:
@@ -10384,7 +10500,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \w_data$92  = 16'h0000;
+    \w_data$94  = 16'h0000;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -10405,8 +10521,74 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h08:
           /* empty */;
       7'h09:
-          if (\$81 ) begin
-            \w_data$92  = mcu_data_in;
+          if (\$80 ) begin
+            \w_data$94  = mcu_data_in;
+          end
+    endcase
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    wmask = 5'h00;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          /* empty */;
+      7'h15:
+          /* empty */;
+      7'h13:
+          if (\$84 ) begin
+            wmask = \$86 ;
           end
     endcase
   end
@@ -10473,7 +10655,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h13:
           /* empty */;
       7'h1d:
-          aux_ctrl_we = \$85 ;
+          aux_ctrl_we = \$87 ;
     endcase
   end
   always @* begin
@@ -10543,69 +10725,59 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h1e:
           /* empty */;
       7'h1f:
-          aux_push = \$88 ;
+          aux_push = \$90 ;
     endcase
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$276  = { wr_sync[1:0], ide_wr };
+    \$277  = { wr_sync[1:0], ide_wr };
     if (rst) begin
-      \$276  = 3'h7;
+      \$277  = 3'h7;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$277  = { rd_sync[1:0], ide_rd };
+    \$278  = { rd_sync[1:0], ide_rd };
     if (rst) begin
-      \$277  = 3'h0;
+      \$278  = 3'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$278  = { wr_h_sync[0], ide_wr_h };
+    \$279  = { wr_h_sync[0], ide_wr_h };
     if (rst) begin
-      \$278  = 2'h3;
+      \$279  = 2'h3;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$279  = { rd_h_sync[0], ide_rd_h };
+    \$280  = { rd_h_sync[0], ide_rd_h };
     if (rst) begin
-      \$279  = 2'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$280  = ide_data_latch;
-    if (rst) begin
-      \$280  = 16'h0000;
+      \$280  = 2'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
     \$281  = ide_data_latch;
-    if (ide_wr) begin
-      \$281  = ide_data_in;
-    end
     if (rst) begin
       \$281  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$282  = decode_data_lat;
+    \$282  = ide_data_latch;
     if (ide_wr) begin
-      \$282  = data;
+      \$282  = ide_data_in;
     end
     if (rst) begin
-      \$282  = 1'h0;
+      \$282  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$283  = decode_device_lat;
+    \$283  = decode_data_lat;
     if (ide_wr) begin
-      \$283  = \device$50 ;
+      \$283  = data;
     end
     if (rst) begin
       \$283  = 1'h0;
@@ -10613,9 +10785,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$284  = decode_command_lat;
+    \$284  = decode_device_lat;
     if (ide_wr) begin
-      \$284  = \command$128 ;
+      \$284  = \device$51 ;
     end
     if (rst) begin
       \$284  = 1'h0;
@@ -10623,9 +10795,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$285  = decode_features_lat;
+    \$285  = decode_command_lat;
     if (ide_wr) begin
-      \$285  = \features$130 ;
+      \$285  = \command$131 ;
     end
     if (rst) begin
       \$285  = 1'h0;
@@ -10633,9 +10805,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$286  = decode_sector_count_lat;
+    \$286  = decode_features_lat;
     if (ide_wr) begin
-      \$286  = sector_count;
+      \$286  = \features$133 ;
     end
     if (rst) begin
       \$286  = 1'h0;
@@ -10643,9 +10815,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$287  = decode_lba_low_lat;
+    \$287  = decode_sector_count_lat;
     if (ide_wr) begin
-      \$287  = lba_low;
+      \$287  = sector_count;
     end
     if (rst) begin
       \$287  = 1'h0;
@@ -10653,9 +10825,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$288  = decode_lba_mid_lat;
+    \$288  = decode_lba_low_lat;
     if (ide_wr) begin
-      \$288  = lba_mid;
+      \$288  = lba_low;
     end
     if (rst) begin
       \$288  = 1'h0;
@@ -10663,9 +10835,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$289  = decode_lba_high_lat;
+    \$289  = decode_lba_mid_lat;
     if (ide_wr) begin
-      \$289  = lba_high;
+      \$289  = lba_mid;
     end
     if (rst) begin
       \$289  = 1'h0;
@@ -10673,9 +10845,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$290  = decode_device_control_lat;
+    \$290  = decode_lba_high_lat;
     if (ide_wr) begin
-      \$290  = device_control;
+      \$290  = lba_high;
     end
     if (rst) begin
       \$290  = 1'h0;
@@ -10683,9 +10855,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$291  = decode_rd_data_lat;
-    if (ide_rd) begin
-      \$291  = data;
+    \$291  = decode_device_control_lat;
+    if (ide_wr) begin
+      \$291  = device_control;
     end
     if (rst) begin
       \$291  = 1'h0;
@@ -10693,9 +10865,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$292  = decode_rd_status_lat;
+    \$292  = decode_rd_data_lat;
     if (ide_rd) begin
-      \$292  = status;
+      \$292  = data;
     end
     if (rst) begin
       \$292  = 1'h0;
@@ -10703,9 +10875,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$293  = decode_rd_alt_status_lat;
+    \$293  = decode_rd_status_lat;
     if (ide_rd) begin
-      \$293  = alt_status;
+      \$293  = status;
     end
     if (rst) begin
       \$293  = 1'h0;
@@ -10713,136 +10885,146 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$294  = { dmackn_sync[0], ide_dmackn };
+    \$294  = decode_rd_alt_status_lat;
+    if (ide_rd) begin
+      \$294  = alt_status;
+    end
     if (rst) begin
-      \$294  = 2'h3;
+      \$294  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$295  = dmack_held;
-    if (\$89 ) begin
-      \$295  = \$90 ;
-    end
+    \$295  = { dmackn_sync[0], ide_dmackn };
     if (rst) begin
-      \$295  = 1'h0;
+      \$295  = 2'h3;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$296  = rd_burst_left;
+    \$296  = dmack_held;
+    if (\$91 ) begin
+      \$296  = \$92 ;
+    end
+    if (rst) begin
+      \$296  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$297  = rd_burst_left;
     if (rd_dma_pop) begin
-      \$296  = \$96 [4:0];
-    end else if (\$93 ) begin
-      \$296  = 5'h10;
+      \$297  = \$98 [4:0];
+    end else if (\$95 ) begin
+      \$297  = 5'h10;
     end
-    if (\$97 ) begin
-      \$296  = 5'h00;
+    if (\$99 ) begin
+      \$297  = 5'h00;
     end
     if (rst) begin
-      \$296  = 5'h00;
+      \$297  = 5'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$297  = ide_dmarq;
-    if (\$102 ) begin
-      \$297  = \$109 ;
+    \$298  = ide_dmarq;
+    if (\$104 ) begin
+      \$298  = \$111 ;
     end
     if (rst) begin
-      \$297  = 1'h0;
+      \$298  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$298  = pio_wr_words;
-    if (\$117 ) begin
+    \$299  = pio_wr_words;
+    if (\$119 ) begin
       (* full_case = 32'd1 *)
-      if (\$119 ) begin
-        \$298  = 8'h00;
+      if (\$121 ) begin
+        \$299  = 8'h00;
       end else begin
-        \$298  = \$121 [7:0];
+        \$299  = \$123 [7:0];
       end
     end
-    if (\$134 ) begin
-      \$298  = 8'h00;
+    if (cmd_wr) begin
+      \$299  = 8'h00;
     end
-    if (\$271 ) begin
-      \$298  = 8'h00;
+    if (\$272 ) begin
+      \$299  = 8'h00;
     end
     if (rst) begin
-      \$298  = 8'h00;
+      \$299  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$299  = bsy;
-    if (\$117 ) begin
-      if (\$119 ) begin
-        if (\$120 ) begin
-          \$299  = 1'h1;
+    \$300  = bsy;
+    if (\$119 ) begin
+      if (\$121 ) begin
+        if (\$122 ) begin
+          \$300  = 1'h1;
         end
       end
     end
-    if (\$134 ) begin
-      \$299  = 1'h1;
+    if (cmd_wr) begin
+      \$300  = 1'h1;
     end
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          if (\$256 ) begin
-            \$299  = mcu_data_in[7];
+          if (\$257 ) begin
+            \$300  = mcu_data_in[7];
           end
     endcase
-    if (\$271 ) begin
-      \$299  = 1'h1;
-    end else if (\$272 ) begin
-    end else if (\$274 ) begin
-      \$299  = 1'h0;
+    if (\$272 ) begin
+      \$300  = 1'h1;
+    end else if (\$273 ) begin
+    end else if (\$275 ) begin
+      \$300  = 1'h0;
     end
     if (rst) begin
-      \$299  = 1'h1;
+      \$300  = 1'h1;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$300  = drq;
-    if (\$117 ) begin
-      if (\$119 ) begin
-        if (\$120 ) begin
-          \$300  = 1'h0;
+    \$301  = drq;
+    if (\$119 ) begin
+      if (\$121 ) begin
+        if (\$122 ) begin
+          \$301  = 1'h0;
         end
       end
     end
-    if (\$134 ) begin
-      \$300  = 1'h0;
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          if (\$256 ) begin
-            \$300  = mcu_data_in[3];
-          end
-    endcase
-    if (\$271 ) begin
-      \$300  = 1'h0;
-    end
-    if (rst) begin
-      \$300  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$301  = pkt_phase;
-    if (\$117 ) begin
-      if (\$119 ) begin
-        \$301  = 1'h0;
-      end
-    end
-    if (\$134 ) begin
+    if (cmd_wr) begin
       \$301  = 1'h0;
+    end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          if (\$257 ) begin
+            \$301  = mcu_data_in[3];
+          end
+    endcase
+    if (\$272 ) begin
+      \$301  = 1'h0;
+    end
+    if (rst) begin
+      \$301  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$302  = pkt_phase;
+    if (\$119 ) begin
+      if (\$121 ) begin
+        \$302  = 1'h0;
+      end
+    end
+    if (cmd_wr) begin
+      \$302  = 1'h0;
     end
     casez (mcu_addr)
       7'h00:
@@ -10902,41 +11084,23 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$269 ) begin
-            \$301  = mcu_data_in[4];
+          if (\$270 ) begin
+            if (wmask[4]) begin
+              \$302  = mcu_data_in[4];
+            end
           end
     endcase
-    if (\$271 ) begin
-      \$301  = 1'h0;
+    if (\$272 ) begin
+      \$302  = 1'h0;
     end
     if (rst) begin
-      \$301  = 1'h0;
+      \$302  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$302  = device;
-    if (\$127 ) begin
-      \$302  = ide_data_latch[7:0];
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          if (\$257 ) begin
-            \$302  = mcu_data_in[7:0];
-          end
-    endcase
-    if (rst) begin
-      \$302  = 8'h00;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$303  = command;
-    if (\$134 ) begin
+    \$303  = device;
+    if (\$129 ) begin
       \$303  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
@@ -10945,11 +11109,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h01:
           /* empty */;
       7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          if (\$259 ) begin
+          if (\$258 ) begin
             \$303  = mcu_data_in[7:0];
           end
     endcase
@@ -10959,49 +11119,9 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$304  = command_pend;
-    if (\$134 ) begin
-      \$304  = 1'h1;
-    end
-    casez (mcu_addr)
-      7'h00:
-          if (\$255 ) begin
-            \$304  = mcu_data_in[1];
-          end
-    endcase
-    if (\$271 ) begin
-      \$304  = 1'h0;
-    end
-    if (rst) begin
-      \$304  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$305  = err;
-    if (\$134 ) begin
-      \$305  = 1'h0;
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          if (\$256 ) begin
-            \$305  = mcu_data_in[0];
-          end
-    endcase
-    if (\$271 ) begin
-      \$305  = 1'h0;
-    end
-    if (rst) begin
-      \$305  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$306  = features;
-    if (\$141 ) begin
-      \$306  = ide_data_latch[7:0];
+    \$304  = command;
+    if (cmd_wr) begin
+      \$304  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
       7'h00:
@@ -11013,49 +11133,76 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h03:
           /* empty */;
       7'h04:
-          if (\$259 ) begin
-            \$306  = mcu_data_in[15:8];
-          end
-    endcase
-    if (rst) begin
-      \$306  = 8'h00;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$307  = \sector_count$58 ;
-    if (\$148 ) begin
-      \$307 [15:8] = \sector_count$58 [7:0];
-      \$307 [7:0] = ide_data_latch[7:0];
-    end
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
           if (\$260 ) begin
-            \$307  = mcu_data_in;
+            \$304  = mcu_data_in[7:0];
           end
     endcase
-    if (\$271 ) begin
-      \$307  = 16'h0001;
-    end
     if (rst) begin
-      \$307  = 16'h0001;
+      \$304  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$308  = lba_low_prev;
-    if (\$155 ) begin
-      \$308  = \lba_low$59 ;
+    \$305  = command_pend;
+    if (cmd_wr) begin
+      \$305  = 1'h1;
+    end
+    casez (mcu_addr)
+      7'h00:
+          if (\$251 ) begin
+            (* full_case = 32'd1 *)
+            if (mcu_data_in[15]) begin
+              if (\$256 ) begin
+                \$305  = 1'h0;
+              end
+            end else begin
+              \$305  = mcu_data_in[1];
+            end
+          end
+    endcase
+    if (\$272 ) begin
+      \$305  = 1'h0;
+    end
+    if (rst) begin
+      \$305  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$306  = cmd_seq;
+    if (cmd_wr) begin
+      \$306  = \$130 [6:0];
+    end
+    if (rst) begin
+      \$306  = 7'h00;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$307  = err;
+    if (cmd_wr) begin
+      \$307  = 1'h0;
+    end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          if (\$257 ) begin
+            \$307  = mcu_data_in[0];
+          end
+    endcase
+    if (\$272 ) begin
+      \$307  = 1'h0;
+    end
+    if (rst) begin
+      \$307  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$308  = features;
+    if (\$137 ) begin
+      \$308  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
       7'h00:
@@ -11067,13 +11214,7 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h03:
           /* empty */;
       7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          if (\$262 ) begin
+          if (\$260 ) begin
             \$308  = mcu_data_in[15:8];
           end
     endcase
@@ -11083,9 +11224,10 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$309  = \lba_low$59 ;
-    if (\$155 ) begin
-      \$309  = ide_data_latch[7:0];
+    \$309  = \sector_count$59 ;
+    if (\$144 ) begin
+      \$309 [15:8] = \sector_count$59 [7:0];
+      \$309 [7:0] = ide_data_latch[7:0];
     end
     casez (mcu_addr)
       7'h00:
@@ -11099,24 +11241,22 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h04:
           /* empty */;
       7'h05:
-          /* empty */;
-      7'h06:
           if (\$261 ) begin
-            \$309  = mcu_data_in[7:0];
+            \$309 [7:0] = mcu_data_in[7:0];
           end
     endcase
-    if (\$271 ) begin
-      \$309  = 8'h01;
+    if (\$272 ) begin
+      \$309  = 16'h0001;
     end
     if (rst) begin
-      \$309  = 8'h01;
+      \$309  = 16'h0001;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$310  = lba_mid_prev;
-    if (\$162 ) begin
-      \$310  = \lba_mid$61 ;
+    \$310  = lba_low_prev;
+    if (\$151 ) begin
+      \$310  = \lba_low$60 ;
     end
     casez (mcu_addr)
       7'h00:
@@ -11134,10 +11274,8 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h06:
           /* empty */;
       7'h07:
-          /* empty */;
-      7'h08:
           if (\$263 ) begin
-            \$310  = mcu_data_in[7:0];
+            \$310  = mcu_data_in[15:8];
           end
     endcase
     if (rst) begin
@@ -11146,8 +11284,8 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$311  = \lba_mid$61 ;
-    if (\$162 ) begin
+    \$311  = \lba_low$60 ;
+    if (\$151 ) begin
       \$311  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
@@ -11164,22 +11302,22 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h05:
           /* empty */;
       7'h06:
-          if (\$261 ) begin
-            \$311  = mcu_data_in[15:8];
+          if (\$262 ) begin
+            \$311  = mcu_data_in[7:0];
           end
     endcase
-    if (\$271 ) begin
-      \$311  = 8'h00;
+    if (\$272 ) begin
+      \$311  = 8'h01;
     end
     if (rst) begin
-      \$311  = 8'h00;
+      \$311  = 8'h01;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$312  = lba_high_prev;
-    if (\$169 ) begin
-      \$312  = \lba_high$63 ;
+    \$312  = lba_mid_prev;
+    if (\$158 ) begin
+      \$312  = \lba_mid$62 ;
     end
     casez (mcu_addr)
       7'h00:
@@ -11199,8 +11337,8 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h07:
           /* empty */;
       7'h08:
-          if (\$263 ) begin
-            \$312  = mcu_data_in[15:8];
+          if (\$264 ) begin
+            \$312  = mcu_data_in[7:0];
           end
     endcase
     if (rst) begin
@@ -11209,8 +11347,8 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$313  = \lba_high$63 ;
-    if (\$169 ) begin
+    \$313  = \lba_mid$62 ;
+    if (\$158 ) begin
       \$313  = ide_data_latch[7:0];
     end
     casez (mcu_addr)
@@ -11227,13 +11365,11 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h05:
           /* empty */;
       7'h06:
-          /* empty */;
-      7'h07:
           if (\$262 ) begin
-            \$313  = mcu_data_in[7:0];
+            \$313  = mcu_data_in[15:8];
           end
     endcase
-    if (\$271 ) begin
+    if (\$272 ) begin
       \$313  = 8'h00;
     end
     if (rst) begin
@@ -11242,29 +11378,74 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$314  = hob;
-    if (\$175 ) begin
-      \$314  = ide_data_latch[7];
+    \$314  = lba_high_prev;
+    if (\$165 ) begin
+      \$314  = \lba_high$64 ;
     end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          if (\$264 ) begin
+            \$314  = mcu_data_in[15:8];
+          end
+    endcase
     if (rst) begin
-      \$314  = 1'h0;
+      \$314  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$315  = srst;
-    if (\$175 ) begin
-      \$315  = ide_data_latch[2];
+    \$315  = \lba_high$64 ;
+    if (\$165 ) begin
+      \$315  = ide_data_latch[7:0];
+    end
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          if (\$263 ) begin
+            \$315  = mcu_data_in[7:0];
+          end
+    endcase
+    if (\$272 ) begin
+      \$315  = 8'h00;
     end
     if (rst) begin
-      \$315  = 1'h0;
+      \$315  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$316  = n_ien;
-    if (\$175 ) begin
-      \$316  = ide_data_latch[1];
+    \$316  = hob;
+    if (\$171 ) begin
+      \$316  = ide_data_latch[7];
     end
     if (rst) begin
       \$316  = 1'h0;
@@ -11272,20 +11453,40 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$317  = intrq_pending;
-    if (\$182 ) begin
+    \$317  = srst;
+    if (\$171 ) begin
+      \$317  = ide_data_latch[2];
+    end
+    if (rst) begin
       \$317  = 1'h0;
     end
-    if (\$189 ) begin
-      \$317  = 1'h0;
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$318  = n_ien;
+    if (\$171 ) begin
+      \$318  = ide_data_latch[1];
+    end
+    if (rst) begin
+      \$318  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$319  = intrq_pending;
+    if (\$178 ) begin
+      \$319  = 1'h0;
+    end
+    if (\$185 ) begin
+      \$319  = 1'h0;
     end
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          if (\$256 ) begin
+          if (\$257 ) begin
             if (mcu_data_in[8]) begin
-              \$317  = 1'h1;
+              \$319  = 1'h1;
             end
           end
       7'h02:
@@ -11325,57 +11526,32 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h0c:
           /* empty */;
       7'h0d:
-          if (\$266 ) begin
-            \$317  = mcu_data_in[0];
+          if (\$267 ) begin
+            \$319  = mcu_data_in[0];
           end
     endcase
-    if (\$271 ) begin
-      \$317  = 1'h0;
+    if (\$272 ) begin
+      \$319  = 1'h0;
     end
     if (rst) begin
-      \$317  = 1'h0;
+      \$319  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$318  = prev_status_rds;
-    if (\$196 ) begin
-      \$318  = host_status_rds;
+    \$320  = prev_status_rds;
+    if (\$192 ) begin
+      \$320  = host_status_rds;
     end
     if (rst) begin
-      \$318  = 8'h00;
+      \$320  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$319  = prev_altstat_rds;
-    if (\$196 ) begin
-      \$319  = host_altstat_rds;
-    end
-    if (rst) begin
-      \$319  = 8'h00;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$320  = prev_data_rds;
-    if (\$196 ) begin
-      \$320  = host_data_rds;
-    end
-    if (rst) begin
-      \$320  = 16'h0000;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$321  = host_status_rds;
-    (* full_case = 32'd1 *)
-    if (\$196 ) begin
-      \$321  = 8'h00;
-    end else begin
-      if (\$205 ) begin
-        \$321  = \$206 [7:0];
-      end
+    \$321  = prev_altstat_rds;
+    if (\$192 ) begin
+      \$321  = host_altstat_rds;
     end
     if (rst) begin
       \$321  = 8'h00;
@@ -11383,39 +11559,39 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$322  = host_altstat_rds;
-    (* full_case = 32'd1 *)
-    if (\$196 ) begin
-      \$322  = 8'h00;
-    end else begin
-      if (\$215 ) begin
-        \$322  = \$216 [7:0];
-      end
+    \$322  = prev_data_rds;
+    if (\$192 ) begin
+      \$322  = host_data_rds;
     end
     if (rst) begin
-      \$322  = 8'h00;
+      \$322  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$323  = host_data_rds;
+    \$323  = host_status_rds;
     (* full_case = 32'd1 *)
-    if (\$196 ) begin
-      \$323  = 16'h0000;
+    if (\$192 ) begin
+      \$323  = 8'h00;
     end else begin
-      if (\$223 ) begin
-        \$323  = \$224 [15:0];
+      if (\$201 ) begin
+        \$323  = \$202 [7:0];
       end
     end
     if (rst) begin
-      \$323  = 16'h0000;
+      \$323  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$324  = devctl_last;
-    if (\$230 ) begin
-      \$324  = ide_data_latch[7:0];
+    \$324  = host_altstat_rds;
+    (* full_case = 32'd1 *)
+    if (\$192 ) begin
+      \$324  = 8'h00;
+    end else begin
+      if (\$211 ) begin
+        \$324  = \$212 [7:0];
+      end
     end
     if (rst) begin
       \$324  = 8'h00;
@@ -11423,162 +11599,148 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$325  = devctl_writes;
-    if (\$230 ) begin
-      \$325  = \$231 [7:0];
+    \$325  = host_data_rds;
+    (* full_case = 32'd1 *)
+    if (\$192 ) begin
+      \$325  = 16'h0000;
+    end else begin
+      if (\$219 ) begin
+        \$325  = \$220 [15:0];
+      end
     end
     if (rst) begin
-      \$325  = 8'h00;
+      \$325  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$326  = mcu_out;
+    \$326  = devctl_last;
+    if (\$226 ) begin
+      \$326  = ide_data_latch[7:0];
+    end
     if (rst) begin
-      \$326  = 16'h0000;
+      \$326  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$327  = \$232 [15:0];
+    \$327  = devctl_writes;
+    if (\$226 ) begin
+      \$327  = \$227 [7:0];
+    end
     if (rst) begin
-      \$327  = 16'h0000;
+      \$327  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$328  = diag_ide_strobes;
-    if (\$243 ) begin
-      \$328  = \$244 [15:0];
-    end
+    \$328  = mcu_out;
     if (rst) begin
       \$328  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$329  = { rstn_sync[0], ide_rstn };
+    \$329  = \$228 [15:0];
     if (rst) begin
-      \$329  = 2'h3;
+      \$329  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$330  = rstn_sync[1];
+    \$330  = diag_ide_strobes;
+    if (\$239 ) begin
+      \$330  = \$240 [15:0];
+    end
     if (rst) begin
-      \$330  = 1'h1;
+      \$330  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$331  = diag_rstn_falls;
-    if (\$246 ) begin
-      \$331  = \$247 [7:0];
-    end
+    \$331  = { rstn_sync[0], ide_rstn };
     if (rst) begin
-      \$331  = 8'h00;
+      \$331  = 2'h3;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$332  = diag_rstn_rises;
-    if (\$249 ) begin
-      \$332  = \$250 [7:0];
-    end
+    \$332  = rstn_sync[1];
     if (rst) begin
-      \$332  = 8'h00;
+      \$332  = 1'h1;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$333  = { audio_sync[0], audio_tick };
+    \$333  = diag_rstn_falls;
+    if (\$242 ) begin
+      \$333  = \$243 [7:0];
+    end
     if (rst) begin
-      \$333  = 2'h0;
+      \$333  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$334  = audio_sync[1];
+    \$334  = diag_rstn_rises;
+    if (\$245 ) begin
+      \$334  = \$246 [7:0];
+    end
     if (rst) begin
-      \$334  = 1'h0;
+      \$334  = 8'h00;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$335  = diag_audio_alive;
-    if (\$251 ) begin
-      \$335  = \$252 [15:0];
-    end
+    \$335  = { audio_sync[0], audio_tick };
     if (rst) begin
-      \$335  = 16'h0000;
+      \$335  = 2'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$336  = \$253 ;
+    \$336  = audio_sync[1];
     if (rst) begin
       \$336  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$337  = \$254 ;
+    \$337  = diag_audio_alive;
+    if (\$247 ) begin
+      \$337  = \$248 [15:0];
+    end
     if (rst) begin
-      \$337  = 1'h0;
+      \$337  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$338  = reset_seen;
-    casez (mcu_addr)
-      7'h00:
-          if (\$255 ) begin
-            if (mcu_data_in[2]) begin
-              \$338  = 1'h0;
-            end
-          end
-    endcase
-    if (\$271 ) begin
-      \$338  = 1'h1;
-    end
+    \$338  = \$249 ;
     if (rst) begin
       \$338  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$339  = dsc;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          if (\$256 ) begin
-            \$339  = mcu_data_in[4];
-          end
-    endcase
-    if (\$271 ) begin
-      \$339  = 1'h0;
-    end else if (\$272 ) begin
-    end else if (\$274 ) begin
-      \$339  = 1'h1;
-    end
+    \$339  = \$250 ;
     if (rst) begin
       \$339  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$340  = df;
+    \$340  = reset_seen;
     casez (mcu_addr)
       7'h00:
-          /* empty */;
-      7'h01:
-          if (\$256 ) begin
-            \$340  = mcu_data_in[5];
+          if (\$251 ) begin
+            if (mcu_data_in[2]) begin
+              \$340  = 1'h0;
+            end
           end
     endcase
-    if (\$271 ) begin
-      \$340  = 1'h0;
+    if (\$272 ) begin
+      \$340  = 1'h1;
     end
     if (rst) begin
       \$340  = 1'h0;
@@ -11586,19 +11748,19 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$341  = drdy;
+    \$341  = dsc;
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          if (\$256 ) begin
-            \$341  = mcu_data_in[6];
+          if (\$257 ) begin
+            \$341  = mcu_data_in[4];
           end
     endcase
-    if (\$271 ) begin
+    if (\$272 ) begin
       \$341  = 1'h0;
-    end else if (\$272 ) begin
-    end else if (\$274 ) begin
+    end else if (\$273 ) begin
+    end else if (\$275 ) begin
       \$341  = 1'h1;
     end
     if (rst) begin
@@ -11607,20 +11769,16 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$342  = abrt;
+    \$342  = df;
     casez (mcu_addr)
       7'h00:
           /* empty */;
       7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          if (\$258 ) begin
-            \$342  = mcu_data_in[2];
+          if (\$257 ) begin
+            \$342  = mcu_data_in[5];
           end
     endcase
-    if (\$271 ) begin
+    if (\$272 ) begin
       \$342  = 1'h0;
     end
     if (rst) begin
@@ -11629,7 +11787,28 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$343  = sense_key;
+    \$343  = drdy;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          if (\$257 ) begin
+            \$343  = mcu_data_in[6];
+          end
+    endcase
+    if (\$272 ) begin
+      \$343  = 1'h0;
+    end else if (\$273 ) begin
+    end else if (\$275 ) begin
+      \$343  = 1'h1;
+    end
+    if (rst) begin
+      \$343  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$344  = abrt;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -11638,20 +11817,20 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h02:
           /* empty */;
       7'h03:
-          if (\$258 ) begin
-            \$343  = mcu_data_in[7:4];
+          if (\$259 ) begin
+            \$344  = mcu_data_in[2];
           end
     endcase
-    if (\$271 ) begin
-      \$343  = 4'h0;
+    if (\$272 ) begin
+      \$344  = 1'h0;
     end
     if (rst) begin
-      \$343  = 4'h0;
+      \$344  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$344  = lvl_at_read;
+    \$345  = sense_key;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -11660,68 +11839,20 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h02:
           /* empty */;
       7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          /* empty */;
-      7'h08:
-          /* empty */;
-      7'h09:
-          /* empty */;
-      7'h0a:
-          /* empty */;
-      7'h0b:
-          if (\$264 ) begin
-            \$344  = { 6'h00, \level$16  };
+          if (\$259 ) begin
+            \$345  = mcu_data_in[7:4];
           end
     endcase
+    if (\$272 ) begin
+      \$345  = 4'h0;
+    end
     if (rst) begin
-      \$344  = 16'h0000;
+      \$345  = 4'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$345  = lvl_read_count;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          /* empty */;
-      7'h08:
-          /* empty */;
-      7'h09:
-          /* empty */;
-      7'h0a:
-          /* empty */;
-      7'h0b:
-          if (\$264 ) begin
-            \$345  = \$265 [15:0];
-          end
-    endcase
-    if (rst) begin
-      \$345  = 16'h0000;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$346  = cap_arm;
+    \$346  = lvl_at_read;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -11746,52 +11877,52 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h0a:
           /* empty */;
       7'h0b:
-          /* empty */;
-      7'h16:
-          /* empty */;
-      7'h17:
-          /* empty */;
-      7'h18:
-          /* empty */;
-      7'h19:
-          /* empty */;
-      7'h1a:
-          /* empty */;
-      7'h1b:
-          /* empty */;
-      7'h1c:
-          /* empty */;
-      7'h0c:
-          /* empty */;
-      7'h0d:
-          /* empty */;
-      7'h0e:
-          /* empty */;
-      7'h0f:
-          /* empty */;
-      7'h10:
-          /* empty */;
-      7'h11:
-          /* empty */;
-      7'h12:
-          /* empty */;
-      7'h14:
-          if (\$267 ) begin
-            (* full_case = 32'd1 *)
-            if (mcu_data_in[0]) begin
-              \$346  = 1'h1;
-            end else begin
-              \$346  = 1'h0;
-            end
+          if (\$265 ) begin
+            \$346  = { 6'h00, \level$16  };
           end
     endcase
     if (rst) begin
-      \$346  = 1'h0;
+      \$346  = 16'h0000;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$347  = cap_run;
+    \$347  = lvl_read_count;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          if (\$265 ) begin
+            \$347  = \$266 [15:0];
+          end
+    endcase
+    if (rst) begin
+      \$347  = 16'h0000;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$348  = cap_arm;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -11846,160 +11977,230 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h12:
           /* empty */;
       7'h14:
-          if (\$267 ) begin
-            (* full_case = 32'd1 *)
-            if (mcu_data_in[0]) begin
-              \$347  = 1'h0;
-            end else begin
-              \$347  = 1'h0;
-            end
-          end
-    endcase
-    if (rst) begin
-      \$347  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$348  = cap_wptr;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          /* empty */;
-      7'h08:
-          /* empty */;
-      7'h09:
-          /* empty */;
-      7'h0a:
-          /* empty */;
-      7'h0b:
-          /* empty */;
-      7'h16:
-          /* empty */;
-      7'h17:
-          /* empty */;
-      7'h18:
-          /* empty */;
-      7'h19:
-          /* empty */;
-      7'h1a:
-          /* empty */;
-      7'h1b:
-          /* empty */;
-      7'h1c:
-          /* empty */;
-      7'h0c:
-          /* empty */;
-      7'h0d:
-          /* empty */;
-      7'h0e:
-          /* empty */;
-      7'h0f:
-          /* empty */;
-      7'h10:
-          /* empty */;
-      7'h11:
-          /* empty */;
-      7'h12:
-          /* empty */;
-      7'h14:
-          if (\$267 ) begin
-            if (mcu_data_in[0]) begin
-              \$348  = 10'h000;
-            end
-          end
-    endcase
-    if (rst) begin
-      \$348  = 10'h000;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$349  = cap_rptr;
-    casez (mcu_addr)
-      7'h00:
-          /* empty */;
-      7'h01:
-          /* empty */;
-      7'h02:
-          /* empty */;
-      7'h03:
-          /* empty */;
-      7'h04:
-          /* empty */;
-      7'h05:
-          /* empty */;
-      7'h06:
-          /* empty */;
-      7'h07:
-          /* empty */;
-      7'h08:
-          /* empty */;
-      7'h09:
-          /* empty */;
-      7'h0a:
-          /* empty */;
-      7'h0b:
-          /* empty */;
-      7'h16:
-          /* empty */;
-      7'h17:
-          /* empty */;
-      7'h18:
-          /* empty */;
-      7'h19:
-          /* empty */;
-      7'h1a:
-          /* empty */;
-      7'h1b:
-          /* empty */;
-      7'h1c:
-          /* empty */;
-      7'h0c:
-          /* empty */;
-      7'h0d:
-          /* empty */;
-      7'h0e:
-          /* empty */;
-      7'h0f:
-          /* empty */;
-      7'h10:
-          /* empty */;
-      7'h11:
-          /* empty */;
-      7'h12:
-          /* empty */;
-      7'h14:
-          if (\$267 ) begin
-            if (mcu_data_in[0]) begin
-              \$349  = 9'h000;
-            end
-          end
-      7'h15:
           if (\$268 ) begin
-            \$349  = mcu_data_in[8:0];
+            (* full_case = 32'd1 *)
+            if (mcu_data_in[0]) begin
+              \$348  = 1'h1;
+            end else begin
+              \$348  = 1'h0;
+            end
           end
     endcase
     if (rst) begin
-      \$349  = 9'h000;
+      \$348  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$350  = dma_mode;
+    \$349  = cap_run;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          if (\$268 ) begin
+            (* full_case = 32'd1 *)
+            if (mcu_data_in[0]) begin
+              \$349  = 1'h0;
+            end else begin
+              \$349  = 1'h0;
+            end
+          end
+    endcase
+    if (rst) begin
+      \$349  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$350  = cap_wptr;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          if (\$268 ) begin
+            if (mcu_data_in[0]) begin
+              \$350  = 10'h000;
+            end
+          end
+    endcase
+    if (rst) begin
+      \$350  = 10'h000;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$351  = cap_rptr;
+    casez (mcu_addr)
+      7'h00:
+          /* empty */;
+      7'h01:
+          /* empty */;
+      7'h02:
+          /* empty */;
+      7'h03:
+          /* empty */;
+      7'h04:
+          /* empty */;
+      7'h05:
+          /* empty */;
+      7'h06:
+          /* empty */;
+      7'h07:
+          /* empty */;
+      7'h08:
+          /* empty */;
+      7'h09:
+          /* empty */;
+      7'h0a:
+          /* empty */;
+      7'h0b:
+          /* empty */;
+      7'h16:
+          /* empty */;
+      7'h17:
+          /* empty */;
+      7'h18:
+          /* empty */;
+      7'h19:
+          /* empty */;
+      7'h1a:
+          /* empty */;
+      7'h1b:
+          /* empty */;
+      7'h1c:
+          /* empty */;
+      7'h0c:
+          /* empty */;
+      7'h0d:
+          /* empty */;
+      7'h0e:
+          /* empty */;
+      7'h0f:
+          /* empty */;
+      7'h10:
+          /* empty */;
+      7'h11:
+          /* empty */;
+      7'h12:
+          /* empty */;
+      7'h14:
+          if (\$268 ) begin
+            if (mcu_data_in[0]) begin
+              \$351  = 9'h000;
+            end
+          end
+      7'h15:
+          if (\$269 ) begin
+            \$351  = mcu_data_in[8:0];
+          end
+    endcase
+    if (rst) begin
+      \$351  = 9'h000;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$352  = dma_mode;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -12058,20 +12259,25 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$269 ) begin
-            \$350  = mcu_data_in[1:0];
+          if (\$270 ) begin
+            if (wmask[0]) begin
+              \$352 [0] = mcu_data_in[0];
+            end
+            if (wmask[1]) begin
+              \$352 [1] = mcu_data_in[1];
+            end
           end
     endcase
-    if (\$271 ) begin
-      \$350  = 2'h0;
+    if (\$272 ) begin
+      \$352  = 2'h0;
     end
     if (rst) begin
-      \$350  = 2'h0;
+      \$352  = 2'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$351  = pio_wr_fc;
+    \$353  = pio_wr_fc;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -12130,20 +12336,22 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$269 ) begin
-            \$351  = mcu_data_in[2];
+          if (\$270 ) begin
+            if (wmask[2]) begin
+              \$353  = mcu_data_in[2];
+            end
           end
     endcase
-    if (\$271 ) begin
-      \$351  = 1'h0;
+    if (\$272 ) begin
+      \$353  = 1'h0;
     end
     if (rst) begin
-      \$351  = 1'h0;
+      \$353  = 1'h0;
     end
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$352  = pio_rd_fc;
+    \$354  = pio_rd_fc;
     casez (mcu_addr)
       7'h00:
           /* empty */;
@@ -12202,28 +12410,13 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
       7'h15:
           /* empty */;
       7'h13:
-          if (\$269 ) begin
-            \$352  = mcu_data_in[3];
+          if (\$270 ) begin
+            if (wmask[3]) begin
+              \$354  = mcu_data_in[3];
+            end
           end
     endcase
-    if (\$271 ) begin
-      \$352  = 1'h0;
-    end
-    if (rst) begin
-      \$352  = 1'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$353  = { irq_delay[2:0], command_pend };
-    if (rst) begin
-      \$353  = 4'h0;
-    end
-  end
-  always @* begin
-    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$354  = post_reset_count[23];
-    if (\$271 ) begin
+    if (\$272 ) begin
       \$354  = 1'h0;
     end
     if (rst) begin
@@ -12232,14 +12425,31 @@ module \OpenGDEMUCore.dev1 (mcu_wr, mcu_addr, mcu_data_in, ide_rstn, csn, ide_wr
   end
   always @* begin
     if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
-    \$355  = post_reset_count;
-    if (\$271 ) begin
-      \$355  = 24'h000000;
-    end else if (\$272 ) begin
-      \$355  = \$275 [23:0];
+    \$355  = { irq_delay[2:0], command_pend };
+    if (rst) begin
+      \$355  = 4'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$356  = post_reset_count[23];
+    if (\$272 ) begin
+      \$356  = 1'h0;
     end
     if (rst) begin
-      \$355  = 24'h000000;
+      \$356  = 1'h0;
+    end
+  end
+  always @* begin
+    if (\$auto$verilog_backend.cc:2355:dump_module$6 ) begin end
+    \$357  = post_reset_count;
+    if (\$272 ) begin
+      \$357  = 24'h000000;
+    end else if (\$273 ) begin
+      \$357  = \$276 [23:0];
+    end
+    if (rst) begin
+      \$357  = 24'h000000;
     end
   end
   assign level = dbg_rfifo_level;

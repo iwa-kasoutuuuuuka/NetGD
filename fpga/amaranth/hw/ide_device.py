@@ -227,6 +227,14 @@ class IDEDevice(Elaboratable):
         n_ien = Signal()
         # Set when the IDE side writes the Command register; cleared by MCU.
         command_pend = Signal()
+        # Counts Command writes (to this device, while selected), modulo 128.
+        # The MCU reads it next to COMMAND_PEND in slot 0 and hands it back
+        # when it acknowledges, so the acknowledge names the command it is
+        # for: one that arrived after the MCU looked has a different number
+        # and keeps its latch. Not cleared by a reset -- it only has to
+        # differ between two consecutive commands.
+        CMD_SEQ_BITS = 7
+        cmd_seq = Signal(CMD_SEQ_BITS)
         # A host-visible reset is either the ATA hard reset line or the SRST
         # bit of Device Control (ATA/ATAPI-5 9.2): both put the device in
         # the post-reset state, abort whatever it was doing and hold BSY
@@ -598,11 +606,15 @@ class IDEDevice(Elaboratable):
 
         # Every other IDE write is gated on `device_selected`.
         sel_wr = wr & device_selected
-        with m.If(sel_wr & decode_command_lat):
+        # One cycle per Command write to this device.
+        cmd_wr = Signal()
+        m.d.comb += cmd_wr.eq(sel_wr & decode_command_lat)
+        with m.If(cmd_wr):
             m.d.sync += [
                 command.eq(ide_data_latch[:8]),
                 bsy.eq(1),
                 command_pend.eq(1),
+                cmd_seq.eq(cmd_seq + 1),
                 # A new command invalidates the previous transfer's status.
                 # Leaving DRQ set let a host that polls immediately after the
                 # command write see leftover DRQ, send a sector into a FIFO
@@ -857,12 +869,16 @@ class IDEDevice(Elaboratable):
         # ID value 0xC0DE. The full slot map is in docs/AddressMapMCU.md.
         # Slots in use (0..31; byte offset = 2 * slot):
         #    0-8  IDE registers (HW_INFO, STATUS, DEVICE, ERROR, COMMAND,
-        #         SECTOR_COUNT, LBA bytes and the previous-LBA bytes)
+        #         SECTOR_COUNT, LBA bytes and the previous-LBA bytes).
+        #         Slot 0 also carries the command sequence number (bits
+        #         8-14) and the "acknowledge by number" flag (bit 15);
+        #         slot 5 writes reach the low byte only.
         #    9-11 data FIFO, read FIFO level, write FIFO level
         #   12-13 ID (0xC0DE), INTRQ_PENDING
         #   14-18 diagnostics: FREE_RUN, IDE_STROBES, RSTN_EDGES, BUS_STATE,
         #         AUDIO_ALIVE
-        #   19    DMA_MODE / flow control
+        #   19    DMA_MODE / flow control (bits 0-4) with a per-bit write
+        #         mask (bits 8-12; a zero mask writes all five, as before)
         #   20-21 signal capture control / data (not built in the shipped image)
         #   22-23 LVL_AT_READ, LVL_READ_COUNT (debug)
         #   24-28 host access counters and their snapshots at the last Command
@@ -969,15 +985,48 @@ class IDEDevice(Elaboratable):
                 # host reset out from under it instead of waiting 10 s for
                 # a drain that will never come.
                 # bit 3: live nIEN, bit 4: live in-reset (diagnostics).
+                # bits 8-14: cmd_seq, the number of the latest Command write.
+                # bit 15: reads 1 -- "this build acknowledges by number".
                 m.d.comb += [
                     mcu_out[0].eq(0 if self.primary else 1),
                     mcu_out[1].eq(command_pend),
                     mcu_out[2].eq(reset_seen),
                     mcu_out[3].eq(n_ien),
                     mcu_out[4].eq(in_reset),
+                    mcu_out[8:15].eq(cmd_seq),
+                    mcu_out[15].eq(1),
                 ]
+                # Acknowledging a command. The plain form (bit 15 = 0) loads
+                # COMMAND_PEND from bit 1, and with bit 1 = 0 that clears it
+                # whatever it stands for -- including a command the host
+                # wrote after the MCU took its snapshot, which is then never
+                # served and leaves BSY up for good (R89 A-c). Two windows:
+                # the microseconds between the MCU's reads and this write,
+                # and the write strobe itself, which is several core clocks
+                # wide and whose `eq(0)` beat the Command write's `eq(1)` by
+                # coming later in this file.
+                #
+                # The numbered form (bit 15 = 1) closes both. The MCU writes
+                # back the upper byte it read from this slot; COMMAND_PEND is
+                # cleared only if bits 8-14 still equal cmd_seq, i.e. no
+                # Command write happened since that read, and never in the
+                # clock of a Command write (after which cmd_seq differs, so
+                # the rest of the strobe does nothing either). Bit 1 = 1
+                # leaves the latch alone, so a write can clear RESET_SEEN
+                # without acknowledging; the numbered form never sets it.
+                #
+                # Old firmware keeps writing the plain form and gets exactly
+                # the old behaviour. New firmware on an old bitstream reads
+                # bits 8-15 as 0, writes them back as 0, and is the plain
+                # form again -- neither side needs to know the other's age.
                 with m.If(wmcu):
-                    m.d.sync += command_pend.eq(self.mcu_data_in[1])
+                    with m.If(self.mcu_data_in[15]):
+                        with m.If(~self.mcu_data_in[1]
+                                  & (self.mcu_data_in[8:15] == cmd_seq)
+                                  & ~cmd_wr):
+                            m.d.sync += command_pend.eq(0)
+                    with m.Else():
+                        m.d.sync += command_pend.eq(self.mcu_data_in[1])
                     with m.If(self.mcu_data_in[2]):
                         m.d.sync += reset_seen.eq(0)
             with m.Case(1):
@@ -1033,9 +1082,16 @@ class IDEDevice(Elaboratable):
                         features.eq(self.mcu_data_in[8:]),
                     ]
             with m.Case(5):
+                # The MCU writes the low byte only: the current sector
+                # count, which on the packet device is the ATAPI interrupt
+                # reason. The high byte is the host's previous value (the
+                # LBA48 sliding window, read back with HOB) and nothing the
+                # MCU has to say goes there; a whole-word write used to zero
+                # it on every interrupt-reason update. The MCU still reads
+                # both bytes.
                 m.d.comb += mcu_out.eq(sector_count)
                 with m.If(wmcu):
-                    m.d.sync += sector_count.eq(self.mcu_data_in)
+                    m.d.sync += sector_count[:8].eq(self.mcu_data_in[:8])
             with m.Case(6):
                 m.d.comb += [
                     mcu_out[:8].eq(lba_low),
@@ -1177,13 +1233,36 @@ class IDEDevice(Elaboratable):
                     mcu_out[3].eq(pio_rd_fc),
                     mcu_out[4].eq(pkt_phase),
                 ]
+                #
+                # Bits 8-12 are a write mask for bits 0-4: a bit is written
+                # only where its mask bit is 1. A zero mask means "all five",
+                # which is the whole-word write this slot always had (old
+                # firmware, and new firmware on an old bitstream, which
+                # ignores the mask). The mask exists because the five bits
+                # have two owners: DMA mode and the two PIO flow controls are
+                # the MCU's, while pkt_phase is raised by the FPGA on a PACKET
+                # Command write -- and a whole-word write that only meant to
+                # drop DMA mode after an abandoned transfer cleared it under
+                # the new command's CDB, so the last CDB word no longer
+                # raised BSY.
+                #
+                # Like slot 0, the write is a level several clocks wide and
+                # sits below the IDE-side logic, so an unmasked bit would
+                # also beat a pkt_phase change made during the strobe.
                 with m.If(wmcu):
-                    m.d.sync += [
-                        dma_mode.eq(self.mcu_data_in[:2]),
-                        pio_wr_fc.eq(self.mcu_data_in[2]),
-                        pio_rd_fc.eq(self.mcu_data_in[3]),
-                        pkt_phase.eq(self.mcu_data_in[4]),
-                    ]
+                    wmask = Signal(5)
+                    m.d.comb += wmask.eq(Mux(self.mcu_data_in[8:13] == 0,
+                                             0b11111, self.mcu_data_in[8:13]))
+                    with m.If(wmask[0]):
+                        m.d.sync += dma_mode[0].eq(self.mcu_data_in[0])
+                    with m.If(wmask[1]):
+                        m.d.sync += dma_mode[1].eq(self.mcu_data_in[1])
+                    with m.If(wmask[2]):
+                        m.d.sync += pio_wr_fc.eq(self.mcu_data_in[2])
+                    with m.If(wmask[3]):
+                        m.d.sync += pio_rd_fc.eq(self.mcu_data_in[3])
+                    with m.If(wmask[4]):
+                        m.d.sync += pkt_phase.eq(self.mcu_data_in[4])
             with m.Case(29):
                 # CDDA control/status (see hw/cdda.py for the bit layout).
                 m.d.comb += mcu_out.eq(self.aux_ctrl_rd)
