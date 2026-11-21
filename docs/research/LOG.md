@@ -1462,6 +1462,30 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：まだ（修正の段階で確かめる）。
 - 関連：R97、R101、`docs/design/menu-app.md` §14。
 
+### R105 古い Status が次のコマンドの BSY を消す競合を、番号つき Status で修正（Fable、Opus が確認）
+
+- 担当：Fable（デバッグ・修正）。コミットは 5bc053c3（FPGA）・0cf783ad（ファーム）。main への取り込みは R105 のコミット。
+- 問い：R100 で残した問題。単純なハンドラが書く古い Status が、その間に来た次のコマンドの BSY（PACKET なら CDB の DRQ）を消して、ホストが前のコマンドの結果を読んでしまう。これを直せるか。
+- 原因（窓は2つ）：
+  1. ソフト：Status を決めてから書くまでの間。
+  2. ハード：MCU の書き込みのストローブが、同じクロックの Command の書き込みの `bsy.eq(1)` に勝つ。
+
+  ハードの窓は、ファームだけでは閉じられない。
+- 修正：
+  - FPGA（スロット 1）：書き込みで bit 15=1 のときは、bit 14:9 が `cmd_seq` の下位6ビットと一致し、かつ同じクロックに Command の書き込みが無いときだけ、Status と INTRQ を反映する。
+  - ファーム：`set_status`・`set_status_intrq` を `post_status` に通し、`ACK_TOKEN` から番号を付ける（`ide.rs:330-333`、Opus がビットの対応を確認：`(t << 1) & 0x7E00` で seq の下位6ビットを bit 14:9 に置く）。
+  - 例外：`complete()` の「COMMAND_PEND が立っているのに Command が 0x00」の経路は、従来の形式のまま。
+  - 互換：新旧のファームとビットストリーム（R100 より前を含む）の、どの組み合わせでも従来どおりかそれ以上に動く。
+  - 番号は6ビットなので、間に Command がちょうど 64 回か 128 回書かれたときだけ、古い Status が通る。
+- 根拠：
+  - 新しいテスト3件（`stale_status_keeps_bsy_of_next_command`・`status_strobe_does_not_clear_bsy_of_command_write`・`status_write_forms`）は、変更前は失敗し、変更後は通る。
+  - **Opus が取り込み後の main で再実行した**：`test.py` 39・`test_cdda` 3・`test_timing` 5・`test_top` 5・`test_fifo` 10 件、すべて通過。Verilog を作り直しても差分なし。
+  - 2E `resident,sd-fast` は 121,608+156（R103 の新しい rbf を入れた状態）。
+- 直していないこと：Error（スロット 3）・割り込み理由（スロット 5）・バイト数には番号を付けていない（新しいコマンドのハンドラが書き直す）。「Command=0x00 の latch」の原因は調べていない。
+- 信頼度：シミュレーションとビルドは確認済み。実機は未確認。rbf は CI で作り直す（R106 の予定）。
+- Opus による検証：あり（シミュレーションの再実行、`post_status` の読み、2E の大きさ）。
+- 関連：R100、R103、`docs/design/mcu-fpga-handshake.md` §2.1。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
