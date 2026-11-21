@@ -324,7 +324,19 @@ int ngtp_srv_service(ngtp_srv_t *s)
         s->last_frame_ms = now_ms(s);
     }
     r = nm_net_recv_all(rx, NGTP_HDR_LEN, 0);
-    if (r == NM_NET_AGAIN) return 0;
+    if (r == NM_NET_AGAIN) {
+        /* Idle, and nothing from the client.  A new connection means the old one is gone or dead (a PC that lost power or
+           a cable that was pulled sends no FIN): the network layer closes the old socket and hands over the new one, and the
+           new client starts again with HELLO (R104 A).  The write session stays as it is: the same PC resumes in it. */
+        if (nm_net_accept(0) == 1) {
+            s->hello = 0;
+            s->broken = 0;
+            s->abort_asked = 0;
+            s->client[0] = 0;
+            s->last_frame_ms = now_ms(s);
+        }
+        return 0;
+    }
     if (r != 0) { ngtp_srv_drop(s); return NGTP_EV_CLOSED; }
     if (ngtp_hdr_parse(rx, &h) != NGTP_OK) { send_error(s, 0, "EPROTO", "bad frame header"); return NGTP_EV_CLOSED; }
     if (nm_net_recv_all(rx + NGTP_HDR_LEN, h.len + 4, FRAME_TIMEOUT_MS) != 0) { ngtp_srv_drop(s); return NGTP_EV_CLOSED; }

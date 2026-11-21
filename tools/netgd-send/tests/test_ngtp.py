@@ -28,8 +28,10 @@ class FakeMenu(object):
     code (default 4821), listing (lines for LIST), fail_done (DONE failure name for PUT), cut_after_wants (close
     the socket after this many WANTs)."""
 
-    def __init__(self, code=4821, listing=("NGD:LIST complete 02",), fail_done=None, cut_after_wants=None):
+    def __init__(self, code=4821, listing=("NGD:LIST complete 02",), fail_done=None, cut_after_wants=None, put_errors=None):
         self.code, self.listing, self.fail_done, self.cut_after_wants = code, list(listing), fail_done, cut_after_wants
+        self.put_errors = dict(put_errors or {})     # folder -> the DONE error for a PUT into it (e.g. "EEXIST")
+        self.put_folders = []                        # the folder of each PUT, in order
         self.srv = socket.socket()
         self.srv.bind(("127.0.0.1", 0))
         self.srv.listen(1)
@@ -78,6 +80,10 @@ class FakeMenu(object):
                 elif t == ngtp.PUT:
                     self.mode, self.flags = p[0], p[1]
                     self.manifest = mf.parse_manifest(p[8:].decode("utf-8"))
+                    self.put_folders.append(self.manifest.image)
+                    if self.manifest.image in self.put_errors:
+                        c.sendall(ngtp.build_frame(ngtp.DONE, b"\0" + self.put_errors[self.manifest.image].encode(), 0, sq))
+                        continue
                     wants = 0
                     for idx, f in enumerate(self.manifest.files):
                         off = 0
@@ -139,6 +145,11 @@ class TestFrames(unittest.TestCase):
         self.assertEqual(pushmod.first_free_slot(set()), 2)
         self.assertEqual(pushmod.first_free_slot({2, 3, 4, 5, 6}), 7)
 
+    def test_partial_slot_numbers(self):
+        lines = ["NGD:LIST partial 03", "NGD:LIST complete 02", "NGD:LIST partial 01", "NGD:LIST partial 12",
+                 "NGD:LIST partial Crazy Taxi", "NGD:LIST partial 05/sub", "NGD:LIST other 06", "NGD:LIST partial 1000"]
+        self.assertEqual(pushmod.partial_slot_numbers(lines), [3, 12, 1000])
+
     def test_ascii_title(self):
         self.assertEqual(pushmod.ascii_title("  Crazy \t Taxi\n"), "Crazy Taxi")
         self.assertEqual(pushmod.ascii_title("Café"), "Caf?")
@@ -197,6 +208,74 @@ class TestPush(Tmp):
         rc, text = self.run_push(menu, self.make_gdi())
         self.assertEqual(rc, 1, text)
         self.assertIn("EAUTH", text)
+
+    # ---- R104 finding 2: --slot auto goes on in the unfinished numbered folder ----
+    def test_auto_resumes_the_partial_folder_before_taking_a_new_one(self):
+        menu = FakeMenu(listing=["NGD:LIST complete 02", "NGD:LIST partial 03"])
+        rc, text = self.run_push(menu, self.make_gdi())
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(menu.put_folders, ["03"])
+        self.assertEqual(menu.mode, ngtp.PUT_RESUME)
+        self.assertIn("trying to resume it", text)
+        self.assertNotIn("using the free folder", text)
+
+    def test_auto_skips_a_partial_folder_of_another_image(self):
+        menu = FakeMenu(listing=["NGD:LIST partial 03", "NGD:LIST partial 05", "NGD:LIST complete 02"],
+                        put_errors={"03": "EEXIST"})
+        rc, text = self.run_push(menu, self.make_gdi())
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(menu.put_folders, ["03", "05"])
+        self.assertIn("holds a different image", text)
+
+    def test_auto_takes_a_free_folder_when_every_partial_one_differs(self):
+        menu = FakeMenu(listing=["NGD:LIST complete 02", "NGD:LIST partial 03"], put_errors={"03": "EEXIST"})
+        rc, text = self.run_push(menu, self.make_gdi())
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(menu.put_folders, ["03", "04"])
+        self.assertIn("using the free folder 04", text)
+
+    def test_other_errors_on_a_partial_folder_are_not_skipped(self):
+        menu = FakeMenu(listing=["NGD:LIST partial 03", "NGD:LIST partial 05"], put_errors={"03": "ENOSPC"})
+        rc, text = self.run_push(menu, self.make_gdi())
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(menu.put_folders, ["03"])
+
+    def test_new_and_overwrite_modes_never_probe_a_partial_folder(self):
+        for mode in ("new", "overwrite"):
+            menu = FakeMenu(listing=["NGD:LIST complete 02", "NGD:LIST partial 03"])
+            rc, text = self.run_push(menu, self.make_gdi(), "--mode", mode)
+            self.assertEqual(rc, 0, text)
+            self.assertEqual(menu.put_folders, ["04"], mode)
+
+    def test_an_explicit_slot_or_name_does_not_look_for_partial_folders(self):
+        menu = FakeMenu(listing=["NGD:LIST partial 03"])
+        rc, text = self.run_push(menu, self.make_gdi(), "--slot", "7")
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(menu.put_folders, ["07"])
+        self.assertNotIn(ngtp.LIST, menu.requests)
+
+    def test_an_interrupted_auto_push_prints_the_exact_command_with_the_slot(self):
+        menu = FakeMenu(listing=["NGD:LIST complete 02"], cut_after_wants=1)
+        rc, text = self.run_push(menu, self.make_gdi(), "--title", "My Game")
+        self.assertEqual(rc, 2, text)
+        line = [l for l in text.splitlines() if l.startswith("to go on with exactly this folder:")]
+        self.assertEqual(len(line), 1, text)
+        self.assertIn("--slot 03", line[0])
+        self.assertIn("--host 127.0.0.1", line[0])
+        self.assertIn("--code 4821", line[0])
+        self.assertIn('--title "My Game"', line[0])
+
+    def test_a_stop_status_also_prints_the_command(self):
+        menu = FakeMenu(listing=["NGD:LIST complete 02"], fail_done="ESTOP")
+        rc, text = self.run_push(menu, self.make_gdi())
+        self.assertEqual(rc, 2, text)
+        self.assertIn("--slot 03", text)
+
+    def test_no_rerun_line_for_an_explicit_name(self):
+        menu = FakeMenu(cut_after_wants=1)
+        rc, text = self.run_push(menu, self.make_gdi(), "--name", "MYGAME")
+        self.assertEqual(rc, 2, text)
+        self.assertNotIn("exactly this folder", text)
 
     def test_connection_lost_is_resumable_exit_2(self):
         menu = FakeMenu(cut_after_wants=1)

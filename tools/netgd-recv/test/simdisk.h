@@ -34,6 +34,7 @@ extern char sim_end_name[128];
 extern int sim_begin_calls;
 extern int sim_ua_mode;             /* UNIT ATTENTION at start and after every END / MOUNT */
 extern int sim_ua_pending, sim_ua_served;
+extern int sim_fail_end;            /* END fails: 1 = the session ends anyway, 2 = it stays open */
 extern int sim_fail_end2;           /* END mode 2 fails (the session ends anyway) */
 extern int sim_default_mounts, sim_named_mounts, sim_packets;
 /* menu commands (0x52 / TEST UNIT READY / named MOUNT) */

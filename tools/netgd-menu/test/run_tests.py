@@ -70,6 +70,9 @@ if _ours:
     atexit.register(shutil.rmtree, WORK_ROOT, True)
 
 EXE = os.path.join(ROOT, "build", "menu_host.exe" if os.name == "nt" else "menu_host")
+# the same core built with -DNM_HANDOFF_TUR=1: the menu polls TEST UNIT READY before the hand-off (R104 finding 3); EXE is the default
+# build, which hands over right after 52 82
+EXE_TUR = os.path.join(ROOT, "build", "menu_host_tur.exe" if os.name == "nt" else "menu_host_tur")
 RECV_EXE = os.path.join(RECV, "build", "test_host.exe" if os.name == "nt" else "test_host")
 
 MENU_SRCS = ["src/nm_text.c", "src/nm_slot.c", "src/nm_cfgparse.c", "src/nm_ipbin.c", "src/nm_list.c", "src/nm_input.c",
@@ -91,14 +94,15 @@ def build():
         for f in os.listdir(d):
             if f.endswith(".h"):
                 newest = max(newest, os.path.getmtime(os.path.join(d, f)))
-    if os.path.exists(EXE) and os.path.getmtime(EXE) >= newest:
-        return build_recv_tool()
-    cmd = ["gcc", "-O1", "-g", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-format-truncation", "-DNG_HOST",
-           "-Isrc", "-I../netgd-recv/src", "-I../netgd-recv/third_party/fatfs", "-I../netgd-recv/test", "-Itest",
-           "-o", EXE] + SRCS + ["../netgd-recv/" + s for s in RECV_SRCS] + (["-lws2_32"] if os.name == "nt" else [])
-    r = run_child(cmd, cwd=ROOT, timeout=max(CHILD_TIMEOUT, 600))
-    if r.returncode:
-        raise RuntimeError("build failed:\n" + r.stdout + r.stderr)
+    for exe, extra in ((EXE, []), (EXE_TUR, ["-DNM_HANDOFF_TUR=1"])):
+        if os.path.exists(exe) and os.path.getmtime(exe) >= newest:
+            continue
+        cmd = ["gcc", "-O1", "-g", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-format-truncation", "-DNG_HOST"] + extra + [
+               "-Isrc", "-I../netgd-recv/src", "-I../netgd-recv/third_party/fatfs", "-I../netgd-recv/test", "-Itest",
+               "-o", exe] + SRCS + ["../netgd-recv/" + s for s in RECV_SRCS] + (["-lws2_32"] if os.name == "nt" else [])
+        r = run_child(cmd, cwd=ROOT, timeout=max(CHILD_TIMEOUT, 600))
+        if r.returncode:
+            raise RuntimeError("build failed:" + chr(10) + r.stdout + r.stderr)
     build_recv_tool()
 
 
@@ -133,9 +137,10 @@ class Base(unittest.TestCase):
 
 class TestSelftest(Base):
     def test_selftest(self):
-        r = run_child([EXE, "selftest"])
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("SELFTEST OK", r.stdout)
+        for exe in (EXE, EXE_TUR):
+            r = run_child([exe, "selftest"])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("SELFTEST OK", r.stdout)
 
 
 GDI3 = (b"3\r\n1 0 4 2352 track01.bin 0\r\n2 450 0 2352 track02.raw 0\r\n"
@@ -180,8 +185,10 @@ class UiBase(Base):
             self.assertEqual(r.returncode, 0, "addfile %s: %s" % (path, r.stdout + r.stderr))
         return img
 
+    exe = EXE                    # a subclass can run the TEST UNIT READY build instead (EXE_TUR)
+
     def ui(self, img, script, *opts, sectors=None):
-        cmd = [EXE, "ui", img, str(sectors or self.SECTORS), "--script", script] + list(opts)
+        cmd = [self.exe, "ui", img, str(sectors or self.SECTORS), "--script", script] + list(opts)
         r = run_child(cmd)
         return UiRun(r.stdout, r.returncode)
 
@@ -343,8 +350,76 @@ class TestListAndInfo(UiBase):
         self.assertEqual(run.rows[17], "No controller")
 
 
+NL = chr(10)
+
+
+class TestNetStart(UiBase):
+    """R104 finding 1: the screen before the blocking network start, and the second Y retrying the address"""
+
+    def lib(self):
+        return self.card({"/02/DISC.GDI": GDI3})
+
+    def test_starting_network_is_on_the_screen_before_the_call(self):
+        r = self.ui(self.lib(), "scan Y", "--slots", "2")
+        m = re.search(r"^NETUP call=1 screen3=\|(.*)\|$", r.text, re.M)
+        self.assertIsNotNone(m, r.text)
+        self.assertIn("Starting network", m.group(1))
+
+    def test_no_bba_is_reported(self):
+        r = self.ui(self.lib(), "scan Y dump", "--slots", "2", "--nobba")
+        self.assertIn("BBA not found", NL.join(r.rows))
+
+    def test_second_y_retries_when_there_was_no_address(self):
+        r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--noaddr", "1")
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 2)
+        self.assertIn("No IP address", NL.join(r.screens[0][1]))
+        self.assertIn("127.0.0.1", NL.join(r.rows))                    # the transfer screen after the second Y
+
+
+class TestLaunchDefault(UiBase):
+    """R104 finding 3, variant A (the default build, NM_HANDOFF_TUR=0): READY is taken from the success of `52 82`; no TEST UNIT
+    READY is sent, so the UNIT ATTENTION stays for the BIOS."""
+
+    def games(self):
+        return self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+
+    def test_no_test_unit_ready_before_the_hand_off(self):
+        run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3")
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertEqual([p[:11] for p in run.packets[:2]], ["E0 03 00 00", "52 00 00 00"])
+        self.assertEqual([p[:2] for p in run.packets[2:]], ["52"], run.text)     # only the mount: no 00 (TEST UNIT READY)
+        self.assertEqual(run.packets[2][:11], "52 82 03 00")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertIn("H04|  Starting 03 ...", run.text)
+
+    def test_a_drive_that_would_never_be_ready_does_not_hold_the_hand_off(self):
+        run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3", "--notready", "1000000")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertEqual([p for p in run.packets if p.startswith("00 ")], [])
+
+    def test_unit_attention_is_left_for_the_bios(self):
+        run = self.ui(self.games(), "scan D ua A t:2000", "--slots", "2,3")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        mounts = [p for p in run.packets if p.startswith("52 82")]
+        self.assertEqual(len(mounts), 2, run.text)                                # the mount is still repeated once (not executed)
+        self.assertEqual([p for p in run.packets if p.startswith("00 ")], [])
+
+    def test_by_name_and_reboot_variants(self):
+        run = self.ui(self.card({"/02/DISC.GDI": GDI3, "/SECOND_GAME_X/DISC.GDI": GDI3}), "scan X A B D A t:2000", "--slots", "2")
+        self.assertEqual(run.handoff, ["reboot"], run.text)
+        self.assertEqual([p for p in run.packets if p.startswith("00 ")], [])
+        self.assertEqual(run.n("named_mounts"), 1)
+
+    def test_no_image_still_shows_the_dialog(self):
+        run = self.ui(self.games(), "scan A dump", "--slots", "3")               # 02 is not mountable in the model
+        self.assertEqual(run.handoff, [])
+        self.assertEqual(run.screens[0][0]["state"], "6", run.text)
+
+
 class TestLaunch(UiBase):
-    """Design 11.2 L3-L7, L13, L14: the 0x52 mount, the READY wait and the hand-off."""
+    """Design 11.2 L3-L7, L13, L14: the 0x52 mount, the READY wait and the hand-off.  This is the NM_HANDOFF_TUR=1 build (the
+    menu polls TEST UNIT READY); TestLaunchDefault below is the default build (hand over right after 52 82)."""
+    exe = EXE_TUR
 
     def games(self, extra=None):
         files = {"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi", "/MYGAME/DISC.GDI": GDI3}
@@ -1095,6 +1170,40 @@ class TestPush(NetBase):
         fc = self.clean_fs(img)
         self.assertEqual(self.read(fc, "/03", "track01.bin"), tracks["track01.bin"])
 
+    def test_auto_slot_resumes_the_partial_folder_when_run_again(self):
+        """R104 finding 2: the same command (default --slot auto) goes on in the folder the stop left, not in the next one"""
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi(sizes=(200 * 2352, 3 * 2352, 5 * 2048))
+        srv = NgtServe(self, img, "--stopafter", "2")
+        r = self.push(srv, gdi)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("using the free folder 03", r.stdout)
+        self.assertIn("--slot 03", r.stdout)                                     # the exact command to go on
+        r = self.push(srv, gdi)                                                   # the same command again
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("trying to resume it", r.stdout)
+        self.assertNotIn("using the free folder", r.stdout)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/03", "track01.bin"), tracks["track01.bin"])
+        self.assertFalse([k for k in fc.files if k.startswith("/04") or k.startswith("04")], "a second numbered folder was started")
+        self.assertFalse([k for k in fc.files if k.lower().endswith((".ngp", ".ckp"))], "leftovers")
+
+    def test_auto_slot_skips_a_partial_folder_of_a_different_image(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi1, _t1 = self.make_gdi("srcA", sizes=(200 * 2352, 3 * 2352, 5 * 2048), stem="first")
+        gdi2, tracks2 = self.make_gdi("srcB", sizes=(7 * 2352, 3 * 2352, 5 * 2048), stem="second")
+        srv = NgtServe(self, img, "--stopafter", "2")
+        r = self.push(srv, gdi1)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)                   # 03 is partial now
+        r = self.push(srv, gdi2)                                                  # another image: not 03
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("holds a different image", r.stdout)
+        self.assertIn("using the free folder 04", r.stdout)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/04", "track01.bin"), tracks2["track01.bin"])
+
     def test_n12_after_finish_the_list_shows_the_new_folder(self):
         img = self.card({"/02/DISC.GDI": GDI3})
         gdi, tracks = self.make_gdi()
@@ -1358,6 +1467,95 @@ def solid_png(w, h, rgb):
     raw = (b"\0" + bytes(rgb) * w) * h
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw))
             + chunk(b"IEND", b""))
+
+
+class TestR104LowItems(NetBase):
+    """R104 'later' items A to D: a dead connection is replaced, one transition per frame, a session-end failure when the
+    firmware says the session is closed, B after 'Stop safely' does not also leave the screen."""
+
+    def test_a_silent_connection_is_replaced_by_a_new_one(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img)
+        c1 = srv.client()
+        c1.hello()                                                    # then silent: its PC lost power, no FIN was sent
+        c2 = srv.client()
+        self.assertEqual(c2.hello()[0], NGT_HELLO_OK)                 # without the fix this never answers (the read times out)
+        r = c2.request(NGT_STATFS)
+        self.assertTrue(r[1], r)
+        c2.send(NGT_FINISH, bytes([1]))
+        c2.recv(), c2.recv()
+        srv.finish()
+
+    def test_a_new_connection_must_say_hello_again(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img)
+        c1 = srv.client()
+        c1.hello()
+        c2 = srv.client()
+        c2.send(NGT_STATFS)                                           # no HELLO on the new connection: refused
+        self.assertEqual(c2.recv()[0], NGT_ERROR)
+        c3 = srv.client()
+        self.assertEqual(c3.hello()[0], NGT_HELLO_OK)
+        c3.send(NGT_FINISH, bytes([1]))
+        c3.recv()                                                     # no session was opened: just DONE
+        srv.finish()
+
+    def test_b_a_and_start_together_start_the_game_only(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+        run = self.ui(img, "scan A+S dump t:2000", "--slots", "2,3")
+        self.assertNotEqual(run.screens[0][0]["state"], "7", run.text)       # not the 'go back to the BIOS menu?' screen
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertEqual(run.n("gdemu_mounts"), 1)
+
+    def test_b_y_and_x_together_open_the_transfer_screen_only(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        run = self.ui(img, "scan Y+X dump", "--slots", "2")
+        self.assertEqual(run.screens[0][0]["state"], "9", run.text)          # NM_S_NET_IDLE, not NM_S_INFO
+
+    def test_b_a_priority_and_cursor_moves_when_no_transition(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+        run = self.ui(img, "scan D+A t:2000", "--slots", "2,3")              # A wins: the game under the cursor, no move
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertEqual([p[:11] for p in run.packets if p.startswith("52 82")], ["52 82 02 00"])
+        run = self.ui(img, "scan D dump", "--slots", "2,3")
+        self.assertEqual(run.screens[0][1][3][:1], ">")                        # a lone D still moves the cursor
+
+    def test_c_session_end_fails_but_the_firmware_says_it_is_closed(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img, "--idle-ms", "400", "--failend", "closed", "--dump")
+        c = srv.client()
+        c.hello()
+        self.assertTrue(c.request(NGT_STATFS)[1])
+        srv.finish(check=False)                                                  # the idle timer ends the session: the end fails
+        self.assertIn("SERVE-END state=3", srv.text)                             # the list, not NM_S_FATAL (12)
+        self.assertIn("session is closed", srv.text)
+
+    def test_c_session_end_fails_and_the_session_is_still_open(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img, "--idle-ms", "400", "--failend", "stuck", "--dump")
+        c = srv.client()
+        c.hello()
+        self.assertTrue(c.request(NGT_STATFS)[1])
+        srv.finish(check=False)
+        self.assertIn("SERVE-END state=12", srv.text)
+        self.assertIn("Could not close the session", srv.text)
+
+    def test_d_b_that_stopped_an_operation_does_not_also_leave_the_screen(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        text, src, files = self.gdi_set("03", sizes=(400000, 6000, 9000))
+        srv = NgtServe(self, img, "--stopafter", "2", "--hold-b-ms", "2500")
+        c = srv.client()
+        c.hello()
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=1), source=src)
+        self.assertEqual((ok, name), (False, "ESTOP"))
+        r = c.request(NGT_STATFS)                                                # B is still down: the screen must still be open
+        self.assertTrue(r[1], r)
+        time.sleep(2.7)                                                          # B is released, then a new press counts again
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=1), source=src)
+        self.assertTrue(ok, (lines, name))
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
 
 
 class TestPushArt(NetBase):

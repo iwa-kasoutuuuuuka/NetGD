@@ -45,8 +45,14 @@ nm_launch_result_t nm_launch_step(nm_launch_t *l)
             l->phase = 2;
             return (nm_launch_result_t)l->result;
         }
+#if NM_HANDOFF_TUR
         nm_launch_wait_again(l);
         return NM_L_BUSY;
+#else
+        l->result = NM_L_OK;            /* `52 82` succeeded: READY, no TEST UNIT READY (it would eat the UNIT ATTENTION) */
+        l->phase = 2;
+        return NM_L_OK;
+#endif
     }
 
     /* phase 1: TEST UNIT READY every POLL_MS; READY = 0 twice in a row (a UNIT ATTENTION or NOT READY resets the count) */

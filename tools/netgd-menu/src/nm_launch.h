@@ -5,6 +5,15 @@
 #define NM_LAUNCH_H
 #include <stdint.h>
 
+/* Build option (R104 finding 3; hardware test H2 in README_ja.md has both variants).
+   0 (default): after `52 82` succeeds the drive is treated as READY and the BIOS gets control at once.  The firmware keeps its
+      UNIT ATTENTION for the BIOS (ide.rs), and TEST UNIT READY from the menu would consume it, so a BIOS that then sees no
+      media change could keep an old TOC.
+   1: the menu polls TEST UNIT READY (every 20 ms, two READY in a row, limit 10 s + open_time + detect_time) before the hand-off. */
+#ifndef NM_HANDOFF_TUR
+#define NM_HANDOFF_TUR 0
+#endif
+
 typedef enum {
     NM_L_BUSY = 0,
     NM_L_OK,            /* mounted and READY (two TEST UNIT READY in a row) */

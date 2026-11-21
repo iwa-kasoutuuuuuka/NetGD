@@ -21,6 +21,8 @@ uint32_t nm_host_entropy = 4821;
 int nm_host_user_stop;
 int nm_host_stop_after_polls = -1;
 int nm_host_polls;
+uint32_t nm_host_b_hold_ms;             /* when ng_plat_user_stop() says stop: B stays down this long (the press that did it) */
+static uint32_t b_down_until;
 int nm_host_realtime;
 uint32_t (*nm_host_buttons_hook)(void);
 static uint64_t real_t0;
@@ -40,7 +42,12 @@ void nm_plat_sleep(uint32_t ms)
     else nm_host_now += ms;
 }
 
-uint32_t nm_plat_buttons(void) { return nm_host_buttons_hook ? nm_host_buttons_hook() : nm_host_buttons; }
+uint32_t nm_plat_buttons(void)
+{
+    uint32_t b = nm_host_buttons_hook ? nm_host_buttons_hook() : nm_host_buttons;
+    if (b_down_until && (int32_t)(b_down_until - nm_plat_millis()) > 0) b |= NM_BTN_B;
+    return b;
+}
 int nm_plat_controller(void) { return nm_host_controller; }
 int nm_plat_dcload(void) { return nm_host_dcload; }
 uint32_t nm_plat_entropy(void) { return nm_host_entropy; }
@@ -78,6 +85,7 @@ int ng_plat_user_stop(void)
     nm_host_polls++;
     if (nm_host_stop_after_polls >= 0 && nm_host_polls > nm_host_stop_after_polls) {
         nm_host_stop_after_polls = -1;          /* one B press: the next run is not stopped */
+        if (nm_host_b_hold_ms) b_down_until = nm_plat_millis() + nm_host_b_hold_ms;
         return 1;
     }
     return nm_host_user_stop;

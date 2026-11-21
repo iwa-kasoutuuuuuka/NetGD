@@ -12,6 +12,13 @@
 #include <arpa/inet.h>
 #include <kos.h>
 #include <kos/net.h>                /* KOS-API-UNVERIFIED: net_init, net_default_dev (K2, K4) */
+#include <dc/net/broadband_adapter.h>   /* KOS-API-UNVERIFIED: bba_init() (R104 finding 1: without INIT_NET KOS never registers the driver) */
+#if defined(__has_include)
+# if __has_include(<dc/net/lan_adapter.h>)
+#  include <dc/net/lan_adapter.h>       /* KOS-API-UNVERIFIED: la_init(); the header may be absent in some KOS versions */
+#  define NM_HAVE_LA 1
+# endif
+#endif
 #include "nm_net.h"
 
 static int net_started;
@@ -19,20 +26,38 @@ static int lsock = -1, csock = -1, usock = -1;
 
 static uint64_t now_ms(void) { return timer_ms_gettime64(); }
 
+/* KOS-API-UNVERIFIED: net_dhcp_request.  KOS 2.x has `int net_dhcp_request(void)` (kos/net.h or net/net_dhcp.h); some versions
+   may differ.  Declared without a prototype, so a different argument list still compiles; the extra argument is harmless. */
+extern int net_dhcp_request();
+
 int nm_net_up(char *ip, size_t n)
 {
     const uint8_t *a;
+    int retry = net_started;
     if (n) ip[0] = 0;
     if (!net_started) {
+        /* R104 finding 1: KOS calls bba_init()/la_init() at start-up only with INIT_NET, which this program does not set (design
+           D12), so the driver would never be registered and net_init would fail.  Start the drivers here first.  A missing
+           adapter makes them return an error, which is not fatal by itself: net_default_dev tells below. */
+        bba_init();                                            /* KOS-API-UNVERIFIED: returns 0 on success, -1 without a BBA */
+#ifdef NM_HAVE_LA
+        la_init();                                             /* KOS-API-UNVERIFIED: the Lan Adapter (HIT-0300) */
+#endif
         /* KOS-API-UNVERIFIED (K2): net_init(uint32 ip) in KOS 2.x (0 = DHCP); some versions take no argument.  Called through
-           an unprototyped pointer so that either compiles; the extra argument is harmless when there is none.  Whether it may
-           be called after start-up without INIT_NET, and how long it takes without a BBA, is H7. */
+           an unprototyped pointer so that either compiles; the extra argument is harmless when there is none.  How long it takes
+           without a BBA is H7. */
         int (*init_fn)() = (int (*)())net_init;
         init_fn(0);
         net_started = 1;
     }
     if (!net_default_dev) return NM_NET_NODEV;                 /* KOS-API-UNVERIFIED (K4) */
     a = net_default_dev->ip_addr;                              /* KOS-API-UNVERIFIED (K4): uint8 ip_addr[4] */
+    if (retry && !(a[0] | a[1] | a[2] | a[3])) {
+        /* a later call (the user pressed Y again) and DHCP gave nothing the first time: ask again (R104, "related").  The
+           call may block for up to about 60 s; the UI has drawn "Starting network ..." before calling this. */
+        net_dhcp_request(0);                                   /* KOS-API-UNVERIFIED (K2) */
+        a = net_default_dev->ip_addr;
+    }
     if (!(a[0] | a[1] | a[2] | a[3])) return NM_NET_NOADDR;
     snprintf(ip, n, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
     return 0;

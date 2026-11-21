@@ -367,7 +367,16 @@ static void run_event(char *ev)
         frame();
         return;
     }
-    bit = button_by_name(ev);
+    bit = 0;                                    /* "A+X": several buttons in the same frame */
+    for (char *part = ev; part;) {              /* not strtok: the caller is walking the script with it */
+        char *plus = strchr(part, '+');
+        uint32_t b;
+        if (plus) *plus = 0;
+        b = button_by_name(part);
+        if (!b) { printf("unknown event '%s'\n", part); exit(2); }
+        bit |= b;
+        part = plus ? plus + 1 : NULL;
+    }
     if (!bit) { printf("unknown event '%s'\n", ev); exit(2); }
     nm_host_buttons = bit;
     frame();
@@ -396,6 +405,8 @@ static int ui_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--rflip") && i + 1 < argc) sim_rflip_cmd = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
         else if (!strcmp(argv[i], "--nocontroller")) nm_host_controller = 0;
+        else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
+        else if (!strcmp(argv[i], "--noaddr") && i + 1 < argc) nm_host_net_noaddr = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--names") && i + 1 < argc) snprintf(sim_names, sizeof sim_names, "%s", argv[++i]);
     }
     if (!noimg && sim_open(img, sectors)) { printf("cannot open image\n"); return 2; }
@@ -563,6 +574,8 @@ static int serve_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--confirm") && i + 1 < argc) serve_confirm = !strcmp(argv[++i], "allow") ? 1 : 2;
         else if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
         else if (!strcmp(argv[i], "--failend2")) sim_fail_end2 = 1;
+        else if (!strcmp(argv[i], "--failend") && i + 1 < argc) sim_fail_end = !strcmp(argv[++i], "stuck") ? 2 : 1;
+        else if (!strcmp(argv[i], "--hold-b-ms") && i + 1 < argc) nm_host_b_hold_ms = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--caps") && i + 1 < argc) sim_caps = (uint8_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(argv[i], "--no-udp")) nm_host_no_udp = 1;
