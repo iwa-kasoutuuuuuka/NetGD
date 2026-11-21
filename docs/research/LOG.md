@@ -1521,6 +1521,31 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：一部（リポジトリに入ったファイルの一覧、`pll.tcl` と `build.sh` の `unshare` の強制）。WSL での再ビルドはしていない。
 - 関連：R66、R81、R99、`fpga/agm/`。
 
+### R107 R105 の Verilog から作った rbf は、2E の `resident,sd-fast` に入らない（Opus）
+
+- 担当：Opus。
+- 問い：R105（番号つき Status）の FPGA の変更を、v5.5 の rbf に入れられるか。
+- 結論：**CI でビルドはできたが、まだ入れていない**。2E の `resident,sd-fast` が 788 B 溢れるため。
+  - 実行 44854550992（9c05b7d0）：Full Compilation は成功。setup slack は +3.792 ns、hold は +0.215 ns。
+  - rbf は 74,685 B（SHA-256 `aaec5987…`）。LZMA で 51,372 B。R103 の rbf（73,713 B、LZMA 48,772 B）より 2,600 B 大きい。
+    Quartus の圧縮済みの rbf は、配置によって大きさが変わり、圧縮済みのデータには LZMA があまり効かない。
+  - 新しい rbf を入れた大きさ：
+    - 2E `sam3u2e`：123,000+156（`resident` なしのフラッシュ 131,072 B には入る）。
+    - 2E `resident,sd-fast`：上限 122,368 B を超えて、リンクに失敗する。`lazy-extents` を外しても失敗する。
+    - `--profile release-z`（R98）なら 116,488+160 で入る。
+  - CI（`build.yaml:72`）は `--release --features sam3u2e,resident,sd-fast` を作るので、この rbf を入れると CI が落ちる。
+    そこで、リポジトリの rbf は R103 のもの（`6618252f…`）のままにした。
+  - R103 の rbf と新しいファームの組み合わせでも動く。Status の番号は無視されて従来どおりになり、番号つきの ack（R100）は効く。
+- 選択肢：
+  1. 2E `resident,sd-fast` だけ `release-z` で作る（resident は配布していない開発用の構成）。
+  2. Quartus のシードや設定を変えて、小さい rbf が出るまで試す。
+  3. Quartus の圧縮を切り、LZMA に任せる（`build.rs` の注によると約 5 KB 小さくなるが、PS で流すビット数が倍になる）。
+  4. R103 の rbf のままにする（今の状態）。
+- 根拠：CI のログ、`xz … | wc -c`、`cargo build` のリンクのエラー、`llvm-size`。
+- 信頼度：確認済み。
+- Opus による検証：該当なし（Opus 自身の作業）。
+- 関連：R98、R103、R105、`mcu/netgd/build.rs` の冒頭の注。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
