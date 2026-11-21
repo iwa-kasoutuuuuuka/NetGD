@@ -1630,6 +1630,21 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 注意：配布している 2E のイメージは `release` のままで、残りは約 8 KB。Quartus の rbf は配置によって大きさが ±1 KB ほど変わる（R107）。
 - 関連：R98、R103、R105、R107。
 
+### R112 Google Drive のファームウェアを ee99eea2 に更新（Opus）
+
+- 担当：Opus。常設の指示（成果物は Google Drive にも上げる）による。
+- 結論：
+  - R111 で v5.5 の rbf が変わったので、Drive の `firmware/` を作り直した。前の `firmware/` と `はじめに読む.txt` は `old-07458751/` に移した。
+  - 新しい `firmware/`（ee99eea2、`DEFMT_LOG=off` のリリースビルド）：
+    - `netgd-v55-4e`（bin 575,660 B）
+    - `netgd-v55-2e`（bin 123,180 B）
+    - `netgd-v60-2e-nobitstream`（bin 67,868 B、前と同じ内容）
+  - `はじめに読む.txt` を R111 の内容に直した。
+  - `dreamcast/` と `docs/` は R110 のまま（変わっていない）。
+- 根拠：Drive が返した大きさが、手元のファイルと一致した。
+- 信頼度：確認済み。
+- 関連：R110、R111。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
