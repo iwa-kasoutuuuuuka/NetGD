@@ -545,6 +545,34 @@ fn remember(dir: ImagePath, name: &str) {
 
 
 
+/// Where [`load_default`] looks for the image to mount, in the order it
+/// tries them.
+#[derive(Clone, Copy)]
+enum DefaultSource {
+    /// The runtime choice ([`SELECTED_NAME`]).
+    Selected,
+    /// `GDEMU.CFG` `image=` ([`configured_name`]).
+    Configured,
+    /// Root folder 01 ([`folder_for_number`]).
+    Folder01,
+}
+
+/// The name `source` gives, if it gives one.
+///
+/// Out of line on purpose: `configured_name` and `folder_for_number` each open
+/// the card (a volume manager with its block cache, about a kilobyte), and
+/// inlined into `load_default` that frame stayed on the stack underneath every
+/// `load_by_name` it then made -- the deepest path in the firmware. Here it is
+/// gone again before the mount starts, and `load_default` keeps only the name.
+#[inline(never)]
+fn default_name(num_blocks: u32, source: DefaultSource) -> Option<String<MAX_NAME_CHARS>> {
+    match source {
+        DefaultSource::Selected => unsafe { &*core::ptr::addr_of!(SELECTED_NAME) }.clone(),
+        DefaultSource::Configured => configured_name(num_blocks),
+        DefaultSource::Folder01 => folder_for_number(num_blocks, 1),
+    }
+}
+
 /// Load whichever image should be mounted now: the runtime choice if there is
 /// one, else whatever `GDEMU.CFG` names, else folder 01. A card with none of
 /// the three comes up empty.
@@ -552,38 +580,38 @@ fn remember(dir: ImagePath, name: &str) {
 /// Both are resolved by name, so mounting opens one directory. Nothing here
 /// walks the card or builds a list of images: which disc to serve is the
 /// host's business, and the host picks it by name over 0xE0.
+///
+/// Each source is asked only once the one before it has failed to mount
+/// (`default_name`), and only the winning name is held across the mount.
 pub fn load_default(num_blocks: u32) -> Result<Gdi, GdiError> {
     // A card scan: pick up GDEMU.INI first, so its settings are current for
     // whatever mounts below. `GDEMU.CFG` `image=` still decides which image.
     reload_ini(num_blocks);
-    if let Some(name) = unsafe { &*core::ptr::addr_of!(SELECTED_NAME) }.clone() {
-        match load_by_name(num_blocks, name.as_str()) {
+    for source in [DefaultSource::Selected, DefaultSource::Configured, DefaultSource::Folder01] {
+        let Some(name) = default_name(num_blocks, source) else { continue };
+        let e = match load_by_name(num_blocks, name.as_str()) {
             Ok(gdi) => return Ok(gdi),
+            Err(e) => e,
+        };
+        match source {
             // The card may have changed under an open tray; fall through
             // rather than refusing to mount anything at all.
-            Err(e) => warn!("gdi: selected image '{}' is gone ({:?})", name.as_str(), e),
-        }
-    }
-
-    if let Some(name) = configured_name(num_blocks) {
-        match load_by_name(num_blocks, name.as_str()) {
-            Ok(gdi) => return Ok(gdi),
-            Err(e) => warn!(
+            DefaultSource::Selected => {
+                warn!("gdi: selected image '{}' is gone ({:?})", name.as_str(), e)
+            }
+            DefaultSource::Configured => warn!(
                 "gdi: config names '{}', which is not on the card ({:?})",
                 name.as_str(),
                 e
             ),
-        }
-    }
-
-    // Nothing named, so do what the original GDEMU does on a card insert:
-    // mount folder 01 (where GDmenu / openMenu usually live). This is a
-    // lookup of one numbered folder, not a guess at "some image" -- a card
-    // without a folder 01 still comes up empty and the host sees no disc.
-    if let Some(name) = folder_for_number(num_blocks, 1) {
-        match load_by_name(num_blocks, name.as_str()) {
-            Ok(gdi) => return Ok(gdi),
-            Err(e) => warn!("gdi: default folder '{}' is unusable ({:?})", name.as_str(), e),
+            // Nothing named, so do what the original GDEMU does on a card
+            // insert: mount folder 01 (where GDmenu / openMenu usually live).
+            // This is a lookup of one numbered folder, not a guess at "some
+            // image" -- a card without a folder 01 still comes up empty and
+            // the host sees no disc.
+            DefaultSource::Folder01 => {
+                warn!("gdi: default folder '{}' is unusable ({:?})", name.as_str(), e)
+            }
         }
     }
     warn!("gdi: no image selected, no usable GDEMU.CFG and no folder 01 -- coming up empty");
@@ -781,6 +809,19 @@ pub fn next_of_mounted(num_blocks: u32) -> Option<String<{ gamecfg::MAX_NEXT }>>
 /// from the button, deeper again and under a running game, it wedged the
 /// firmware hard enough to take the debug port with it.
 pub fn load_by_name(num_blocks: u32, want: &str) -> Result<Gdi, GdiError> {
+    let which = resolve_name(num_blocks, want)?;
+    load_image(num_blocks, &which)
+}
+
+/// The image in the folder called `want`: walk to it, remember it as the
+/// selection, find its descriptor. The first half of [`load_by_name`].
+///
+/// Out of line, and done with the card before `load_image` opens it again:
+/// inlined, this volume manager (block cache included, about a kilobyte)
+/// stayed open on the stack under the whole parse, the deepest path in the
+/// firmware. Only the small `ImageRef` crosses over.
+#[inline(never)]
+fn resolve_name(num_blocks: u32, want: &str) -> Result<ImageRef, GdiError> {
     let dev = HsmciBlockDevice::new();
     dev.set_num_blocks(num_blocks);
     let mgr = VolumeManager::new(dev, crate::blockdev::DummyClock);
@@ -809,13 +850,12 @@ pub fn load_by_name(num_blocks: u32, want: &str) -> Result<Gdi, GdiError> {
             break;
         }
     }
-    let which = ImageRef {
+    Ok(ImageRef {
         dir: path,
         file,
         is_cdi,
         name,
-    };
-    load_image(num_blocks, &which)
+    })
 }
 
 /// Forget the runtime choice: the next load goes back to the configured
@@ -830,6 +870,12 @@ pub fn select_default() {
 
 /// Load the image `which` names, ready to serve: descriptor parsed and every
 /// track file mapped to its SD block runs.
+///
+/// Out of line for the same reason as `resolve_name`: [`load_by_name`] calls
+/// the two one after the other, and inlined, this frame (the parse's volume
+/// manager) was reserved for the whole of `load_by_name`, under
+/// `resolve_name` too.
+#[inline(never)]
 pub fn load_image(num_blocks: u32, which: &ImageRef) -> Result<Gdi, GdiError> {
     let mut gdi = parse_image(num_blocks, which)?;
     map_track_extents(&mut gdi);
