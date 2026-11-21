@@ -145,6 +145,10 @@ jobs:
           - tool: netgd-recv
             dir: .
             cmd: python tools/netgd-recv/test/run_tests.py
+          # Needs gcc.  The menu core, linked with the netgd-recv core (docs/design/menu-app.md 11).
+          - tool: netgd-menu
+            dir: .
+            cmd: python tools/netgd-menu/test/run_tests.py
     steps:
       - uses: actions/checkout@v4
 

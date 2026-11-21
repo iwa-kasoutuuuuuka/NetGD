@@ -1,0 +1,20 @@
+# Host (gcc) build of the menu core + the netgd-recv core + FatFs + test doubles, for test/run_tests.py.
+#   make -f Makefile.host            -> build/menu_host(.exe)
+# (run_tests.py builds with the same list, without make.)
+CC      ?= gcc
+CFLAGS  ?= -O1 -g -Wall -Wno-unused-function -Wno-format-truncation
+RECV     = ../netgd-recv
+FATFS    = $(RECV)/third_party/fatfs
+CFLAGS  += -DNG_HOST -Isrc -I$(RECV)/src -I$(FATFS) -I$(RECV)/test -Itest
+MENU     = src/nm_text.c src/nm_slot.c src/nm_cfgparse.c src/nm_ipbin.c src/nm_list.c src/nm_input.c
+SRCS     = $(MENU) test/menu_host.c
+OUT      = build/menu_host
+
+all: $(OUT)
+
+$(OUT): $(SRCS) $(wildcard src/*.h test/*.h)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $(SRCS)
+
+clean:
+	rm -rf build
