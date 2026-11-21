@@ -1546,6 +1546,24 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：該当なし（Opus 自身の作業）。
 - 関連：R98、R103、R105、`mcu/netgd/build.rs` の冒頭の注。
 
+### R108 netgd-menu の任意の手順 9（UDP 探索）と 11（箱絵）を実装（Sonnet、Opus が確認）
+
+- 担当：Sonnet（実装）。コミットは 80b0c081・1e4d5cd4。main への取り込みは 4b6b64f6。
+- 結論：
+  - 手順 9（`nm_disc.c`）：取り込み画面を開いている間、UDP 20039 で `NGTP-DISCOVER 1` に `NGTP-HERE 1 name=… app=… state=idle|busy` で答える。合言葉とポートは答えに入れない。
+    PC 側は `netgd-send discover` を足した。`push`・`remote` で `--host` を省くと探索し、1台だけ見つかればそれを使う。
+  - 手順 11（`nm_art.c`）：`NETGD.ART` は、16 B のヘッダ（`NGAR`、128×128）と RGB565 LE で、計 32,784 B。
+    カーソルが 300 ms 止まったら、軽いマウントのまま 1 フレームに 4 KiB ずつ読む。読めなければ絵が出ないだけ。
+    PC 側は `netgd_send/art.py`（Pillow は任意で、無くても内蔵の PNG 読み取りで作れる）と、`push --art`。
+  - 決めたことは `tools/netgd-menu/README_ja.md` の「実装メモ」にある。
+- 根拠：
+  - Opus が取り込み後の main で再実行した：メニュー 58 件（2回とも OK）、recv 52、send 98。
+    Sonnet は、メニューの全件で一度だけ 2 件が失敗したと報告している（再実行では通る。原因は不明で、負荷によるタイミングのずれとみられる）。
+  - CI の KOS ビルド（44855310846）は成功した。UDP の `socket`/`bind`/`recvfrom`/`sendto` も、KOS 2.3.0 のヘッダでコンパイルできた。
+- 信頼度：ホストのテストと KOS のコンパイルは確認済み。実機は未確認（H5 読み取りの時間、H10 右端に絵が収まるか）。
+- Opus による検証：あり（テストの再実行、CI）。
+- 関連：R97、R101、R104。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
