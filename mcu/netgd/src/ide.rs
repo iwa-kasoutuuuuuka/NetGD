@@ -125,8 +125,9 @@ const STATUS_ERR: u8 = 0x01;
 // Error register bits (we only model ABRT for now).
 const ERR_ABRT: u8 = 0x04;
 /// ATAPI Error register for a CD_READ the card failed under: sense key 3
-/// (MEDIUM ERROR) in the high nibble, plus ABRT.
-const ERR_MEDIUM: u8 = 0x30 | ERR_ABRT;
+/// (MEDIUM ERROR) in the high nibble, as stock writes every CHECK (D5; this
+/// had ABRT too).
+const ERR_MEDIUM: u8 = discimg::atapi::check_error(discimg::atapi::SENSE_MEDIUM_ERROR);
 
 // ATA / ATAPI command opcodes we handle (or explicitly ABRT).
 const CMD_NOP: u8 = 0x00;
@@ -140,6 +141,11 @@ const CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 
 const STATUS_IDLE: u8 = STATUS_DRDY | STATUS_DSC;
 const STATUS_IDLE_ERR: u8 = STATUS_DRDY | STATUS_DSC | STATUS_ERR;
+/// Status of an ATAPI CHECK CONDITION on the packet device: DSC | ERR, DRDY
+/// clear (0x11), as stock GDEMU 6.0 posts every one (D5). Plain ATA errors
+/// (and the disk) keep `STATUS_IDLE_ERR`.
+const STATUS_CHECK: u8 = discimg::atapi::CHECK_STATUS;
+const _: () = assert!(STATUS_CHECK == STATUS_DSC | STATUS_ERR);
 
 /// Wrapper around one of the two FPGA-emulated IDE devices.
 #[derive(Clone, Copy)]
@@ -749,17 +755,6 @@ impl DeviceState {
         self.pending_asc = discimg::atapi::ASC_MEDIUM_CHANGED;
     }
 
-    /// NOT READY: 2/3A/00 with no medium, 2/04/01 while it becomes ready
-    /// (the swap window), as stock reports them (D7).
-    fn not_ready(&mut self) {
-        self.pending_sense_key = 0x02;
-        self.pending_asc = if media_present() {
-            discimg::atapi::ASC_BECOMING_READY
-        } else {
-            discimg::atapi::ASC_NO_MEDIUM
-        };
-    }
-
     /// Nothing pending.
     fn clear_sense(&mut self) {
         self.pending_sense_key = 0;
@@ -837,9 +832,9 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
         return;
     }
     // No NOT READY window survives a reset: the host is rebooting and a
-    // stale `READY_AT` (see `APPLY_SWAP_WINDOW`) would keep answering the
-    // booting BIOS with NOT READY on the paths that do not remount.
-    unsafe { READY_AT = None };
+    // window left open would answer the booting BIOS with NOT READY. A
+    // medium that was still in its window gets its UNIT ATTENTION now.
+    cancel_swap_window(state);
     // A write session does not survive a hard reset (never SRST: that does
     // not move the counter). Ending it first leaves the drive ejected, so
     // the remount below is the same one F5 does.
@@ -861,7 +856,7 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
                 info!("primary: hard reset -- reset_goto image {}", goto);
                 let ok = mount_named(state, "primary", name.as_str()).await;
                 // The host is rebooting anyway: no tray-cycle window.
-                unsafe { READY_AT = None };
+                cancel_swap_window(state);
                 if ok {
                     return;
                 }
@@ -874,6 +869,7 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
     }
     info!("primary: hard reset while ejected -- mounting the selected image again");
     let ok = load_media(state).await;
+    cancel_swap_window(state);
     info!("primary: remounted after hard reset (mounted: {})", ok);
 }
 
@@ -1024,7 +1020,7 @@ async fn handle(
                 // staged -- DRQ has to drop once the host has taken it all,
                 // or a host that polls for "DRQ clear, BSY clear" before
                 // issuing the next command waits forever.
-                finish_pio_in(dev).await;
+                finish_pio_in(dev, false).await;
             }
         },
         CMD_IDENTIFY_PACKET => match role {
@@ -1038,10 +1034,10 @@ async fn handle(
                 dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
                 dev.ack_command();
                 // Drop DRQ once the host has the 80 bytes (stock: status
-                // 0x50 after them), as the disk IDENTIFY does: a host that
-                // reads while DRQ is up (gdprobe) would otherwise read on
-                // past the block.
-                finish_pio_in(dev).await;
+                // 0x50 and interrupt reason 0x03 after them), as the disk
+                // IDENTIFY does: a host that reads while DRQ is up (gdprobe)
+                // would otherwise read on past the block.
+                finish_pio_in(dev, true).await;
             }
             // Mirror image: a non-packet device ABRTs the packet IDENTIFY.
             Role::Disk => {
@@ -1267,13 +1263,20 @@ async fn rescan_media() -> bool {
 async fn load_media(state: &mut DeviceState) -> bool {
     crate::cdda::stop();
     let ok = rescan_media().await;
-    unsafe { READY_AT = None };
-    MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
-    // The format nibble follows the mounted image (GDI -> GD-ROM, CDI -> CD-ROM
-    // XA); without this a swap between the two shows the old one until reset.
-    IdeDevice::primary().reassert_disc_format();
-    state.medium_changed();
+    mounted(state, ok);
     ok
+}
+
+/// After a mount attempt (`ok` = an image mounted): the interlock, the
+/// empty-slot flag, the format nibble (GDI -> GD-ROM, CDI -> CD-ROM XA;
+/// without it a swap between the two showed the old one until reset) and the
+/// swap window -- opened whether or not anything mounted, as stock does for
+/// an empty folder too (D12, D13).
+fn mounted(state: &mut DeviceState, ok: bool) {
+    MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
+    EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
+    IdeDevice::primary().reassert_disc_format();
+    open_swap_window(state);
 }
 
 /// Swap discs without the host's help: eject, mount the selection, load.
@@ -1317,8 +1320,9 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
     // holds a CMD25 open across its waits, and a swap would both read the card
     // under it and set MEDIA_PRESENT mid-transfer so the next write ABRTs. The
     // button is dead while ejected (`button::on_press`); a request that slipped
-    // in just before the eject is dropped here.
-    if !media_present() {
+    // in just before the eject is dropped here. An empty folder is not an
+    // eject: the button has to bring a disc back from it ([`swap_allowed`]).
+    if !swap_allowed() {
         info!("{}: button swap dropped -- media is ejected", label);
         return;
     }
@@ -1330,9 +1334,9 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
 /// Mount the folder called `name`, replacing whatever is mounted.
 ///
 /// Stops CD-DA, drops the media and the sector cache, mounts by name,
-/// prefetches IP.BIN, then raises UNIT ATTENTION so the host re-reads the
-/// TOC. On failure the drive is left empty (`GDI = None`, no medium).
-/// Returns whether an image mounted.
+/// prefetches IP.BIN, then opens the swap window, at whose end the host gets
+/// UNIT ATTENTION and re-reads the TOC. On failure the drive is left empty
+/// (`GDI = None`, no medium, `EMPTY_SLOT`). Returns whether an image mounted.
 async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -> bool {
     crate::cdda::stop();
     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
@@ -1352,18 +1356,7 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
             false
         }
     };
-    MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
-    let delay = if APPLY_SWAP_WINDOW { crate::gdi::ini().swap_delay_ms() } else { 0 };
-    unsafe {
-        READY_AT = if ok && delay != 0 {
-            Some(Instant::now() + Duration::from_millis(delay as u64))
-        } else {
-            None
-        };
-    }
-    // Same as `load_media`: the format nibble must follow the new image.
-    IdeDevice::primary().reassert_disc_format();
-    state.medium_changed();
+    mounted(state, ok);
     info!("{}: mounted '{}' ({})", label, name, ok);
     ok
 }
@@ -1381,46 +1374,92 @@ pub(crate) fn media_present() -> bool {
     MEDIA_PRESENT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Whether GDEMU.INI `open_time` / `detect_time` open a NOT READY window after
-/// a swap. OFF: the keys are parsed (`gdi::ini()`) but not applied.
-///
-/// The window as written is only half a tray cycle (review R45 item 1), and
-/// half is worse than none: openMenu's `cdrom_reinit` can see OK inside it
-/// and its next CD_READ then fails. It waits for stock-GDEMU probe data --
-/// the SENSE sequence and the timing a real GDEMU shows after a swap. To turn
-/// it on consistently, all of these are needed together:
-///   * gate GET_TOC, REQ_SES, GET_SCD and REQ_STAT as well as TUR, CD_PLAY
-///     and CD_READ;
-///   * SECNR / REQ_STAT report OPEN -> BUSY during the window, not STANDBY;
-///   * one UNIT ATTENTION when the window *ends* (not only before it);
-///   * every gated path sets the sense key, and REQ_ERROR (0x13) reports it;
-///   * also open the window on `swap_media` / `load_media`, not just
-///     `mount_named`.
-/// `service_hard_reset` already clears `READY_AT` on a reset.
-const APPLY_SWAP_WINDOW: bool = false;
+/// Nothing is mounted because the selected folder had nothing to mount (no
+/// image, or one that failed to parse): stock accepts such a switch and
+/// reports no medium (D12). Unlike an eject, the card is still the
+/// firmware's, so the button and a pending swap keep working
+/// ([`swap_allowed`]). Cleared by a mount, an eject, a write session, and the
+/// first disk write the host issues while the drive is empty.
+static EMPTY_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// When a swapped-in disc stops reading NOT READY (GDEMU.INI `open_time` +
-/// `detect_time`, applied only for keys the card set, and only while
-/// [`APPLY_SWAP_WINDOW`]). Only `ide_task` touches
-/// this. Non-blocking on purpose: the IDE task keeps answering commands during
-/// the window, so the host sees NOT READY rather than a stalled bus.
-static mut READY_AT: Option<Instant> = None;
+/// Whether the firmware may switch images by itself (button).
+pub(crate) fn swap_allowed() -> bool {
+    discimg::slot::swap_allowed(media_present(), EMPTY_SLOT.load(core::sync::atomic::Ordering::Relaxed))
+}
 
-/// Mounted and past the swap window: what TEST UNIT READY, CD_READ and CD_PLAY
-/// answer on. (`media_present` is the ownership interlock and ignores it.)
-fn media_ready() -> bool {
-    if !media_present() {
-        return false;
+/// The NOT READY window after an image switch (D13): opened by every mount
+/// attempt (`mounted`), timed by `discimg::atapi::swap_phase`. Only
+/// `ide_task` touches it. Non-blocking: the task keeps answering commands
+/// through the window, so the host sees NOT READY rather than a stalled bus.
+struct SwapWindow {
+    at: Instant,
+    open_ms: u32,
+    detect_ms: u32,
+}
+static mut SWAP_WINDOW: Option<SwapWindow> = None;
+
+/// Open the window: no medium for `open_time`, becoming ready for
+/// `detect_time`, then the new medium's UNIT ATTENTION (or no medium for
+/// good). The phases are stock's measured 150 + 150 ms unless GDEMU.INI sets
+/// the key (the probe card's INI set both to 150, so stock's timing is
+/// presumably the INI's). Any UNIT ATTENTION or sense still pending belongs
+/// to the old medium and goes: the new one is raised when the window ends.
+fn open_swap_window(state: &mut DeviceState) {
+    let (open_ms, detect_ms) = crate::gdi::ini()
+        .swap_window_ms(discimg::atapi::SWAP_OPEN_MS, discimg::atapi::SWAP_DETECT_MS);
+    unsafe { SWAP_WINDOW = Some(SwapWindow { at: Instant::now(), open_ms, detect_ms }) };
+    state.unit_attention = false;
+    state.clear_sense();
+}
+
+/// End the window now (hard reset, eject, write session). A medium still in
+/// it gets its UNIT ATTENTION, as it would have at the end, and an open /
+/// busy nibble a command already put in SECNR is taken down (a window ended
+/// before any command leaves SECNR as it was, as on the hard reset paths).
+fn cancel_swap_window(state: &mut DeviceState) {
+    if unsafe { (*core::ptr::addr_of_mut!(SWAP_WINDOW)).take() }.is_none() {
+        return;
     }
-    match unsafe { READY_AT } {
-        Some(t) if Instant::now() < t => false,
-        Some(_) => {
-            unsafe { READY_AT = None };
-            true
-        }
-        None => true,
+    let medium = media_present();
+    if medium {
+        state.medium_changed();
+    }
+    let dev = IdeDevice::primary();
+    let st = (dev.read(REG_LBA_LOW_MID) & 0x0F) as u8;
+    if st == discimg::atapi::DRIVE_OPEN || st == discimg::atapi::DRIVE_BUSY {
+        dev.set_secnr(secnr(discimg::atapi::swap_drive_status(discimg::atapi::SwapPhase::Done, medium)));
     }
 }
+
+/// Whether the drive can serve the command about to run: `None` = ready,
+/// else the ASC/ASCQ of its NOT READY (2/3A/00 no medium, 2/04/01 becoming
+/// ready). Ends an expired window: with an image, the UNIT ATTENTION for the
+/// new medium is raised for this command (stock: 6/28/00 once, ~300 ms after
+/// the switch); without one the drive stays "no medium". SECNR's status
+/// nibble follows the phase (open, busy, then paused or no disc), written
+/// here, before the command's completion, since nothing runs between
+/// commands to time it: until the first command after a switch it keeps the
+/// value it had.
+fn drive_not_ready(dev: &IdeDevice, state: &mut DeviceState) -> Option<(u8, u8)> {
+    use discimg::atapi::SwapPhase;
+    let w = unsafe { &mut *core::ptr::addr_of_mut!(SWAP_WINDOW) };
+    let medium = media_present();
+    let Some(sw) = w else {
+        return if medium { None } else { Some(discimg::atapi::ASC_NO_MEDIUM) };
+    };
+    let elapsed = (Instant::now() - sw.at).as_millis().min(u32::MAX as u64) as u32;
+    let phase = discimg::atapi::swap_phase(elapsed, sw.open_ms, sw.detect_ms);
+    dev.set_secnr(secnr(discimg::atapi::swap_drive_status(phase, medium)));
+    if phase == SwapPhase::Done {
+        *w = None;
+        if medium {
+            state.medium_changed();
+            return None;
+        }
+    }
+    Some(discimg::atapi::not_ready_asc(phase))
+}
+
 // Sega GD-ROM ATAPI extensions.
 const SEGA_REQ_STAT: u8 = 0x10;
 const SEGA_REQ_MODE: u8 = 0x11;
@@ -1451,7 +1490,8 @@ const SEGA_GET_SCD: u8 = 0x40;
 ///   packet[1] = 2  MOUNT     -> mount the name staged by MOUNT_NAME, or the
 ///                               configured default if packet[2] = 0xFF or no
 ///                               name is staged. Swaps immediately, no
-///                               eject/load needed; UNIT ATTENTION follows.
+///                               eject/load needed; the swap window and
+///                               UNIT ATTENTION follow (D13).
 ///                               The staged name is cleared once used.
 ///   packet[1] = 3  VERSION   -> "OGDM", u8 protocol, feature byte
 ///                               (`OGDM_FEATURES`), 3 reserved bytes (zero),
@@ -1578,6 +1618,11 @@ async fn handle_packet(
         packet[8], packet[9], packet[10], packet[11],
     );
 
+    // Not ready (swap window, no medium): what the command gets is decided
+    // below, but an expiring window raises the new medium's UNIT ATTENTION
+    // here, before it is looked at.
+    let not_ready = drive_not_ready(dev, state);
+
     // ATAPI: when UNIT_ATTENTION is pending (set on reset), every PACKET
     // command other than REQUEST_SENSE / REQ_ERROR completes immediately
     // with CHECK_CONDITION and sense key 6, and the UA flag is cleared.
@@ -1594,13 +1639,11 @@ async fn handle_packet(
         && opcode != GDEMU_CMD
     {
         info!("{}: UNIT_ATTENTION served on opcode 0x{:02x}", label, opcode);
-        dev.set_error(0x60); // sense key 6 << 4
-        dev.set_irr(0x03);
         // 6/28/00 for the REQ_SENSE / REQ_ERROR that should follow (set
         // here, not left over: a GDEMU_CMD in between clears stale keys).
-        state.medium_changed();
+        // Status 0x11, error 0x60 (D5).
         state.unit_attention = false;
-        dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_ERR); // 0x51
+        finish_check(dev, state, discimg::atapi::SENSE_UNIT_ATTENTION, discimg::atapi::ASC_MEDIUM_CHANGED);
         return;
     }
 
@@ -1611,21 +1654,29 @@ async fn handle_packet(
         state.clear_sense();
     }
 
+    // Not ready: the disc commands get CHECK CONDITION as stock answers them
+    // with no medium (`discimg::atapi::not_ready_answer`: NOT READY, or
+    // ILLEGAL REQUEST for REQ_SES past 0); REQ_MODE, REQ_ERROR, `0x52` and
+    // the rest are served. Ejected for the host, CD_READ and CD_PLAY must
+    // not touch the card (a CMD25 may be open), which this covers too.
+    if let Some(asc) = not_ready {
+        match discimg::atapi::not_ready_answer(&packet) {
+            discimg::atapi::NotReadyAnswer::NotReady => {
+                finish_check(dev, state, discimg::atapi::SENSE_NOT_READY, asc);
+                return;
+            }
+            discimg::atapi::NotReadyAnswer::IllegalRequest => {
+                finish_illegal(dev, state);
+                return;
+            }
+            discimg::atapi::NotReadyAnswer::Serve => {}
+        }
+    }
+
     // Step 4: dispatch.
     match opcode {
-        ATAPI_TEST_UNIT_READY => {
-            // No data, just "I'm here" -- unless the tray is open.
-            dev.set_irr(0x03);
-            if media_ready() {
-                dev.set_error(0);
-                dev.set_status_intrq(STATUS_IDLE);
-            } else {
-                // NOT READY / MEDIUM NOT PRESENT.
-                state.not_ready();
-                dev.set_error(0x20);
-                dev.set_status_intrq(STATUS_IDLE_ERR);
-            }
-        }
+        // No data, just "I'm here" (not ready was answered above).
+        ATAPI_TEST_UNIT_READY => finish_ok(dev),
         ATAPI_START_STOP_UNIT => {
             // CDB byte 4: bit 1 = LoEj, bit 0 = Start. LoEj clear is just a
             // spin up/down request, which means nothing here.
@@ -1648,6 +1699,8 @@ async fn handle_packet(
                 } else {
                     info!("{}: EJECT -- releasing media", label);
                     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
+                    EMPTY_SLOT.store(false, core::sync::atomic::Ordering::Relaxed);
+                    cancel_swap_window(state);
                     // Staged sectors are no longer trustworthy: the host is
                     // free to rewrite the filesystem they came from -- and
                     // for the same reason the image list, if anything built
@@ -1689,8 +1742,7 @@ async fn handle_packet(
                 Some(reply) => send_data_in(dev, reply).await,
                 None => {
                     warn!("{}: REQ_MODE off={} len={} unsupported", label, packet[2], packet[4]);
-                    dev.set_error(ERR_ABRT);
-                    dev.set_status_intrq(STATUS_IDLE_ERR);
+                    finish_illegal(dev, state);
                 }
             }
         }
@@ -1714,18 +1766,9 @@ async fn handle_packet(
             dev.set_status_intrq(STATUS_IDLE);
         }
         SEGA_CD_PLAY => {
-            // Ejected, GDI is still set but the host may be writing the card:
-            // cdda's SD reads would cut into an open CMD25. NOT READY /
-            // MEDIUM NOT PRESENT, as TEST UNIT READY and CD_READ say.
-            // (CD_SEEK only pauses or stops, which reads nothing.)
-            if !media_ready() {
-                info!("{}: CD_PLAY while ejected", label);
-                state.not_ready();
-                dev.set_irr(0x03);
-                dev.set_error(0x20);
-                dev.set_status_intrq(STATUS_IDLE_ERR);
-                return;
-            }
+            // Ejected (GDI still set, the host maybe writing the card) was
+            // answered NOT READY above: cdda's SD reads would cut into an
+            // open CMD25. (CD_SEEK only pauses or stops, which reads nothing.)
             // [1] parameter type, [2..5] start, [6] repeat count (low
             // nibble, 15 = forever), [8..11] end. Type 1 = FAD (24-bit BE),
             // 2 = MSF, 3 = resume from pause. Layout per iceGDROM cdda.c.
@@ -1742,14 +1785,11 @@ async fn handle_packet(
             if !ok {
                 warn!("{}: CD_PLAY rejected: {=[u8]:02x}", label, packet[..12]);
             }
-            dev.set_irr(0x03);
             if ok {
                 dev.set_secnr(secnr(GD_PLAY));
-                dev.set_error(0);
-                dev.set_status_intrq(STATUS_IDLE);
+                finish_ok(dev);
             } else {
-                dev.set_error(ERR_ABRT);
-                dev.set_status_intrq(STATUS_IDLE_ERR);
+                finish_illegal(dev, state);
             }
         }
         SEGA_CD_SEEK => {
@@ -1815,9 +1855,9 @@ async fn handle_packet(
                 let n_aligned = n & !1; // host expects 16-bit-aligned PIO; trim odd trailing byte
                 send_data_in(dev, &toc[..n_aligned]).await;
             } else {
+                // Not reached: no image is no medium, answered above.
                 warn!("{}: GET_TOC with no GDI loaded", label);
-                dev.set_error(ERR_ABRT);
-                dev.set_status_intrq(STATUS_IDLE_ERR);
+                finish_check(dev, state, discimg::atapi::SENSE_NOT_READY, discimg::atapi::ASC_NO_MEDIUM);
             }
         }
         SEGA_REQ_SES => {
@@ -1825,8 +1865,8 @@ async fn handle_packet(
             // BIOS asks for sessions 0..num_sessions and our reply
             // describes that session's first track + start FAD. Session
             // 0 = SDA, session 1 = HDA on a GD-ROM. Sessions outside
-            // the disc's range get ABRT (the BIOS uses that to learn
-            // num_sessions). Per iceGDROM rv32/source/ide.c:437.
+            // the disc's range get CHECK CONDITION, ILLEGAL REQUEST (stock:
+            // status 0x11, error 0x50, D5/D6; this was ABRT with no key).
             let alloc = packet[4] as u16;
             let session = packet[2];
             match build_req_ses_reply(gdi_ref(), session) {
@@ -1839,11 +1879,9 @@ async fn handle_packet(
                 }
                 None => {
                     info!(
-                        "{}: REQ_SES({}) out of range, ABRT", label, session
+                        "{}: REQ_SES({}) out of range", label, session
                     );
-                    dev.set_irr(0x03);
-                    dev.set_error(ERR_ABRT);
-                    dev.set_status_intrq(STATUS_IDLE_ERR);
+                    finish_illegal(dev, state);
                 }
             }
         }
@@ -1881,9 +1919,7 @@ async fn handle_packet(
         }
         _ => {
             warn!("{}: unhandled ATAPI opcode 0x{:02x}", label, opcode);
-            dev.set_irr(0x03);
-            dev.set_error(ERR_ABRT);
-            dev.set_status_intrq(STATUS_IDLE_ERR);
+            finish_illegal(dev, state);
         }
     }
     // Every arm posts its completion status and INTRQ together; there is
@@ -1930,19 +1966,11 @@ async fn handle_cd_read(
         label, starting_fad, count, lba, dma
     );
 
-    if !media_ready() {
-        // NOT READY / MEDIUM NOT PRESENT -- the host ejected and has not
-        // loaded again, so it may be rewriting the filesystem right now.
-        info!("{}: CD_READ while ejected", label);
-        dev.set_irr(0x03);
-        dev.set_error(0x20);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        return;
-    }
+    // Ejected or in the swap window: answered NOT READY by `handle_packet`
+    // (the host may be rewriting the filesystem right now).
     let Some(gdi) = gdi_ref() else {
         warn!("{}: CD_READ but no GDI loaded", label);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
+        finish_illegal(dev, state);
         return;
     };
 
@@ -1960,7 +1988,8 @@ async fn handle_cd_read(
     // (1.1 MB), which the old 64 KB guard aborted outright.
     //
     // Still reject a request that runs off the end of the track; better an
-    // ABRT the host can see than a read that silently returns garbage.
+    // ILLEGAL REQUEST the host can see than a read that silently returns
+    // garbage.
     let track_sectors = gdi.track_for_lba(lba).map(|t| t.sector_count).unwrap_or(0);
     let available = track_sectors.saturating_sub(lba.saturating_sub(
         gdi.track_for_lba(lba).map(|t| t.start_lba).unwrap_or(0),
@@ -1970,8 +1999,7 @@ async fn handle_cd_read(
             "{}: CD_READ rejected: {} sectors from LBA {} ({} available in track)",
             label, count, lba, available
         );
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
+        finish_illegal(dev, state);
         return;
     }
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
@@ -2281,12 +2309,22 @@ fn finish_ok(dev: &IdeDevice) {
     dev.set_status_intrq(STATUS_IDLE);
 }
 
-/// Complete a no-data command with CHECK CONDITION / ILLEGAL REQUEST.
-fn finish_illegal(dev: &IdeDevice, state: &mut DeviceState) {
-    state.pending_sense_key = 0x05;
+/// Complete a packet command with CHECK CONDITION the way stock GDEMU 6.0
+/// does (D5): status 0x11, error = `key << 4` (no ABRT), and `key`/`asc`
+/// pending for REQUEST SENSE / REQ_ERROR.
+#[inline(never)]
+fn finish_check(dev: &IdeDevice, state: &mut DeviceState, key: u8, asc: (u8, u8)) {
+    state.pending_sense_key = key;
+    state.pending_asc = asc;
     dev.set_irr(0x03);
-    dev.set_error(ERR_ABRT | 0x50); // sense key 5 << 4
-    dev.set_status_intrq(STATUS_IDLE_ERR);
+    dev.set_error(discimg::atapi::check_error(key));
+    dev.set_status_intrq(STATUS_CHECK);
+}
+
+/// Complete a packet command with CHECK CONDITION / ILLEGAL REQUEST (5/00/00;
+/// stock's ASC for these is not known).
+fn finish_illegal(dev: &IdeDevice, state: &mut DeviceState) {
+    finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, (0, 0));
 }
 
 /// Send `data`, cut to the CDB's allocation length (packet[3..=4], 0 = all).
@@ -2384,8 +2422,9 @@ async fn handle_image_ctl(
             };
             crate::cdda::stop();
             MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
+            EMPTY_SLOT.store(false, core::sync::atomic::Ordering::Relaxed);
             invalidate_cd_read_cache();
-            unsafe { READY_AT = None };
+            cancel_swap_window(state);
             clear_mount_name();
             let _ = wsession().begin(&packet[2..6], part);
             info!("{}: write session begun, protecting LBA < {}", label, part);
@@ -2472,9 +2511,12 @@ async fn handle_image_ctl(
 /// send to the GD-ROM device. CDB byte 1 is the sub-code:
 ///
 ///   52 82 lo hi  mount image number `lo | hi << 8`; 0 = back to the default.
-///                No data phase. A number with no folder, or a failed
-///                mount, is ILLEGAL REQUEST; an unknown number leaves the
-///                current media untouched.
+///                No data phase. A number with no folder is ILLEGAL REQUEST
+///                and leaves the current media untouched (stock: not
+///                probed). A folder with nothing to mount (no image, or one
+///                that fails to parse) is accepted like stock does (D12):
+///                the drive goes empty and reports no medium after the swap
+///                window. A failed default (0) is ILLEGAL REQUEST.
 ///   52 81 55     next image          (wraps from the last to the first)
 ///   52 81 44     previous image
 ///   52 00        data-in, 8 bytes: two little-endian u32, bootloader then
@@ -2512,12 +2554,10 @@ fn stage_folder(n: Option<u16>, dir: Option<discimg::slot::Step>) -> bool {
         (None, None) => None,
     };
     let Some(found) = found else { return false };
-    // A folder with nothing to mount would empty the drive and leave the
-    // button dead (F1: it is off while no medium is mounted). `step_folder`
-    // already vets its pick; a number named outright is vetted here.
-    if n.is_some() && !crate::gdi::folder_has_image(blocks, found.as_str()) {
-        return false;
-    }
+    // A number named outright is not vetted for an image: stock accepts a
+    // folder with nothing to mount and reports no medium (D12), and the
+    // button still works from there (`EMPTY_SLOT`). `step_folder` skips
+    // such folders, as before.
     let name = unsafe { &mut *core::ptr::addr_of_mut!(MOUNT_NAME) };
     name.clear();
     let _ = name.push_str(found.as_str());
@@ -2548,23 +2588,14 @@ async fn handle_gdemu_cmd(
                 }
                 return;
             }
-            // Resolve first: an unknown number, or a folder with no image in
-            // it, must not disturb what is mounted.
+            // Resolve first: an unknown number must not disturb what is
+            // mounted.
             if !stage_folder(Some(n), None) {
-                warn!("{}: GDEMU mount: no mountable folder numbered {}", label, n);
+                warn!("{}: GDEMU mount: no folder numbered {}", label, n);
                 finish_illegal(dev, state);
                 return;
             }
-            let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
-            let ok = mount_named(state, label, name.as_str()).await;
-            // `0x52` stages through the same buffer as MOUNT_NAME: leave
-            // nothing behind for a later WSESSION_END 2 to mount.
-            clear_mount_name();
-            if ok {
-                finish_ok(dev);
-            } else {
-                finish_illegal(dev, state);
-            }
+            gdemu_mount_staged(dev, state, label).await;
         }
         GDEMU_STEP => {
             let dir = match packet[2] {
@@ -2580,16 +2611,7 @@ async fn handle_gdemu_cmd(
                 finish_illegal(dev, state);
                 return;
             }
-            let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
-            let ok = mount_named(state, label, name.as_str()).await;
-            // `0x52` stages through the same buffer as MOUNT_NAME: leave
-            // nothing behind for a later WSESSION_END 2 to mount.
-            clear_mount_name();
-            if ok {
-                finish_ok(dev);
-            } else {
-                finish_illegal(dev, state);
-            }
+            gdemu_mount_staged(dev, state, label).await;
         }
         GDEMU_VERSION => {
             let (ma, mi, pa) = GDEMU_COMPAT_VERSION;
@@ -2607,6 +2629,18 @@ async fn handle_gdemu_cmd(
             finish_illegal(dev, state);
         }
     }
+}
+
+/// Mount the folder `stage_folder` put in `MOUNT_NAME` for `0x52`. Accepted
+/// whether or not an image mounts (stock answers `52 82` to a folder with
+/// nothing to mount with status 0x50, D12); the swap window tells the host.
+async fn gdemu_mount_staged(dev: &IdeDevice, state: &mut DeviceState, label: &'static str) {
+    let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
+    let _ = mount_named(state, label, name.as_str()).await;
+    // `0x52` stages through the same buffer as MOUNT_NAME: leave nothing
+    // behind for a later WSESSION_END 2 to mount.
+    clear_mount_name();
+    finish_ok(dev);
 }
 
 /// Sub-commands of [`OGDM_IMAGE_CTL`].
@@ -2708,7 +2742,7 @@ async fn stream_from_sd(
         warn!("stream_from_sd: SD read failed");
         dev.set_irr(0x03);
         dev.set_error(ERR_MEDIUM);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
+        dev.set_status_intrq(STATUS_CHECK);
         return true;
     }
 
@@ -2950,7 +2984,7 @@ async fn stream_from_sd(
         // The card failed mid-stream: the host got fewer sectors than it
         // asked for and must be told so, as the PIO path does. This used to
         // complete with a clean status (R89 A2).
-        dev.complete(ERR_MEDIUM, STATUS_IDLE_ERR);
+        dev.complete(ERR_MEDIUM, STATUS_CHECK);
     } else {
         dev.complete(0, STATUS_IDLE);
     }
@@ -3094,7 +3128,13 @@ async fn stream_pio_from_sd(
             unsafe { STREAM_OK = true };
         }
     } else {
-        dev.complete(if sd_failed { ERR_MEDIUM } else { ERR_ABRT }, STATUS_IDLE_ERR);
+        // A card failure is MEDIUM ERROR in stock's CHECK form (D5); a
+        // transfer the host stopped draining is an ATA abort, as before.
+        if sd_failed {
+            dev.complete(ERR_MEDIUM, STATUS_CHECK);
+        } else {
+            dev.complete(ERR_ABRT, STATUS_IDLE_ERR);
+        }
     }
     info!("CD_READ complete ({} bytes)", delivered);
     sd_failed
@@ -3707,6 +3747,9 @@ async fn handle_disk_write(
         dev.ack_command();
         return;
     }
+    // The host is using the card: from here the empty drive is an eject, and
+    // the button stays off until something mounts (`swap_allowed`).
+    EMPTY_SLOT.store(false, core::sync::atomic::Ordering::Relaxed);
     if snap.device & 0x40 == 0 {
         warn!("{}: disk write in CHS mode, refusing", label);
         wsession().write_refused(req_lba, count);
@@ -3916,7 +3959,7 @@ async fn handle_disk_write(
 /// The ATAPI path folds this into `send_data_in`; plain ATA commands like
 /// IDENTIFY DEVICE need the same ending without the packet-protocol byte
 /// count / interrupt-reason bookkeeping.
-async fn finish_pio_in(dev: &IdeDevice) {
+async fn finish_pio_in(dev: &IdeDevice, packet: bool) {
     if wait_host(dev, || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
         == Err(Stall::Timeout)
     {
@@ -3925,6 +3968,12 @@ async fn finish_pio_in(dev: &IdeDevice) {
     // No completion over a reset or the host's next command (R89 A-b).
     if dev.aborted() {
         return;
+    }
+    // The packet device's IDENTIFY PACKET ends with interrupt reason 3 (C/D
+    // and I/O, status phase), as stock shows; on the disk this register is
+    // the sector count and is left alone.
+    if packet {
+        dev.set_irr(0x03);
     }
     dev.complete(0, STATUS_IDLE);
 }

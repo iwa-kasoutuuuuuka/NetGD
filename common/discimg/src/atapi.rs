@@ -187,6 +187,11 @@ pub fn head_position<T: TrackInfo>(
 pub const DRIVE_PAUSE: u8 = 0x01;
 pub const DRIVE_STANDBY: u8 = 0x02;
 pub const DRIVE_PLAY: u8 = 0x03;
+/// Busy, tray open, no disc (flycast `gdromv3.h`): what SECNR shows through
+/// the swap window and after it with nothing mounted ([`swap_drive_status`]).
+pub const DRIVE_BUSY: u8 = 0x00;
+pub const DRIVE_OPEN: u8 = 0x06;
+pub const DRIVE_NODISC: u8 = 0x07;
 
 /// Disc format, already in the high nibble (SECNR, REQ_STAT byte 1).
 /// Stock GDEMU 6.0 reports CD-ROM XA for a CDI (R117).
@@ -286,6 +291,105 @@ pub fn req_mode_reply(offset: u8, len: u8) -> Option<&'static [u8]> {
 pub const ASC_NO_MEDIUM: (u8, u8) = (0x3A, 0x00);
 pub const ASC_BECOMING_READY: (u8, u8) = (0x04, 0x01);
 pub const ASC_MEDIUM_CHANGED: (u8, u8) = (0x28, 0x00);
+
+/// Sense keys NetGD reports.
+pub const SENSE_NOT_READY: u8 = 0x02;
+pub const SENSE_MEDIUM_ERROR: u8 = 0x03;
+pub const SENSE_ILLEGAL_REQUEST: u8 = 0x05;
+pub const SENSE_UNIT_ATTENTION: u8 = 0x06;
+
+/// Status register of every CHECK CONDITION on stock GDEMU 6.0 (D5, records
+/// 03-07): DSC | ERR, with DRDY clear.
+pub const CHECK_STATUS: u8 = 0x11;
+
+/// Error register of a CHECK CONDITION on stock GDEMU 6.0 (D5): the sense key
+/// in the high nibble and nothing else (no ABRT bit): 0x20 not ready, 0x50
+/// illegal request, 0x60 unit attention.
+pub const fn check_error(sense_key: u8) -> u8 {
+    (sense_key & 0x0F) << 4
+}
+
+/// The NOT READY window after an image switch, as stock GDEMU 6.0 shows it
+/// (D13, `stock_20261121_04_img3-7.txt` and every other switch record):
+/// [`SwapPhase::Open`] for the first `open_ms` (2/3A/00, "no medium"), then
+/// [`SwapPhase::Detect`] for `detect_ms` (2/04/01, "becoming ready"), then
+/// [`SwapPhase::Done`]: one UNIT ATTENTION 6/28/00 and READY with an image,
+/// 2/3A/00 for good without one. 150 + 150 ms is what was measured (READY at
+/// 331-351 ms with 20 ms polls); the probe card's GDEMU.INI set
+/// `open_time = detect_time = 150`, so these are also the INI's values there.
+pub const SWAP_OPEN_MS: u32 = 150;
+pub const SWAP_DETECT_MS: u32 = 150;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwapPhase {
+    /// Tray shown open: NOT READY, no medium.
+    Open,
+    /// Disc being detected: NOT READY, becoming ready.
+    Detect,
+    /// The window is over.
+    Done,
+}
+
+/// The phase `elapsed_ms` after a switch.
+pub fn swap_phase(elapsed_ms: u32, open_ms: u32, detect_ms: u32) -> SwapPhase {
+    if elapsed_ms < open_ms {
+        SwapPhase::Open
+    } else if elapsed_ms - open_ms < detect_ms {
+        SwapPhase::Detect
+    } else {
+        SwapPhase::Done
+    }
+}
+
+/// ASC/ASCQ of a NOT READY answer in `phase` (`Done` = no medium after it).
+pub fn not_ready_asc(phase: SwapPhase) -> (u8, u8) {
+    match phase {
+        SwapPhase::Detect => ASC_BECOMING_READY,
+        _ => ASC_NO_MEDIUM,
+    }
+}
+
+/// SECNR's drive status nibble for `phase`; `medium` = an image mounted.
+/// gdprobe does not record SECNR, so stock's value here is not known: open
+/// and busy are the GD-ROM's own codes for a tray cycle, and a disc that has
+/// just come up is paused, which is what stock's REQ_STAT byte 0 says after a
+/// switch (01, D2) and what the FPGA's reset value 0x81 holds.
+pub fn swap_drive_status(phase: SwapPhase, medium: bool) -> u8 {
+    match phase {
+        SwapPhase::Open => DRIVE_OPEN,
+        SwapPhase::Detect => DRIVE_BUSY,
+        SwapPhase::Done if medium => DRIVE_PAUSE,
+        SwapPhase::Done => DRIVE_NODISC,
+    }
+}
+
+/// How a command is answered while the drive is not ready (swap window, or
+/// no medium).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotReadyAnswer {
+    /// As usual.
+    Serve,
+    /// CHECK CONDITION, NOT READY (key 2, ASC from [`not_ready_asc`]).
+    NotReady,
+    /// CHECK CONDITION, ILLEGAL REQUEST (key 5).
+    IllegalRequest,
+}
+
+/// Stock GDEMU 6.0 with no medium (records 04 img=6/7, `06_gdi-variants`):
+/// TEST UNIT READY, REQ_STAT, GET_TOC (both areas), REQ_SES 0 and GET_SCD
+/// are NOT READY; REQ_SES 1 and up are ILLEGAL REQUEST; REQ_MODE, REQ_ERROR
+/// and `52 00` answer normally. Not in the records: CD_READ and CD_PLAY are
+/// NOT READY (NetGD's answer while ejected); everything else is served
+/// (REQUEST SENSE, `0x52` -- the switch is what leaves the state --, NetGD's
+/// `0xE0`, START/STOP, SET_MODE, CD_SEEK, the security commands).
+pub fn not_ready_answer(cdb: &[u8; 12]) -> NotReadyAnswer {
+    match cdb[0] {
+        0x00 | 0x10 | 0x14 | 0x20 | 0x30 | 0x31 | 0x40 => NotReadyAnswer::NotReady,
+        0x15 if cdb[2] == 0 => NotReadyAnswer::NotReady,
+        0x15 => NotReadyAnswer::IllegalRequest,
+        _ => NotReadyAnswer::Serve,
+    }
+}
 
 /// 10-byte REQ_ERROR reply (SPI): byte 0 = 0xF0, byte 2 low nibble = sense
 /// key, bytes 8/9 = ASC/ASCQ. Stock GDEMU 6.0 sends `F0 00 ...` with nothing

@@ -1,4 +1,4 @@
-use discimg::slot::{number_of, step_accepted, Nearest, Step};
+use discimg::slot::{number_of, step_accepted, swap_allowed, Nearest, Step};
 
 #[test]
 fn number_of_accepts_two_to_four_digits() {
@@ -134,4 +134,32 @@ fn step_accepted_no_slots_or_no_current() {
     assert_eq!(step_ok(Some(1), Step::Next, &[], &[]), None);
     assert_eq!(step_ok(None, Step::Next, &[4, 2, 9], &[9]), Some(9));
     assert_eq!(step_ok(None, Step::Prev, &[4, 2, 9], &[2, 4]), Some(4));
+}
+
+#[test]
+fn stepping_from_an_image_less_current_folder() {
+    // `52 82 07` onto a folder with no image leaves 07 as the current number
+    // (stock: accepted, no medium). The next step must leave it, both ways,
+    // and skip other image-less folders on the way (R18 item 1: the old
+    // firmware could not move past such a folder).
+    let all = [1, 2, 3, 4, 5, 6, 7];
+    let ok = [1, 2, 3, 4, 5, 6];
+    assert_eq!(step_ok(Some(7), Step::Next, &all, &ok), Some(1));
+    assert_eq!(step_ok(Some(7), Step::Prev, &all, &ok), Some(6));
+    let all = [1, 3, 7, 8, 9];
+    assert_eq!(step_ok(Some(7), Step::Next, &all, &[1, 3, 9]), Some(9));
+    assert_eq!(step_ok(Some(8), Step::Prev, &all, &[1, 3, 9]), Some(3));
+}
+
+#[test]
+fn swap_allowed_while_empty_but_not_while_released() {
+    // Mounted: the button and the IDE task's pending swap work.
+    assert!(swap_allowed(true, false));
+    // No medium because the selected folder has nothing to mount: still the
+    // firmware's card, so the button has to work (it is the only way back
+    // short of the host).
+    assert!(swap_allowed(false, true));
+    // Ejected for the host (START/STOP eject, write session, or a disk write
+    // seen while empty): the host may hold a CMD25 open, hands off.
+    assert!(!swap_allowed(false, false));
 }

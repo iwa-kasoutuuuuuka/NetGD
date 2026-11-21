@@ -77,10 +77,10 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(self.one(3, 'REQ_SES_0')['data'], '02000100b4aa')
         self.assertEqual(self.one(3, 'GET_TOC_1')['data'][-8:], '4100b4aa')
         self.assertEqual(self.one(3, 'REQ_SES_1')['data'], '020001000096')
-        # a GDI has no session 2 / 3: ABRT
+        # a GDI has no session 2 / 3: CHECK, ILLEGAL REQUEST in stock's form (status 0x11, err 0x50; D5)
         for s in (2, 3):
             e = self.one(3, 'REQ_SES_%d' % s)
-            self.assertEqual((e['rc'], e['status'], e['err'], e['bytes']), ('check', '0x51', '0x04', '0'))
+            self.assertEqual((e['rc'], e['status'], e['err'], e['bytes']), ('check', '0x11', '0x50', '0'))
         # REQ_MODE as the firmware answers it (the stock 32-byte block, R117), REQ_ERROR F0 + no sense, version 5.20.0
         self.assertEqual(self.one(3, 'REQ_MODE_18_8')['data'], '52657620362e3432')
         self.assertEqual(self.one(3, 'REQ_MODE_0_10')['data'], '0000000000b419000008')
@@ -108,23 +108,58 @@ class ExpectTest(unittest.TestCase):
         self.assertIn(' 0 mismatch', out)
         self.assertEqual(rc, 0, out)
 
-    def test_empty_folder_07_is_refused_and_media_untouched(self):
+    def test_empty_folder_07_is_accepted_and_reports_no_medium(self):
+        # stock_20261121_04_img3-7.txt img=7 (D12): accepted, the swap window, then no medium for good
         cmd = self.one(7, 'SW_CMD')
-        self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('check', '0x51', '0x54'))   # ILLEGAL REQUEST
+        self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('ok', '0x50', '0x00'))
         polls = [e for e in self.entries if e['img'] == 7 and e['probe'] == 'SW_POLL']
-        self.assertEqual([p['rc'] for p in polls], ['ok'])            # no UNIT ATTENTION: nothing was mounted
-        # the battery under img=7 is image 06's, UNIT ATTENTION already gone
-        self.assertEqual(self.one(7, 'TUR_W0')['rc'], 'ok')
-        self.assertEqual(self.one(7, 'GET_TOC_0')['data'], self.one(6, 'GET_TOC_0')['data'])
+        self.assertEqual([(p['rc'], p['status'], p['err'], p['sense']) for p in polls],
+                         [('check', '0x11', '0x20', '2/3a/00'), ('check', '0x11', '0x20', '2/04/01'),
+                          ('check', '0x11', '0x20', '2/3a/00')])
+        self.assertEqual(self.one(7, 'SW_RESULT')['rc'], 'timeout')
+        # the no-medium battery: warmup gives up, the disc commands are CHECK, no reads
+        self.assertEqual([self.one(7, 'TUR_W%d' % i)['err'] for i in range(8)], ['0x20'] * 8)
+        self.assertEqual(self.one(7, 'REQ_ERROR_W0')['data'], 'f0000200000000003a00')
+        self.assertEqual(self.one(7, 'WARMUP')['ready'], '0')
+        for probe, err in (('TUR', '0x20'), ('REQ_STAT', '0x20'), ('GET_TOC_0', '0x20'), ('GET_TOC_1', '0x20'),
+                           ('REQ_SES_0', '0x20'), ('REQ_SES_1', '0x50'), ('REQ_SES_2', '0x50'), ('REQ_SES_3', '0x50'),
+                           ('GET_SCD_0', '0x20'), ('GET_SCD_1', '0x20')):
+            e = self.one(7, probe)
+            self.assertEqual((e['rc'], e['status'], e['err'], e['bytes']), ('check', '0x11', err, '0'), probe)
+        for probe in ('REQ_MODE_0_10', 'REQ_MODE_18_8', 'REQ_MODE_0_32', 'REQ_ERROR', 'GDEMU_VERSION'):
+            self.assertEqual(self.one(7, probe)['rc'], 'ok', probe)
+        self.assertEqual(self.one(7, 'REQ_ERROR')['data'], 'f0' + '00' * 9)
+        self.assertFalse([e for e in self.entries if e['img'] == 7 and e['probe'] in ('IP_READ', 'HASH', 'TP_000')])
+        # a later switch to a folder with an image is a normal one (02 of the test card has no image either)
+        text = expect_sd.predict(self.card, images=[7, 3], return_to=0)
+        _, entries = compare.parse_record(text)
+        polls = [e for e in entries if e['img'] == 3 and e['probe'] == 'SW_POLL']
+        self.assertEqual([p['sense'] for p in polls], ['2/3a/00', '2/04/01', '6/28/00', 'none'])
+        self.assertEqual([e['ready'] for e in entries if e['probe'] == 'WARMUP'], ['0', '1'])
 
-    def test_mount_gets_unit_attention_then_ready(self):
+    def test_mount_gets_the_swap_window_then_unit_attention_then_ready(self):
+        # stock (D13): 2/3A/00 from t=0, 2/04/01 from ~150 ms, 6/28/00 once at ~300 ms, then READY
         polls = [e for e in self.entries if e['img'] == 3 and e['probe'] == 'SW_POLL']
-        self.assertEqual([(p['rc'], p['err']) for p in polls], [('check', '0x60'), ('ok', '0x00')])
-        self.assertEqual(polls[0]['sense'], '6/28/00')   # medium changed (D7)
+        self.assertEqual([(p['rc'], p['status'], p['err'], p['sense']) for p in polls],
+                         [('check', '0x11', '0x20', '2/3a/00'), ('check', '0x11', '0x20', '2/04/01'),
+                          ('check', '0x11', '0x60', '6/28/00'), ('ok', '0x50', '0x00', 'none')])
+        self.assertEqual(self.one(3, 'SW_RESULT')['rc'], 'ok')
+        self.assertTrue(all(p['t_ms'] == '-' for p in polls))      # time is not simulated
+
+    def test_missing_folder_is_refused_and_media_untouched(self):
+        text = expect_sd.predict(self.card, images=[3, 42], return_to=0)
+        _, entries = compare.parse_record(text)
+        one = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe][0]
+        cmd = one(42, 'SW_CMD')
+        self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('check', '0x11', '0x50'))   # ILLEGAL REQUEST
+        polls = [e for e in entries if e['img'] == 42 and e['probe'] == 'SW_POLL']
+        self.assertEqual([p['rc'] for p in polls], ['ok'])            # nothing changed: no window, no UA
+        self.assertEqual(one(42, 'TUR_W0')['rc'], 'ok')               # image 03 still there
+        self.assertEqual(one(42, 'GET_TOC_0')['data'], one(3, 'GET_TOC_0')['data'])
 
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
-        want = 'img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x51 err=0x04 irr=0x03 bytes=0 us=-'
+        want = 'img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 us=-'
         self.assertIn(want, self.text)
         stock = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 '
                  'bytes=6 data=01000300b05e us=1234\n')

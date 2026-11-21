@@ -10,20 +10,23 @@
 
 | 項目 | 予測の内容 |
 |---|---|
-| レジスタ | 正常完了 = `status=0x50 err=0x00 irr=0x03`。CHECK は `status=0x51`（`err` は下の表） |
-| 切替直後 | 最初のコマンドは UNIT ATTENTION（`status=0x51 err=0x60`）、REQ_ERROR は `F0 00 06 …`（センスキー 6、ASC は持たない）なので `sense=6/00/00`。2 回目の TUR で READY |
-| REQ_MODE | 純正の 32 バイト（`00 00 00 00 00 b4 19 00 00 08` + `SE      ` + `Rev 6.42` + `990316`、R117）の窓。32 バイトを越える窓と長さ 0 は ABRT（`err=0x04`） |
-| REQ_ERROR | `F0`、バイト 2 = 保留中のセンスキー、残り 0（R117 の純正どおり。ASC/ASCQ は持たない） |
+| レジスタ | 正常完了 = `status=0x50 err=0x00 irr=0x03`。CHECK は純正どおり `status=0x11`、`err` = センスキー << 4（0x20 NOT READY、0x50 ILLEGAL REQUEST、0x60 UNIT ATTENTION。D5） |
+| 切替直後 | 切替の窓（D13）：TUR は NOT READY `2/3a/00` → `2/04/01` → UNIT ATTENTION `6/28/00` を 1 回 → READY。`SW_POLL` はこの 4 行（時刻は `-`） |
+| REQ_MODE | 純正の 32 バイト（`00 00 00 00 00 b4 19 00 00 08` + `SE      ` + `Rev 6.42` + `990316`、R117）の窓。32 バイトを越える窓と長さ 0 は ILLEGAL REQUEST（`err=0x50`） |
+| REQ_ERROR | `F0`、バイト 2 = 保留中のセンスキー、バイト 8・9 = ASC/ASCQ（D7） |
 | REQ_STAT / GET_SCD | 待機状態（FAD 150、トラック 1）。REQ_STAT バイト 1 の上位 = ディスク形式（CDI 0x2、GDI 0x8。SECNR と同じ）、GET_SCD 形式 1 の位置はバイナリ FAD、形式 0 は Q = 0x40・ほか 0 |
-| REQ_SES | `req_ses_reply` どおり（バイト 0 = ドライブ状態、待機中は 0x02）。GDI のセッション 2・3、2 トラック CDI のセッション 2 は ABRT（`err=0x04`、`bytes=0`） |
+| REQ_SES | `req_ses_reply` どおり（バイト 0 = ドライブ状態、待機中は 0x02）。範囲外のセッションは ILLEGAL REQUEST（`status=0x11 err=0x50`、`bytes=0`） |
 | `52 00` | `00 00 00 00 00 00 20 05`（バージョン 5.20.0） |
-| CD_READ | CDB のバイト 1 は見ない。常に 1 セクタ 2048 バイト（`ssz=2048`、`0x10` でも 2352 にならない）。データは `file_offset + (LBA − 開始 LBA) × セクタ長 + 16`（2352）/ `+ 8`（2336）の 2048 バイト。要求がトラックの残りを越えると ABRT（`err=0x04`） |
-| `52 82 n`（n が空フォルダ） | ILLEGAL REQUEST（`status=0x51 err=0x54`）。**メディアは変わらない**ので、そのあとの `img=7` の試験は直前のイメージの答え（UNIT ATTENTION は消費済み）になる |
+| CD_READ | CDB のバイト 1 は見ない。常に 1 セクタ 2048 バイト（`ssz=2048`、`0x10` でも 2352 にならない）。データは `file_offset + (LBA − 開始 LBA) × セクタ長 + 16`（2352）/ `+ 8`（2336）の 2048 バイト。要求がトラックの残りを越えると ILLEGAL REQUEST（`err=0x50`、`sense=5/00/00`） |
+| `52 82 n`（n が空フォルダ） | 純正どおり受け付ける（`status=0x50`、D12）。同じ窓のあと `2/3a/00` のまま（`SW_RESULT rc=timeout`）。そのあとの `img=7` は「ディスクなし」の試験：TUR・REQ_STAT・GET_TOC・REQ_SES_0・GET_SCD は `0x11/0x20`、REQ_SES_1〜3 は `0x11/0x50`、REQ_MODE・REQ_ERROR・`52 00` は通常どおり、読み出しなし |
+| `52 82 n`（n のフォルダが無い） | ILLEGAL REQUEST（`status=0x11 err=0x50`）。メディアは変わらない（純正は未調査。NetGD の方針） |
 
 予測できない項目は `-` で書く：`us=`、`t_ms=`、`poll=`、`polls=`、`changes=`、`min_us=`、`max_us=`、`kib_s=`。`compare.py` は `-` を数値として読めないので、
 時間の比較をしない（差分にも注記にもならない）。
 
-予測しないもの：`img=0`（電源投入時にマウントされている dcload-ip のディスク）、`IDENTIFY_PACKET`、`SW_POLL` の回数・時刻（NetGD は 2 回で READY と仮定。純正はもっと多いはず）。
+予測しないもの：`img=0`（電源投入時にマウントされている dcload-ip のディスク）、`IDENTIFY_PACKET`、`SW_POLL` の回数・時刻。
+時間は模擬しない：窓の各段階（150 ms + 150 ms、`discimg::atapi::swap_phase`）を「20 ms ごとに TUR を送る gdprobe ならすべての段階を見る」として、
+状態が変わる行の並びだけを書く。段階より粗い間隔のポーリングや、窓の中で TUR 以外を送る場合は表せない。
 
 ## コマンド
 
@@ -42,17 +45,18 @@ python tools/netgd-expect/expect_sd.py E:\sdcard_out --images 3,4,5,6,7 --return
 
 | 引数 | 意味 |
 |---|---|
-| `--image FILE` | `.gdi` または `.cdi`（必須。`--empty-folder` のときは省略可） |
+| `--image FILE` | `.gdi` または `.cdi`（必須。`--empty-folder`・`--missing-folder` のときは省略可） |
 | `--img N` | 記録の `img=` に書く番号（SD のフォルダ番号。既定 0） |
 | `--label L` / `--header` / `--end` | ヘッダ行（`# gdprobe ... label=L`）、末尾の `END` 行を付ける |
 | `--switch` | `52 82 N` の `SW_CMD` / `SW_POLL` / `SW_RESULT` を先頭に付け、UNIT ATTENTION は消費済みとして試験を書く。無しなら「起動直後の最初の試験」（`TUR_W0` が UNIT ATTENTION、`REQ_ERROR_W0`、`TUR_W1`）。`--ua` / `--no-ua` で明示 |
-| `--empty-folder` | そのフォルダに画像が無い（`52 82 N` を拒否）。`--image` を一緒に渡すと、直前にマウントされていたイメージ |
+| `--empty-folder` | そのフォルダはあるが画像が無い（受け付けて「ディスクなし」。`--image` は無視） |
+| `--missing-folder` | その番号のフォルダが無い（`52 82 N` を拒否）。`--image` を一緒に渡すと、直前にマウントされていたイメージ（無ければ「ディスクなし」） |
 | `--sw-only` | `SW_*` だけ（`return_to` 用） |
 | `--ip-fad N`、`--cdread-flags 0x24` | gdprobe の同名の設定（既定 自動判定 / `0x24`） |
 | `--no-flags-test`、`--no-throughput`、`--tp-batches N`、`--tp-sectors N`、`--no-seek`、`--seek-n N`、`--seek-span N`、`--no-reads` | 設定の `cdread_flags_test` / `throughput` / `tp_batches` / `tp_sectors` / `seek` / `seek_n` / `seek_span` に対応（既定は gdprobe と同じ） |
 
 `expect_sd.py OUTDIR`：`OUTDIR` の数字のフォルダを `03` 以降を昇順に（`--images` で変更）処理する。`disc.gdi` / `*.gdi` / `*.cdi` があればマウント、無ければ
-空フォルダ扱い（`07`）。`--return-to`（既定 `02` があれば 2）で最後の切替の `SW_*` 行を書き、`END` で終わる。`--bin` か環境変数 `NETGD_EXPECT_BIN` に
+空フォルダ扱い（`07`）、フォルダ自体が無ければ拒否扱い。`--return-to`（既定 `02` があれば 2）で最後の切替の `SW_*` 行を書き、`END` で終わる。`--bin` か環境変数 `NETGD_EXPECT_BIN` に
 ビルド済みの実行ファイルを渡すと cargo を使わない。ほかの引数（`--no-seek` など）は `example expect` にそのまま渡す。
 別の作業が `cargo` を動かしていてロックで待たされるときは `CARGO_TARGET_DIR` を別の場所にする。
 
@@ -71,15 +75,15 @@ python tools/netgd-expect/expect_sd.py E:\sdcard_out --images 3,4,5,6,7 --return
 
    | 差分の出る行 | 決めること |
    |---|---|
-   | `img=4` の `REQ_SES_2`（NetGD は ABRT、純正が 6 バイトを返せば差分） | D-1：2 トラック CDI の REQ_SES(2)、`IP_READ` の位置 |
+   | `img=4` の `REQ_SES_2`（純正が 6 バイトを返せば差分） | D-1：2 トラック CDI の REQ_SES(2)、`IP_READ` の位置 |
    | `GET_SCD_1`、`GET_SCD_0` の `data=` | D-2（format 1 の中身）、D-5（R〜W ビット） |
    | `REQ_STAT` の `data=`（バイト 1 の Disc Format など） | D-3 |
    | `img=3`・`img=6` の `REQ_SES_0`（セッション数）、`REQ_SES_2`・`_3` | D-4（GDI のセッション数 1 か 2 か） |
    | `GET_TOC_*` の lead-out・CTRL、CDI の lead-out、`REQ_SES_0` の最初のバイト | D-5 |
    | `REQ_MODE_*`、`REQ_ERROR`、`GDEMU_VERSION` | 純正で確認済みの値のはず。差分が出たら純正のバージョン違いを疑う |
    | `CDREAD_FLAGS` の `ssz` / `crc`（`0x10`） | NetGD は 2048 固定。純正が `0x10` で 2352 を返すなら生セクタ読みを足すか決める |
-   | `img=7` の `SW_*` と、その後の行 | 空フォルダへの切替：純正が READY にならない・別の SENSE を返すなど（R18 の欠陥 1） |
-   | `SW_POLL` | NetGD は即 READY の想定。純正が段階を踏めば差分（NetGD が遅れて READY になるべきか） |
+   | `img=7` の `SW_*` と、その後の行 | 空フォルダへの切替（D12。いまは純正に合わせてある） |
+   | `SW_POLL` | 切替の窓の段階（D13。いまは純正に合わせてある） |
 
    差分が無い行は「いまの NetGD のままで純正と同じ」。`TIMING` の注記は出ない（予測側が `-`）ので、速度の比較は純正の記録同士・NetGD 実機の記録同士で行う。
 4. NetGD を書き込んだあと、実機の記録（`label=netgd`）と予測を比べると、**ファームが予測どおりに動いたか**の確認にもなる
@@ -87,11 +91,11 @@ python tools/netgd-expect/expect_sd.py E:\sdcard_out --images 3,4,5,6,7 --return
 
 ## 限界
 
-- 予測は **ファームのソース（HEAD の `ide.rs`）の読み解き**であって、実機では確認していない。とくに、切替直後の UNIT ATTENTION の出方、
-  CD_READ が範囲外で返す CHECK のレジスタ値（`status=0x51 err=0x04`）、`REQ_MODE_0_32` の `irr`（コード上は直前のコマンドの値のまま = `0x03` と仮定）は読みの結果。
+- 予測は **ファームのソース（HEAD の `ide.rs`）の読み解き**であって、実機では確認していない。とくに、切替の窓の段階と UNIT ATTENTION の出方、
+  CD_READ が範囲外で返す CHECK（`status=0x11 err=0x50`）、`REQ_MODE_0_32` の `irr`（コード上は直前のコマンドの値のまま = `0x03` と仮定）は読みの結果。
 - GDI は `disc.gdi` の隣のトラックファイルの大きさでセクタ数を決める（ファーム同様）。トラックファイルが足りない・短いと、予測は CHECK になる。
 - 純正が mksdcard の CDI を受け付けない場合、純正の記録の `img=4/5` は切替失敗の行になり、予測と大きく違う（それ自体が調査結果）。
-- READY までの時間と `SW_POLL` の回数は予測できない（`-` と、2 回の POLL を置いてあるだけ）。
+- READY までの時間と `SW_POLL` の回数は予測しない（`-`。段階ごとに 1 行を置いてあるだけ）。
 
 ## テスト
 
@@ -101,7 +105,7 @@ GDPROBE_SAMPLE=<C ハーネスの記録> python tools/netgd-expect/test_expect.p
 ```
 
 確認すること：予測どうしの `compare.py` が差分 0、`compare.py --manifest`（mksdcard の生成コードでセクタを再計算）で `HASH` が全部一致（不一致 0）、
-`tests/atapi.rs` と同じ REQ_STAT / GET_SCD / TOC / REQ_SES のバイト、空フォルダ 07 の `SW_CMD`（`err=0x54`）、`CDREAD_FLAGS` 4 行が同じ内容、
+`tests/atapi.rs` と同じ REQ_STAT / GET_SCD / TOC / REQ_SES のバイト、空フォルダ 07 の切替（受け付け・窓・ディスクなしの試験）、無いフォルダの拒否（`err=0x50`）、切替の窓の 4 行、`CDREAD_FLAGS` 4 行が同じ内容、
 `--only-common` が片側だけの行を無視すること。
 
 ## ファイル

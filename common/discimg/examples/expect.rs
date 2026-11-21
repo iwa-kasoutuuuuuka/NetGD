@@ -1,7 +1,7 @@
 //! Predict what NetGD's firmware would answer to the gdprobe battery, in gdprobe's record format.
 //!
 //!     cargo run --example expect -- --image disc.gdi|disc.cdi [--img N] [--label netgd-expected]
-//!                                   [--switch] [--empty-folder] [--no-ua] [--header] [--end]
+//!                                   [--switch] [--empty-folder] [--missing-folder] [--no-ua] [--header] [--end]
 //!                                   [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test]
 //!                                   [--no-throughput] [--tp-batches 64] [--tp-sectors 16]
 //!                                   [--no-seek] [--seek-n 16] [--seek-span 50000] [--no-reads] [--sw-only]
@@ -9,9 +9,16 @@
 //! What it does: loads the image the way `mcu/netgd` does (the same `discimg` parsers, the same
 //! boot-area / session rules, GDI track sizes from the files) and answers each probe of tools/gdprobe
 //! (`probes.c`) with the same `discimg::atapi` builders the firmware's `ide.rs` calls, wrapped the way
-//! `handle_packet` wraps them: status / error / interrupt-reason registers, REQ_MODE contents, REQ_ERROR
-//! (`F0`, the pending sense key and its ASC/ASCQ), the first command after a mount answered with UNIT ATTENTION, CD_READ ignoring byte 1 of
-//! the CDB and always returning 2048 bytes per sector.
+//! `handle_packet` wraps them: status / error / interrupt-reason registers (a CHECK CONDITION is status 0x11,
+//! error = sense key << 4, as stock), REQ_MODE contents, REQ_ERROR (`F0`, the pending sense key and its
+//! ASC/ASCQ), the swap window after `52 82` (no medium, becoming ready, then UNIT ATTENTION), the answers with
+//! no medium (`atapi::not_ready_answer`), CD_READ ignoring byte 1 of the CDB and always returning 2048 bytes
+//! per sector.
+//!
+//! Time is not simulated. The window's phases (`atapi::swap_phase`, 150 + 150 ms) are written as the sequence
+//! of SW_POLL state changes a poller that samples every phase sees (gdprobe polls every ~20 ms); when each
+//! change happens (`t_ms`) is left `-`. A poller slower than a phase, or commands other than TUR inside the
+//! window, are not modelled.
 //!
 //! Fields NetGD cannot predict are written as `-`: every `us=`, `t_ms=`, `polls=`, `changes=`, `poll=`,
 //! `min_us=`, `max_us=`, `kib_s=` (compare.py skips a `-`). The record has the same line order and keys as
@@ -39,6 +46,7 @@ struct Opts {
     label: String,
     switch: bool,
     empty_folder: bool,
+    missing_folder: bool,
     ua: Option<bool>,
     header: bool,
     end: bool,
@@ -57,7 +65,8 @@ struct Opts {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: expect --image <disc.gdi|disc.cdi> [--img N] [--label L] [--switch] [--empty-folder] [--no-ua]\n\
+        "usage: expect --image <disc.gdi|disc.cdi> [--img N] [--label L] [--switch] [--empty-folder]\n\
+         \x20             [--missing-folder] [--no-ua]\n\
          \x20             [--header] [--end] [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test]\n\
          \x20             [--no-throughput] [--tp-batches N] [--tp-sectors N] [--no-seek] [--seek-n N]\n\
          \x20             [--seek-span N] [--no-reads] [--sw-only]"
@@ -80,6 +89,7 @@ fn parse_args() -> Opts {
         label: "netgd-expected".into(),
         switch: false,
         empty_folder: false,
+        missing_folder: false,
         ua: None,
         header: false,
         end: false,
@@ -104,6 +114,7 @@ fn parse_args() -> Opts {
             "--label" => o.label = val(),
             "--switch" => o.switch = true,
             "--empty-folder" => o.empty_folder = true,
+            "--missing-folder" => o.missing_folder = true,
             "--no-ua" => o.ua = Some(false),
             "--ua" => o.ua = Some(true),
             "--header" => o.header = true,
@@ -208,7 +219,7 @@ impl Disc {
         atapi::track_for_lba(&self.tracks, lba)
     }
 
-    /// `handle_cd_read` + `fill_cd_read_buf_*`: Some(count * 2048 bytes) or None = ABRT.
+    /// `handle_cd_read` + `fill_cd_read_buf_*`: Some(count * 2048 bytes) or None = ILLEGAL REQUEST.
     fn cd_read(&self, fad: u32, count: u32) -> Option<Vec<u8>> {
         let lba = fad.saturating_sub(FAD_OFFSET);
         let t = self.track_for_lba(lba);
@@ -260,17 +271,22 @@ impl Res {
     fn ok_big(total: usize, first: &[u8]) -> Res {
         Res { ok: true, status: 0x50, err: 0, irr: 0x03, total, data: first.to_vec() }
     }
-    /// CHECK CONDITION with `err` in the error register (status 0x51, STATUS_IDLE_ERR).
-    fn check(err: u8) -> Res {
-        Res { ok: false, status: 0x51, err, irr: 0x03, total: 0, data: Vec::new() }
+    /// CHECK CONDITION with sense key `key` (`finish_check`: status 0x11, error = key << 4; D5).
+    fn check(key: u8) -> Res {
+        Res { ok: false, status: atapi::CHECK_STATUS, err: atapi::check_error(key), irr: 0x03, total: 0, data: Vec::new() }
     }
-    /// The UNIT ATTENTION answer: ERR = sense key 6 << 4.
+    /// The UNIT ATTENTION answer (key 6).
     fn ua() -> Res {
-        Res::check(0x60)
+        Res::check(atapi::SENSE_UNIT_ATTENTION)
     }
-    /// ABRT (REQ_SES out of range, REQ_MODE with an unsupported window, CD_READ out of the track).
-    fn abrt() -> Res {
-        Res::check(0x04)
+    /// NOT READY (key 2: no medium, the swap window).
+    fn not_ready() -> Res {
+        Res::check(atapi::SENSE_NOT_READY)
+    }
+    /// ILLEGAL REQUEST (key 5: REQ_SES out of range, REQ_MODE with an unsupported window, CD_READ out of the track,
+    /// a `52 82` to a folder number that does not exist).
+    fn illegal() -> Res {
+        Res::check(atapi::SENSE_ILLEGAL_REQUEST)
     }
 }
 
@@ -365,11 +381,11 @@ fn fad3(p: &[u8]) -> u32 {
 
 // ------------------------------------------------------------------ the firmware's answers
 
-/// REQ_MODE (ide.rs): a window of the stock 32-byte block (`atapi::req_mode_reply`), else ABRT.
+/// REQ_MODE (ide.rs): a window of the stock 32-byte block (`atapi::req_mode_reply`), else ILLEGAL REQUEST.
 fn req_mode(c: &[u8; 12]) -> Res {
     match atapi::req_mode_reply(c[2], c[4]) {
         Some(r) => Res::ok(r),
-        None => Res::abrt(),
+        None => Res::illegal(),
     }
 }
 
@@ -381,7 +397,7 @@ fn cut(data: &[u8], alloc: usize) -> Res {
 fn read_res(d: &Disc, fad: u32, count: u32) -> (Res, Option<Vec<u8>>) {
     match d.cd_read(fad, count) {
         Some(data) => (Res::ok_big(data.len(), &data[..data.len().min(REC_DATA_MAX)]), Some(data)),
-        None => (Res::abrt(), None),
+        None => (Res::illegal(), None),
     }
 }
 
@@ -451,7 +467,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
         }
     }
 
-    // Sessions 0..3. The firmware answers an out-of-range one with ABRT.
+    // Sessions 0..3. The firmware answers an out-of-range one with ILLEGAL REQUEST (stock's 0x11 / 0x50).
     let mut ses_ip = 0u32;
     for s in 0..4u8 {
         let c = cdb_simple(0x15, 0, s, 6);
@@ -465,7 +481,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
                 }
                 Res::ok(&rep)
             }
-            None => Res::abrt(),
+            None => Res::illegal(),
         };
         o.probe(&format!("REQ_SES_{}", s), None, Some(&c), &r, true);
     }
@@ -479,13 +495,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
         o.probe(name, None, Some(&c), &cut(&rep[..len], alloc as usize), true);
     }
 
-    // `52 00`: bootloader 0.0.0 then the firmware version, little-endian words; no allocation length = all 8.
-    let mut c = [0u8; 12];
-    c[0] = 0x52;
-    let (ma, mi, pa) = GDEMU_COMPAT_VERSION;
-    let mut ver = [0u8; 8];
-    ver[4..].copy_from_slice(&gdemu::version_word(ma, mi, pa).to_le_bytes());
-    o.probe("GDEMU_VERSION", None, Some(&c), &Res::ok(&ver), true);
+    gdemu_version(o);
 
     if !opt.reads {
         return;
@@ -514,7 +524,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
             let (r, data) = read_res(d, ip, 1);
             let (ssz, crc, sense) = match &data {
                 Some(dd) => ("2048".to_string(), format!("{:08x}", crc32(dd)), "none"),
-                None => ("-".to_string(), "-".to_string(), "0/00/00"), // CD_READ's ABRT sets no sense key: REQ_ERROR = F0 00 00 ..
+                None => ("-".to_string(), "-".to_string(), "5/00/00"), // ILLEGAL REQUEST, ASC 0 (stock's is not known)
             };
             let ex = format!("flags=0x{:02x} fad={} count=1 ssz={} crc={} sense={}", flags, ip, ssz, crc, sense);
             o.probe("CDREAD_FLAGS", Some(&ex), Some(&c), &r, false);
@@ -558,21 +568,108 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool) {
     }
 }
 
-/// `switch_to`: `52 82 n`, then TUR / REQ_ERROR polls. Returns nothing; a refused mount leaves the old
-/// image (and its already-consumed UNIT ATTENTION) in place.
-fn switch_lines(o: &mut Out, n: u32, mounted: bool) {
-    let c = cdb_mount(n);
-    if mounted {
-        o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::ok(&[]), false);
-        // First poll: UNIT ATTENTION (CHECK, err 0x60); its REQ_ERROR reads 6/28/00 (medium changed). Second poll: READY.
-        o.event("SW_POLL", "t_ms=- poll=- rc=check status=0x51 err=0x60 sense=6/28/00");
-        o.event("SW_POLL", "t_ms=- poll=- rc=ok status=0x50 err=0x00 sense=none");
-    } else {
-        // finish_illegal: ILLEGAL REQUEST, ERR = ABRT | 0x50. Media untouched, so the first poll is READY.
-        o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::check(0x54), false);
-        o.event("SW_POLL", "t_ms=- poll=- rc=ok status=0x50 err=0x00 sense=none");
+/// `52 00`: bootloader 0.0.0 then the firmware version, little-endian words; no allocation length = all 8.
+fn gdemu_version(o: &mut Out) {
+    let mut c = [0u8; 12];
+    c[0] = 0x52;
+    let (ma, mi, pa) = GDEMU_COMPAT_VERSION;
+    let mut ver = [0u8; 8];
+    ver[4..].copy_from_slice(&gdemu::version_word(ma, mi, pa).to_le_bytes());
+    o.probe("GDEMU_VERSION", None, Some(&c), &Res::ok(&ver), true);
+}
+
+/// The battery with no medium (an empty folder after its swap window): warmup gives up after eight TUR /
+/// REQ_ERROR rounds, then the information commands as `atapi::not_ready_answer` sorts them, no reads.
+fn battery_no_medium(o: &mut Out) {
+    let tur = [0u8; 12];
+    let req_err = cdb_simple(0x13, 0, 0, 10);
+    let (asc, ascq) = atapi::ASC_NO_MEDIUM;
+    let no_medium = atapi::req_error_reply(atapi::SENSE_NOT_READY, asc, ascq);
+    for i in 0..8 {
+        o.probe(&format!("TUR_W{}", i), None, Some(&tur), &Res::not_ready(), false);
+        o.probe(&format!("REQ_ERROR_W{}", i), None, Some(&req_err), &Res::ok(&no_medium), true);
     }
-    o.event("SW_RESULT", &format!("n={} rc=ok t_ms=- polls=- changes=-", n));
+    o.event("WARMUP", "ready=0");
+    let answer = |c: &[u8; 12], served: Res| match atapi::not_ready_answer(c) {
+        atapi::NotReadyAnswer::Serve => served,
+        atapi::NotReadyAnswer::NotReady => Res::not_ready(),
+        atapi::NotReadyAnswer::IllegalRequest => Res::illegal(),
+    };
+    o.probe("TUR", None, Some(&tur), &answer(&tur, Res::ok(&[])), false);
+    let c = cdb_simple(0x10, 0, 0, 10);
+    o.probe("REQ_STAT", None, Some(&c), &answer(&c, Res::ok(&[])), true);
+    for (name, c) in [
+        ("REQ_MODE_0_10", cdb_simple(0x11, 0, 0, 10)),
+        ("REQ_MODE_18_8", cdb_simple(0x11, 0, 18, 8)),
+        ("REQ_MODE_0_32", cdb_simple(0x11, 0, 0, 32)),
+    ] {
+        o.probe(name, None, Some(&c), &answer(&c, req_mode(&c)), true);
+    }
+    // The REQ_MODEs were served, which clears the sense REQ_STAT left.
+    o.probe("REQ_ERROR", None, Some(&req_err), &Res::ok(&atapi::req_error_reply(0, 0, 0)), true);
+    for s in 0..2u8 {
+        let c = cdb_be16(0x14, s, 408);
+        o.probe(&format!("GET_TOC_{}", s), None, Some(&c), &answer(&c, Res::ok(&[])), true);
+    }
+    for s in 0..4u8 {
+        let c = cdb_simple(0x15, 0, s, 6);
+        o.probe(&format!("REQ_SES_{}", s), None, Some(&c), &answer(&c, Res::ok(&[])), true);
+    }
+    for (name, fmt, alloc) in [("GET_SCD_0", 0u8, 100u32), ("GET_SCD_1", 1u8, 14u32)] {
+        let c = cdb_be16(0x40, fmt, alloc);
+        o.probe(name, None, Some(&c), &answer(&c, Res::ok(&[])), true);
+    }
+    gdemu_version(o);
+}
+
+/// What a `52 82 n` leaves behind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// The folder has an image: it mounts.
+    Image,
+    /// The folder exists with nothing to mount: accepted, no medium (D12).
+    Empty,
+    /// No folder with that number: refused, the old image stays.
+    Missing,
+}
+
+fn sw_poll(o: &mut Out, r: &Res, sense: &str) {
+    o.event(
+        "SW_POLL",
+        &format!("t_ms=- poll=- rc={} status=0x{:02x} err=0x{:02x} sense={}", if r.ok { "ok" } else { "check" }, r.status, r.err, sense),
+    );
+}
+
+/// `switch_to`: `52 82 n`, then TUR / REQ_ERROR polls, one line per change of state. With an image or an
+/// empty folder the swap window plays out (`atapi::swap_phase`): no medium, becoming ready, then UNIT
+/// ATTENTION and READY -- or no medium again, until gdprobe's switch timeout. A refused mount leaves the old
+/// image (and its already-consumed UNIT ATTENTION) in place.
+fn switch_lines(o: &mut Out, n: u32, target: Target) {
+    let c = cdb_mount(n);
+    let fmt = |(asc, ascq): (u8, u8), key: u8| format!("{}/{:02x}/{:02x}", key, asc, ascq);
+    let nr = atapi::SENSE_NOT_READY;
+    let ready = match target {
+        Target::Missing => {
+            o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::illegal(), false);
+            sw_poll(o, &Res::ok(&[]), "none");
+            true
+        }
+        Target::Image | Target::Empty => {
+            o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::ok(&[]), false);
+            for phase in [atapi::SwapPhase::Open, atapi::SwapPhase::Detect] {
+                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(phase), nr));
+            }
+            if target == Target::Image {
+                sw_poll(o, &Res::ua(), &fmt(atapi::ASC_MEDIUM_CHANGED, atapi::SENSE_UNIT_ATTENTION));
+                sw_poll(o, &Res::ok(&[]), "none");
+                true
+            } else {
+                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(atapi::SwapPhase::Done), nr));
+                false
+            }
+        }
+    };
+    o.event("SW_RESULT", &format!("n={} rc={} t_ms=- polls=- changes=-", n, if ready { "ok" } else { "timeout" }));
 }
 
 fn main() {
@@ -588,7 +685,7 @@ fn main() {
             }
         },
         None => {
-            if !opt.empty_folder {
+            if !opt.empty_folder && !opt.missing_folder {
                 usage();
             }
             None
@@ -601,13 +698,28 @@ fn main() {
             opt.label
         ));
     }
+    // --empty-folder: the drive has no medium afterwards, whatever --image says. --missing-folder: the
+    // previously mounted --image stays (none = no medium).
+    let disc = if opt.empty_folder { None } else { disc };
     if opt.switch {
-        switch_lines(&mut o, opt.img as u32, !opt.empty_folder);
+        let target = if opt.empty_folder {
+            Target::Empty
+        } else if opt.missing_folder {
+            Target::Missing
+        } else {
+            Target::Image
+        };
+        switch_lines(&mut o, opt.img as u32, target);
     }
-    if let (Some(d), false) = (&disc, opt.sw_only) {
-        // A switch consumes the UNIT ATTENTION in its polls; a bare run on a freshly booted unit sees it.
-        let ua = opt.ua.unwrap_or(!opt.switch);
-        battery(&opt, d, &mut o, ua);
+    if !opt.sw_only {
+        match &disc {
+            Some(d) => {
+                // A switch consumes the UNIT ATTENTION in its polls; a bare run on a freshly booted unit sees it.
+                let ua = opt.ua.unwrap_or(!opt.switch);
+                battery(&opt, d, &mut o, ua);
+            }
+            None => battery_no_medium(&mut o),
+        }
     }
     if opt.end {
         o.event("END", "abort=0");

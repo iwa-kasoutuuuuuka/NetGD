@@ -8,10 +8,13 @@ Runs `cargo run --example expect` (common/discimg) once per image folder and joi
 record, in the order a gdprobe switch run (switch=on, images=3,4,5,6,7, return_to=2) writes them:
 SW_CMD / SW_POLL / SW_RESULT, then the battery, all tagged img=<folder number>.
 
-  * A folder with a disc.gdi / *.gdi / *.cdi is mounted: the first poll sees UNIT ATTENTION, the second READY.
-  * A folder with no image (07) is refused with ILLEGAL REQUEST (`52 82 07` -> status 0x51 err 0x54) and the
-    previously mounted image stays: the battery under img=7 is that image's answers again (UNIT ATTENTION
-    already consumed). That is what NetGD does; a stock GDEMU may differ, which is what the diff is for.
+  * A folder with a disc.gdi / *.gdi / *.cdi is mounted: the polls see the swap window (2/3A/00 no medium,
+    2/04/01 becoming ready), then UNIT ATTENTION 6/28/00, then READY (stock GDEMU 6.0, D13).
+  * A folder with no image (07) is accepted like stock does (D12): the same window, then no medium (2/3A/00)
+    until gdprobe's switch timeout, and the battery under img=7 is the no-medium one (CHECK 0x11 / key 2, REQ_SES
+    past 0 key 5, no reads).
+  * A folder number not on the card is refused with ILLEGAL REQUEST (`52 82 n` -> status 0x11 err 0x50) and the
+    previously mounted image (or no medium) stays. That is NetGD's choice; stock was not probed there.
   * img=0 (the image mounted at power-up, the dcload-ip disc) is not predicted.
 Without --out the record goes to stdout. Everything not predictable (us, t_ms, polls, ...) is '-'.
 """
@@ -83,25 +86,30 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
     parts = ['# gdprobe version=1 kos=- label=%s stamp=predicted seq=0 dcload=0\n' % label,
              '# config switch=1 identify=0 images=%s return_to=%d\n' % (','.join(str(n) for n in images), return_to),
              '# predicted by tools/netgd-expect (NetGD firmware logic); img=0 (boot disc) is not predicted; timings are "-"\n']
-    mounted = None      # the image file currently mounted, None = unknown (the boot disc)
+    mounted = None      # the image file currently mounted, None = unknown (the boot disc) or no medium
     last_img = 0
-    for n in images:
+
+    def switch_args(n, extra):
+        nonlocal mounted
         img = find_image(folders[n]) if n in folders else None
-        args = ['--img', str(n), '--switch']
+        args = ['--img', str(n), '--switch'] + extra
         if img:
-            parts.append(ex.run(args + ['--image', img]))
+            args += ['--image', img]
             mounted = img
+        elif n in folders:
+            args.append('--empty-folder')       # accepted, no medium (D12)
+            mounted = None
         else:
-            args.append('--empty-folder')
+            args.append('--missing-folder')     # refused, the old image stays
             if mounted:
                 args += ['--image', mounted, '--no-ua']
-            parts.append(ex.run(args))
+        return args
+
+    for n in images:
+        parts.append(ex.run(switch_args(n, [])))
         last_img = n
     if return_to > 0:
-        img = find_image(folders[return_to]) if return_to in folders else None
-        args = ['--img', str(return_to), '--switch', '--sw-only']
-        args += ['--image', img] if img else ['--empty-folder']
-        parts.append(ex.run(args))
+        parts.append(ex.run(switch_args(return_to, ['--sw-only'])))
         last_img = return_to
     parts.append('img=%d probe=END abort=0\n' % last_img)
     return ''.join(parts)

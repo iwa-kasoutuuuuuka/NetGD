@@ -27,6 +27,20 @@ pub fn number_of(name: &[u8]) -> Option<u16> {
     }
 }
 
+/// Whether the firmware may switch images on its own (the front button, or a
+/// switch it was asked for between commands).
+///
+/// `media_present`: an image is mounted. `empty_slot`: nothing is mounted
+/// because the selected folder had nothing to mount (stock accepts such a
+/// switch and reports no medium, D12) -- the card is still the firmware's,
+/// so the button must keep working or nothing short of the host brings a
+/// disc back. With neither, the drive was ejected for the host (START/STOP,
+/// a write session, or a disk write while empty), which may hold a CMD25 open
+/// across its waits: hands off.
+pub const fn swap_allowed(media_present: bool, empty_slot: bool) -> bool {
+    media_present || empty_slot
+}
+
 /// Direction of a step between slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {

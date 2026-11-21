@@ -37,9 +37,11 @@ pub const READ_LIMIT_MAX: i16 = 1250;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Ini {
-    /// Milliseconds the tray is shown open after an image swap.
+    /// Milliseconds the tray is shown open after an image swap (NOT READY,
+    /// no medium).
     pub open_time: u16,
-    /// Milliseconds the drive is shown busy detecting the disc after that.
+    /// Milliseconds the drive is shown busy detecting the disc after that
+    /// (NOT READY, becoming ready).
     pub detect_time: u16,
     pub image_tests: bool,
     pub high_speed: bool,
@@ -47,8 +49,8 @@ pub struct Ini {
     pub reset_goto: u16,
     /// KiB/s read limit; 0 = off, -1 = automatic.
     pub read_limit: i16,
-    /// Which of `open_time` / `detect_time` the file actually set. A swap
-    /// delay is only applied for keys the card asked for.
+    /// Which of `open_time` / `detect_time` the file actually set: only those
+    /// override the firmware's swap window ([`Ini::swap_window_ms`]).
     pub open_time_set: bool,
     pub detect_time_set: bool,
     /// Lines with a key this parser does not know.
@@ -210,12 +212,15 @@ impl Ini {
         }
     }
 
-    /// Extra time, in milliseconds, a swapped-in disc is held NOT READY:
-    /// `open_time` plus `detect_time`, counting only keys the file set.
-    pub fn swap_delay_ms(&self) -> u32 {
-        let o = if self.open_time_set { self.open_time as u32 } else { 0 };
-        let d = if self.detect_time_set { self.detect_time as u32 } else { 0 };
-        o + d
+    /// The two phases of the NOT READY window after an image switch, in
+    /// milliseconds: (`open_time`, `detect_time`), each the file's value if it
+    /// set the key, else the caller's default. The firmware's defaults are the
+    /// stock GDEMU 6.0 measurement (`discimg::atapi::SWAP_OPEN_MS` /
+    /// `SWAP_DETECT_MS`), not the documented 500 / 250 nobody has measured.
+    pub fn swap_window_ms(&self, open_default: u32, detect_default: u32) -> (u32, u32) {
+        let o = if self.open_time_set { self.open_time as u32 } else { open_default };
+        let d = if self.detect_time_set { self.detect_time as u32 } else { detect_default };
+        (o, d)
     }
 }
 
@@ -251,7 +256,9 @@ mod tests {
         assert_eq!((i.open_time, i.detect_time), (500, 250));
         assert!(i.image_tests && !i.high_speed);
         assert_eq!((i.reset_goto, i.read_limit), (0, 0));
-        assert_eq!(i.swap_delay_ms(), 0, "unset keys apply no delay");
+        // Unset keys: the caller's defaults (the firmware passes the stock
+        // GDEMU 6.0 measurement, 150 + 150 ms), not the documented 500/250.
+        assert_eq!(i.swap_window_ms(150, 150), (150, 150), "unset keys take the defaults");
     }
 
     #[test]
@@ -265,7 +272,7 @@ mod tests {
         assert!(i.high_speed);
         assert_eq!(i.reset_goto, 12);
         assert_eq!(i.read_limit, 900);
-        assert_eq!(i.swap_delay_ms(), 1000);
+        assert_eq!(i.swap_window_ms(150, 150), (700, 300));
         assert_eq!(i.unknown, 0);
     }
 
@@ -341,9 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn set_flags_drive_the_swap_delay() {
-        assert_eq!(Ini::parse("open_time=500").swap_delay_ms(), 500);
-        assert_eq!(Ini::parse("detect_time=250").swap_delay_ms(), 250);
+    fn set_flags_drive_the_swap_window() {
+        // Each phase separately: a key the file set wins, else the default.
+        assert_eq!(Ini::parse("open_time=500").swap_window_ms(150, 150), (500, 150));
+        assert_eq!(Ini::parse("detect_time=250").swap_window_ms(150, 150), (150, 250));
+        // The stock probe card's GDEMU.INI.
+        let probe = Ini::parse("open_time = 150\ndetect_time = 150\nreset_goto = 1");
+        assert_eq!(probe.swap_window_ms(1, 2), (150, 150));
+        // Clamped like the keys themselves (150..=5000).
+        assert_eq!(Ini::parse("open_time=1\ndetect_time=9000").swap_window_ms(0, 0), (150, 5000));
     }
 
     /// Feed `data` through `parse_reader` in chunks of at most `chunk`.

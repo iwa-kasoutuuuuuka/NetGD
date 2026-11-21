@@ -63,7 +63,9 @@ pub async fn button_task() {
 fn on_press() {
     // Ejected: the host owns the card (a write may hold a CMD25 open across its
     // waits), and a swap would remount mid-transfer. Do nothing, SD included.
-    if !crate::ide::media_present() {
+    // A drive left empty by a folder with nothing to mount is not ejected:
+    // the button is the way out of it (`ide::swap_allowed`, D12).
+    if !crate::ide::swap_allowed() {
         info!("button: ignored while the media is ejected");
         return;
     }

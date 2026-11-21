@@ -652,3 +652,99 @@ fn identify_packet_is_the_stock_80_bytes() {
     assert_eq!(&IDENTIFY_PACKET_REPLY[32..44], b"CD-ROM DRIVE");
     assert_eq!(&IDENTIFY_PACKET_REPLY[48..52], b"6.42");
 }
+
+// ---------------------------------------------------------------- D5 / D13 (stock_20261121_04_img3-7.txt)
+
+#[test]
+fn check_registers_are_the_stock_form() {
+    // D5: every CHECK CONDITION of the stock drive reads status 0x11 (DSC |
+    // ERR, DRDY clear) and error = sense key << 4.
+    assert_eq!(CHECK_STATUS, 0x11);
+    assert_eq!(check_error(SENSE_NOT_READY), 0x20); // TUR with no medium
+    assert_eq!(check_error(SENSE_MEDIUM_ERROR), 0x30);
+    assert_eq!(check_error(SENSE_ILLEGAL_REQUEST), 0x50); // REQ_SES_3, CD_READ type mismatch
+    assert_eq!(check_error(SENSE_UNIT_ATTENTION), 0x60); // first TUR after a mount
+    assert_eq!(check_error(0x16), 0x60, "only the key's nibble");
+}
+
+#[test]
+fn swap_window_phases() {
+    // Stock after `52 82 n` (GDEMU.INI open_time = detect_time = 150 on the
+    // probe card): 2/3A/00 from t=0, 2/04/01 from ~150 ms, one 6/28/00 at
+    // ~300 ms, READY from the next poll.
+    assert_eq!((SWAP_OPEN_MS, SWAP_DETECT_MS), (150, 150));
+    let p = |t| swap_phase(t, SWAP_OPEN_MS, SWAP_DETECT_MS);
+    assert_eq!(p(0), SwapPhase::Open);
+    assert_eq!(p(149), SwapPhase::Open);
+    assert_eq!(p(150), SwapPhase::Detect);
+    assert_eq!(p(299), SwapPhase::Detect);
+    assert_eq!(p(300), SwapPhase::Done);
+    assert_eq!(p(u32::MAX), SwapPhase::Done);
+    // Zero-length phases are skipped.
+    assert_eq!(swap_phase(0, 0, 150), SwapPhase::Detect);
+    assert_eq!(swap_phase(0, 0, 0), SwapPhase::Done);
+    assert_eq!(swap_phase(10, 5000, 5000), SwapPhase::Open);
+    assert_eq!(swap_phase(9999, 5000, 5000), SwapPhase::Detect);
+    assert_eq!(swap_phase(10_000, 5000, 5000), SwapPhase::Done);
+}
+
+#[test]
+fn swap_window_sense_and_drive_status() {
+    // The REQ_ERROR bytes each phase's NOT READY carries (records 04: img=3
+    // SW_POLL, img=6/7 REQ_ERROR_W0).
+    let (a, q) = not_ready_asc(SwapPhase::Open);
+    assert_eq!(&req_error_reply(SENSE_NOT_READY, a, q)[..], &hex("f0000200000000003a00")[..]);
+    let (a, q) = not_ready_asc(SwapPhase::Detect);
+    assert_eq!(&req_error_reply(SENSE_NOT_READY, a, q)[..], &hex("f0000200000000000401")[..]);
+    // After the window with no medium (empty folder): back to 2/3A/00.
+    assert_eq!(not_ready_asc(SwapPhase::Done), ASC_NO_MEDIUM);
+    // SECNR's drive status nibble (flycast gdromv3.h): open, then busy, then
+    // paused (stock's REQ_STAT byte 0 after a switch, D2) or no disc. Stock's
+    // register itself is not recorded by gdprobe.
+    assert_eq!(swap_drive_status(SwapPhase::Open, true), DRIVE_OPEN);
+    assert_eq!(swap_drive_status(SwapPhase::Detect, true), DRIVE_BUSY);
+    assert_eq!(swap_drive_status(SwapPhase::Done, true), DRIVE_PAUSE);
+    assert_eq!(swap_drive_status(SwapPhase::Done, false), DRIVE_NODISC);
+    assert_eq!((DRIVE_BUSY, DRIVE_OPEN, DRIVE_NODISC), (0x00, 0x06, 0x07));
+}
+
+fn cdb(b: &[u8]) -> [u8; 12] {
+    let mut c = [0u8; 12];
+    c[..b.len()].copy_from_slice(b);
+    c
+}
+
+#[test]
+fn what_stock_answers_with_no_medium() {
+    use NotReadyAnswer::*;
+    // stock_20261121_04_img3-7.txt img=6 / img=7 (no medium), probe by probe.
+    for (name, c, want) in [
+        ("TUR", cdb(&[0x00]), NotReady),
+        ("REQ_STAT", cdb(&[0x10, 0, 0, 0, 10]), NotReady),
+        ("REQ_MODE_0_10", cdb(&[0x11, 0, 0, 0, 10]), Serve),
+        ("REQ_MODE_18_8", cdb(&[0x11, 0, 18, 0, 8]), Serve),
+        ("REQ_ERROR", cdb(&[0x13, 0, 0, 0, 10]), Serve),
+        ("GET_TOC_0", cdb(&[0x14, 0, 0, 1, 0x98]), NotReady),
+        ("GET_TOC_1", cdb(&[0x14, 1, 0, 1, 0x98]), NotReady),
+        ("REQ_SES_0", cdb(&[0x15, 0, 0, 0, 6]), NotReady),
+        ("REQ_SES_1", cdb(&[0x15, 0, 1, 0, 6]), IllegalRequest),
+        ("REQ_SES_2", cdb(&[0x15, 0, 2, 0, 6]), IllegalRequest),
+        ("REQ_SES_3", cdb(&[0x15, 0, 3, 0, 6]), IllegalRequest),
+        ("GET_SCD_0", cdb(&[0x40, 0, 0, 0, 100]), NotReady),
+        ("GET_SCD_1", cdb(&[0x40, 1, 0, 0, 14]), NotReady),
+        ("GDEMU_VERSION", cdb(&[0x52, 0x00]), Serve),
+        // Not in the record: the switch itself (it is what leaves the
+        // state), REQUEST SENSE, NetGD's 0xE0 and START/STOP (the host's
+        // eject / load) are served; reads and CD-DA play are NOT READY, as
+        // NetGD already answered them while ejected.
+        ("SW_CMD", cdb(&[0x52, 0x82, 7]), Serve),
+        ("REQUEST_SENSE", cdb(&[0x03, 0, 0, 0, 18]), Serve),
+        ("IMAGE_CTL", cdb(&[0xE0, 8]), Serve),
+        ("START_STOP", cdb(&[0x1B, 0, 0, 0, 3]), Serve),
+        ("CD_READ", cdb(&[0x30, 0x24, 0, 0, 0x96, 0, 0, 0, 0, 0, 1]), NotReady),
+        ("CD_READ2", cdb(&[0x31]), NotReady),
+        ("CD_PLAY", cdb(&[0x20, 1]), NotReady),
+    ] {
+        assert_eq!(not_ready_answer(&c), want, "{}", name);
+    }
+}

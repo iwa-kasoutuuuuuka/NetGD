@@ -389,8 +389,8 @@ pub fn reload_ini(num_blocks: u32) {
     // A read error ends the file where it stands.
     let ini = gamecfg::ini::Ini::parse_reader(buf, |b| f.read(b).unwrap_or(0));
     info!(
-        "gdi: GDEMU.INI open_time={} detect_time={} reset_goto={} swap_delay={}ms",
-        ini.open_time, ini.detect_time, ini.reset_goto, ini.swap_delay_ms()
+        "gdi: GDEMU.INI open_time={} (set {}) detect_time={} (set {}) reset_goto={}",
+        ini.open_time, ini.open_time_set, ini.detect_time, ini.detect_time_set, ini.reset_goto
     );
     if ini.unknown != 0 || ini.read_limit != 0 || ini.high_speed || !ini.image_tests {
         info!(
@@ -794,6 +794,11 @@ pub fn load_by_name(num_blocks: u32, want: &str) -> Result<Gdi, GdiError> {
     // has.
     let mut path = ImagePath::new();
     walk_to(&mut d, want, &mut path)?;
+    // Remember it, so a later remount keeps this disc -- and before looking
+    // inside: a folder with nothing to mount is still the selection (stock
+    // accepts `52 82` to one, D12), so `52 81` and the button step on from
+    // its number instead of from the disc before it (R18 item 1).
+    remember(path.clone(), want);
 
     let Some((file, is_cdi)) = locate_image(&d) else {
         return Err(GdiError::NoGdiFile);
@@ -805,13 +810,11 @@ pub fn load_by_name(num_blocks: u32, want: &str) -> Result<Gdi, GdiError> {
         }
     }
     let which = ImageRef {
-        dir: path.clone(),
+        dir: path,
         file,
         is_cdi,
         name,
     };
-    // Remember it, so a later remount keeps this disc.
-    remember(path, want);
     load_image(num_blocks, &which)
 }
 
