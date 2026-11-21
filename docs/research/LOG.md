@@ -1645,6 +1645,26 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み。
 - 関連：R110、R111。
 
+### R113 Drive の docs の LOG と PLAN を差し替え（R112 の訂正）と、実機をつなぐ PC への移行の確認（Opus）
+
+- 担当：Opus。問いはユーザーの「すべて GitHub と Google Drive に上げたか」「実機をつなぐ PC で開発できるか」。
+- 結論：
+  - GitHub：`main` と `origin/main` はどちらも 8e75bf2f で、差はない（`git fetch` のあとの `git log origin/main..main` は空）。
+  - Drive：R112 では「`docs/` は変わっていない」と書いたが、これは誤り。07458751 のあと、`docs/research/LOG.md` と `docs/PLAN.md` は変わっていた（R111・R112）。
+    - この2つを差し替えた。古いものは `old-07458751/` に移した。
+    - 新しい LOG は 262,287 B、PLAN は 31,520 B。Drive が返した大きさは、手元のファイルと一致した。
+    - ほかの docs は 07458751 のあと変わっていない（`git log 07458751..HEAD -- docs` で確かめた）。
+  - 実機をつなぐ PC への移行：
+    - リポジトリに入っているもの：CLAUDE.md、LOG、PLAN、CI、ビルドの手順。`git clone` すれば同じルールで続けられる。
+    - リポジトリに入っていないもの：
+      - Claude の会話の記録と記憶。記憶はこの PC の `~/.claude/projects/…/memory`、3件。
+      - Supra 2026.03 の tar。再配布しないためコミットしていない。SHA-256 は e37eb1d2…8197。
+      - WSL の環境と KOS のツールチェイン。KOS は CI でビルドしているので、手元に無くてもよい。
+    - 書き込みは `.cargo/config.toml` の runner（`probe-rs run --chip ATSAM3U4E --protocol swd`）で行う。2E と 6.0 では chip を変える必要がある。
+- 根拠：上のコマンドの出力と、Drive の `create_file` の応答。
+- 信頼度：確認済み。移行の部分は、手順を確かめた段階で、まだ試していない。
+- 関連：R110、R112。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
