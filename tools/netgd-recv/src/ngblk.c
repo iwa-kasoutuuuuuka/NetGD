@@ -9,6 +9,7 @@
 
 ngblk_stats_t ngblk_stats;
 int ngblk_check_fnv;
+int ngblk_readonly;
 
 int ngblk_read(uint32_t lba, uint32_t n, void *buf)
 {
@@ -74,6 +75,7 @@ static int write_cmd(uint32_t lba, uint32_t n, const void *buf)
 
 int ngblk_write(uint32_t lba, uint32_t n, const void *buf)
 {
+    if (ngblk_readonly) return -1;      /* light mount: no write command is ever issued */
     while (n) {
         uint32_t c = n > NGBLK_WRITE_MAX ? NGBLK_WRITE_MAX : n;
         int r = write_cmd(lba, c, buf);

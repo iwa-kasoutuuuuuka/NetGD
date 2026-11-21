@@ -300,3 +300,30 @@ def folder_name(slot, name, image_path):
         validate_image_path(name)
         return name
     return folder_from_stem(os.path.splitext(os.path.basename(image_path))[0])
+
+
+def plan_image(image_path):
+    """Check an image and decide what goes onto the SD card (shared by `prepare` and `push`).
+
+    Returns (kind, descriptor_name, sources): kind is "gdi" or "cdi"; sources is a list of
+    (target_name, source_path or None, text or None) in manifest order, the descriptor first.
+    A rewritten .gdi has no source file: its text is built here (latin-1, as written to the job folder).
+    Nothing is written."""
+    kind = detect_type(image_path)
+    sources = []
+    if kind == "gdi":
+        gi = check_gdi(image_path)
+        by_track, gdi_text = plan_gdi_names(gi)
+        desc = DESCRIPTOR_BASE + ".gdi"
+        sources.append((desc, None, gdi_text))
+        done = set()
+        for t in gi.tracks:
+            nm = by_track[t.number]
+            if nm.lower() not in done:
+                done.add(nm.lower())
+                sources.append((nm, t.path, None))
+    else:
+        check_cdi(image_path)
+        desc = DESCRIPTOR_BASE + ".cdi"
+        sources.append((desc, image_path, None))
+    return kind, desc, sources

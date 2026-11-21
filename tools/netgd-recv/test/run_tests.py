@@ -1304,6 +1304,81 @@ class TestRunFinder(Base):
         self.assertEqual(res.malformed, [])
 
 
+class TestMenuSupport(Base):
+    """What netgd-menu needs from the core (docs/design/menu-app.md 4.3, 5.2, step 1): the light (read-only)
+    mount and the firmware commands of fwctl.c for 0x52 / TEST UNIT READY / named MOUNT."""
+
+    def light(self, img, sectors):
+        r = run_child([EXE, "light", img, str(sectors)])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_light_mount_reads_far_less_than_the_fat_scan_and_never_writes(self):
+        sectors = 4000000                       # a FAT of ~30,500 sectors (as a 128 GB card with 32 KiB clusters)
+        img = self.mkimage("big.img", sectors=sectors, cluster=512)
+        scan = TestHardening.fat_ref(self, img)[1]
+        self.assertGreater(scan, 30000)
+        r = run_child([EXE, "mkdirs", img, str(sectors), "G", "40"])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        out = self.light(img, sectors)
+        m = re.search(r"^LIGHT mount_rcmds=(\d+) list_rc=(\d+) folders=(\d+) list_rcmds=(\d+) readonly=(\d)$", out, re.M)
+        self.assertTrue(m, out)
+        mount_cmds, list_rc, folders, readonly = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(5))
+        self.assertEqual((list_rc, folders, readonly), (0, 40, 1), out)
+        # two orders of magnitude below FatFs's own FAT scan (two commands per FAT sector)
+        self.assertLess(mount_cmds * 100, 2 * scan, out)
+        full = int(re.search(r"^FULL mount_rcmds=(\d+) readonly=0$", out, re.M).group(1))
+        self.assertLess(mount_cmds * 10, full, out)         # and well below this app's own bulk scan
+        # an ngblk_write while light-mounted: -1, no write command, no sector written
+        self.assertRegex(out, r"(?m)^LIGHT write rc=-1 cmd_writes=0 sector_writes=0 unsessioned=0$")
+        self.assertIn("LIGHT after_unmount readonly=0", out)
+        print("light mount: %d read commands (full scan %d, FatFs's own scan %d)" % (mount_cmds, full, 2 * scan),
+              file=sys.stderr)
+
+    def test_light_mount_rejects_what_the_full_mount_rejects(self):
+        img = os.path.join(self.work, "blank.img")
+        with open(img, "wb") as f:
+            f.write(b"\0" * 512 * 4096)
+        out = run_child([EXE, "light", img, "4096"]).stdout
+        self.assertIn("LIGHT MOUNT FAILED no MBR", out)
+
+    def test_menu_commands_packet_bytes(self):
+        r = run_child([EXE, "gdemu", "259", "2", "3", "5"])
+        self.assertEqual(r.returncode, 0, r.stdout)
+        txt = r.stdout
+        self.assertIn("FW 52 82 03 01 00 00 00 00 00 00 00 00", txt)            # 52 82 lo hi: 259 = 0x0103
+        self.assertIn("FW 52 81 55 00 00 00 00 00 00 00 00 00", txt)            # step next
+        self.assertIn("FW 52 81 44 00 00 00 00 00 00 00 00 00", txt)            # step previous
+        self.assertIn("FW 52 00 00 00 08 00 00 00 00 00 00 00", txt)            # GDEMU version, 8 bytes
+        self.assertIn("FW E0 05 00 41 42 43 44 45 46 47 48 49", txt)            # MOUNT_NAME chunk 0: 9 bytes
+        self.assertIn("FW E0 05 01 4A 4B 4C 4D 00 00 00 00 00", txt)            # chunk 1, NUL padded
+        self.assertIn("FW E0 02 00 00 00 00 00 00 00 00 00 00", txt)            # MOUNT the staged name
+        self.assertIn("FW E0 02 FF 00 00 00 00 00 00 00 00 00", txt)            # MOUNT default
+        self.assertIn("FW 00 00 00 00 00 00 00 00 00 00 00 00", txt)            # TEST UNIT READY
+        # 259 is not in the list: ILLEGAL REQUEST (sense 5), nothing mounted
+        self.assertRegex(txt, r"MOUNT rc=-1 sense=5 mounted=0")
+        self.assertRegex(txt, r"NAMED rc=0 sense=0 named_mounts=1")
+        self.assertRegex(txt, r"VERSION rc=0 boot=05200000 fw=05200000")      # bytes 00 00 20 05 = 5.20.0
+
+    def test_menu_commands_slots_and_steps(self):
+        out = run_child([EXE, "gdemu", "3", "2", "3", "5"]).stdout
+        self.assertRegex(out, r"MOUNT rc=0 sense=0 mounted=3")
+        self.assertRegex(out, r"STEP_NEXT rc=0 sense=0 mounted=5")
+        self.assertRegex(out, r"STEP_PREV rc=0 sense=0 mounted=3")
+        out = run_child([EXE, "gdemu", "0", "2", "3"]).stdout
+        self.assertRegex(out, r"MOUNT rc=0 sense=0 mounted=0")      # n = 0: back to the default
+
+    def test_menu_unit_attention_is_repeated_once_but_not_for_test_unit_ready(self):
+        out = run_child([EXE, "gdemu", "3", "2", "3", "--ua", "--notready", "2"]).stdout
+        self.assertRegex(out, r"MOUNT rc=0 sense=0 mounted=3")      # the UNIT ATTENTION at the start was repeated over
+        self.assertEqual(out.count("FW 52 82 03 00 00 00"), 2, out)  # sent twice: the first was not executed
+        # after the mount: TUR sees the UNIT ATTENTION raised by the mount, then NOT READY twice, then READY
+        tur = re.findall(r"^TUR rc=(-?\d+) sense=(\d+)$", out, re.M)
+        self.assertEqual(tur[:4], [("-1", "6"), ("-1", "2"), ("-1", "2"), ("0", "0")], out)
+        # fw_test_unit_ready sent exactly one packet per call (no repeat of the UNIT ATTENTION)
+        self.assertEqual(out.count("FW 00 00 00 00 00 00 00 00 00 00 00 00"), 4, out)
+
+
 if __name__ == "__main__":
     if "--full-sweep" in sys.argv:
         sys.argv.remove("--full-sweep")

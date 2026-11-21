@@ -5,6 +5,8 @@
      test_host dump <img> <sectors> <outdir>
      test_host addfile <img> <sectors> <fspath> <localfile>
      test_host mkdirs <img> <sectors> <prefix> <count>
+     test_host light <img> <sectors>      (light mount + ngfs_list + a refused write, then the full mount for comparison)
+     test_host gdemu <n> [slots...] [--ua] [--notready N]  (fwctl menu commands against the firmware model, prints the packets)
      test_host hang                       (never returns: for the time-limit test of run_tests.py)
    options: --cut N --ckp N --read N --readback 0|1 --slow --flip K --caps C --frag --force
             --stopafter N --pollms N --quiet --rflip K --rflip-all --rflipn K --rflipn-all --mountms N
@@ -29,6 +31,7 @@
 #include "xport_pc.h"
 #include "ng_plat.h"
 #include "simdisk.h"
+#include "fwctl.h"
 
 extern void (*ng_pc_cfg_hook)(void);
 extern ngblk_stats_t ngblk_stats;
@@ -253,6 +256,72 @@ static int mkdirs(const char *img, uint32_t sectors, const char *prefix, int cou
     return 0;
 }
 
+static void light_cb(void *ctx, const char *state, const char *path)
+{
+    (void)state; (void)path;
+    ++*(int *)ctx;
+}
+
+/* light <img> <sectors>: the menu's read-only mount.  Prints the read commands of each phase. */
+static int light(const char *img, uint32_t sectors)
+{
+    char why[96];
+    int n = 0, rc;
+    uint64_t r0, r1, r2;
+    static uint8_t buf[512];
+    if (sim_open(img, sectors)) return 1;
+    ngdev_init();
+    r0 = sim_cmd_reads;
+    if (ngfs_mount_light(why, sizeof why)) { printf("LIGHT MOUNT FAILED %s\n", why); return 1; }
+    r1 = sim_cmd_reads;
+    rc = (int)ngfs_list("/", light_cb, &n);
+    printf("LIGHT mount_rcmds=%llu list_rc=%d folders=%d list_rcmds=%llu readonly=%d\n", (unsigned long long)(r1 - r0),
+           rc, n, (unsigned long long)(sim_cmd_reads - r1), ngblk_readonly);
+    rc = ngblk_write(5000, 1, buf);
+    printf("LIGHT write rc=%d cmd_writes=%llu sector_writes=%llu unsessioned=%d\n", rc, (unsigned long long)sim_cmd_writes,
+           (unsigned long long)sim_sector_writes, sim_unsessioned_writes);
+    ngfs_unmount();
+    printf("LIGHT after_unmount readonly=%d\n", ngblk_readonly);
+    r2 = sim_cmd_reads;
+    if (ngfs_mount(why, sizeof why, NULL, NULL)) { printf("FULL MOUNT FAILED %s\n", why); return 1; }
+    printf("FULL mount_rcmds=%llu readonly=%d\n", (unsigned long long)(sim_cmd_reads - r2), ngblk_readonly);
+    ngfs_unmount();
+    sim_close();
+    return 0;
+}
+
+/* gdemu <n> [slot...] [--ua] [--notready N]: every menu command of fwctl.c against the model, packets traced */
+static int gdemu(int n, int argc, char **argv)
+{
+    uint8_t sense = 0xEE;
+    uint32_t boot = 0, fw = 0;
+    int rc, k = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
+        else if (!strcmp(argv[i], "--notready") && i + 1 < argc) sim_notready_polls = atoi(argv[++i]);
+        else if (k < 63) sim_slots[k++] = atoi(argv[i]);
+    }
+    sim_trace = 1;
+    rc = fw_gdemu_mount((uint16_t)n, &sense);
+    printf("MOUNT rc=%d sense=%u mounted=%d\n", rc, sense, sim_mounted_number);
+    rc = fw_gdemu_step(0, &sense);
+    printf("STEP_NEXT rc=%d sense=%u mounted=%d\n", rc, sense, sim_mounted_number);
+    rc = fw_gdemu_step(1, &sense);
+    printf("STEP_PREV rc=%d sense=%u mounted=%d\n", rc, sense, sim_mounted_number);
+    rc = fw_gdemu_version(&boot, &fw);
+    printf("VERSION rc=%d boot=%08X fw=%08X\n", rc, (unsigned)boot, (unsigned)fw);
+    rc = fw_mount_named("ABCDEFGHIJKLM", &sense);
+    printf("NAMED rc=%d sense=%u named_mounts=%d\n", rc, sense, sim_named_mounts);
+    rc = fw_mount_default(&sense);
+    printf("DEFAULT rc=%d sense=%u default_mounts=%d\n", rc, sense, sim_default_mounts);
+    for (int i = 0; i < 4; i++) {
+        rc = fw_test_unit_ready(&sense);
+        printf("TUR rc=%d sense=%u\n", rc, sense);
+    }
+    printf("COUNTS packets=%d ua_served=%d mount_in_session=%d\n", sim_packets, sim_ua_served, sim_mount_in_session);
+    return 0;
+}
+
 static int dump(const char *img, uint32_t sectors, const char *outdir)
 {
     char why[96];
@@ -272,12 +341,14 @@ int main(int argc, char **argv)
     if (argc < 2) return 2;
     ng_cfg_defaults();
     if (!strcmp(argv[1], "selftest")) return selftest();
+    if (!strcmp(argv[1], "gdemu") && argc >= 3) return gdemu(atoi(argv[2]), argc - 3, argv + 3);
     if (!strcmp(argv[1], "hang")) {
         volatile unsigned spin = 0;
         printf("hanging\n");
         fflush(stdout);
         for (;;) spin++;
     }
+    if (!strcmp(argv[1], "light") && argc >= 4) return light(argv[2], (uint32_t)strtoul(argv[3], NULL, 10));
     if (argc < 5) return 2;
     sectors = (uint32_t)strtoul(argv[3], NULL, 10);
     if (!strcmp(argv[1], "mkimage")) return mkimage(argv[2], sectors, (uint32_t)strtoul(argv[4], NULL, 10));

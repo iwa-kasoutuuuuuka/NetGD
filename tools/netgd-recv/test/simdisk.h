@@ -36,6 +36,17 @@ extern int sim_ua_mode;             /* UNIT ATTENTION at start and after every E
 extern int sim_ua_pending, sim_ua_served;
 extern int sim_fail_end2;           /* END mode 2 fails (the session ends anyway) */
 extern int sim_default_mounts, sim_named_mounts, sim_packets;
+/* menu commands (0x52 / TEST UNIT READY / named MOUNT) */
+extern int sim_slots[64];           /* mountable folder numbers, 0-terminated; a 52 82 for another number: ILLEGAL REQUEST */
+extern int sim_mounted_number;      /* last number mounted by 52 82 / 52 81 (0 = default / none) */
+extern int sim_notready_polls;      /* TEST UNIT READY answers NOT READY this many times after a mount */
+extern int sim_gdemu_mounts;        /* successful 52 82 / 52 81 */
+extern char sim_names[256];         /* '|'-separated names a named MOUNT accepts (upper case); empty = any */
+extern int sim_fw_dead;             /* the firmware does not answer any packet (no OGDM, a stock GDEMU, no board) */
+extern int sim_trace;               /* print "FW <12 hex bytes>" for every packet */
+extern int sim_mount_in_session;    /* mount-type commands seen while a write session was open */
+extern int sim_tur_calls;           /* TEST UNIT READY packets seen */
+extern uint32_t sim_fw_version;     /* 52 00 reply (boot and firmware word) */
 
 /* platform (plat_host.c) */
 extern char sim_pc_root[260];       /* what "/pc" maps to */

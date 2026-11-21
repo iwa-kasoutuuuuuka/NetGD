@@ -104,6 +104,28 @@ NGD:END ok=1
 - PC 側：フォルダ名・ファイル名は ASCII のみ、127 バイト以下、`\ / : * ? " < > |` なし。1 ファイル 4 GiB 未満。ファイルは 128 個まで。
 - dcload-ip は認証も暗号化も無い。信頼できる LAN だけで使う。`/pc/` への書き込みは結果ファイルだけ（4 KiB ずつ + `fflush`）。
 
+## `push` と `remote`（BBA 経由、NetGD メニューへ。T2 の PC 側）
+
+`netgd-menu`（`tools/netgd-menu`、設計 `docs/design/menu-app.md` 8 章）の取り込み画面に、ジョブフォルダ無しで直接送る。**実機では一度も動かしていない**（ホスト試験は、Python の模型とメニュー中核の `menu_host serve` の両方に対して通る）。
+
+1. Dreamcast：メニューの一覧で **Y**。画面に `IP 192.168.0.20  port 20039  code 4821` が出る。
+2. PC：
+
+```
+python netgd-send.py push game.gdi --host 192.168.0.20 --code 4821 --slot auto
+python netgd-send.py push game.cdi --host 192.168.0.20 --code 4821 --name MYGAME --title "My Game" --mount
+python netgd-send.py remote list --host 192.168.0.20 --code 4821
+python netgd-send.py remote delete 05 --host 192.168.0.20 --code 4821
+```
+
+- `push IMAGE`：`prepare` と同じ検査（`image.plan_image`）をして、元のファイルから直接読んで送る（コピーもリンクも作らない。書き換えた `.gdi` はメモリ上）。マニフェストに **`name.txt`**（メニューに出るタイトル）を 1 ファイル足す。中身は `--title`、無ければイメージの隣の `name.txt`、それも無ければ元のファイル名の拡張子を除いたもの（ASCII 以外は `?`）。
+- `--slot N|auto`：`auto` は先に `LIST /` を送り、使われている番号フォルダを避けて 2 以上で最小の空き番号にする（`01` はメニュー自身）。`--name` と `--slot` のどちらも無ければ `auto`。
+- `--mode new|resume|overwrite`：既定は `resume`（中断したら同じコマンドをもう一度で続きから）。`--mount`：終わったらそのフォルダをマウント。`--force`：保護フォルダ（`GDEMU.CFG` の既定・`01`）への上書き。**本体の画面でも A を 1 秒押し続けて許可する必要がある**。`--allow-fragmented`、`--no-finish`（セッションを閉じない）。
+- 終了コードは `collect` と同じ：0 成功、2 途中（本体で B を押した、LAN が切れた：同じコマンドで再開できる）、1 失敗。
+- `remote statfs|list [フォルダ]|delete フォルダ [--force]|verify フォルダ|finish [--mount フォルダ|--none]`：単発の操作。`NGD:` の行がそのまま出る。
+- 認証は 4 桁の合言葉だけ（誤操作よけ。暗号化は無い。LAN 用）。3 回間違えると本体が合言葉を作り直す。
+- プロトコルの定義は `netgd_send/ngtp.py`（標準ライブラリだけ）。
+
 ## テスト
 
 ```
@@ -115,7 +137,7 @@ python -m unittest discover -s tests -v
 
 ## 未実装・今後
 
-- T2（NGTP、単体 TCP）は含まない。
-- `netgd-recv`（G2-3）と、`--prepare` / `--collect` 以外のサブコマンド（`list` / `delete` / `verify` / `statfs` の独立した実行。`job.ngj` の形式は設計のとおりだが、現状 `prepare` が作るのは `statfs` と `put` と `finish` だけ）。
+- T2 の探索（UDP の `NGTP-DISCOVER`、`--host` の省略）は未実装（設計の手順 9、任意）。
+- `prepare` が作る `job.ngj` は `statfs` と `put` と `finish` だけ（`list` / `delete` / `verify` の単発は T2 の `remote` で行う）。
 
 `prepare` は前回の `result.ngr` で `DONE ok` だった項目を `job.ngj` から外す（再送を防ぐ）。失敗・未完の項目は残る。.gdi のトラック名は UTF-8、ANSI コードページ、latin-1 の順に読み、ディスク上にあるファイルに当たった読み方を採る。
