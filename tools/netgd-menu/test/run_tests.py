@@ -562,7 +562,7 @@ class NgtServe(object):
         self.clients.append(c)
         return c
 
-    def finish(self, timeout=60):
+    def finish(self, timeout=60, check=True):
         """wait for the process to end (the UI left the transfer screen); returns the SIM summary as a dict"""
         try:
             self.proc.wait(timeout)
@@ -574,6 +574,12 @@ class NgtServe(object):
         m = re.search(r"^SIM (.*)$", text, re.M)
         self.text = text
         self.sim = {k: v for k, v in re.findall(r"(\w+)=(\S*)", m.group(1))} if m else {}
+        if check and self.sim and "POWERCUT" not in text:
+            # in every scenario: no write outside a session, none the firmware would refuse, no mount command while a
+            # session was open (N14), and no session left open when the transfer screen is left
+            t = self.test
+            t.assertEqual((int(self.sim["unsess"]), int(self.sim["violations"]), int(self.sim["mount_in_session"])), (0, 0, 0), text)
+            t.assertEqual(int(self.sim["session"]), 0, text)
         return self.sim
 
 
@@ -961,6 +967,168 @@ class TestNgtpFrames(NetBase):
                 self.assertEqual(self.read(fc, "/03", n), d, "after resume, cut %d %s" % (cut, n))
         print("ngtp power cuts: %d positions of %d sector writes; image visible after the cut at %d of them; most clusters left over %d"
               % (len(cuts), total, sum(results), lost_max), file=sys.stderr)
+
+
+SEND_PY = os.path.join(os.path.dirname(ROOT), "netgd-send", "netgd-send.py")
+
+
+class TestPush(NetBase):
+    """netgd-send push / remote against menu_host serve (design 11.2 N1, N2, N8, N10, N12, N14)."""
+
+    def make_gdi(self, sub="src", sizes=(4 * 2352, 3 * 2352, 5 * 2048), stem="mygame"):
+        d = os.path.join(self.work, sub)
+        os.makedirs(d, exist_ok=True)
+        specs = [(1, 0, 4, 2352, "track01.bin"), (2, 450, 0, 2352, "track02.raw"), (3, 45000, 4, 2048, "track03.bin")]
+        lines = ["3"]
+        for (num, lba, ctrl, sec, nm), size in zip(specs, sizes):
+            with open(os.path.join(d, nm), "wb") as f:
+                f.write(self.pattern(size, num))
+            lines.append("%d %d %d %d %s 0" % (num, lba, ctrl, sec, nm))
+        p = os.path.join(d, stem + ".gdi")
+        with open(p, "wb") as f:
+            f.write(("\r\n".join(lines) + "\r\n").encode("ascii"))
+        return p, {nm: self.pattern(size, num) for (num, _l, _c, _s, nm), size in zip(specs, sizes)}
+
+    def make_cdi(self, sub="cdi", stem="disc one", size=8192):
+        d = os.path.join(self.work, sub)
+        os.makedirs(d, exist_ok=True)
+        data = bytearray(self.pattern(size, 9))
+        data[-8:] = (0x80000005).to_bytes(4, "little") + (size - 100).to_bytes(4, "little")
+        p = os.path.join(d, stem + ".cdi")
+        with open(p, "wb") as f:
+            f.write(bytes(data))
+        return p, bytes(data)
+
+    def push(self, srv, image, *extra, timeout=120):
+        cmd = [sys.executable, SEND_PY, "push", image, "--host", "127.0.0.1", "--port", str(srv.port), "--code", str(CODE)] + list(extra)
+        r = run_child(cmd, timeout=timeout)
+        return r
+
+    def test_n1_push_gdi_slot_auto(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/04/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi()
+        srv = NgtServe(self, img, "--slots", "2,3,4")
+        r = self.push(srv, gdi, "--slot", "auto")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("using the free folder 03", r.stdout)
+        sim = srv.finish()
+        self.assertEqual((sim_int(sim, "begin"), sim_int(sim, "end"), sim_int(sim, "endmode")), (1, 1, 1), srv.text)
+        fc = self.clean_fs(img)
+        self.assertEqual(sorted(k.lower() for k in fc.folder_files("/03")),
+                         sorted(["disc.gdi", "track01.bin", "track02.raw", "track03.bin", "name.txt", "netgd.mf"]))
+        for n, d in tracks.items():
+            self.assertEqual(self.read(fc, "/03", n), d, n)
+        self.assertEqual(self.read(fc, "/03", "name.txt"), b"mygame\n")
+        self.assertFalse([p for p in fc.files if p.lower().endswith((".ngp", ".ckp"))])
+        self.assertEqual([p.lower() for p in fc.visible_images()["/03"]], ["/03/disc.gdi"])
+        # the rewritten descriptor names the 8.3 files
+        self.assertIn(b"track03.bin", self.read(fc, "/03", "disc.gdi"))
+
+    def test_n2_push_cdi_by_name_and_mount(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        cdi, data = self.make_cdi()
+        srv = NgtServe(self, img)
+        r = self.push(srv, cdi, "--name", "MYCDI", "--mount", "--title", "Café Disc")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        sim = srv.finish()
+        self.assertEqual((sim_int(sim, "endmode"), sim["endname"]), (2, "MYCDI"), srv.text)
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/MYCDI", "disc.cdi"), data)
+        self.assertEqual(self.read(fc, "/MYCDI", "name.txt"), b"Caf? Disc\n")                 # ASCII only
+
+    def test_push_uses_a_name_txt_next_to_the_image(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi()
+        with open(os.path.join(os.path.dirname(gdi), "Name.TXT"), "wb") as f:
+            f.write(b"The Real Title\r\nsecond line\r\n")
+        srv = NgtServe(self, img)
+        r = self.push(srv, gdi, "--slot", "5")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/05", "name.txt"), b"The Real Title\r\nsecond line\r\n")
+
+    def test_wrong_code_is_refused(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi()
+        srv = NgtServe(self, img)
+        cmd = [sys.executable, SEND_PY, "push", gdi, "--host", "127.0.0.1", "--port", str(srv.port), "--code", "1"]
+        r = run_child(cmd)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("EAUTH", r.stdout)
+        srv.proc.kill()
+        srv.finish()
+
+    def test_n8_push_force_protected_folder(self):
+        for decision, rc in (("allow", 0), ("deny", 1)):
+            img = self.card({"/01/MENU.CDI": b"menu"}, name="p_%s.img" % decision)
+            gdi, tracks = self.make_gdi("src_" + decision)
+            srv = NgtServe(self, img, "--confirm", decision)
+            r = self.push(srv, gdi, "--slot", "1", "--mode", "overwrite", "--force")
+            self.assertEqual(r.returncode, rc, (decision, r.stdout, r.stderr))
+            if rc:
+                self.assertIn("EPROTECTED", r.stdout)
+                srv.test.assertTrue(True)
+                cl = srv.client()
+                cl.hello()
+                cl.send(NGT_FINISH, bytes([1]))
+                cl.recv(), cl.recv()
+            srv.finish()
+            fc = self.clean_fs(img)
+            self.assertEqual("/01/DISC.GDI" in fc.files, rc == 0)
+            self.assertEqual("/01/MENU.CDI" in fc.files, rc != 0)
+
+    def test_n10_stop_safely_exit_code_2_then_resume(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi(sizes=(200 * 2352, 3 * 2352, 5 * 2048))
+        srv = NgtServe(self, img, "--stopafter", "2")
+        r = self.push(srv, gdi, "--slot", "3")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("NGD:STOP", r.stdout)
+        self.assertIn("incomplete", r.stdout)
+        r = self.push(srv, gdi, "--slot", "3")                                   # the same command again
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        sim = srv.finish()
+        self.assertEqual(sim_int(sim, "begin"), 1)                               # one session over both runs
+        fc = self.clean_fs(img)
+        self.assertEqual(self.read(fc, "/03", "track01.bin"), tracks["track01.bin"])
+
+    def test_n12_after_finish_the_list_shows_the_new_folder(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        gdi, tracks = self.make_gdi()
+        srv = NgtServe(self, img, "--dump", "--slots", "2,3")
+        r = self.push(srv, gdi, "--slot", "auto", "--title", "Pushed Game")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        srv.finish()
+        rows = [l[4:] for l in srv.lines if re.match(r"S\d\d\|", l)]
+        self.assertIn(exp_row(False, 3, "Pushed Game", "GDI"), rows, "\n".join(rows))
+        self.assertIn("SERVE-END state=3", srv.text)                              # back in the list
+        self.assertIn("2 games", "\n".join(rows))
+
+    def test_remote_operations(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+        srv = NgtServe(self, img)
+
+        def remote(*args):
+            return run_child([sys.executable, SEND_PY, "remote", args[0], *args[1:], "--host", "127.0.0.1",
+                              "--port", str(srv.port), "--code", str(CODE)])
+
+        r = remote("statfs")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"NGD:STATFS free=\d+ total=\d+ cluster=512")
+        r = remote("list")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("NGD:LIST complete 02", r.stdout)
+        r = remote("verify", "02")
+        self.assertEqual(r.returncode, 1, r.stdout)                              # no NETGD.MF
+        r = remote("delete", "03")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('NGD:DELETE "03" ok', r.stdout)
+        r = remote("finish")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        sim = srv.finish()
+        self.assertEqual((sim_int(sim, "begin"), sim_int(sim, "end")), (1, 1))
+        self.assertNotIn("/03/DISC.CDI", self.clean_fs(img).files)
 
 
 if __name__ == "__main__":

@@ -199,23 +199,8 @@ def prepare(image_path, jobdir, slot=None, name=None, chunk_mib=8, mode="new", m
     kind = imgmod.detect_type(image_path)
     folder = imgmod.folder_name(slot, name, image_path)
 
-    # 1. validate and plan names (nothing is written yet)
-    sources = []  # (target_name, source_path or None, text or None)
-    if kind == "gdi":
-        gi = imgmod.check_gdi(image_path)
-        by_track, gdi_text = imgmod.plan_gdi_names(gi)
-        desc = imgmod.DESCRIPTOR_BASE + ".gdi"
-        sources.append((desc, None, gdi_text))
-        done = set()
-        for t in gi.tracks:
-            nm = by_track[t.number]
-            if nm.lower() not in done:
-                done.add(nm.lower())
-                sources.append((nm, t.path, None))
-    else:
-        imgmod.check_cdi(image_path)
-        desc = imgmod.DESCRIPTOR_BASE + ".cdi"
-        sources.append((desc, image_path, None))
+    # 1. validate and plan names (nothing is written yet): the same code `push` uses
+    kind, desc, sources = imgmod.plan_image(image_path)  # sources: (target_name, source_path or None, text or None)
 
     # 2. job folder and entry number
     jobdir = os.path.abspath(jobdir)

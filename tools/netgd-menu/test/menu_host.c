@@ -282,11 +282,11 @@ static void u7_input(void)
 static void sim_summary(void)
 {
     printf("SIM cmd_writes=%llu sector_writes=%llu begin=%d end=%d unsess=%d violations=%llu rcmds=%llu rsecs=%llu "
-           "gdemu_mounts=%d named_mounts=%d mount_in_session=%d packets=%d endmode=%d endname=%s\n",
+           "gdemu_mounts=%d named_mounts=%d mount_in_session=%d packets=%d endmode=%d endname=%s session=%d\n",
            (unsigned long long)sim_cmd_writes, (unsigned long long)sim_sector_writes, sim_begin_calls, sim_end_calls,
            sim_unsessioned_writes, (unsigned long long)sim_violations, (unsigned long long)sim_cmd_reads,
            (unsigned long long)sim_sector_reads, sim_gdemu_mounts, sim_named_mounts, sim_mount_in_session, sim_packets, sim_end_mode,
-           sim_end_name[0] ? sim_end_name : "-");
+           sim_end_name[0] ? sim_end_name : "-", sim_session);
 }
 
 static nm_ui_t ui;

@@ -1,7 +1,8 @@
-"""CLI: python -m netgd_send {prepare,collect,status} ...
+"""CLI: python -m netgd_send {prepare,collect,status,push,remote} ...
 
-This tool never talks to the Dreamcast.  Sending, running, logging and noexec detection
-belong to the owner's dc_auto / dc_gui (design 7.1).
+`prepare`/`collect`/`status` never talk to the Dreamcast: sending, running, logging and noexec detection
+belong to the owner's dc_auto / dc_gui (design 7.1).  `push` and `remote` talk to the NetGD menu over a BBA
+(docs/design/menu-app.md 8): the menu's transfer screen shows the IP address and the 4-digit code.
 """
 
 import argparse
@@ -10,6 +11,8 @@ import sys
 from . import __version__
 from . import image as imgmod
 from . import job as jobmod
+from . import ngtp
+from . import push as pushmod
 from .manifest import ManifestError
 
 
@@ -63,6 +66,30 @@ def cmd_status(a):
     return 0
 
 
+def cmd_push(a):
+    return pushmod.cmd_push(a)
+
+
+def cmd_remote(a):
+    return pushmod.cmd_remote(a)
+
+
+def _slot_arg(v):
+    if v == "auto":
+        return v
+    try:
+        return int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--slot takes a number or auto")
+
+
+def _add_net_args(p):
+    p.add_argument("--host", required=True, help="IP address shown on the menu's transfer screen")
+    p.add_argument("--code", required=True, type=int, help="the 4-digit code shown there")
+    p.add_argument("--port", type=int, default=ngtp.DEFAULT_PORT)
+    p.add_argument("--timeout", type=float, default=60.0, help="network timeout in seconds (default 60)")
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog="netgd_send", description=__doc__.strip().splitlines()[0])
     ap.add_argument("--version", action="version", version="netgd-send " + __version__)
@@ -88,14 +115,41 @@ def build_parser():
     p = sub.add_parser("status", help="show what is pending / done / resumable")
     p.add_argument("--job", required=True)
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("push", help="send an image to the NetGD menu's transfer screen over the BBA (no job folder)")
+    p.add_argument("image", help=".gdi or .cdi file")
+    _add_net_args(p)
+    p.add_argument("--slot", type=_slot_arg, default=None,
+                   help="numbered folder 01..9999, or `auto` for the lowest free one from 02 (default when no --name)")
+    p.add_argument("--name", help="ASCII folder name on the SD card (up to 3 levels with '/')")
+    p.add_argument("--mode", choices=jobmod.MODES, default="resume", help="put mode (default resume: a repeat goes on)")
+    p.add_argument("--title", help="the title the menu shows (written as name.txt; default: the image file name)")
+    p.add_argument("--mount", action="store_true", help="mount this image when the transfer is finished")
+    p.add_argument("--force", action="store_true", help="allow overwriting a protected folder (the console asks too)")
+    p.add_argument("--allow-fragmented", action="store_true", help="accept a fragmented allocation")
+    p.add_argument("--no-finish", action="store_true", help="do not close the session at the end")
+    p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("remote", help="one operation on the menu's transfer screen: statfs, list, delete, verify, finish")
+    p.add_argument("op", choices=("statfs", "list", "delete", "verify", "finish"))
+    p.add_argument("folder", nargs="?", help="folder for list (default /), delete and verify")
+    _add_net_args(p)
+    p.add_argument("--force", action="store_true", help="delete: allow a protected folder (the console asks too)")
+    p.add_argument("--mount", metavar="FOLDER", help="finish: mount this folder")
+    p.add_argument("--none", action="store_true", help="finish: mount nothing")
+    p.set_defaults(func=cmd_remote)
     return ap
 
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
+    if a.cmd == "push" and a.slot is None and a.name is None:
+        a.slot = "auto"
+    if a.cmd == "remote" and a.op in ("delete", "verify") and not a.folder:
+        build_parser().error("%s needs a folder" % a.op)
     try:
         return a.func(a)
-    except (imgmod.ImageError, ManifestError, jobmod.JobError) as e:
+    except (imgmod.ImageError, ManifestError, jobmod.JobError, ngtp.NgtpError) as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
 
