@@ -1019,6 +1019,250 @@ async def tb_hob_selects_prev(ctx, dut):
     assert (val & 0xFF) == 0xAA, f"HOB=1 should read LBALowPrev 0xAA, got {val:#06x}"
 
 
+# -- Command acknowledge by number, masked slot writes (R89 A-c) -------------
+
+def ack_token(hw_info):
+    """What the firmware's `ack_command` writes to slot 0: the upper byte of
+    the HW_INFO word it read when it took the command (sequence number in
+    bits 8-14, "acknowledge by number" flag in bit 15), bit 1 clear. Against
+    a bitstream from before the sequence number this is 0 -- the old
+    unconditional acknowledge."""
+    return hw_info & 0xFF00
+
+
+async def tb_ack_keeps_command_written_after_snapshot(ctx, dut):
+    """A command the host writes between the MCU's snapshot and its
+    acknowledge must stay latched.
+
+    The old acknowledge wrote COMMAND_PEND = 0 unconditionally, so it also
+    cleared the latch of a command the MCU had never looked at: nothing was
+    left to say it existed, the host sat on BSY=1 until it timed out, and
+    with MCU_IRQn already released there was no edge to wake the firmware
+    either. The firmware's simple handlers post Status first and acknowledge
+    second, which is exactly when a fast host writes its next command."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+
+    # Command A. The MCU takes it: HW_INFO, then the registers.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EF)
+    hw_a = await mcu_read(ctx, dut, MCU_HW_INFO)
+    assert hw_a & 0x2, "command A should be pending"
+    assert (await mcu_read(ctx, dut, MCU_CMD_FEAT)) & 0xFF == 0xEF
+    # The handler posts A's completion...
+    await mcu_write(ctx, dut, MCU_STATUS, 0x0150)
+
+    # ...and the host, seeing BSY drop, writes command B before the
+    # acknowledge lands.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+
+    # The acknowledge of A.
+    await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_a))
+
+    hw_b = await mcu_read(ctx, dut, MCU_HW_INFO)
+    assert hw_b & 0x2, (
+        f"command B was written after the MCU's snapshot of A; acknowledging "
+        f"A must not clear it (HW_INFO={hw_b:#06x})"
+    )
+    assert (await mcu_read(ctx, dut, MCU_CMD_FEAT)) & 0xFF == 0xEC
+    for _ in range(8):
+        await ctx.tick()
+    assert ctx.get(dut.mcu_irq) == 1, "mcu_irq must stay up for command B"
+    st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+    assert st & 0x80, f"B is unserved, BSY should be up, got {st:#04x}"
+
+    # The MCU's next look takes B; acknowledging with B's number clears it.
+    assert (hw_b ^ hw_a) & 0x7F00, "B must carry a different sequence number"
+    await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_b))
+    assert not ((await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2), (
+        "acknowledging B with its own number should clear COMMAND_PEND"
+    )
+    # Acknowledging again is harmless...
+    await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_b))
+    assert not ((await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2)
+    # ...and a stale number never clears a later command.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00E7)
+    await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_b))
+    await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_a))
+    assert (await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2, "stale ack cleared command C"
+
+
+async def tb_ack_strobe_does_not_swallow_command_write(ctx, dut):
+    """The same race inside one bus access: the acknowledge is a level
+    several core clocks wide, and a Command write landing under it used to
+    lose -- the MCU-side `command_pend.eq(...)` is the later assignment.
+
+    Swept over every alignment of the two strobes."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+    for lead in range(0, 12):
+        # Command A, taken by the MCU.
+        await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EF)
+        hw_a = await mcu_read(ctx, dut, MCU_HW_INFO)
+        assert hw_a & 0x2
+
+        # Host starts writing command B...
+        ctx.set(dut.ide_csn, CSN_CMD)
+        ctx.set(dut.ide_addr, ADDR_COMMAND)
+        ctx.set(dut.ide_data_in, 0x00A1)
+        await ctx.tick()
+        ctx.set(dut.ide_wr, 1); ctx.set(dut.ide_wr_h, 1)
+        for _ in range(5):
+            await ctx.tick()
+        # ...and the MCU's acknowledge of A overlaps the end of that write:
+        # it starts `lead` clocks before the host releases the strobe and is
+        # held long enough to cover the synchronized edge at every lead.
+        for t in range(24):
+            if t == 12 - lead:
+                ctx.set(dut.mcu_cs, 1)
+                ctx.set(dut.mcu_addr, MCU_HW_INFO)
+                ctx.set(dut.mcu_data_in, ack_token(hw_a))
+                ctx.set(dut.mcu_wr, 1)
+            if t == 8:
+                ctx.set(dut.ide_wr, 0); ctx.set(dut.ide_wr_h, 0)
+            if t == 12 - lead + 10:
+                ctx.set(dut.mcu_wr, 0)
+            await ctx.tick()
+        await mcu_idle(ctx, dut)
+        await ide_idle(ctx, dut)
+
+        hw_b = await mcu_read(ctx, dut, MCU_HW_INFO)
+        cmd = (await mcu_read(ctx, dut, MCU_CMD_FEAT)) & 0xFF
+        assert cmd == 0xA1, f"lead={lead}: command B not latched ({cmd:#04x})"
+        assert hw_b & 0x2, (
+            f"lead={lead}: the acknowledge of A swallowed command B "
+            f"(HW_INFO={hw_b:#06x})"
+        )
+        # B is then acknowledged normally.
+        await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw_b))
+        assert not ((await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2), f"lead={lead}"
+
+
+async def tb_hw_info_numbered_write_forms(ctx, dut):
+    """Slot 0 write forms: the plain one (bit 15 = 0) still loads
+    COMMAND_PEND from bit 1; the numbered one never sets it, and with bit 1
+    set it leaves the latch alone so RESET_SEEN can be cleared on its own."""
+    await release_reset(ctx, dut)
+    hw = await mcu_read(ctx, dut, MCU_HW_INFO)
+    assert hw & 0x8000, f"bit 15 should read 1 (acknowledge by number), got {hw:#06x}"
+    assert hw & 0x4, "boot reset should be flagged"
+
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+    hw = await mcu_read(ctx, dut, MCU_HW_INFO)
+    assert hw & 0x2
+
+    # clear_reset_seen: write back PEND and the upper byte, plus bit 2.
+    await mcu_write(ctx, dut, MCU_HW_INFO, (hw & 0xFF02) | 0x0004)
+    hw2 = await mcu_read(ctx, dut, MCU_HW_INFO)
+    assert not (hw2 & 0x4), "RESET_SEEN should clear"
+    assert hw2 & 0x2, "clearing RESET_SEEN must not acknowledge the command"
+
+    # The numbered form cannot set the latch.
+    await mcu_write(ctx, dut, MCU_HW_INFO, ack_token(hw2))
+    assert not ((await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2)
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x8002 | (hw2 & 0x7F00))
+    assert not ((await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2), (
+        "numbered write with bit 1 set must not set COMMAND_PEND"
+    )
+
+    # Old firmware: plain writes behave as they always did.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x00EC)
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+    assert not ((await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2)
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x0002)
+    assert (await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2
+
+    # The sequence number counts Command writes modulo 128 and survives a
+    # reset (it only has to differ between consecutive commands).
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+    before = ((await mcu_read(ctx, dut, MCU_HW_INFO)) >> 8) & 0x7F
+    for _ in range(3):
+        await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0x0000)
+    after = ((await mcu_read(ctx, dut, MCU_HW_INFO)) >> 8) & 0x7F
+    assert after == (before + 3) & 0x7F, f"seq {before} -> {after}"
+    await ide_write(ctx, dut, CSN_CTRL, ADDR_DEVICE_CONTROL, 0x04)
+    await ide_write(ctx, dut, CSN_CTRL, ADDR_DEVICE_CONTROL, 0x00)
+    assert ((await mcu_read(ctx, dut, MCU_HW_INFO)) >> 8) & 0x7F == after
+
+
+async def tb_slot19_masked_write(ctx, dut):
+    """Slot 19 bits 8-12 mask the write of bits 0-4; a zero mask writes all
+    five (the old whole-word behaviour)."""
+    await release_reset(ctx, dut)
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+
+    # Whole word, as before.
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0009)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x09
+    # Flow control only: DMA mode survives.
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0C04)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x05
+    # DMA mode only: flow control survives.
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0302)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x06
+    # One bit.
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0808)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x0E
+    # The firmware's `disarm`: DMA mode and both flow controls off.
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0F00)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x00
+    # Whole word again clears everything.
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0F1F)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x0F, "bit 4 was masked out"
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0000)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x00
+
+
+async def tb_disarm_keeps_packet_phase(ctx, dut):
+    """Cleaning up an abandoned transfer must not close the CDB phase of the
+    PACKET command that abandoned it.
+
+    The host drops a DMA read and writes a new PACKET; the FPGA opens the
+    CDB phase (pkt_phase) on that write. The firmware then notices and
+    releases DMA mode -- through slot 19, which also holds pkt_phase. As a
+    whole-word write that cleared it, so the sixth CDB word no longer
+    raised BSY / dropped DRQ (ATA-5 10.8.6) and the host took the still-set
+    DRQ for a data phase."""
+    await release_reset(ctx, dut)
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+    # A DMA read in flight...
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0F01)
+    # ...abandoned by a new PACKET.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0xA0)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x11
+    # The firmware's `disarm`.
+    await mcu_write(ctx, dut, MCU_DMA_MODE, 0x0F00)
+    assert (await mcu_read(ctx, dut, MCU_DMA_MODE)) & 0x1F == 0x10, (
+        "disarm must leave pkt_phase to the FPGA"
+    )
+    for i in range(6):
+        await ide_write(ctx, dut, CSN_CMD, ADDR_DATA, 0x4000 + i)
+    for _ in range(4):
+        await ctx.tick()
+    st = await mcu_read(ctx, dut, MCU_STATUS) & 0xFF
+    assert st & 0x80 and not (st & 0x08), (
+        f"last CDB word should give BSY=1 DRQ=0, got {st:#04x}"
+    )
+
+
+async def tb_irr_write_keeps_sector_count_prev(ctx, dut):
+    """An MCU write to slot 5 (the ATAPI interrupt reason) changes the low
+    byte only; the previous sector count in the high byte is the host's."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_SECTOR_COUNT, 0xAA)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_SECTOR_COUNT, 0xBB)
+    await mcu_write(ctx, dut, MCU_SECTOR_COUNT, 0x0003)
+    sc = await mcu_read(ctx, dut, MCU_SECTOR_COUNT)
+    assert sc == 0xAA03, f"expected 0xAA03 after an IRR write, got {sc:#06x}"
+    await ide_write(ctx, dut, CSN_CTRL, ADDR_DEVICE_CONTROL, 0x80)   # HOB
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_SECTOR_COUNT)
+    assert (val & 0xFF) == 0xAA, f"HOB=1 should still read 0xAA, got {val:#06x}"
+    await ide_write(ctx, dut, CSN_CTRL, ADDR_DEVICE_CONTROL, 0x00)
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_SECTOR_COUNT)
+    assert (val & 0xFF) == 0x03, f"HOB=0 should read the IRR, got {val:#06x}"
+
+
 # -- Runner -----------------------------------------------------------------
 
 async def ide_read_short_hold(ctx, dut, csn, addr):
@@ -1126,6 +1370,14 @@ TESTBENCHES = [
     ("dma_pop_survives_burst_end", tb_dma_pop_survives_burst_end, True),
     ("secondary_reports_ata_signature", tb_secondary_reports_ata_signature, False),
     ("dma_write_fills_write_fifo", tb_dma_write_fills_write_fifo, False),
+    ("ack_keeps_command_written_after_snapshot",
+     tb_ack_keeps_command_written_after_snapshot, True),
+    ("ack_strobe_does_not_swallow_command_write",
+     tb_ack_strobe_does_not_swallow_command_write, True),
+    ("hw_info_numbered_write_forms", tb_hw_info_numbered_write_forms, True),
+    ("slot19_masked_write", tb_slot19_masked_write, True),
+    ("disarm_keeps_packet_phase", tb_disarm_keeps_packet_phase, True),
+    ("irr_write_keeps_sector_count_prev", tb_irr_write_keeps_sector_count_prev, True),
 ]
 
 

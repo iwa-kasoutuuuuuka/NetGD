@@ -5,7 +5,9 @@
 //! (falling edge, `pioa_wait_irq`). After every wake-up the task sweeps both
 //! devices; the disc-swap button wakes it the same way. A command is
 //! snapshotted from the register window, dispatched on its opcode, answered
-//! through STATUS / ERROR / INTRQ, and acknowledged by clearing COMMAND_PEND.
+//! through STATUS / ERROR / INTRQ, and acknowledged by clearing COMMAND_PEND
+//! -- by number, so that only the command that was snapshotted is
+//! acknowledged (`take_command`, `ack_command`).
 //! The register layout is in `docs/AddressMapMCU.md`.
 //!
 //! The two devices are told apart by `Role`:
@@ -91,6 +93,24 @@ const HW_CMD_PEND: u16 = 0x0002;
 const HW_RESET_SEEN: u16 = 0x0004;
 const HW_NIEN: u16 = 0x0008;
 const HW_IN_RESET: u16 = 0x0010;
+/// The command's number (bits 8-14, counts Command writes) and the FPGA's
+/// "I acknowledge by number" flag (bit 15). Written back to slot 0 with
+/// COMMAND_PEND clear, this byte acknowledges that command and no later one.
+/// A bitstream from before the number reads it as 0, and writing 0 back is
+/// the old unconditional acknowledge -- so nothing here asks which it has.
+const HW_ACK_TOKEN: u16 = 0xFF00;
+
+/// Slot 19 write mask (bits 8-12 enable the write of bits 0-4; see
+/// `ide_device.py`, case 19): DMA mode and both PIO flow controls, the
+/// transfer state this side owns. Bit 4, the packet phase, is the FPGA's --
+/// it raises it on a PACKET Command write -- and stays out of every write
+/// made here. An older bitstream ignores the mask and writes all five.
+const XFER_MASK: u16 = 0x0F00;
+
+/// `HW_ACK_TOKEN` of the command `sweep` last took, for `ack_command`. One
+/// cell serves both devices: `ide_task` takes, serves and acknowledges one
+/// command at a time, and nothing acknowledges outside that.
+static ACK_TOKEN: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
 // Status register bits (matches ATA: BSY DRDY DF DSC DRQ - - ERR).
 const STATUS_BSY: u8 = 0x80;
@@ -192,7 +212,9 @@ impl IdeDevice {
     /// interrupt reason -- they belong to the new command now, or to the
     /// FPGA's post-reset state -- and post no completion. The FPGA clears its
     /// FIFOs on a Command write but leaves DMA mode and PIO flow control
-    /// armed, so `disarm` is the one write still owed.
+    /// armed, so `disarm` is the one write still owed. (It is masked to
+    /// those bits: the new command may be a PACKET whose CDB phase the FPGA
+    /// has already opened in the same slot.)
     ///
     /// A latch with the Command register reading 0x00 is not a command (see
     /// `complete`) and does not count.
@@ -203,16 +225,22 @@ impl IdeDevice {
     }
 
     /// DMA mode off and both PIO flow controls released (slot 19 holds all
-    /// three).
+    /// three, and the packet phase, which is left alone).
     fn disarm(&self) {
-        self.write(REG_DMA_MODE, 0);
+        self.write(REG_DMA_MODE, XFER_MASK);
     }
 
     /// Clear the sticky reset flag without disturbing COMMAND_PEND (slot 0
     /// writes carry both).
+    ///
+    /// Writing back COMMAND_PEND as read keeps a pending command pending. If
+    /// it read 0, the number read with it goes back too, so the write can
+    /// only "acknowledge" a latch that is already clear: a command that
+    /// arrives between the read and the write has the next number. (On a
+    /// bitstream without the number, that command is lost, as it always was.)
     fn clear_reset_seen(&self) {
-        let pend = self.read(REG_HW_INFO) & HW_CMD_PEND;
-        self.write(REG_HW_INFO, pend | HW_RESET_SEEN);
+        let hw = self.read(REG_HW_INFO) & (HW_ACK_TOKEN | HW_CMD_PEND);
+        self.write(REG_HW_INFO, hw | HW_RESET_SEEN);
     }
 
     fn is_primary(&self) -> bool {
@@ -222,6 +250,33 @@ impl IdeDevice {
     /// The other device on the bus.
     fn peer(&self) -> IdeDevice {
         if self.is_primary() { Self::secondary() } else { Self::primary() }
+    }
+
+    /// Take the pending command: its registers, and the number
+    /// `ack_command` will acknowledge it by.
+    ///
+    /// The number is read on both sides of the snapshot, and the snapshot
+    /// retaken until they agree. That makes the pair consistent -- the
+    /// registers are the ones written with that Command write, not half the
+    /// next one's -- and it is also what makes a single read of the number
+    /// safe to trust: the FPGA changes it on its own clock, so one read that
+    /// straddles a change can return bits of both values, but not the same
+    /// wrong value twice.
+    ///
+    /// A command written after the second read has a later number; the
+    /// acknowledge then leaves its COMMAND_PEND alone and `sweep` comes
+    /// round to it (R89 A-c).
+    fn take_command(&self) -> CommandSnapshot {
+        let mut token = self.read(REG_HW_INFO) & HW_ACK_TOKEN;
+        loop {
+            let snap = self.snapshot_command();
+            let again = self.read(REG_HW_INFO) & HW_ACK_TOKEN;
+            if again == token {
+                ACK_TOKEN.store(token, core::sync::atomic::Ordering::Relaxed);
+                return snap;
+            }
+            token = again;
+        }
     }
 
     /// Read the latched command opcode + features + LBA + sector count.
@@ -320,10 +375,21 @@ impl IdeDevice {
         true
     }
 
-    /// Clear COMMAND_PEND so the FPGA stops asserting MCU_IRQ and
-    /// accepts the next command.
+    /// Acknowledge the command `take_command` took: clear its COMMAND_PEND,
+    /// so the FPGA releases MCU_IRQn.
+    ///
+    /// Only that command's. This used to write 0, which cleared the latch
+    /// whatever it stood for, and the handlers that post Status first and
+    /// acknowledge second gave the host exactly the opening: it sees BSY
+    /// drop and writes its next command before the acknowledge lands. That
+    /// command was then never served -- BSY up, no latch, no interrupt edge
+    /// -- until the host timed out (R89 A-c). The FPGA now compares the
+    /// number written here with the latest Command write's and keeps the
+    /// latch if they differ, so the command stays pending for `sweep`.
+    /// Calling this twice, or late, is harmless for the same reason.
+    #[inline(never)]
     fn ack_command(&self) {
-        self.write(REG_HW_INFO, 0);
+        self.write(REG_HW_INFO, ACK_TOKEN.load(core::sync::atomic::Ordering::Relaxed));
     }
 
     /// Pulse the IDE-side INTRQ line. Real ATAPI drives INTRQ high
@@ -352,14 +418,17 @@ impl IdeDevice {
     /// read stale words). So data staged for a DMA read must total a multiple
     /// of 32 bytes or its tail never drains -- true of every whole-sector
     /// path today; pad here if a caller ever stages anything else.
+    ///
+    /// This sets the whole transfer mode: PIO flow control goes off with it.
+    /// A command moves its data by DMA or by PIO, never both, so the two are
+    /// one setting with five values, and writing it as one is what clears a
+    /// leftover from a transfer that ended without its own cleanup. (The
+    /// FPGA can write the fields separately -- the mask in bits 8-12 -- if a
+    /// caller ever needs that.) The packet phase bit is not touched.
     fn set_dma_mode(&self, mode: DmaMode) {
-        self.write(REG_DMA_MODE, mode as u16);
+        self.write(REG_DMA_MODE, XFER_MASK | mode as u16);
     }
 
-    /// Arm hardware backpressure for a PIO data-out phase: while set, the
-    /// FPGA drops the host-visible DRQ whenever the write FIFO is full.
-    /// Without it a multi-sector WRITE SECTORS overruns the FIFO -- the MCU
-    /// polls far too slowly to drop DRQ in time by itself.
     /// Arm the fabric capture: it triggers on the next matching event and
     /// records until full. No-op unless the FPGA was built with capture=True.
     fn capture_arm(&self) {
@@ -396,8 +465,18 @@ impl IdeDevice {
         }
     }
 
+    /// Arm hardware backpressure for a PIO data phase, or release it. For
+    /// data-out: while set, the FPGA drops the host-visible DRQ whenever the
+    /// write FIFO is full. Without it a multi-sector WRITE SECTORS overruns
+    /// the FIFO -- the MCU polls far too slowly to drop DRQ in time by
+    /// itself. For data-in: DRQ shows only while the read FIFO has data. Like
+    /// `set_dma_mode` this sets the whole transfer mode (DMA goes off) and
+    /// leaves the packet phase bit alone.
     fn set_pio_flow_control(&self, read: bool, write: bool) {
-        self.write(REG_DMA_MODE, (if read { 8 } else { 0 }) | (if write { 4 } else { 0 }));
+        self.write(
+            REG_DMA_MODE,
+            XFER_MASK | (if read { 8 } else { 0 }) | (if write { 4 } else { 0 }),
+        );
     }
 
     /// Update the ATAPI Interrupt Reason register (lives in the
@@ -409,6 +488,11 @@ impl IdeDevice {
     ///   0x01 — host is writing the 12-byte packet to us
     ///   0x02 — we have data-in ready for the host
     ///   0x03 — command finished, host should read STATUS
+    ///
+    /// The FPGA takes the low byte only from an MCU write to this slot; the
+    /// high byte (the host's previous sector count, LBA48) is not ours. A
+    /// bitstream from before that zeroes it here, which no host of the
+    /// packet device reads back.
     fn set_irr(&self, ir: u8) {
         self.write(REG_SECTOR_COUNT, ir as u16);
     }
@@ -765,7 +849,9 @@ async fn sweep(
     // command_pend is set, but we ack as part of `handle`, so the
     // line goes high again after each — re-checking here also covers
     // the race where a second command arrives before we returned to
-    // the wait.
+    // the wait. That includes one written before `handle` acknowledged:
+    // the acknowledge is by number and leaves that command's latch set,
+    // so MCU_IRQn never rises and there is no edge -- only this level.
     while dev.command_pending() {
         // Command turnaround timing. The host arms a transfer and then polls
         // for DRQ with a finite patience; if we take longer than that to
@@ -779,7 +865,7 @@ async fn sweep(
             .unwrap_or(0);
         unsafe { CMD_SEEN_AT = Some(cmd_at) };
 
-        let snap = dev.snapshot_command();
+        let snap = dev.take_command();
         // A reset between commands is normal (the BIOS does one at boot);
         // one that landed mid-transfer already aborted the wait that saw
         // it. Either way, log it and clear the flag before the handler runs

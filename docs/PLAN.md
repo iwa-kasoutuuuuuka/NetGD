@@ -209,7 +209,10 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - ホスト側のツールは揃っている：`tools/fwimage`（形式 2・3）、`tools/netgd-fwupd`（BBA 経由の送信。実機未検証）。
 
 ## 将来の地雷メモ（レビューで判明、未修正）
-- slot 19：DMA モードと PIO フロー制御が1語で書かれ、片方の書込でもう片方が消える。今は転送ごとに排他なので無害。
-- slot 5：`set_irr` がセクタカウントの上位バイトを消す。ATAPI 側でのみ使用するので無害。
+- slot 0・5・19 の3件は FPGA とファームの両方で対処した（`docs/design/mcu-fpga-handshake.md`、スロットの説明は `docs/AddressMapMCU.md`）。
+  **シミュレーションとビルドで確認しただけで、実機では未確認。新しい動作は `out/OpenGDEMUCore.v` からビットストリームを作り直してから有効**（同梱の `OpenGDEMU.rbf` は古いまま。古いビットストリームでは新しいファームも従来どおりに動く）。
+  - slot 0：`ack_command` はコマンドの番号つきで ack する。取り込みより後に来たコマンドの COMMAND_PEND は消えない（R89 A-c の残り）。
+  - slot 19：書き込みにビットごとのマスク（bit 12:8）。ファームは DMA モードと PIO フロー制御をまとめて1つの「転送モード」として書き（転送は DMA か PIO のどちらかなので、片方を立てるともう片方が消えるのは意図した動作）、FPGA が持つ PKT_PHASE には触らない。
+  - slot 5：MCU からの書き込みは下位バイトだけ。`set_irr` は上位バイト（LBA48 の前回値）を消さない。
 - `ide_device.py` 845 行付近の「Layout」コメントと、`ide.rs` の `read_fifo_depth` のコメント（256 と 1024）。R88 で修正中。
 - 2E のフラッシュ：`resident,sd-fast` で残りは数百 B（R86）。機能を足すときは `docs/research/flash-budget-2e.md` の削減案から先に入れる。
