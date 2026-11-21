@@ -73,6 +73,7 @@ typedef struct {
     char confirm_what[16], confirm_folder[NM_FOLDER_MAX + 1];
     uint32_t confirm_since;
     char fatal[NM_COLS + 1];
+    int b_wait_release;                 /* B stopped an operation ("Stop safely"): ignore B until it is released (R104 D) */
 
     int sd_mounted;                     /* the light mount is active */
     nm_art_t art;                       /* the box art of the game under the cursor (step 11) */

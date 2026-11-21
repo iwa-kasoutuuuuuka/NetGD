@@ -1469,6 +1469,95 @@ def solid_png(w, h, rgb):
             + chunk(b"IEND", b""))
 
 
+class TestR104LowItems(NetBase):
+    """R104 'later' items A to D: a dead connection is replaced, one transition per frame, a session-end failure when the
+    firmware says the session is closed, B after 'Stop safely' does not also leave the screen."""
+
+    def test_a_silent_connection_is_replaced_by_a_new_one(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img)
+        c1 = srv.client()
+        c1.hello()                                                    # then silent: its PC lost power, no FIN was sent
+        c2 = srv.client()
+        self.assertEqual(c2.hello()[0], NGT_HELLO_OK)                 # without the fix this never answers (the read times out)
+        r = c2.request(NGT_STATFS)
+        self.assertTrue(r[1], r)
+        c2.send(NGT_FINISH, bytes([1]))
+        c2.recv(), c2.recv()
+        srv.finish()
+
+    def test_a_new_connection_must_say_hello_again(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img)
+        c1 = srv.client()
+        c1.hello()
+        c2 = srv.client()
+        c2.send(NGT_STATFS)                                           # no HELLO on the new connection: refused
+        self.assertEqual(c2.recv()[0], NGT_ERROR)
+        c3 = srv.client()
+        self.assertEqual(c3.hello()[0], NGT_HELLO_OK)
+        c3.send(NGT_FINISH, bytes([1]))
+        c3.recv()                                                     # no session was opened: just DONE
+        srv.finish()
+
+    def test_b_a_and_start_together_start_the_game_only(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+        run = self.ui(img, "scan A+S dump t:2000", "--slots", "2,3")
+        self.assertNotEqual(run.screens[0][0]["state"], "7", run.text)       # not the 'go back to the BIOS menu?' screen
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertEqual(run.n("gdemu_mounts"), 1)
+
+    def test_b_y_and_x_together_open_the_transfer_screen_only(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        run = self.ui(img, "scan Y+X dump", "--slots", "2")
+        self.assertEqual(run.screens[0][0]["state"], "9", run.text)          # NM_S_NET_IDLE, not NM_S_INFO
+
+    def test_b_a_priority_and_cursor_moves_when_no_transition(self):
+        img = self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+        run = self.ui(img, "scan D+A t:2000", "--slots", "2,3")              # A wins: the game under the cursor, no move
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertEqual([p[:11] for p in run.packets if p.startswith("52 82")], ["52 82 02 00"])
+        run = self.ui(img, "scan D dump", "--slots", "2,3")
+        self.assertEqual(run.screens[0][1][3][:1], ">")                        # a lone D still moves the cursor
+
+    def test_c_session_end_fails_but_the_firmware_says_it_is_closed(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img, "--idle-ms", "400", "--failend", "closed", "--dump")
+        c = srv.client()
+        c.hello()
+        self.assertTrue(c.request(NGT_STATFS)[1])
+        srv.finish(check=False)                                                  # the idle timer ends the session: the end fails
+        self.assertIn("SERVE-END state=3", srv.text)                             # the list, not NM_S_FATAL (12)
+        self.assertIn("session is closed", srv.text)
+
+    def test_c_session_end_fails_and_the_session_is_still_open(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        srv = NgtServe(self, img, "--idle-ms", "400", "--failend", "stuck", "--dump")
+        c = srv.client()
+        c.hello()
+        self.assertTrue(c.request(NGT_STATFS)[1])
+        srv.finish(check=False)
+        self.assertIn("SERVE-END state=12", srv.text)
+        self.assertIn("Could not close the session", srv.text)
+
+    def test_d_b_that_stopped_an_operation_does_not_also_leave_the_screen(self):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        text, src, files = self.gdi_set("03", sizes=(400000, 6000, 9000))
+        srv = NgtServe(self, img, "--stopafter", "2", "--hold-b-ms", "2500")
+        c = srv.client()
+        c.hello()
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=1), source=src)
+        self.assertEqual((ok, name), (False, "ESTOP"))
+        r = c.request(NGT_STATFS)                                                # B is still down: the screen must still be open
+        self.assertTrue(r[1], r)
+        time.sleep(2.7)                                                          # B is released, then a new press counts again
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=1), source=src)
+        self.assertTrue(ok, (lines, name))
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
+
+
 class TestPushArt(NetBase):
     """step 11 end to end: netgd-send push --art -> the card -> the menu shows the picture"""
     make_gdi = TestPush.make_gdi

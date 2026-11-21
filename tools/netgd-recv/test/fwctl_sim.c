@@ -13,6 +13,7 @@ int sim_end_calls = 0, sim_end_mode = -1, sim_begin_calls = 0;
 char sim_end_name[128];
 int sim_ua_mode;                    /* a UNIT ATTENTION is raised at start and after every END / MOUNT */
 int sim_ua_pending, sim_ua_served;
+int sim_fail_end;                   /* END of any mode fails: 1 = the session ends anyway, 2 = it stays open */
 int sim_fail_end2;                  /* END mode 2 fails (ILLEGAL REQUEST) but still ends the session */
 int sim_default_mounts, sim_named_mounts, sim_packets;
 
@@ -148,11 +149,13 @@ int fw_xfer(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, ui
     case 7: {                                   /* WSESSION_END */
         int mode = pkt[2];
         if (!sim_session) { *err = 0x50; return -1; }       /* END without a session: ILLEGAL REQUEST */
+        if (sim_fail_end == 2) { *err = 0x50; return -1; }  /* fails and the session stays open */
         sim_session = 0;
         sim_end_calls++;
         sim_end_mode = mode;
         sim_end_name[0] = 0;
         raise_ua();
+        if (sim_fail_end == 1) { *err = 0x50; return -1; }  /* fails after the session ended */
         if (mode == 2) {
             if (sim_fail_end2) { *err = 0x50; return -1; }
             strncpy(sim_end_name, staged, sizeof sim_end_name - 1);

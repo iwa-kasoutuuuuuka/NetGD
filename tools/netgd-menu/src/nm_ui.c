@@ -456,7 +456,13 @@ static void hk_progress(void *ctx, const ng_ui_t *u)
     net_redraw(ui);
 }
 
-static int hk_stop(void *ctx) { (void)ctx; return ng_plat_user_stop(); }
+static int hk_stop(void *ctx)
+{
+    nm_ui_t *ui = (nm_ui_t *)ctx;
+    int stop = ng_plat_user_stop();
+    if (stop) ui->b_wait_release = 1;       /* the same press must not also leave the screen when the operation has stopped */
+    return stop;
+}
 
 static void hk_busy(void *ctx, int busy)
 {
@@ -545,18 +551,27 @@ static void net_start(nm_ui_t *ui)
 static void net_close(nm_ui_t *ui)
 {
     char why[96];
+    int closed_anyway = 0;
     ng_err_t e = ngtp_srv_end(&ui->srv, 1);
     nm_net_close_client();
     nm_net_stop();
     if (e != NG_OK) {
-        snprintf(ui->fatal, sizeof ui->fatal, "Could not close the session: reset the console");
-        ui->state = NM_S_FATAL;
-        return;
+        /* The end command failed, but the failure may have come after the firmware closed the session (the mode 2 mount of a
+           folder, a lost answer): ask it.  Closed = the card is the console's again, so go back to the list; still open or no
+           answer = the card is not safe to read (R104 C). */
+        ng_fwstatus_t st;
+        if (fw_status(&st) != 0 || (st.flags & FW_ST_SESSION)) {
+            snprintf(ui->fatal, sizeof ui->fatal, "Could not close the session: reset the console");
+            ui->state = NM_S_FATAL;
+            return;
+        }
+        closed_anyway = 1;
     }
     if (ngfs_mount_light(why, sizeof why) != NG_OK) { to_nosd(ui, why); return; }
     ui->sd_mounted = 1;
     ui->msg[0] = 0;
     start_scan(ui);
+    if (closed_anyway) set_msg(ui, "The end command failed, but the session is closed", 6000);
 }
 
 static void net_frame(nm_ui_t *ui)
@@ -603,6 +618,10 @@ void nm_ui_step(nm_ui_t *ui)
     ui->now = nm_plat_millis();
     ui->controller = nm_plat_controller();
     ui->events = nm_input_update(&ui->in, nm_plat_buttons(), ui->now);
+    if (ui->b_wait_release) {           /* B stopped an operation: the press that did it must not count as a new B (R104 D) */
+        if (nm_plat_buttons() & NM_BTN_B) ui->events &= ~(uint32_t)NM_BTN_B;
+        else ui->b_wait_release = 0;
+    }
 
     switch (ui->state) {
     case NM_S_BOOT:
@@ -618,21 +637,26 @@ void nm_ui_step(nm_ui_t *ui)
         break;
 
     case NM_S_LIST:
-        if (ui->events & NM_BTN_UP) move_cursor(ui, -1, 0);
-        if (ui->events & NM_BTN_DOWN) move_cursor(ui, 1, 0);
-        if (ui->events & (NM_BTN_LEFT | NM_BTN_LT)) move_cursor(ui, -LIST_ROWS, 1);
-        if (ui->events & (NM_BTN_RIGHT | NM_BTN_RT)) move_cursor(ui, LIST_ROWS, 1);
-        if (ui->events & NM_BTN_X) ui->state = NM_S_INFO;
+        /* One transition per frame (R104 B): when several buttons come in the same frame, the first of A, Y, X, START wins and
+           the others are dropped, so "X and A together" never shows the info screen and starts the game too.  The cursor
+           moves only when no transition was asked for. */
         if (ui->events & NM_BTN_A) begin_launch(ui);
-        if (ui->events & NM_BTN_Y) net_start(ui);
-        if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
+        else if (ui->events & NM_BTN_Y) net_start(ui);
+        else if (ui->events & NM_BTN_X) ui->state = NM_S_INFO;
+        else if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
+        else {
+            if (ui->events & NM_BTN_UP) move_cursor(ui, -1, 0);
+            if (ui->events & NM_BTN_DOWN) move_cursor(ui, 1, 0);
+            if (ui->events & (NM_BTN_LEFT | NM_BTN_LT)) move_cursor(ui, -LIST_ROWS, 1);
+            if (ui->events & (NM_BTN_RIGHT | NM_BTN_RT)) move_cursor(ui, LIST_ROWS, 1);
+        }
         if (ui->state == NM_S_LIST || ui->state == NM_S_INFO || ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
         if (ui->state == NM_S_LIST) art_frame(ui);
         break;
 
     case NM_S_INFO:
-        if (ui->events & NM_BTN_A) ui->handoff_mode = ui->handoff_mode == NM_HANDOFF_REBOOT ? NM_HANDOFF_BIOS : NM_HANDOFF_REBOOT;
         if (ui->events & NM_BTN_B) ui->state = NM_S_LIST;
+        else if (ui->events & NM_BTN_A) ui->handoff_mode = ui->handoff_mode == NM_HANDOFF_REBOOT ? NM_HANDOFF_BIOS : NM_HANDOFF_REBOOT;
         scan_frame(ui);
         break;
 

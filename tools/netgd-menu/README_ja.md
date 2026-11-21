@@ -100,3 +100,14 @@ KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`
 - **PC 側**：`netgd-send push --art` と `netgd-send art`（`tools/netgd-send/README_ja.md`）。絵の変換は PC で行い、Dreamcast は縮小も色変換もしない。
 - KOS：新しい API は使っていない（`vram_s`・FatFs・`bfont` は既存の使い方のまま）。`KOS-API-UNVERIFIED` は増えない。
 - 実機で見ること：絵が出るまでの時間（32 KiB を 4 KiB ずつ読むので H5 の 1 コマンドの時間次第）、カーソルを速く動かしたときに読みかけで固まらないか、PAL・VGA で右端の 11 桁（132 px）に絵が収まるか（H10）。
+
+## 独立レビュー（R104）の指摘への対応（実機未検証）
+
+- **指摘 1（BBA）**：`net_kos.c` が `net_init` の前に `bba_init()`（ヘッダがあれば `la_init()`）を呼ぶ。第 2 の Y で、IP が無ければ `net_dhcp_request` をやり直す。DHCP の前に「Starting network ...」を描く。`KOS-API-UNVERIFIED`：`bba_init`・`la_init`（と `__has_include` による有無の判定）・`net_dhcp_request`（引数の有無）・`net_init` の引数。
+- **指摘 3（TUR）**：上の `NM_HANDOFF_TUR`（既定 0 = TUR を送らない）と、初回確認リストの H2 の 2 変種を参照。ホスト試験は両方の組み立て（`menu_host`・`menu_host_tur`）で通る。
+- **A**：待機中（要求が来ていないとき）に新しい接続が来たら、古い接続を閉じて新しい方に替える（`ngtp_srv.c`）。新しい接続は HELLO からやり直す。書き込みセッションはそのまま。
+- **B**：一覧で同じフレームに複数のボタンが来たら、遷移は 1 つだけ（優先順は A・Y・X・START。どれも無いときだけカーソルが動く）。情報画面は B が A より先。
+- **C**：セッションを閉じる命令が失敗しても、ファームの状態（`fw_status`）がセッション終了を示していれば、一覧に戻って「The end command failed, but the session is closed」と出す。まだ開いている、または答えが無いときは、これまでどおり「Could not close the session: reset the console」で止まる。
+- **D**：「Stop safely」の B で操作が止まったあと、その B が押されたままの間は B を無視する（取り込み画面まで閉じない）。
+- **E（直していない）**：`EWOULDBLOCK` のたびに `thd_sleep(1)` するので、速度の上限は約 800 KB/s とみられる。実機（H6）で測ってから、待ちを短くするか `select` 相当にするかを決める。
+- **F（直していない）**：番号が重複するフォルダがあるとき、メニューの表示とファームがマウントするゲームが食い違いうる（H8）。実機でファームの選び方を確かめてから、メニュー側を合わせる。
