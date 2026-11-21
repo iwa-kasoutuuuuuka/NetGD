@@ -1,0 +1,77 @@
+# NETGD-PROVISIONAL-PINS
+# 仮のピン配置。GDEMU 6.0 の配線ではない（6.0 のピン配置は未判明）。
+# PROVISIONAL pinout: NOT the GDEMU 6.0 pinout. A bitstream built from this file
+# must never be loaded into a board: every I/O would be on the wrong ball.
+# It exists only so that the flow can be run and the bitstream size, resource
+# use and rough timing can be measured (docs/research/ag16k-supra-build.md).
+#
+# Body made by: mkasf.py $SUPRA_HOME/etc/AG16KDDF256.pinmap PIN_J4 PIN_H16
+# The first line is the marker build.sh looks for: a pin file that carries it
+# only ever produces OpenGDEMU_ag16k-provisional.rbf, never the name the
+# firmware build picks up. A real pin file must not contain that marker.
+set_location_assignment -to CLK_11_2896_MHz PIN_J4
+set_location_assignment -to CLK_48_MHz PIN_H16
+set_location_assignment -to {MCU_RSTn} PIN_F5
+set_location_assignment -to {MCU_NCS} PIN_E5
+set_location_assignment -to {MCU_NRE} PIN_B1
+set_location_assignment -to {MCU_NWE} PIN_A1
+set_location_assignment -to {MCU_NBS[0]} PIN_D4
+set_location_assignment -to {MCU_NBS[1]} PIN_C4
+set_location_assignment -to {MCU_ADDR[1]} PIN_C2
+set_location_assignment -to {MCU_ADDR[2]} PIN_D1
+set_location_assignment -to {MCU_ADDR[3]} PIN_D3
+set_location_assignment -to {MCU_ADDR[4]} PIN_C3
+set_location_assignment -to {MCU_ADDR[5]} PIN_E1
+set_location_assignment -to {MCU_ADDR[6]} PIN_E2
+set_location_assignment -to {MCU_ADDR[7]} PIN_F1
+set_location_assignment -to {MCU_ADDR[8]} PIN_F2
+set_location_assignment -to {MCU_DATA[0]} PIN_H5
+set_location_assignment -to {MCU_DATA[1]} PIN_G5
+set_location_assignment -to {MCU_DATA[2]} PIN_L2
+set_location_assignment -to {MCU_DATA[3]} PIN_K2
+set_location_assignment -to {MCU_DATA[4]} PIN_M2
+set_location_assignment -to {MCU_DATA[5]} PIN_M1
+set_location_assignment -to {MCU_DATA[6]} PIN_L4
+set_location_assignment -to {MCU_DATA[7]} PIN_L3
+set_location_assignment -to {MCU_DATA[8]} PIN_P1
+set_location_assignment -to {MCU_DATA[9]} PIN_N1
+set_location_assignment -to {MCU_DATA[10]} PIN_T1
+set_location_assignment -to {MCU_DATA[11]} PIN_R1
+set_location_assignment -to {MCU_DATA[12]} PIN_P2
+set_location_assignment -to {MCU_DATA[13]} PIN_N2
+set_location_assignment -to {MCU_DATA[14]} PIN_R2
+set_location_assignment -to {MCU_DATA[15]} PIN_T2
+set_location_assignment -to {MCU_IRQn} PIN_P3
+set_location_assignment -to {DC_CDCLK} PIN_M12
+set_location_assignment -to {DC_SCK} PIN_L12
+set_location_assignment -to {DC_SDAT} PIN_N13
+set_location_assignment -to {DC_LRCK} PIN_N14
+set_location_assignment -to {DC_EMPH} PIN_T15
+set_location_assignment -to {DC_RSTn} PIN_R15
+set_location_assignment -to {DC_CSn[0]} PIN_T16
+set_location_assignment -to {DC_CSn[1]} PIN_R16
+set_location_assignment -to {DC_WRn} PIN_P16
+set_location_assignment -to {DC_RDn} PIN_N16
+set_location_assignment -to {DC_ADDR[0]} PIN_N15
+set_location_assignment -to {DC_ADDR[1]} PIN_M15
+set_location_assignment -to {DC_ADDR[2]} PIN_M16
+set_location_assignment -to {DC_DATA[0]} PIN_L16
+set_location_assignment -to {DC_DATA[1]} PIN_K12
+set_location_assignment -to {DC_DATA[2]} PIN_J12
+set_location_assignment -to {DC_DATA[3]} PIN_L14
+set_location_assignment -to {DC_DATA[4]} PIN_L15
+set_location_assignment -to {DC_DATA[5]} PIN_K15
+set_location_assignment -to {DC_DATA[6]} PIN_K16
+set_location_assignment -to {DC_DATA[7]} PIN_J15
+set_location_assignment -to {DC_DATA[8]} PIN_J16
+set_location_assignment -to {DC_DATA[9]} PIN_E15
+set_location_assignment -to {DC_DATA[10]} PIN_E16
+set_location_assignment -to {DC_DATA[11]} PIN_D16
+set_location_assignment -to {DC_DATA[12]} PIN_G13
+set_location_assignment -to {DC_DATA[13]} PIN_F13
+set_location_assignment -to {DC_DATA[14]} PIN_G12
+set_location_assignment -to {DC_DATA[15]} PIN_C15
+set_location_assignment -to {DC_DMARQ} PIN_C16
+set_location_assignment -to {DC_DMACKn} PIN_B15
+set_location_assignment -to {DC_IORDY} PIN_B16
+set_location_assignment -to {DC_INTRQ} PIN_A15

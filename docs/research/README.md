@@ -21,7 +21,7 @@
 | [g3-read-path.md](g3-read-path.md) | SD 読み込み経路の調査と高速化の feature（R72・R75） |
 | [fable-debug-2026-11-20.md](fable-debug-2026-11-20.md) | Fable 3並列による全体のデバッグの結果（ファームの読み込み・自己更新・G2 の書き込み、R89） |
 | [supra-static-analysis.md](supra-static-analysis.md) | AGM Supra 2026.03（Windows）の静的解析：署名・API・文字列・ESET の走査、`synth_agm` が無いこと（R92） |
-| [ag16k-supra-build.md](ag16k-supra-build.md) | Supra 2026.03（Linux 版、ネットワークを切った環境）で NetGD の AG16K 版をビルドした記録：資源・タイミング・ビットストリームの実サイズ（LZMA 後 37,727 B）・inout の問題（R99） |
+| [ag16k-supra-build.md](ag16k-supra-build.md) | Supra 2026.03（Linux 版、ネットワークを切った環境）で NetGD の AG16K 版をビルドした記録：資源・タイミング・ビットストリームの実サイズ（LZMA 後 37,727 B）・inout の問題（R99）。追記 §11〜§14：リポジトリ内のフロー `fpga/agm/` と再現結果（同じ入力でも出力は毎回変わる、LZMA 後 36.7〜39.9 KB）、`board-v60` への埋め込みの大きさ、PS で流す時間の見積もり（LOG 未転記） |
 | [../design/fw-bootloader.md](../design/fw-bootloader.md) | 自己更新の安全対策 B：ロックした常駐ブート領域（R54） |
 | [../design/resident-app-contract.md](../design/resident-app-contract.md) | 常駐部とアプリの引き渡しの取り決め（世代 1）（R79） |
 | [../design/g1-bitstream-storage.md](../design/g1-bitstream-storage.md) | 6.0 のビットストリームの置き場所（SD の `NETGD.BIT` か埋め込みか）（R66） |

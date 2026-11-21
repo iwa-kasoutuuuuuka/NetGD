@@ -1,0 +1,8 @@
+# Everything here is run or read inside WSL/Linux: keep LF in the working tree
+# even on a Windows checkout with core.autocrlf=true.
+*.sh  text eol=lf
+*.py  text eol=lf
+*.tcl text eol=lf
+*.v   text eol=lf
+*.sdc text eol=lf
+*.asf text eol=lf
