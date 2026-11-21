@@ -69,6 +69,7 @@ static void status_text(const nm_ui_t *ui, char *out, size_t n)
     char reset[64], line[160];
     int warn = 0;
     if (!ui->controller) { snprintf(out, n, "No controller"); return; }
+    if (ui->msg[0] && (int32_t)(ui->now - ui->msg_until) < 0) { snprintf(out, n, "%s", ui->msg); return; }
     if (sc->state == NM_SCAN_RUNNING) {
         snprintf(out, n, "Scanning %d/%d ...", sc->next, sc->total);
         return;
@@ -228,6 +229,12 @@ static void folder_label(const nm_ui_t *ui, char *out, size_t n)
     else snprintf(out, n, "%s", ui->dlg_folder);
 }
 
+static void set_msg(nm_ui_t *ui, const char *text, uint32_t ms)
+{
+    snprintf(ui->msg, sizeof ui->msg, "%s", text);
+    ui->msg_until = ui->now + ms;
+}
+
 static void show_dialog(nm_ui_t *ui, int kind)
 {
     ui->dialog = kind;
@@ -320,6 +327,7 @@ void nm_ui_step(nm_ui_t *ui)
         if (ui->events & (NM_BTN_RIGHT | NM_BTN_RT)) move_cursor(ui, LIST_ROWS, 1);
         if (ui->events & NM_BTN_X) ui->state = NM_S_INFO;
         if (ui->events & NM_BTN_A) begin_launch(ui);
+        if (ui->events & NM_BTN_Y) set_msg(ui, "Network transfer is not built into this version", 3000);
         if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
         if (ui->state == NM_S_LIST || ui->state == NM_S_INFO || ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
         break;

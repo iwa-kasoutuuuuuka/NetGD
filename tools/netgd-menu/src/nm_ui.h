@@ -52,6 +52,8 @@ typedef struct {
     int handoff_mode;
     char why[96];                       /* NOSD: the reason */
 
+    char msg[NM_COLS + 1];              /* a one-line message in the status row ... */
+    uint32_t msg_until;                 /* ... until this time (ms) */
     int sd_mounted;                     /* the light mount is active */
     nm_launch_t launch;
     int dialog;                         /* nm_dialog_t */
