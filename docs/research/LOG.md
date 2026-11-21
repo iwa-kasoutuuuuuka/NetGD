@@ -1889,6 +1889,59 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み（実機）。
 - 関連：R119、R121、R123、`mcu/netgd/src/ide.rs` の `stage_identify_packet`。
 
+### R125 純正の応答 4 件を NetGD に採用（D1 lead-out・D3 繰り返し回数・D7 ASC/ASCQ・D16 IDENTIFY）（Opus）
+
+- 担当：Opus（サブエージェントが実装、メインがテストの再実行と差分の範囲を確認）。worktree `H:\OpenGDEmu-stock2`、ブランチ `stock/leadout-asc-repeat`、コミット `383a2ccb`（main 43c5f4b4 から）。
+- 問い：R123・R124 の差のうち、純正の動きがはっきりしていて影響が小さい 4 件を純正に合わせる。
+- 結論：
+  - **D1**：GDI の lead-out を「最後のトラックの開始 + セクタ数」にした（セクタ数はトラックファイルの大きさ ÷ セクタ長。`gdi.rs` の `parse_image` と `expect.rs` の既存の処理）。
+    TOC area 1 の FAD 549300 への水増しをやめ、REQ_SES(0) も同じ規則。`GDROM_LEADOUT_LBA` はトラック表が空のときの予備値だけに残す。lead-out の CTRL は最後のトラックのもの（03 で 0x41、純正と一致）。CDI は変更なし。
+    シーク・読み出しの範囲チェックはトラックごとのセクタ数を使っていて、この定数は使っていなかった。
+  - **D3**：CD-DA を再生していないとき REQ_STAT バイト 1 の下位を 0xF に。再生中は繰り返し回数のまま（純正の再生中の記録は無い）。
+  - **D7**：REQ_ERROR のバイト 8・9 に ASC/ASCQ。`DeviceState::pending_asc` と `medium_changed()`（マウント後の UA = 6/28/00）・`not_ready()`（メディア無し 2/3A/00、準備中 2/04/01）・`clear_sense()`。
+    MEDIUM ERROR（キー 3）と ILLEGAL REQUEST（キー 5）の ASC は純正の値が分からないので 0 のまま。起動時の UA も 28/00 にした（純正の電源投入時の値は不明）。
+  - **D16**：IDENTIFY PACKET を純正の 80 バイト（`IDENTIFY_PACKET_REPLY`、バイト数 80）に。転送後 `finish_pio_in` で DRQ を落とす（無いと gdprobe が 80 バイトを超えて読み続ける）。セカンダリの IDENTIFY DEVICE（0xEC）は変更なし。
+- テスト：PLAN の決まりどおり期待値を先に純正の値に。GDI 03・08 の TOC の末尾と REQ_SES_0、メディア無しの REQ_ERROR（`f0 00 02 00 00 00 00 00 3a 00`）、REQ_STAT の `8f`、IDENTIFY の 80 バイトを固定。
+  `common/discimg` の `cargo test` 全通過（メインでも再実行）、`test_expect.py` OK（10 件、1 件スキップ）。
+- 比較（`stock_20261121_04_img3-7.txt`、`--only-common`）：246 → 230 行。D1（GET_TOC_1、REQ_SES_0、SEEK_01〜15）と D3 の差は消えた。SW_POLL の差は D13（切替のあとの NOT READY）なので残る。
+- 大きさ（text + data、43c5f4b4 → 383a2ccb）：4E −300、2E（`DEFMT_LOG=off`）−32、2E `release-z` の `resident,sd-fast` ±0（116,660 B、上限 122,368 B）。512 バイトの IDENTIFY を組み立てる処理が無くなった分減った。
+- 未対応：IDENTIFY のあとの IRQ_REASON（純正 0x03、未設定）、メディアが無いときの CD_READ でセンスキーを立てない（以前から）、REQUEST SENSE（0x03）の ASC。続きの作業（D13・D5・D12）で扱う。
+- 信頼度：ホストテストと比較で確認済み。実機では未確認。
+- 関連：R123、R124、`common/discimg/src/atapi.rs`、`common/discimg/tests/atapi.rs`、`mcu/netgd/src/ide.rs`、`mcu/netgd/src/gdi.rs`、`common/discimg/examples/expect.rs`、`tools/netgd-expect/test_expect.py`。
+
+### R126 切替のあとの NOT READY・CHECK のレジスタ・中身の無いフォルダを純正に合わせた（D13・D5・D12）（Opus）
+
+- 担当：Opus（サブエージェントが実装、メインがホストテストを再実行して確認）。ブランチ `stock/leadout-asc-repeat`、コミット `805e98b4`（親 383a2ccb）。3 件は共通の関数（`finish_check`）に依存するので 1 コミット。
+- **見つかったこと**：試験用 SD の `GDEMU.ini` は `open_time = 150`、`detect_time = 150`（GDmenu v0.6 の雛形）。純正で測った「約 150 ms + 約 150 ms」は、この INI の値そのものである可能性が高い。
+  キーが無いときに純正がどれだけ待つかは未測定（公式の既定値とされる 500 / 250 も未確認）。
+- 結論：
+  - **D13（切替の窓）**：マウントを試すたび（`52 82`・`52 81`・ボタン・0xE0 の MOUNT・LOAD・WSESSION_END）に窓を開く。
+    open 段階 = 2/3A/00、detect 段階 = 2/04/01、窓のあとの最初のコマンドで 6/28/00 を 1 回、そのあと READY。イメージが無ければ窓のあとも 2/3A/00。
+    時間は、GDEMU.INI がキーを設定していればその値、無ければ純正の実測値の 150 + 150 ms（`discimg::atapi::SWAP_OPEN_MS`・`SWAP_DETECT_MS`）。`swap_delay_ms` は `Ini::swap_window_ms` に置き換え。
+    窓の中とディスクなしのときの答えは `not_ready_answer`（純正の 06・07 の記録どおり）：TUR・REQ_STAT・GET_TOC・REQ_SES 0・GET_SCD・CD_READ・CD_PLAY は NOT READY（0x11/0x20）、
+    REQ_SES 1 以上は ILLEGAL（0x11/0x50）、REQ_MODE・REQ_ERROR・0x52・0xE0 などは通常どおり。判定は `handle_packet` の入口の 1 か所（`drive_not_ready`）。
+    SECNR の状態は open（6）→ busy（0）→ pause（1）か no disc（7）（**推測**。gdprobe は SECNR を記録しない）。ハードリセット・EJECT・WSESSION_BEGIN で打ち切る。
+    `APPLY_SWAP_WINDOW`・`READY_AT`・`media_ready` は削除。`expect` は時間を模擬せず、状態の変わる行を並べる（`t_ms` は `-`）。
+  - **D5（CHECK のレジスタ）**：パケットデバイスの ATAPI の CHECK はすべて status 0x11・err = センスキー << 4、センスキーを保留（`finish_check`・`finish_illegal`）。
+    REQ_SES の範囲外はキー 5。0x52・0xE0 の拒否は 0x54 → 0x50、MEDIUM ERROR は 0x34 → 0x30。ATA の ABRT（IDENTIFY DEVICE、未知の ATA コマンド）とセカンダリ（ディスク）は変更なし。
+    IDENTIFY PACKET のあとに IRQ_REASON 0x03（R125 の残り）。
+  - **D12（中身の無いフォルダ）**：番号のフォルダはあるがマウントできるイメージが無い（または解析に失敗する）とき、`52 82 n` を 0x50 で受け付けてディスクを外し、窓のあとは「ディスクなし」。
+    `load_by_name` がフォルダを先に `remember()` するので、`52 81` とボタンは先へ進める。`EMPTY_SLOT` と `discimg::slot::swap_allowed` でボタンが効き続ける（R18 の欠陥 1 の再発防止。EJECT・WSESSION・ディスクなしでの最初のディスク書き込みで解除）。
+    番号のフォルダが無いときは従来どおり断り、前のイメージを残す。純正が拒む GDI の形（D11）は受け付けたまま。
+- テスト：期待値を先に純正の値にして失敗を確かめてから実装（PLAN の決まり）。`common/discimg` 131 件、`common/gamecfg` 31 件、`common/lzma` 5 件、`test_expect.py` 11 件（1 件スキップ）、
+  `tools/gdprobe/tests/test_compare.py` がすべて通過（メインでも discimg・gamecfg・lzma・test_expect を再実行して確認）。netgd の警告 0 件は変わらず。
+- 比較（`stock_20261121_04_img3-7.txt`、`--only-common`）：230 → 200 行。SW_POLL・img=7 のすべて・REQ_SES の範囲外の差が消えた。残りは D2・D4・D8〜D11・D15（範囲外か、方針で残したもの）。
+- 大きさ（text + data、383a2ccb → 805e98b4）：4E +664（165,236）、2E（`DEFMT_LOG=off`）+708（123,968）、2E `release-z` の `resident,sd-fast` +500（117,160 B、上限 122,368 B まで残り 5,208 B）。bss +24〜32 B。
+- 実機で気をつける点：
+  1. SECNR の OPEN（6）・BUSY（0）は推測。ゲーム中のボタンでの切替で、ゲームが「ふたが開いた」と受け取る可能性がある（純正も同じだと推測しているが未確認）。
+  2. openMenu の `cdrom_reinit` は約 300 ms の NO_DISC のあと DISC_CHG を 1 回受ける見込み（待つ上限は 10 秒。INI で 5000 + 5000 を設定するとちょうど境目）。
+  3. WSESSION_END と LOAD のあとにも約 300 ms の窓がある。netgd-recv の再試行は UA のときだけだが、0xE0 は窓の中でも答えるので問題ないと見ている。
+  4. SRST と DEVICE RESET では窓を打ち切らない（ハードリセットのときだけ）。
+  5. スタックの増え方は未測定（async の階層が 1 つ増えた）。
+- 未確認（実機で確かめること）：キーの無い GDEMU.INI での純正の切替の時間、INI の値を変えたときに純正の時間が変わるか、存在しない番号への切替の純正の動き。
+- 信頼度：純正の値は確認済み（実機）。NetGD の動きはホストのテストと予測だけで、実機では未確認。SECNR の値と、キーが無いときの時間は推測。
+- 関連：R13、R18、R21、R119〜R125、`common/discimg/src/atapi.rs`・`slot.rs`、`common/gamecfg/src/ini.rs`、`mcu/netgd/src/ide.rs`・`gdi.rs`・`button.rs`、`tools/netgd-expect/README_ja.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -1934,3 +1987,6 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-21 | AG16K の手順は `fpga/agm/` に置く。Supra の出力（PLL のファイル）とビットストリームはコミットせず、仮のピンの出力には `-provisional` を付けてファームに拾わせない | 再配布を避け、基板に流せないものが紛れ込まないようにする（R106） | Fable 設計、Opus 承認 |
 | 2026-11-21 | v5.5 の rbf は R105 のもの（番号つき ack と Status）。2E `resident,sd-fast` は `release-z` で作り、CI もそれで確かめる | resident は配布していない開発用の構成で、`release` では 788 B 入らない（R107・R111） | ユーザー |
 | 2026-11-21 | 純正 GDEMU 6.0 の CDI の記録（R117）で決まった ATAPI 応答（REQ_STAT・GET_SCD・REQ_SES・CDI の TOC・REQ_MODE・REQ_ERROR）を純正に合わせる。CD_READ の種別検査・生セクタ・CHECK のレジスタ・GDEMU_VERSION は保留 | CDI については「実機と比べるまで変えない」の条件を満たした。保留分はデータ不足か影響が広い（R118） | Opus 提案、ユーザーが main への取り込みを指示 |
+| 2026-11-22 | GDI の lead-out を最後のトラックの終わりにし、FAD 549300 への水増しをやめる。REQ_ERROR に ASC/ASCQ、REQ_STAT の繰り返し回数 0xF、IDENTIFY PACKET を純正の 80 バイトに | 純正 GDEMU 6.0 の記録（R119・R123・R124）。水増しの方が安全という前提には実測の裏付けが無かった（R125） | Opus |
+| 2026-11-22 | 切替のあとの NOT READY（D13）と CHECK のレジスタ（D5）を純正に合わせる。中身の無いフォルダへの切替（D12）は純正に合わせて「ディスクなし」にし、存在しない番号は今のまま断る。純正が拒む GDI の形（D11）は受け付けたまま | D13・D5 は純正のデータがそろった。D12 はメニューが純正の動きを前提にしているため。存在しない番号の純正の動きは未確認（R123） | ユーザー（Opus の推奨を承認） |
+| 2026-11-22 | 切替の窓は、GDEMU.INI がキーを設定していればその値、無ければ 150 + 150 ms | 純正の実測値（R119）。試験用 SD の INI が 150 / 150 だったので、純正は INI の値を使っている可能性が高い。キーが無いときの純正の値は未測定（R126） | Opus（実機での確認待ち） |
