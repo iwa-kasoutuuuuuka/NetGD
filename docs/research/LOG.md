@@ -1376,6 +1376,28 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：あり（テストの再実行、CI のログの確認、リンクの修正）。
 - 関連：R97、`docs/design/menu-app.md`、`tools/netgd-menu/README_ja.md`。
 
+### R102 Google Drive の成果物を 33545021 に更新（Opus）
+
+- 担当：Opus。ユーザーの指示：成果物は Google Drive にも上げる（常設の指示）。
+- 問い：R97〜R101 の成果（メニュー、番号つき ack、Supra でのビルド、release-z）を Drive に反映する。
+- 結論：
+  - R91 と同じやり方で、前の版（`firmware/`・`dreamcast/`・`docs/`・`はじめに読む.txt`）を `old-e9df6141/` に移した。削除はしていない。
+  - 同じ構成で、新しい版（22 ファイル）を置いた。
+    - `firmware/`：33545021 をこの PC で `DEFMT_LOG=off` のリリースビルドにしたもの。
+      - `netgd-v55-4e`（bin 573,920 B）
+      - `netgd-v55-2e`（bin 121,952 B）
+      - `netgd-v60-2e-nobitstream`（bin 68,392 B）
+
+      それぞれ `.bin` と `.elf`。
+    - `dreamcast/`：KOS の CI の実行 44846846136（33545021、成功）の成果物 `dreamcast-elfs`。中身は `netgd-menu.elf`（新）・`netgd-recv.elf`・`netgd-fwupd.elf`・`gdprobe.elf`。
+    - `docs/`：README・PLAN・LOG（R101 まで）・user-tasks.html・menu-app.md・netgd-menu の README_ja・mcu-fpga-handshake.md・ag16k-supra-build.md・flash-budget-2e.md・fable-debug・supra-static-analysis.md。
+    - 最上位に、新しい `はじめに読む.txt`（R92〜R101 の変更点と、実機で最初に見てほしいこと）。
+  - Supra のファイルと、仮のピン配置の AG16K ビットストリームは上げていない（再配布にあたる／基板に流せない）。
+- 根拠：Drive が返した大きさが、手元のファイルと全部一致した。
+- 信頼度：確認済み。
+- Opus による検証：該当なし（Opus 自身の作業）。
+- 関連：R91、R96。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
