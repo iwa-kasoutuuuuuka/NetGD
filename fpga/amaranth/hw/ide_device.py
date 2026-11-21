@@ -1043,7 +1043,33 @@ class IDEDevice(Elaboratable):
                 # small PIO reads timed out and it fell back to the BIOS
                 # menu. ATA has the device raise INTRQ together with the
                 # BSY-to-0 / DRQ transition, which is what this bit does.
-                with m.If(wmcu):
+                #
+                # Bit 15: the write belongs to the command whose number is in
+                # bits 9-14 (the low six bits of cmd_seq, as the MCU read
+                # them from slot 0). It is dropped whole -- status bits and
+                # INTRQ -- unless that is still the latest Command write, and
+                # in the clock of a Command write. Without it a handler that
+                # decided its status before the host wrote the next command
+                # posts it after: BSY, which the Command write had just
+                # raised, drops with the new command still unserved, and for
+                # PACKET the DRQ of the CDB phase goes with it. Like the
+                # slot 0 acknowledge, the strobe is several clocks wide and
+                # sits below the IDE-side logic, so the plain form also wins
+                # over a Command write that lands inside it.
+                #
+                # Six bits, not seven: bit 8 is taken. A stale write gets
+                # through only if exactly 64 (or 128, ...) Command writes
+                # fell between the MCU's read and its status write.
+                #
+                # Bit 15 = 0 is the plain form old firmware writes; an older
+                # bitstream ignores bits 9-15, and new firmware on a
+                # bitstream without cmd_seq reads the number as 0 and writes
+                # the plain form.
+                status_ok = Signal()
+                m.d.comb += status_ok.eq(
+                    ~self.mcu_data_in[15]
+                    | ((self.mcu_data_in[9:15] == cmd_seq[:6]) & ~cmd_wr))
+                with m.If(wmcu & status_ok):
                     m.d.sync += [
                         err.eq(self.mcu_data_in[0]),
                         drq.eq(self.mcu_data_in[3]),
