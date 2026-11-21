@@ -1762,6 +1762,37 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 未確認（GD-ROM の記録待ち）：D-4（GDI のセッション数）、GDI の REQ_STAT 0x8・lead-out・TOC area 1、Mode 1 トラックでの CD_READ の種別検査、REQ_ERROR の ASC。
 - 関連：R11、R55、R71、R117、`docs/PLAN.md`、`common/discimg/src/atapi.rs`、`mcu/netgd/src/ide.rs`、`common/discimg/examples/expect.rs`。
 
+### R119 純正 GDEMU 6.0 でイメージを切り替えて調べた（mksdcard の試験用 SD、03〜07）（Opus）
+
+- 担当：Opus。問いは P5.5 の 2・3 回目：純正は `52 82 n` の切替にどう応え、GD-ROM の GDI・CDI・空フォルダに何を返すか。
+- 環境：R117 と同じ（Dreamcast + BBA + PC の本体の LAN 端子）。SD は別のカード（119 GB、MBR・FAT32）に `tools/mksdcard` の出力を書いたもの
+  （`H:\NetGD_probe_sd`。01 = GDmenu v0.6、02 = dcload-ip（`H:\DC\gdemu_sd_cdpark\44\disc.cdi`）、03〜06 = 合成イメージ、07 = 空、ルートに GDEMU.ini）。
+  書き込み後に全ファイルの大きさを照合（一致）。`verify.py` でも 03〜06 がマニフェストと一致。
+- 記録：`docs/research/probe-records/stock_20261121_03_img3.txt`（`images=3`）、`stock_20261121_04_img3-7.txt`（`images=3,4,5,6,7`）。どちらも `abort=0`、`return_to=2` で 02 に戻った。
+  `compare.py --manifest` で **HASH 1,050 件・1,056 件すべて一致**（純正の読み出しにデータ化けなし）。
+- 結論：
+  - **切替の手順**（03・04・05・02 で同じ）：`52 82 n` は即座に完了（status 0x50）。そのあと TUR が **2/3A/00（ディスクなし）→ 約 150 ms で 2/04/01（準備中）→ 約 300 ms で 6/28/00（ディスクが替わった）→ 約 335〜350 ms で READY**。
+  - **D-4（GD-ROM のセッション数）**：03 の REQ_SES_0 = `01 00 01 00 fe 7e`（**セッション 1**、lead-out FAD 65150）、REQ_SES_1 = FAD 150、REQ_SES_2・3 は CHECK。
+    NetGD の今の動作（1）と同じで、Flycast（2）とは違う。**D-4 は NetGD のままでよい**。
+  - **GD-ROM の REQ_STAT**：`01 8f 41 03 01 00 b0 5e 00 00`。バイト 1 の上位 = **8**（R118 で仕様から入れた値が正しかった）、CTRL/ADR 0x41・トラック 3・インデックス 1・FAD 45150。
+    バイト 0 のドライブ状態は 1（一時停止）。R117 の 2 回目は 2（待機）で、状態によって変わる。
+  - **GD-ROM の TOC**：area 0 = トラック 1（0x41、FAD 150）と 2（0x01、FAD 906）、area 1 = トラック 3（0x41、FAD 45150）だけ（area 0 の分は FF）。
+  - **CD_READ の種別検査**：GD-ROM（Mode 1）では `0x24` が通り `0x28` が 5/64/00。CDI（Mode 2 Form 1）では逆。`0x20` はどちらも通り、`0x10` はどちらも 2352 バイト。
+    **純正は期待セクタ種別を検査する**（規則が 2 つのイメージで確かめられた）。
+  - **CDI（04 = 2 トラック、05 = 3 トラック）**：どちらもセッション 2 個。05 の TOC はトラック 2（音声）を **FAD 602**（mkdcdisc の記述部の `start_lba` 452 + 150。pregap の頭）として返す。
+    NetGD のパーサと同じ扱い（`tools/mksdcard/README_ja.md` の「限界」）。CDI では area 0 と area 1 に同じ TOC（R118 の変更と一致）。
+  - **06（低密度領域に音声 3 本の GDI）は純正がマウントしない**：2/3A/00 → 2/04/01 → **2/3A/00 のまま**で 15 秒のタイムアウト。そのあと情報コマンドはすべて CHECK（センスキー 2）。
+    03（音声 1 本）は通るので、**低密度領域のトラックが 3 本以上の GDI を純正は受け付けない**可能性が高い（原因は未確定。GDI の書式はどちらも同じ形）。NetGD は受け付ける。
+  - **07（空フォルダ）**：06 と同じく 2/3A/00 のままでタイムアウト（ディスクなしの扱い）。そのあと 02 への切替は普通に成功し、純正は固まらない（R18 の欠陥 1 の参考）。
+  - **速さ**：03 の CD_READ 16 セクタずつで 2,278〜2,285 KiB/s（R117 の CDI と同じ）。**GET_SCD 形式 1 だけ約 24 ms かかる**（ほかの情報コマンドは 17〜34 µs）。
+- 設定の不備：`cdread_flags` を既定（0x24）にしたので、04・05（Mode 2）では IP_READ とスループット試験が CHECK で飛んだ（`TP_SUMMARY ok=0`）。データの照合は CDREAD_FLAGS の行で済んでいる。
+  CDI の速さを測るなら `cdread_flags=0x20` で再実行する。
+- 未確認：06 を拒む理由（トラック数か、低密度領域の配置か）。CHECK のときの G1 バスのレジスタ値の扱い（R118 の「データ待ち」のまま）。
+- 根拠：上の 2 つの記録、`compare.py --manifest H:\NetGD_probe_sd\NETGD-PROBE-MANIFEST.json <記録>` の出力（`hashes: 1050 match` / `1056 match, 0 mismatch`）、`H:\NetGD_probe_sd\06\disc.gdi`・`03\disc.gdi`。
+- 信頼度：記録の値は確認済み（実機）。06 の理由と、ドライブ状態 1/2 の意味は推測。
+- Opus による検証：記録を読み、R117・R118 と PLAN の D-1〜D-5 と照合。
+- 関連：R18、R71、R117、R118、`tools/mksdcard/README_ja.md`、`docs/research/stock-gdemu-flow.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
