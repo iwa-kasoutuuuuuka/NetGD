@@ -147,16 +147,49 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(self.one(3, 'SW_RESULT')['rc'], 'ok')
         self.assertTrue(all(p['t_ms'] == '-' for p in polls))      # time is not simulated
 
-    def test_missing_folder_is_refused_and_media_untouched(self):
+    def test_missing_folder_mounts_folder_01(self):
+        # stock_20261122_09_missing-folder.txt img=50 (folders 01-09 only): 52 82 50 is accepted (0x50), the normal
+        # swap window runs and folder 01 (the GDmenu CDI) is mounted; the same with reset_goto = 1 and 2 (record 10).
+        card = os.path.join(self.tmp, 'card01')
+        shutil.copytree(self.card, card)
+        shutil.copy(os.path.join(card, '04', 'disc.cdi'), os.path.join(card, '01', 'disc.cdi'))
+        text = expect_sd.predict(card, images=[4, 42, 3], return_to=2)
+        _, entries = compare.parse_record(text)
+        one = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe][0]
+        cmd = one(42, 'SW_CMD')
+        self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('ok', '0x50', '0x00'))
+        polls = [e for e in entries if e['img'] == 42 and e['probe'] == 'SW_POLL']
+        self.assertEqual([p['sense'] for p in polls], ['2/3a/00', '2/04/01', '6/28/00', 'none'])
+        self.assertEqual(one(42, 'SW_RESULT')['rc'], 'ok')
+        # what is mounted is 01 (here a copy of 04's CDI), not the image before the switch
+        for probe in ('GET_TOC_0', 'REQ_SES_0', 'REQ_STAT', 'IP_READ'):
+            self.assertEqual(one(42, probe).get('data'), one(4, probe).get('data'), probe)
+        # a later switch is a normal one
+        polls = [e for e in entries if e['img'] == 3 and e['probe'] == 'SW_POLL']
+        self.assertEqual([p['sense'] for p in polls], ['2/3a/00', '2/04/01', '6/28/00', 'none'])
+        self.assertEqual(one(3, 'GET_TOC_0')['data'], self.one(3, 'GET_TOC_0')['data'])
+
+    def test_missing_folder_with_unusable_01_reports_no_medium(self):
+        # folder 01 of the test card has no image: the switch to 01 is the D12 empty-folder one
         text = expect_sd.predict(self.card, images=[3, 42], return_to=0)
         _, entries = compare.parse_record(text)
         one = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe][0]
         cmd = one(42, 'SW_CMD')
-        self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('check', '0x11', '0x50'))   # ILLEGAL REQUEST
+        self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('ok', '0x50', '0x00'))
         polls = [e for e in entries if e['img'] == 42 and e['probe'] == 'SW_POLL']
-        self.assertEqual([p['rc'] for p in polls], ['ok'])            # nothing changed: no window, no UA
-        self.assertEqual(one(42, 'TUR_W0')['rc'], 'ok')               # image 03 still there
-        self.assertEqual(one(42, 'GET_TOC_0')['data'], one(3, 'GET_TOC_0')['data'])
+        self.assertEqual([p['sense'] for p in polls], ['2/3a/00', '2/04/01', '2/3a/00'])
+        self.assertEqual(one(42, 'SW_RESULT')['rc'], 'timeout')
+        self.assertEqual(one(42, 'TUR_W0')['err'], '0x20')
+        self.assertFalse([e for e in entries if e['img'] == 42 and e['probe'] == 'IP_READ'])
+
+    def test_number_past_999_with_no_folder_is_still_refused(self):
+        # not probed on stock; NetGD keeps refusing it (ILLEGAL REQUEST) and the old image stays
+        text = expect_sd.predict(self.card, images=[3, 1000], return_to=0)
+        _, entries = compare.parse_record(text)
+        one = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe][0]
+        cmd = one(1000, 'SW_CMD')
+        self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('check', '0x11', '0x50'))
+        self.assertEqual(one(1000, 'GET_TOC_0')['data'], one(3, 'GET_TOC_0')['data'])
 
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer

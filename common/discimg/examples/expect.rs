@@ -634,7 +634,9 @@ enum Target {
     Image,
     /// The folder exists with nothing to mount: accepted, no medium (D12).
     Empty,
-    /// No folder with that number: refused, the old image stays.
+    /// No folder with that number and past 999: refused, the old image stays. (A missing number up to 999
+    /// mounts folder 01 like stock, stock_20261122_09: expect_sd.py runs that as a switch to 01's image, or
+    /// `--empty-folder` when 01 has none, `discimg::slot::mount_target`.)
     Missing,
 }
 
@@ -703,8 +705,8 @@ fn main() {
             opt.label
         ));
     }
-    // --empty-folder: the drive has no medium afterwards, whatever --image says. --missing-folder: the
-    // previously mounted --image stays (none = no medium).
+    // --empty-folder: the drive has no medium afterwards, whatever --image says. --missing-folder (a number
+    // past 999 with no folder): the previously mounted --image stays (none = no medium).
     let disc = if opt.empty_folder { None } else { disc };
     if opt.switch {
         let target = if opt.empty_folder {

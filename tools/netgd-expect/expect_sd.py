@@ -13,8 +13,11 @@ SW_CMD / SW_POLL / SW_RESULT, then the battery, all tagged img=<folder number>.
   * A folder with no image (07) is accepted like stock does (D12): the same window, then no medium (2/3A/00)
     until gdprobe's switch timeout, and the battery under img=7 is the no-medium one (CHECK 0x11 / key 2, REQ_SES
     past 0 key 5, no reads).
-  * A folder number not on the card is refused with ILLEGAL REQUEST (`52 82 n` -> status 0x11 err 0x50) and the
-    previously mounted image (or no medium) stays. That is NetGD's choice; stock was not probed there.
+  * A folder number not on the card (1..999) is accepted and mounts folder 01, like stock GDEMU 6.0
+    (stock_20261122_09_missing-folder.txt, whatever GDEMU.ini reset_goto says): the same window and battery as a
+    switch to 01 (no medium if 01 has no image or does not exist). Past 999 it is refused with ILLEGAL REQUEST
+    (`52 82 n` -> status 0x11 err 0x50) and the previously mounted image (or no medium) stays; stock was not
+    probed there.
   * img=0 (the image mounted at power-up, the dcload-ip disc) is not predicted.
 Without --out the record goes to stdout. Everything not predictable (us, t_ms, polls, ...) is '-'.
 """
@@ -91,16 +94,17 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
 
     def switch_args(n, extra):
         nonlocal mounted
-        img = find_image(folders[n]) if n in folders else None
+        folder = n if n in folders or not 1 <= n <= 999 else 1     # a missing number mounts 01 (stock)
+        img = find_image(folders[folder]) if folder in folders else None
         args = ['--img', str(n), '--switch'] + extra
         if img:
             args += ['--image', img]
             mounted = img
-        elif n in folders:
-            args.append('--empty-folder')       # accepted, no medium (D12)
+        elif folder in folders or folder == 1:
+            args.append('--empty-folder')       # accepted, no medium (D12; also a missing number with no 01)
             mounted = None
         else:
-            args.append('--missing-folder')     # refused, the old image stays
+            args.append('--missing-folder')     # past 999: refused, the old image stays
             if mounted:
                 args += ['--image', mounted, '--no-ua']
         return args

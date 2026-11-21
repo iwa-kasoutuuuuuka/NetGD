@@ -1,4 +1,4 @@
-use discimg::slot::{number_of, step_accepted, swap_allowed, Nearest, Step};
+use discimg::slot::{mount_target, number_of, step_accepted, swap_allowed, Nearest, Step, Target};
 
 #[test]
 fn number_of_accepts_two_to_four_digits() {
@@ -162,4 +162,58 @@ fn swap_allowed_while_empty_but_not_while_released() {
     // Ejected for the host (START/STOP eject, write session, or a disk write
     // seen while empty): the host may hold a CMD25 open, hands off.
     assert!(!swap_allowed(false, false));
+}
+
+/// The numbers on a card, as `mount_target`'s `exists`, counting the lookups.
+fn target_on(n: u16, card: &[u16], lookups: &mut u32) -> Target {
+    mount_target(n, |k| {
+        *lookups += 1;
+        card.contains(&k)
+    })
+}
+
+#[test]
+fn missing_number_mounts_folder_01() {
+    // stock_20261122_09_missing-folder.txt (folders 01-09 only): `52 82 50`
+    // is accepted and folder 01 (GDmenu) mounts, with reset_goto = 1 and 2
+    // alike (record 10), so it is always 01.
+    let card = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    let mut lookups = 0;
+    assert_eq!(target_on(50, &card, &mut lookups), Target::Folder(1));
+    assert_eq!(lookups, 2, "the number, then 01");
+    // 01 is what the firmware remembers (`load_by_name` of 01's name), so the
+    // button and `52 81 55/44` continue from 01, not from 50 or the disc
+    // before the switch.
+    let mounted = Some(1);
+    assert_eq!(step_ok(mounted, Step::Next, &card, &card), Some(2));
+    assert_eq!(step_ok(mounted, Step::Prev, &card, &card), Some(9));
+    // A later switch to a folder that exists is an ordinary one.
+    let mut lookups = 0;
+    assert_eq!(target_on(3, &card, &mut lookups), Target::Folder(3));
+    assert_eq!(lookups, 1);
+    // ... and the top of the range falls back the same way.
+    assert_eq!(target_on(999, &card, &mut 0), Target::Folder(1));
+    assert_eq!(target_on(10, &card, &mut 0), Target::Folder(1));
+}
+
+#[test]
+fn missing_number_without_folder_01_is_no_medium() {
+    // No folder 01 either: accepted, the drive goes empty (D12's handling).
+    let card = [2, 3, 7];
+    assert_eq!(target_on(50, &card, &mut 0), Target::NoMedium);
+    let mut lookups = 0;
+    assert_eq!(target_on(1, &card, &mut lookups), Target::NoMedium);
+    assert_eq!(lookups, 1, "01 itself is not looked up twice");
+    assert_eq!(target_on(1, &[], &mut 0), Target::NoMedium);
+}
+
+#[test]
+fn numbers_outside_the_fallback_range() {
+    // A folder that exists mounts whatever its number (folders 1000-9999 are
+    // numbered too). With no folder, numbers past 999 (not probed on stock)
+    // and 0 (the default, handled by the caller) are refused.
+    assert_eq!(target_on(1000, &[1, 1000], &mut 0), Target::Folder(1000));
+    assert_eq!(target_on(1000, &[1, 2], &mut 0), Target::Refused);
+    assert_eq!(target_on(65535, &[1], &mut 0), Target::Refused);
+    assert_eq!(target_on(0, &[1], &mut 0), Target::Refused);
 }

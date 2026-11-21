@@ -2537,8 +2537,13 @@ async fn handle_image_ctl(
 /// send to the GD-ROM device. CDB byte 1 is the sub-code:
 ///
 ///   52 82 lo hi  mount image number `lo | hi << 8`; 0 = back to the default.
-///                No data phase. A number with no folder is ILLEGAL REQUEST
-///                and leaves the current media untouched (stock: not
+///                No data phase. A number with no folder (1..=999) is
+///                accepted and mounts folder 01, like stock (R128/R129,
+///                whatever `reset_goto` says); 01 is then the selection, so
+///                the button and `52 81` step on from it. With no folder 01
+///                either the drive goes empty (no medium) and the selection
+///                stays as it was. A missing number past 999 is ILLEGAL
+///                REQUEST and leaves the current media untouched (stock: not
 ///                probed). A folder with nothing to mount (no image, or one
 ///                that fails to parse) is accepted like stock does (D12):
 ///                the drive goes empty and reports no medium after the swap
@@ -2571,11 +2576,39 @@ const GDEMU_COMPAT_VERSION: (u8, u8, u8) = (5, 20, 0);
 /// folder -- into `MOUNT_NAME`. Done in a plain function and through a static
 /// so the 100-odd byte name never lives in the async frame: the IDE task's
 /// stack is the scarce thing, and this runs ahead of the deepest path.
+///
+/// A number with no folder (1..=999) stages folder 01 instead, as stock does
+/// (`discimg::slot::mount_target`); with no 01 either it stages an empty
+/// name, which `load_by_name` refuses before remembering anything, so the
+/// mount leaves the drive empty (no medium, `EMPTY_SLOT`) with the selection
+/// as it was. Returns false only for a refusal.
 #[inline(never)]
 fn stage_folder(n: Option<u16>, dir: Option<discimg::slot::Step>) -> bool {
     let blocks = disk_sectors();
     let found = match (n, dir) {
-        (Some(n), _) => crate::gdi::folder_for_number(blocks, n),
+        (Some(n), _) => {
+            // `mount_target` asks about 01 only after `n` came back empty,
+            // so `found` ends up holding the folder that answered.
+            let mut found = None;
+            let target = discimg::slot::mount_target(n, |k| {
+                found = crate::gdi::folder_for_number(blocks, k);
+                found.is_some()
+            });
+            match target {
+                discimg::slot::Target::Folder(k) => {
+                    if k != n {
+                        info!("GDEMU mount: no folder numbered {}, mounting {}", n, k);
+                    }
+                    found
+                }
+                discimg::slot::Target::NoMedium => {
+                    warn!("GDEMU mount: no folder numbered {} and no folder 01", n);
+                    clear_mount_name();
+                    return true;
+                }
+                discimg::slot::Target::Refused => None,
+            }
+        }
         (None, Some(dir)) => crate::gdi::step_folder(blocks, dir),
         (None, None) => None,
     };
@@ -2614,8 +2647,8 @@ async fn handle_gdemu_cmd(
                 }
                 return;
             }
-            // Resolve first: an unknown number must not disturb what is
-            // mounted.
+            // Resolve first: a refused number must not disturb what is
+            // mounted. A missing one (1..=999) mounts folder 01 (stock).
             if !stage_folder(Some(n), None) {
                 warn!("{}: GDEMU mount: no folder numbered {}", label, n);
                 finish_illegal(dev, state);

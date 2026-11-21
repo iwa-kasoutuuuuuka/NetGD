@@ -41,6 +41,48 @@ pub const fn swap_allowed(media_present: bool, empty_slot: bool) -> bool {
     media_present || empty_slot
 }
 
+/// The folder stock GDEMU 6.0 mounts for `52 82 n` when no folder has the
+/// number `n` (1..=[`FALLBACK_MAX`]): 01, whatever GDEMU.INI `reset_goto`
+/// says (stock_20261122_09 / _10, R128-R129).
+pub const FALLBACK_FOLDER: u16 = 1;
+/// The largest number that falls back to [`FALLBACK_FOLDER`]. Stock was
+/// probed with 50; past 999 (four-digit folders) NetGD still refuses.
+pub const FALLBACK_MAX: u16 = 999;
+
+/// What `52 82 n` (`n` not 0) mounts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The folder with this number: accepted, mounted through the normal
+    /// path (which reports no medium if it has nothing to mount, D12).
+    Folder(u16),
+    /// Neither `n` nor 01 exists: accepted, the drive goes empty (no medium).
+    NoMedium,
+    /// Refused (ILLEGAL REQUEST), what is mounted stays: no folder `n` and
+    /// `n` outside 1..=[`FALLBACK_MAX`] (0 is the caller's: the default).
+    Refused,
+}
+
+/// Resolve `52 82 n`. `exists(k)` says whether the card has a folder numbered
+/// `k`; it is asked about `n`, then (only when `n` is missing and in range,
+/// and not 01 itself) about 01, so for a [`Target::Folder`] the last call was
+/// the one that answered `true` -- a caller can keep that lookup's result.
+pub fn mount_target<E: FnMut(u16) -> bool>(n: u16, mut exists: E) -> Target {
+    if n == 0 {
+        return Target::Refused;
+    }
+    if exists(n) {
+        return Target::Folder(n);
+    }
+    if n > FALLBACK_MAX {
+        return Target::Refused;
+    }
+    if n != FALLBACK_FOLDER && exists(FALLBACK_FOLDER) {
+        Target::Folder(FALLBACK_FOLDER)
+    } else {
+        Target::NoMedium
+    }
+}
+
 /// Direction of a step between slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
