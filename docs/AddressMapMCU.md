@@ -26,8 +26,12 @@ Write behaviour, which matters when a bus access is held for several FPGA cycles
 - Register writes are level-sampled (`cs & wr`). Writing the same value twice is harmless.
 - Slot 9 (data FIFO) and slot 31 (CDDA push) are edge-sampled: one push or pop per access, however long the
   strobe is held.
-- A read-modify-write of slot 0 is needed by anything that wants to keep COMMAND_PEND while touching the reset
-  bit. Every write to slot 0 loads COMMAND_PEND from bit 1 (`ide_device.py`, case 0).
+- A write to slot 0 with bit 15 clear loads COMMAND_PEND from bit 1 (`ide_device.py`, case 0), so anything that
+  wants to keep COMMAND_PEND while touching the reset bit has to write it back. With bit 15 set the write is an
+  acknowledge by number and can only clear COMMAND_PEND; see slot 0 below.
+- Because a write is a level several FPGA cycles wide and the MCU-side assignments come last in `ide_device.py`,
+  an MCU write beats a host-side change to the same flop made during the strobe. Slots 0 and 19 are written
+  so that this cannot lose a host event (the acknowledge yields to a Command write; slot 19 has a write mask).
 
 Bit names follow ATA. "RO" means reads only, "W" means writes only (reads return 0), "R/W" means both. Byte
 offsets are the slot number times two, for comparison with the old version of this file.
@@ -36,12 +40,12 @@ offsets are the slot number times two, for comparison with the old version of th
 
 | Slot | Byte | Name | Access | Purpose |
 |------|------|------|--------|---------|
-| 0 | 0x00 | HW_INFO | R/W | Device id, COMMAND_PEND, RESET_SEEN, nIEN, IN_RESET |
+| 0 | 0x00 | HW_INFO | R/W | Device id, COMMAND_PEND, RESET_SEEN, nIEN, IN_RESET, command number |
 | 1 | 0x02 | STATUS | R/W (bit 8 W) | ATA status; write bit 8 to raise INTRQ |
 | 2 | 0x04 | DEVICE | R/W | Device register (bit 4 = DEV) |
 | 3 | 0x06 | ERROR | R/W | ABRT and sense key |
 | 4 | 0x08 | COMMAND / FEATURES | R/W | Latched command (low), features (high) |
-| 5 | 0x0A | SECTOR_COUNT | R/W | Sector count; ATAPI interrupt reason in the low byte |
+| 5 | 0x0A | SECTOR_COUNT | R/W (low byte W) | Sector count; ATAPI interrupt reason in the low byte |
 | 6 | 0x0C | LBA_LOW / LBA_MID | R/W | LBA bits 7:0 and 15:8 |
 | 7 | 0x0E | LBA_HIGH / LBA_LOW_PREV | R/W | LBA bits 23:16; previous LBA_LOW |
 | 8 | 0x10 | LBA_MID_PREV / LBA_HIGH_PREV | R/W | Previous LBA_MID and LBA_HIGH |
@@ -55,7 +59,7 @@ offsets are the slot number times two, for comparison with the old version of th
 | 16 | 0x20 | RSTN_EDGES | RO | Reset edge counters (low: rises, high: falls) |
 | 17 | 0x22 | BUS_STATE | RO | Live IDE control lines |
 | 18 | 0x24 | AUDIO_ALIVE | RO | Audio-clock heartbeat counter |
-| 19 | 0x26 | DMA_MODE / flow control | R/W | DMA direction, PIO flow control, packet phase |
+| 19 | 0x26 | DMA_MODE / flow control | R/W (masked) | DMA direction, PIO flow control, packet phase |
 | 20 | 0x28 | CAP_CTRL | R/W | In-fabric capture control (not built in shipped image) |
 | 21 | 0x2A | CAP_DATA | R/W | In-fabric capture read index and value |
 | 22 | 0x2C | LVL_AT_READ | RO | Debug: write FIFO level at the last slot 11 read |
@@ -76,12 +80,33 @@ offsets are the slot number times two, for comparison with the old version of th
 | Bit | Name | Access | Meaning |
 |-----|------|--------|---------|
 | 0 | DEV_ID | RO | 0 = primary (GD-ROM), 1 = secondary (ATA disk) |
-| 1 | COMMAND_PEND | R/W | Set by a host Command write. The MCU clears it by writing 0 (`ack_command`). The FPGA raises MCU_IRQn while it is set. |
+| 1 | COMMAND_PEND | R/W | Set by a host Command write. The MCU clears it by acknowledging (`ack_command`, below). The FPGA raises MCU_IRQn while it is set. |
 | 2 | RESET_SEEN | R/W | Sticky. Set by a hard reset (RSTn low) or SRST. Write 1 to clear. |
 | 3 | nIEN | RO | Live copy of Device Control bit 1. |
 | 4 | IN_RESET | RO | Live: RSTn is low or SRST is set. |
+| 14:8 | CMD_SEQ | R, W = number to acknowledge | Counts host Command writes to this device, modulo 128. Not cleared by a reset. |
+| 15 | ACK_BY_SEQ | R = 1, W = form of the write | Reads 1 on a bitstream that has CMD_SEQ. Written as 1, it makes the write an acknowledge by number. |
 
-Bits 5-15 read 0.
+Bits 5-7 read 0.
+
+Writes come in two forms, chosen by bit 15. Bit 2 (clear RESET_SEEN) works the same in both.
+
+- **Plain, bit 15 = 0.** COMMAND_PEND is loaded from bit 1. Writing 0 clears it whatever command it stands
+  for. This is the only form a bitstream from before CMD_SEQ has.
+- **By number, bit 15 = 1.** With bit 1 = 0, COMMAND_PEND is cleared only if bits 14:8 equal CMD_SEQ, and not
+  in the FPGA cycle of a host Command write. With bit 1 = 1 it is left alone. This form never sets it.
+
+The firmware reads slot 0 before and after it snapshots a command (`take_command`), keeps the upper byte,
+and writes that byte back to acknowledge (`ack_command`). A command the host writes after the snapshot has
+the next number, so the acknowledge leaves its COMMAND_PEND set and the command is served next. With the
+plain form that command was lost: COMMAND_PEND cleared, BSY still set, and no MCU_IRQn edge.
+
+The two ages of firmware and bitstream mix freely. An old bitstream reads bits 15:8 as 0, so the firmware
+writes back 0, which is the plain acknowledge. Old firmware writes 0 to a new bitstream, which is also the
+plain form.
+
+CMD_SEQ changes on the FPGA clock, so one MCU read that straddles a Command write can return a mix of the
+two values. `take_command` accepts a number only when two reads either side of the snapshot agree.
 
 ### Slot 1 (0x02): STATUS
 
@@ -121,7 +146,9 @@ R/W, 16 bits. Reset value `0x0001`.
 - Low byte: the sector count, or on the packet device the ATAPI interrupt reason (C/D bit 0, I/O bit 1).
 - High byte: the previous sector count, used by LBA48.
 
-`set_irr` in the firmware writes the whole word, so it zeroes the high byte.
+An MCU write changes the low byte only. The high byte belongs to the host (its previous Sector Count write)
+and is read back by the host with HOB set. `set_irr` in the firmware therefore no longer zeroes it. On a
+bitstream from before this change an MCU write is a whole-word write and does zero it.
 
 ### Slot 6 (0x0C): LBA_LOW (low) / LBA_MID (high)
 
@@ -208,12 +235,23 @@ R/W.
 | 1:0 | DMA_MODE | 0 = off, 1 = device to host (DMARQ means "data ready"), 2 = host to device (DMARQ means "room"). 3 is decoded as off. |
 | 2 | PIO_WR_FC | During a PIO data-out phase, drop host-visible DRQ while the write FIFO is full. |
 | 3 | PIO_RD_FC | During a PIO data-in phase, show DRQ only while the read FIFO has data. |
-| 4 | PKT_PHASE | Packet phase. Set by the FPGA when a PACKET command opens the CDB phase, and by the MCU. |
+| 4 | PKT_PHASE | Packet phase. Set by the FPGA when a PACKET command opens the CDB phase; cleared by the FPGA on the last CDB word, on any Command write and on reset. |
+| 12:8 | WRITE_MASK | Write only. Bit 8+n enables the write of bit n. All zero means "write bits 4:0", the whole-word write of older bitstreams. |
 
-Reads return the same bits. The FPGA clears DMA_MODE and both flow-control bits on reset.
+Reads return bits 4:0; bits 12:8 read 0. The FPGA clears all five bits on reset.
 
-The firmware's `set_dma_mode` and `set_pio_flow_control` each write the whole slot, so each call clears the
-bits the other one set.
+The firmware writes with mask `0x0F` (`XFER_MASK` in `ide.rs`): `set_dma_mode`, `set_pio_flow_control` and
+`disarm` each set DMA_MODE and both flow-control bits together and never touch PKT_PHASE.
+
+- DMA_MODE and the flow-control bits are written together on purpose. A command moves its data by DMA or by
+  PIO, never both, so the three fields are one transfer mode, and setting the whole mode also clears whatever
+  a transfer that ended without cleanup left behind. A caller that does need to change one field can use a
+  narrower mask.
+- PKT_PHASE is left out because the FPGA owns it. Before the mask, `disarm` after a transfer that the host had
+  abandoned with a new PACKET command cleared PKT_PHASE under that command's CDB, and the sixth CDB word then
+  did not raise BSY.
+
+On an older bitstream the mask is ignored and every write is a whole-word write, as before.
 
 ### Slot 20 (0x28): CAP_CTRL and slot 21 (0x2A): CAP_DATA
 
@@ -279,6 +317,7 @@ These were found while writing this page. Nothing was changed in the code to res
 4. **Capture (slots 20/21) is not in the shipped image.** The firmware depends on it for diagnostics only, and it
    reads zeros in the shipped build. If it is needed, build with `capture=True` and rebuild the bitstream. The
    Python notes say enabling it has changed fitter results before.
-5. **Whole-word writes to shared slots.** `set_irr` (slot 5), `set_dma_mode` and `set_pio_flow_control` (slot 19)
-   write the whole register. A caller that wants to change one field has to keep the others.
+5. **Whole-word writes to shared slots.** Resolved in the FPGA: slot 5 takes only the low byte from the MCU,
+   and slot 19 has a write mask. Both fall back to whole-word writes on a bitstream built before that; the
+   shipped `OpenGDEMU.rbf` has to be rebuilt from `out/OpenGDEMUCore.v` to get the new behaviour.
 6. **Slot 1 bit 8 is a pulse.** Reads never show it, so the MCU cannot check whether INTRQ was raised.
