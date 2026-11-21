@@ -5,6 +5,9 @@
 #include "nm_text.h"
 #include "ngdev.h"
 #include "ngfs.h"
+#include "ngtp.h"
+#include "nm_net.h"
+#include "ng_plat.h"
 
 #define LIST_ROW0 2
 #define LIST_ROWS 15
@@ -24,6 +27,7 @@ void nm_ui_init(nm_ui_t *ui)
     memset(ui, 0, sizeof *ui);
     ui->state = NM_S_BOOT;
     ui->handoff_mode = NM_HANDOFF_DEFAULT;
+    ui->idle_ms = 300000;
     ui->controller = 1;
     nm_input_init(&ui->in);
     nm_ini_defaults(&ui->ini);
@@ -70,6 +74,7 @@ static void status_text(const nm_ui_t *ui, char *out, size_t n)
     int warn = 0;
     if (!ui->controller) { snprintf(out, n, "No controller"); return; }
     if (ui->msg[0] && (int32_t)(ui->now - ui->msg_until) < 0) { snprintf(out, n, "%s", ui->msg); return; }
+    if (ui->state == NM_S_NET_IDLE || ui->state == NM_S_NET_BUSY) { out[0] = 0; return; }
     if (sc->state == NM_SCAN_RUNNING) {
         snprintf(out, n, "Scanning %d/%d ...", sc->next, sc->total);
         return;
@@ -290,87 +295,50 @@ static void launch_frame(nm_ui_t *ui)
     }
 }
 
-static void scan_frame(nm_ui_t *ui)
+/* ---- the transfer screen (design 7.4) ---- */
+
+static void draw_net(nm_ui_t *ui)
 {
-    nm_scan_step(&ui->scan);
-    if (ui->scan.generation != ui->scan_gen_seen) {
-        ui->scan_gen_seen = ui->scan.generation;
-        relocate_cursor(ui);
-    } else {
-        fix_view(ui);
+    char line[NM_COLS + 40];
+    const ng_ui_t *u = &ui->prog;
+    int busy = ui->state == NM_S_NET_BUSY;
+    nm_screen_clear(&ui->scr);
+    draw_frame(ui, busy ? "B:Stop safely (a later push resumes)" : "B:Leave this screen", "Send with: netgd-send push <image> --host <IP> --code <code>");
+    nm_screen_printf(&ui->scr, 2, 1, NM_ATTR_NORMAL, "IP %s  port %u  code %04u", ui->ip, (unsigned)NGTP_PORT, (unsigned)ui->code);
+    if (!ui->srv.connected) snprintf(line, sizeof line, "waiting for the PC%s", ui->srv.session ? " (session open)" : "");
+    else if (!ui->srv.hello) snprintf(line, sizeof line, "client connected");
+    else snprintf(line, sizeof line, "client %.20s%s", ui->srv.client, ui->srv.session ? "  session open" : "");
+    nm_screen_put(&ui->scr, 3, 1, line, NM_ATTR_NORMAL);
+    if (ui->prog_valid) {
+        int pct = u->total ? (int)(u->cum * 100 / u->total) : 0;
+        nm_screen_printf(&ui->scr, 5, 1, NM_ATTR_NORMAL, "%s %d/%d", ui->prog_op, u->fi, u->fn);
+        nm_screen_printf(&ui->scr, 6, 1, NM_ATTR_NORMAL, "%.50s", ui->prog_file);
+        nm_screen_bar(&ui->scr, 7, 1, 40, pct, NM_ATTR_NORMAL);
+        nm_screen_printf(&ui->scr, 7, 42, NM_ATTR_NORMAL, "%3d%%", pct);
+        nm_screen_printf(&ui->scr, 8, 1, NM_ATTR_NORMAL, "%u KB/s  %u/%u MB", (unsigned)(u->rate / 1024), (unsigned)(u->cum >> 20),
+                         (unsigned)(u->total >> 20));
+        if (u->rate && u->total > u->cum) {
+            unsigned left = (unsigned)((u->total - u->cum) / u->rate);
+            nm_screen_printf(&ui->scr, 9, 1, NM_ATTR_NORMAL, "left about %u min %u s", left / 60, left % 60);
+        }
     }
+    for (int i = 0; i < ui->nlog; i++) nm_screen_printf(&ui->scr, 11 + i, 1, NM_ATTR_NORMAL, "%.51s", ui->log[i]);
+    draw_status(ui, NM_ATTR_NORMAL);
 }
 
-void nm_ui_step(nm_ui_t *ui)
+static void draw_net_confirm(nm_ui_t *ui)
 {
-    ui->now = nm_plat_millis();
-    ui->controller = nm_plat_controller();
-    ui->events = nm_input_update(&ui->in, nm_plat_buttons(), ui->now);
+    uint32_t held = nm_input_held_ms(&ui->in, NM_BTN_A, ui->now);
+    nm_screen_clear(&ui->scr);
+    draw_frame(ui, "Hold A for 1 second: allow", "B (or 30 seconds): refuse");
+    nm_screen_printf(&ui->scr, 3, 2, NM_ATTR_WARN, "The PC asks to %s a protected folder:", ui->confirm_what);
+    nm_screen_printf(&ui->scr, 5, 2, NM_ATTR_NORMAL, "%.48s", ui->confirm_folder);
+    nm_screen_put(&ui->scr, 7, 2, "The folder is the card's default image or 01.", NM_ATTR_NORMAL);
+    nm_screen_bar(&ui->scr, 9, 2, 20, (int)(held > 1000 ? 100 : held / 10), NM_ATTR_NORMAL);
+}
 
-    switch (ui->state) {
-    case NM_S_BOOT:
-        if (ui->boot_stage == 0) {
-            nm_screen_clear(&ui->scr);
-            draw_frame(ui, "", "");
-            nm_screen_put(&ui->scr, 3, 2, "Looking for the NetGD firmware ...", NM_ATTR_NORMAL);
-            ui->boot_stage = 1;
-        } else {
-            boot_work(ui);
-            if (ui->state == NM_S_BOOT) ui->state = NM_S_NOFW;     /* not reached */
-        }
-        break;
-
-    case NM_S_LIST:
-        if (ui->events & NM_BTN_UP) move_cursor(ui, -1, 0);
-        if (ui->events & NM_BTN_DOWN) move_cursor(ui, 1, 0);
-        if (ui->events & (NM_BTN_LEFT | NM_BTN_LT)) move_cursor(ui, -LIST_ROWS, 1);
-        if (ui->events & (NM_BTN_RIGHT | NM_BTN_RT)) move_cursor(ui, LIST_ROWS, 1);
-        if (ui->events & NM_BTN_X) ui->state = NM_S_INFO;
-        if (ui->events & NM_BTN_A) begin_launch(ui);
-        if (ui->events & NM_BTN_Y) set_msg(ui, "Network transfer is not built into this version", 3000);
-        if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
-        if (ui->state == NM_S_LIST || ui->state == NM_S_INFO || ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
-        break;
-
-    case NM_S_INFO:
-        if (ui->events & NM_BTN_A) ui->handoff_mode = ui->handoff_mode == NM_HANDOFF_REBOOT ? NM_HANDOFF_BIOS : NM_HANDOFF_REBOOT;
-        if (ui->events & NM_BTN_B) ui->state = NM_S_LIST;
-        scan_frame(ui);
-        break;
-
-    case NM_S_LAUNCH:
-        launch_frame(ui);
-        break;
-
-    case NM_S_DIALOG:
-        if (ui->dialog == NM_DLG_NOTREADY && (ui->events & NM_BTN_A)) {
-            nm_launch_wait_again(&ui->launch);
-            ui->state = NM_S_LAUNCH;
-        } else if (ui->events & (NM_BTN_A | NM_BTN_B)) {
-            back_to_list(ui);
-        }
-        break;
-
-    case NM_S_CONFIRM_BIOS:
-        if (ui->events & NM_BTN_A) {
-            if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
-            enter_handoff(ui, "Returning to the BIOS menu ...", NM_HANDOFF_BIOS);
-        } else if (ui->events & NM_BTN_B) {
-            ui->state = NM_S_LIST;
-        }
-        if (ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
-        break;
-
-    case NM_S_HANDOFF:
-        if (ui->now - ui->handoff_since >= 100) nm_plat_handoff(ui->handoff_target);
-        break;
-
-    case NM_S_NOFW:
-    case NM_S_NOSD:
-        if (ui->events & NM_BTN_START) nm_plat_handoff(NM_HANDOFF_BIOS);
-        break;
-    }
-
+static void draw_state(nm_ui_t *ui)
+{
     switch (ui->state) {
     case NM_S_LIST: draw_list(ui); break;
     case NM_S_INFO: draw_info(ui); break;
@@ -431,7 +399,254 @@ void nm_ui_step(nm_ui_t *ui)
         draw_frame(ui, "", "");
         nm_screen_put(&ui->scr, 4, 2, ui->start_msg, NM_ATTR_NORMAL);
         break;
+    case NM_S_NET_IDLE:
+    case NM_S_NET_BUSY: draw_net(ui); break;
+    case NM_S_NET_CONFIRM: draw_net_confirm(ui); break;
+    case NM_S_FATAL:
+        draw_text_screen(ui, ui->fatal, "The console is left as it is.", "Reset it: the firmware brings the card back.", NULL, NULL);
+        break;
     default: break;
     }
+}
+
+/* ---- the transfer: hooks for the NGTP server and the screens' flow ---- */
+
+static void net_redraw(nm_ui_t *ui)
+{
+    ui->now = nm_plat_millis();
+    draw_state(ui);
+    nm_plat_present(&ui->scr);
+}
+
+static int line_worth_showing(const char *l)
+{
+    static const char *const keep[] = { "NGD:ERROR", "NGD:DONE", "NGD:FINISH", "NGD:MOUNT pct=100", "NGD:FILE", "NGD:STOP",
+                                        "NGD:VERIFY", "NGD:DELETE", "NGD:RESUME", "NGD:NOTE", "NGD:HELLO" };
+    for (unsigned i = 0; i < sizeof keep / sizeof keep[0]; i++)
+        if (!strncmp(l, keep[i], strlen(keep[i]))) return 1;
+    return 0;
+}
+
+static void hk_line(void *ctx, const char *line, int throttled)
+{
+    nm_ui_t *ui = (nm_ui_t *)ctx;
+    if (throttled || !line_worth_showing(line)) return;
+    if (ui->nlog == 5) {
+        for (int i = 1; i < 5; i++) memcpy(ui->log[i - 1], ui->log[i], sizeof ui->log[0]);
+        ui->nlog = 4;
+    }
+    snprintf(ui->log[ui->nlog++], sizeof ui->log[0], "%s", line + 4);          /* without the "NGD:" */
+}
+
+static void hk_progress(void *ctx, const ng_ui_t *u)
+{
+    nm_ui_t *ui = (nm_ui_t *)ctx;
+    ui->prog = *u;
+    snprintf(ui->prog_op, sizeof ui->prog_op, "%s", u->op ? u->op : "");
+    snprintf(ui->prog_file, sizeof ui->prog_file, "%s", u->file ? u->file : "");
+    ui->prog_valid = 1;
+    net_redraw(ui);
+}
+
+static int hk_stop(void *ctx) { (void)ctx; return ng_plat_user_stop(); }
+
+static void hk_busy(void *ctx, int busy)
+{
+    nm_ui_t *ui = (nm_ui_t *)ctx;
+    ui->state = busy ? NM_S_NET_BUSY : NM_S_NET_IDLE;
+    if (busy) ui->prog_valid = 0;
+    net_redraw(ui);
+}
+
+static void hk_idle(void *ctx)
+{
+    nm_ui_t *ui = (nm_ui_t *)ctx;
+    net_redraw(ui);
+}
+
+static uint32_t hk_millis(void *ctx) { (void)ctx; return nm_plat_millis(); }
+
+static void hk_before_session(void *ctx)
+{
+    nm_ui_t *ui = (nm_ui_t *)ctx;
+    if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
+}
+
+/* The PC asked for force on a protected folder: A held for a second allows it, B or 30 s refuses (design 8.3). */
+static int hk_confirm(void *ctx, const char *what, const char *folder)
+{
+    nm_ui_t *ui = (nm_ui_t *)ctx;
+    int saved = ui->state, allow = 0;
+    uint32_t t0 = nm_plat_millis();
+    snprintf(ui->confirm_what, sizeof ui->confirm_what, "%s", what);
+    snprintf(ui->confirm_folder, sizeof ui->confirm_folder, "%s", folder);
+    ui->state = NM_S_NET_CONFIRM;
+    ui->confirm_since = t0;
+    for (;;) {
+        uint32_t ev = nm_input_update(&ui->in, nm_plat_buttons(), nm_plat_millis());
+        ui->now = nm_plat_millis();
+        if (ev & NM_BTN_B) break;
+        if (nm_input_held_ms(&ui->in, NM_BTN_A, ui->now) >= 1000) { allow = 1; break; }
+        if (ui->now - t0 >= 30000) break;
+        net_redraw(ui);
+        nm_plat_sleep(16);
+    }
+    ui->state = saved;
+    net_redraw(ui);
+    return allow;
+}
+
+uint16_t nm_ui_code_from_seed(uint32_t seed)
+{
+    seed = seed * 1103515245u + 12345u;
+    return (uint16_t)((seed >> 8) % 10000u);
+}
+
+static void net_start(nm_ui_t *ui)
+{
+    ngtp_hooks_t hk;
+    int r;
+    if (nm_plat_dcload()) { set_msg(ui, "Started from dcload: use netgd-recv", 4000); return; }
+    r = nm_net_up(ui->ip, sizeof ui->ip);
+    if (r == NM_NET_NODEV) { set_msg(ui, "BBA not found", 3000); return; }
+    if (r != 0) { set_msg(ui, "No IP address", 3000); return; }
+    if (nm_net_listen(NGTP_PORT) != 0) { set_msg(ui, "Cannot listen on the port", 3000); return; }
+    if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }     /* the light mount and a write session never coexist */
+    ui->code = nm_ui_code_from_seed(nm_plat_entropy());
+    memset(&hk, 0, sizeof hk);
+    hk.ctx = ui; hk.line = hk_line; hk.progress = hk_progress; hk.stop = hk_stop; hk.confirm = hk_confirm;
+    hk.busy = hk_busy; hk.idle = hk_idle; hk.millis = hk_millis; hk.before_session = hk_before_session;
+    ngtp_srv_init(&ui->srv, &hk, &ui->fw, ui->code);
+    ui->nlog = 0;
+    ui->prog_valid = 0;
+    ui->msg[0] = 0;
+    ui->state = NM_S_NET_IDLE;
+}
+
+/* Leave the transfer screen: close the session if it is open, stop the network, read the card again. */
+static void net_close(nm_ui_t *ui)
+{
+    char why[96];
+    ng_err_t e = ngtp_srv_end(&ui->srv, 1);
+    nm_net_close_client();
+    nm_net_stop();
+    if (e != NG_OK) {
+        snprintf(ui->fatal, sizeof ui->fatal, "Could not close the session: reset the console");
+        ui->state = NM_S_FATAL;
+        return;
+    }
+    if (ngfs_mount_light(why, sizeof why) != NG_OK) { to_nosd(ui, why); return; }
+    ui->sd_mounted = 1;
+    ui->msg[0] = 0;
+    start_scan(ui);
+}
+
+static void net_frame(nm_ui_t *ui)
+{
+    int ev;
+    if (ui->events & NM_BTN_B) { net_close(ui); return; }
+    ev = ngtp_srv_service(&ui->srv);
+    if (ui->srv.code_expired) {
+        ui->code = nm_ui_code_from_seed(nm_plat_entropy() + (uint32_t)ui->now);
+        ngtp_srv_new_code(&ui->srv, ui->code);
+    }
+    if (ui->state != NM_S_NET_IDLE && ui->state != NM_S_NET_BUSY) return;
+    ui->state = NM_S_NET_IDLE;
+    if (ev & NGTP_EV_FINISH) { net_close(ui); return; }
+    if ((ev & NGTP_EV_CLOSED) && !(ev & NGTP_EV_FINISH)) set_msg(ui, "connection closed", 4000);
+    ui->now = nm_plat_millis();
+    /* signed: a request may have finished after this frame's clock was read */
+    if (ui->srv.session && (int32_t)(ui->now - ui->srv.last_frame_ms) >= (int32_t)ui->idle_ms) net_close(ui);
+}
+
+static void scan_frame(nm_ui_t *ui)
+{
+    nm_scan_step(&ui->scan);
+    if (ui->scan.generation != ui->scan_gen_seen) {
+        ui->scan_gen_seen = ui->scan.generation;
+        relocate_cursor(ui);
+    } else {
+        fix_view(ui);
+    }
+}
+
+void nm_ui_step(nm_ui_t *ui)
+{
+    ui->now = nm_plat_millis();
+    ui->controller = nm_plat_controller();
+    ui->events = nm_input_update(&ui->in, nm_plat_buttons(), ui->now);
+
+    switch (ui->state) {
+    case NM_S_BOOT:
+        if (ui->boot_stage == 0) {
+            nm_screen_clear(&ui->scr);
+            draw_frame(ui, "", "");
+            nm_screen_put(&ui->scr, 3, 2, "Looking for the NetGD firmware ...", NM_ATTR_NORMAL);
+            ui->boot_stage = 1;
+        } else {
+            boot_work(ui);
+            if (ui->state == NM_S_BOOT) ui->state = NM_S_NOFW;     /* not reached */
+        }
+        break;
+
+    case NM_S_LIST:
+        if (ui->events & NM_BTN_UP) move_cursor(ui, -1, 0);
+        if (ui->events & NM_BTN_DOWN) move_cursor(ui, 1, 0);
+        if (ui->events & (NM_BTN_LEFT | NM_BTN_LT)) move_cursor(ui, -LIST_ROWS, 1);
+        if (ui->events & (NM_BTN_RIGHT | NM_BTN_RT)) move_cursor(ui, LIST_ROWS, 1);
+        if (ui->events & NM_BTN_X) ui->state = NM_S_INFO;
+        if (ui->events & NM_BTN_A) begin_launch(ui);
+        if (ui->events & NM_BTN_Y) net_start(ui);
+        if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
+        if (ui->state == NM_S_LIST || ui->state == NM_S_INFO || ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
+        break;
+
+    case NM_S_INFO:
+        if (ui->events & NM_BTN_A) ui->handoff_mode = ui->handoff_mode == NM_HANDOFF_REBOOT ? NM_HANDOFF_BIOS : NM_HANDOFF_REBOOT;
+        if (ui->events & NM_BTN_B) ui->state = NM_S_LIST;
+        scan_frame(ui);
+        break;
+
+    case NM_S_LAUNCH:
+        launch_frame(ui);
+        break;
+
+    case NM_S_DIALOG:
+        if (ui->dialog == NM_DLG_NOTREADY && (ui->events & NM_BTN_A)) {
+            nm_launch_wait_again(&ui->launch);
+            ui->state = NM_S_LAUNCH;
+        } else if (ui->events & (NM_BTN_A | NM_BTN_B)) {
+            back_to_list(ui);
+        }
+        break;
+
+    case NM_S_CONFIRM_BIOS:
+        if (ui->events & NM_BTN_A) {
+            if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
+            enter_handoff(ui, "Returning to the BIOS menu ...", NM_HANDOFF_BIOS);
+        } else if (ui->events & NM_BTN_B) {
+            ui->state = NM_S_LIST;
+        }
+        if (ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
+        break;
+
+    case NM_S_HANDOFF:
+        if (ui->now - ui->handoff_since >= 100) nm_plat_handoff(ui->handoff_target);
+        break;
+
+    case NM_S_NET_IDLE:
+        net_frame(ui);
+        break;
+
+    case NM_S_NOFW:
+    case NM_S_NOSD:
+        if (ui->events & NM_BTN_START) nm_plat_handoff(NM_HANDOFF_BIOS);
+        break;
+
+    default:
+        break;
+    }
+
+    draw_state(ui);
     nm_plat_present(&ui->scr);
 }

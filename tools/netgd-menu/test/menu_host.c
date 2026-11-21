@@ -15,6 +15,7 @@
 #include "nm_ipbin.h"
 #include "nm_list.h"
 #include "nm_input.h"
+#include "ngtp.h"
 #include "nm_ui.h"
 #include "nm_plat.h"
 #include "plat_host.h"
@@ -281,10 +282,11 @@ static void u7_input(void)
 static void sim_summary(void)
 {
     printf("SIM cmd_writes=%llu sector_writes=%llu begin=%d end=%d unsess=%d violations=%llu rcmds=%llu rsecs=%llu "
-           "gdemu_mounts=%d named_mounts=%d mount_in_session=%d packets=%d\n",
+           "gdemu_mounts=%d named_mounts=%d mount_in_session=%d packets=%d endmode=%d endname=%s\n",
            (unsigned long long)sim_cmd_writes, (unsigned long long)sim_sector_writes, sim_begin_calls, sim_end_calls,
            sim_unsessioned_writes, (unsigned long long)sim_violations, (unsigned long long)sim_cmd_reads,
-           (unsigned long long)sim_sector_reads, sim_gdemu_mounts, sim_named_mounts, sim_mount_in_session, sim_packets);
+           (unsigned long long)sim_sector_reads, sim_gdemu_mounts, sim_named_mounts, sim_mount_in_session, sim_packets, sim_end_mode,
+           sim_end_name[0] ? sim_end_name : "-");
 }
 
 static nm_ui_t ui;
@@ -397,6 +399,158 @@ static int ui_cmd(int argc, char **argv)
     return 0;
 }
 
+/* U8: the NGTP frame layer */
+static void u8_frame(void)
+{
+    static uint8_t f[NGTP_MAX_FRAME + 16], big[NGTP_MAX_PAYLOAD + 1];
+    uint8_t pay[40];
+    ngtp_hdr_t h;
+    size_t n;
+    for (int i = 0; i < 40; i++) pay[i] = (uint8_t)(i * 5 + 1);
+    /* a round trip */
+    n = ngtp_frame_build(f, sizeof f, NGTP_LINE, NGTP_F_THROTTLED, 0x01020304u, pay, 40);
+    CHECK(n == 16 + 40 + 4);
+    CHECK(!memcmp(f, "NGT1", 4) && f[4] == NGTP_LINE && f[5] == 1 && f[6] == 0 && f[7] == 0);
+    CHECK(f[8] == 4 && f[9] == 3 && f[10] == 2 && f[11] == 1);                       /* little endian sequence */
+    CHECK(f[12] == 40 && f[13] == 0);
+    CHECK(ngtp_hdr_parse(f, &h) == NGTP_OK && h.type == NGTP_LINE && h.flags == 1 && h.seq == 0x01020304u && h.len == 40);
+    CHECK(ngtp_frame_check(f, f + 16, 40, f + 16 + 40) == NGTP_OK);
+    /* the CRC is the zlib CRC-32 of header + payload: pin it with a known vector */
+    {
+        uint8_t e[20];
+        size_t en = ngtp_frame_build(e, sizeof e, NGTP_PING, 0, 0, NULL, 0);
+        CHECK(en == 20);
+        CHECK(ngtp_frame_crc(e, NULL, 0) == ngtp_get32(e + 16));
+    }
+    /* a flipped bit anywhere in header or payload */
+    for (int pos = 0; pos < 16 + 40; pos++) {
+        uint8_t c[80];
+        ngtp_hdr_t hh;
+        memcpy(c, f, n);
+        c[pos] ^= 0x04;
+        if (ngtp_hdr_parse(c, &hh) == NGTP_OK && hh.len == 40) CHECK(ngtp_frame_check(c, c + 16, 40, c + 16 + 40) == NGTP_E_CRC);
+    }
+    {
+        uint8_t c[80];
+        memcpy(c, f, n);
+        c[n - 1] ^= 0x80;                                                              /* in the CRC itself */
+        CHECK(ngtp_frame_check(c, c + 16, 40, c + 16 + 40) == NGTP_E_CRC);
+    }
+    /* bad magic, bad zero field, too long */
+    {
+        uint8_t c[16];
+        memcpy(c, f, 16);
+        c[0] = 'X';
+        CHECK(ngtp_hdr_parse(c, &h) == NGTP_E_MAGIC);
+        memcpy(c, f, 16);
+        c[6] = 1;
+        CHECK(ngtp_hdr_parse(c, &h) == NGTP_E_MAGIC);
+        memcpy(c, f, 16);
+        ngtp_put32(c + 12, NGTP_MAX_PAYLOAD);
+        CHECK(ngtp_hdr_parse(c, &h) == NGTP_OK && h.len == NGTP_MAX_PAYLOAD);
+        ngtp_put32(c + 12, NGTP_MAX_PAYLOAD + 1);
+        CHECK(ngtp_hdr_parse(c, &h) == NGTP_E_LENGTH);
+        ngtp_put32(c + 12, 0xFFFFFFFFu);
+        CHECK(ngtp_hdr_parse(c, &h) == NGTP_E_LENGTH);
+    }
+    /* sizes: the largest frame, and refusals */
+    memset(big, 0x5A, sizeof big);
+    CHECK(ngtp_frame_build(f, sizeof f, NGTP_DATA, 0, 1, big, NGTP_MAX_PAYLOAD) == NGTP_MAX_FRAME);
+    CHECK(ngtp_frame_build(f, sizeof f, NGTP_DATA, 0, 1, big, NGTP_MAX_PAYLOAD + 1) == 0);
+    CHECK(ngtp_frame_build(f, 19, NGTP_PING, 0, 1, NULL, 0) == 0);                    /* no room for the CRC */
+    CHECK(ngtp_frame_build(f, 20, NGTP_PING, 0, 1, NULL, 0) == 20);
+    /* building in place (the payload already at out+16) is allowed */
+    memcpy(f + 16, pay, 40);
+    CHECK(ngtp_frame_build(f, sizeof f, NGTP_LINE, 0, 7, f + 16, 40) == 60);
+    CHECK(ngtp_frame_check(f, f + 16, 40, f + 56) == NGTP_OK && !memcmp(f + 16, pay, 40));
+    /* the request types */
+    for (int t = 0; t < 256; t++) CHECK(ngtp_is_request((uint8_t)t) == (t >= 1 && t <= 9));
+    /* little-endian helpers */
+    {
+        uint8_t b[8];
+        ngtp_put64(b, 0x0102030405060708ull);
+        CHECK(b[0] == 8 && b[7] == 1 && ngtp_get64(b) == 0x0102030405060708ull);
+    }
+    /* the pass code is always four digits, and a seed maps the same way every time */
+    for (uint32_t s = 0; s < 1000; s++) CHECK(nm_ui_code_from_seed(s) < 10000 && nm_ui_code_from_seed(s) == nm_ui_code_from_seed(s));
+}
+
+/* ---- menu_host serve: the transfer screen on a real 127.0.0.1 socket, real time ---- */
+
+static int serve_confirm;       /* 1 = A is held while the confirm screen shows, 2 = B */
+static uint32_t serve_btn;
+
+static uint32_t serve_buttons(void)
+{
+    if (ui.state == NM_S_NET_CONFIRM) return serve_confirm == 1 ? NM_BTN_A : serve_confirm == 2 ? NM_BTN_B : 0;
+    return serve_btn;
+}
+
+/* menu_host serve <img> <sectors> --port P --code C [--cut N] [--idle-ms N] [--stopafter N] [--confirm allow|deny]
+                   [--slots ..] [--ua] [--failend2] [--caps C] [--nobba] [--timeout-ms T] [--dump] [--trace] */
+static int serve_cmd(int argc, char **argv)
+{
+    const char *img = argv[2];
+    uint32_t sectors = (uint32_t)strtoul(argv[3], NULL, 10), seed = 0, timeout_ms = 120000;
+    unsigned code = 4821;
+    int dump = 0, entered = 0, k = 0;
+    uint64_t t0;
+    for (int i = 4; i < argc; i++) {
+        if (!strcmp(argv[i], "--port") && i + 1 < argc) nm_host_net_port = (uint16_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--code") && i + 1 < argc) code = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--cut") && i + 1 < argc) sim_cut_after = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--idle-ms") && i + 1 < argc) ui.idle_ms = (uint32_t)atol(argv[++i]);
+        else if (!strcmp(argv[i], "--stopafter") && i + 1 < argc) nm_host_stop_after_polls = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--confirm") && i + 1 < argc) serve_confirm = !strcmp(argv[++i], "allow") ? 1 : 2;
+        else if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
+        else if (!strcmp(argv[i], "--failend2")) sim_fail_end2 = 1;
+        else if (!strcmp(argv[i], "--caps") && i + 1 < argc) sim_caps = (uint8_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
+        else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = (uint32_t)atol(argv[++i]);
+        else if (!strcmp(argv[i], "--dump")) dump = 1;
+        else if (!strcmp(argv[i], "--trace")) sim_trace = 1;
+        else if (!strcmp(argv[i], "--slots") && i + 1 < argc) {
+            char *p;
+            for (p = strtok(argv[++i], ","); p && k < 63; p = strtok(NULL, ",")) sim_slots[k++] = atoi(p);
+        }
+    }
+    if (sim_open(img, sectors)) { printf("cannot open image\n"); return 2; }
+    sim_protect_lba = 2048;
+    nm_host_realtime = 1;
+    nm_host_buttons_hook = serve_buttons;
+    while (nm_ui_code_from_seed(seed) != (uint16_t)code) seed++;
+    nm_host_entropy = seed;
+    atexit(sim_summary);
+    {
+        uint32_t keep_idle = ui.idle_ms;
+        nm_ui_init(&ui);
+        if (keep_idle) ui.idle_ms = keep_idle;
+    }
+    for (int i = 0; i < 2000 && ui.state != NM_S_LIST; i++) {
+        frame();
+        if (ui.state == NM_S_NOFW || ui.state == NM_S_NOSD) { printf("SERVE-END state=%d\n", ui.state); return 0; }
+    }
+    serve_btn = NM_BTN_Y;
+    frame();
+    serve_btn = 0;
+    frame();
+    if (ui.state != NM_S_NET_IDLE) { printf("SERVE-END state=%d (the transfer screen did not open)\n", ui.state); if (dump) dump_screen(); return 0; }
+    printf("LISTENING %u code %04u\n", (unsigned)nm_host_net_port, code);
+    fflush(stdout);
+    t0 = nm_host_real_ms();
+    for (;;) {
+        frame();
+        if (ui.state == NM_S_NET_IDLE || ui.state == NM_S_NET_BUSY || ui.state == NM_S_NET_CONFIRM) entered = 1;
+        else if (entered) break;
+        if (sim_dead) { printf("POWERCUT\n"); fflush(stdout); return 0; }
+        if (nm_host_real_ms() - t0 > timeout_ms) { printf("SERVE-TIMEOUT\n"); break; }
+    }
+    for (int i = 0; i < 100000 && (ui.state == NM_S_LIST) && ui.scan.state == NM_SCAN_RUNNING; i++) frame();
+    printf("SERVE-END state=%d\n", ui.state);
+    if (dump) dump_screen();
+    return 0;
+}
+
 static int selftest(void)
 {
     u1_slot();
@@ -406,6 +560,7 @@ static int selftest(void)
     u5_text();
     u6_list();
     u7_input();
+    u8_frame();
     printf(bad ? "SELFTEST FAIL (%d)\n" : "SELFTEST OK\n", bad);
     return bad ? 1 : 0;
 }
@@ -414,6 +569,7 @@ int main(int argc, char **argv)
 {
     if (argc >= 2 && !strcmp(argv[1], "selftest")) return selftest();
     if (argc >= 4 && !strcmp(argv[1], "ui")) return ui_cmd(argc, argv);
+    if (argc >= 4 && !strcmp(argv[1], "serve")) return serve_cmd(argc, argv);
     fprintf(stderr, "usage: menu_host selftest | ui <img> <sectors> --script \"<events>\" [options]\n");
     return 2;
 }

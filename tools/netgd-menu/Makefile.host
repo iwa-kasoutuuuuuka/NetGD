@@ -7,18 +7,21 @@ RECV     = ../netgd-recv
 FATFS    = $(RECV)/third_party/fatfs
 CFLAGS  += -DNG_HOST -Isrc -I$(RECV)/src -I$(FATFS) -I$(RECV)/test -Itest
 MENU     = src/nm_text.c src/nm_slot.c src/nm_cfgparse.c src/nm_ipbin.c src/nm_list.c src/nm_input.c \
-           src/nm_screen.c src/nm_scan.c src/nm_launch.c src/nm_ui.c
+           src/nm_screen.c src/nm_scan.c src/nm_launch.c src/ngtp_frame.c src/ngtp_srv.c src/nm_ui.c
 RECVSRC  = $(RECV)/src/crc32.c $(RECV)/src/manifest.c $(RECV)/src/ngblk.c $(RECV)/src/fwctl.c $(RECV)/src/ngfs.c \
            $(RECV)/src/recv_core.c $(RECV)/src/diskio.c $(FATFS)/ff.c $(FATFS)/ffunicode.c $(FATFS)/ffsystem.c \
            $(RECV)/test/dev_file.c $(RECV)/test/fwctl_sim.c
-SRCS     = $(MENU) $(RECVSRC) test/menu_host.c test/plat_host.c
+SRCS     = $(MENU) $(RECVSRC) test/menu_host.c test/plat_host.c test/net_host.c
+ifeq ($(OS),Windows_NT)
+  LDLIBS += -lws2_32
+endif
 OUT      = build/menu_host
 
 all: $(OUT)
 
 $(OUT): $(SRCS) $(wildcard src/*.h test/*.h)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ $(SRCS)
+	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDLIBS)
 
 clean:
 	rm -rf build
