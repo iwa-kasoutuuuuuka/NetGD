@@ -1735,6 +1735,33 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - Opus による検証：記録を読み、D-1〜D-3 の記述（`docs/PLAN.md`）と照合。
 - 関連：`tools/gdprobe/README_ja.md`（「ホストテストでできていないこと」の 2・7）、`docs/research/stock-gdemu-flow.md`、R31、R55、R71。
 
+### R118 純正 GDEMU 6.0 の記録（R117）と NetGD の予測を比較し、明確な差を純正に合わせた（Opus）
+
+- 担当：Opus（サイドセッション、worktree `H:\OpenGDEmu-compare`、ブランチ `compare/stock-vs-netgd`、コミット `86a75a3c`）。メインの Opus がホストテストを再実行して確認し、ユーザーの指示で main に fast-forward で取り込んだ。
+- 問い：R117 の純正の記録（dcload-ip の CDI、img=0）と、NetGD が同じディスクに返すはずの記録の違いはどこか。どれを純正に合わせるか。
+- 入力：`docs/research/probe-records/stock_20261121_02.txt`。CDI は `H:\DC\gdemu_sd_cdpark\44\disc.cdi`（md5 `00175584cb3d54dbdc18375d131200ea`）。
+  予測は `cargo run --release --example expect -- --image <cdi> --img 0 --no-ua --cdread-flags 0x20 --header --end`、比較は `compare.py --only-common`。
+- 結論：差分 13 件（HASH 1047 行はすべて一致）。
+  - 純正に合わせたもの：
+    1. REQ_STAT バイト 1 の上位 4 ビット = SECNR と同じディスク形式（D-3。CDI の 0x2 は純正と一致、GDI の 0x8 は記録待ち）。
+    2. GET_SCD 形式 1 の位置をバイナリ FAD に（D-2。相対位置は記録では 0 のため、仕様に合わせた。推測を含む）。
+    3. GET_SCD 形式 0 のビット展開を Q = 0x40、P と R〜W = 0 に（D-5。Q のビット列は元から一致）。
+    4. REQ_SES_0〜2 のバイト 0 = ドライブ状態（待機中 0x02）（D-5。旧 g1bios_replay の 0x01 は一時停止中と解釈。推測）。
+    5. CDI の GET_TOC は area 1 でも同じ TOC を返す（R11 の判断を変更）。
+    6. REQ_MODE は純正の 32 バイト（`…SE      Rev 6.42990316`）の範囲内の任意の窓を返す。範囲外と長さ 0 は従来どおり ABRT。
+    7. REQ_ERROR = 先頭 F0 + 保留中のセンスキー。キーはコマンドごとに 0 に戻し、UA では 6 を明示する。
+  - NetGD のまま：GDEMU_VERSION（NetGD 自身の互換版と機能ビットを返す方針）、CD_READ `0x10` の 2352 バイト（生セクタ読みは機能追加）、
+    CD_READ `0x24` の拒否（データ 1 点で規則が分からず、拒否すると今動くものを壊す方向）。
+  - データ待ち：CHECK のときのレジスタ値（純正は status = 0x11、err = センスキー << 4。全エラー経路に及ぶので別作業）、REQ_STAT バイト 1 の下位（純正は待機中 0xF）。
+  - 比較の差分は 13 件 → 5 件。
+- テストとビルド：`common/discimg` の `cargo test` 全通過（メインでも再実行して確認）、`tools/netgd-expect/test_expect.py` OK（10 件、1 件スキップ）。
+  text は 4E 164,696 → 164,740（+44）、2E 123,000 → 123,136（+136）、2E `release-z` の `resident,sd-fast` 116,488 → 116,504（+16。イメージ 116,664 B、上限 122,368 B まで残り 5,704 B）。サイズはサイドセッションの報告の値。
+- 根拠：`compare.py --only-common` の出力（前 13 件・後 5 件）、`common/discimg/tests/atapi.rs` の `the_stock_record_of_the_dcload_cdi`（記録のバイトをそのまま照合）。
+- 信頼度：純正の値は確認済み（実機の記録）。NetGD 側はホストテストとビルドだけで、実機では未確認。
+- Opus による検証：サイドセッションが記録と予測を 1 行ずつ照合。メインがコミットの差分の範囲とホストテストを確認。
+- 未確認（GD-ROM の記録待ち）：D-4（GDI のセッション数）、GDI の REQ_STAT 0x8・lead-out・TOC area 1、Mode 1 トラックでの CD_READ の種別検査、REQ_ERROR の ASC。
+- 関連：R11、R55、R71、R117、`docs/PLAN.md`、`common/discimg/src/atapi.rs`、`mcu/netgd/src/ide.rs`、`common/discimg/examples/expect.rs`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -1779,3 +1806,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-21 | v5.5 の `OpenGDEMU.rbf` を、CI の Quartus（上流の公開イメージ）で作った新しいものに差し替える | R100 の修正を実機で効かせるため。番号つき ack は新旧の組み合わせで動き、古い rbf は履歴から戻せる（R103） | Opus |
 | 2026-11-21 | AG16K の手順は `fpga/agm/` に置く。Supra の出力（PLL のファイル）とビットストリームはコミットせず、仮のピンの出力には `-provisional` を付けてファームに拾わせない | 再配布を避け、基板に流せないものが紛れ込まないようにする（R106） | Fable 設計、Opus 承認 |
 | 2026-11-21 | v5.5 の rbf は R105 のもの（番号つき ack と Status）。2E `resident,sd-fast` は `release-z` で作り、CI もそれで確かめる | resident は配布していない開発用の構成で、`release` では 788 B 入らない（R107・R111） | ユーザー |
+| 2026-11-21 | 純正 GDEMU 6.0 の CDI の記録（R117）で決まった ATAPI 応答（REQ_STAT・GET_SCD・REQ_SES・CDI の TOC・REQ_MODE・REQ_ERROR）を純正に合わせる。CD_READ の種別検査・生セクタ・CHECK のレジスタ・GDEMU_VERSION は保留 | CDI については「実機と比べるまで変えない」の条件を満たした。保留分はデータ不足か影響が広い（R118） | Opus 提案、ユーザーが main への取り込みを指示 |
