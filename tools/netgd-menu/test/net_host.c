@@ -29,6 +29,8 @@ typedef int sock_t;
 uint16_t nm_host_net_port;              /* listen here instead of the port asked for (0 = as asked) */
 int nm_host_net_nodev;                  /* nm_net_up answers "no BBA" */
 int nm_host_no_udp;                     /* nm_net_udp_listen fails */
+int nm_host_net_noaddr;                 /* nm_net_up answers "no IP address" this many more times (DHCP failed) */
+int nm_host_net_up_calls;
 
 static sock_t lsock = BAD_SOCK, csock = BAD_SOCK, usock = BAD_SOCK;
 static struct sockaddr_in udp_peer;
@@ -58,6 +60,11 @@ void nm_host_real_sleep(uint32_t ms)
 int nm_net_up(char *ip, size_t n)
 {
     static int started;
+    char row[NM_COLS + 1];
+    nm_host_net_up_calls++;
+    nm_screen_row_text(&nm_host_screen, 3, row);       /* what the user sees while this (possibly long) call runs */
+    printf("NETUP call=%d screen3=|%s|\n", nm_host_net_up_calls, row);
+    fflush(stdout);
     if (nm_host_net_nodev) { if (n) ip[0] = 0; return NM_NET_NODEV; }
     if (!started) {
 #ifdef _WIN32
@@ -68,6 +75,7 @@ int nm_net_up(char *ip, size_t n)
 #endif
         started = 1;
     }
+    if (nm_host_net_noaddr > 0) { nm_host_net_noaddr--; if (n) ip[0] = 0; return NM_NET_NOADDR; }
     snprintf(ip, n, "127.0.0.1");
     return 0;
 }

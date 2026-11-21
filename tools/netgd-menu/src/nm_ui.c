@@ -516,9 +516,16 @@ static void net_start(nm_ui_t *ui)
     ngtp_hooks_t hk;
     int r;
     if (nm_plat_dcload()) { set_msg(ui, "Started from dcload: use netgd-recv", 4000); return; }
+    /* net_dhcp_request can block for a long time: say so before it starts (R104 finding 1) */
+    nm_screen_clear(&ui->scr);
+    draw_frame(ui, "", "");
+    nm_screen_put(&ui->scr, 3, 2, "Starting network ...", NM_ATTR_NORMAL);
+    nm_screen_put(&ui->scr, 5, 2, "(getting an IP address by DHCP; this can take up to a minute)", NM_ATTR_DIM);
+    nm_plat_set_art(NULL);
+    nm_plat_present(&ui->scr);
     r = nm_net_up(ui->ip, sizeof ui->ip);
     if (r == NM_NET_NODEV) { set_msg(ui, "BBA not found", 3000); return; }
-    if (r != 0) { set_msg(ui, "No IP address", 3000); return; }
+    if (r != 0) { set_msg(ui, "No IP address (Y: try again)", 3000); return; }
     if (nm_net_listen(NGTP_PORT) != 0) { set_msg(ui, "Cannot listen on the port", 3000); return; }
     nm_net_udp_listen(NGTP_PORT);                                   /* discovery is optional: no message when it fails */
     nm_art_cancel(&ui->art);

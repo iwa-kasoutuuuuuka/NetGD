@@ -396,6 +396,8 @@ static int ui_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--rflip") && i + 1 < argc) sim_rflip_cmd = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
         else if (!strcmp(argv[i], "--nocontroller")) nm_host_controller = 0;
+        else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
+        else if (!strcmp(argv[i], "--noaddr") && i + 1 < argc) nm_host_net_noaddr = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--names") && i + 1 < argc) snprintf(sim_names, sizeof sim_names, "%s", argv[++i]);
     }
     if (!noimg && sim_open(img, sectors)) { printf("cannot open image\n"); return 2; }

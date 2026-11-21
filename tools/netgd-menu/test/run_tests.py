@@ -343,6 +343,32 @@ class TestListAndInfo(UiBase):
         self.assertEqual(run.rows[17], "No controller")
 
 
+NL = chr(10)
+
+
+class TestNetStart(UiBase):
+    """R104 finding 1: the screen before the blocking network start, and the second Y retrying the address"""
+
+    def lib(self):
+        return self.card({"/02/DISC.GDI": GDI3})
+
+    def test_starting_network_is_on_the_screen_before_the_call(self):
+        r = self.ui(self.lib(), "scan Y", "--slots", "2")
+        m = re.search(r"^NETUP call=1 screen3=\|(.*)\|$", r.text, re.M)
+        self.assertIsNotNone(m, r.text)
+        self.assertIn("Starting network", m.group(1))
+
+    def test_no_bba_is_reported(self):
+        r = self.ui(self.lib(), "scan Y dump", "--slots", "2", "--nobba")
+        self.assertIn("BBA not found", NL.join(r.rows))
+
+    def test_second_y_retries_when_there_was_no_address(self):
+        r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--noaddr", "1")
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 2)
+        self.assertIn("No IP address", NL.join(r.screens[0][1]))
+        self.assertIn("127.0.0.1", NL.join(r.rows))                    # the transfer screen after the second Y
+
+
 class TestLaunch(UiBase):
     """Design 11.2 L3-L7, L13, L14: the 0x52 mount, the READY wait and the hand-off."""
 

@@ -22,5 +22,7 @@ void nm_host_real_sleep(uint32_t ms);
 extern uint16_t nm_host_net_port;       /* net_host.c */
 extern int nm_host_net_nodev;
 extern int nm_host_no_udp;
+extern int nm_host_net_noaddr;
+extern int nm_host_net_up_calls;
 
 #endif
