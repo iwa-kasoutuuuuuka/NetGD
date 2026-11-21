@@ -93,9 +93,15 @@ jobs:
             # GHCR names must be lower case; github.repository may not be.
             image="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')/quartus2:latest"
           fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "Using $image"
-          docker pull "$image"
+          if ! docker pull "$image"; then
+            # This fork has never run quartus_container.yaml, so its own image
+            # may not exist. Upstream's image is public (checked 2026-11-21).
+            image="ghcr.io/cepawiel/opengdemu/quartus2:latest"
+            echo "Falling back to $image"
+            docker pull "$image"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # Same staging layout as fpga/build_fpga.sh.
       - name: Stage sources
