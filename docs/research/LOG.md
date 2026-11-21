@@ -1846,6 +1846,49 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み。
 - 関連：R121。
 
+### R123 R119〜R122 の純正の記録と NetGD の予測の比較（GD-ROM・CDI・空フォルダ・切替）（Opus）
+
+- 担当：Opus（サブエージェントが比較、メインが確認）。問いは R118 で比べなかった記録（03〜09 と切替）で、純正と NetGD の差はどこか。
+- 方法：main（43c5f4b4）の `common/discimg/examples/expect` と `tools/netgd-expect/expect_sd.py` で同じイメージの予測を作り、
+  `compare.py --only-common` で `stock_20261121_04_img3-7.txt`・`05_cdi-tp.txt`・`06_gdi-variants.txt` と比較。切替（`SW_*`）は `ide.rs` を読んで手で比較。
+  生の差分は 246・26・88 行。同じ原因から出る行をまとめると 15 件。
+- 差（D1〜D15）：
+  - D1 **GD-ROM の lead-out**：純正は最後のトラックの本当の終わり（03 = FAD 65150、08 = FAD 66050）。NetGD は市販ディスクの大きさ（FAD 549300、`GDROM_LEADOUT_LBA`）まで埋める。
+    読めない範囲を「ある」と答えることになる（シーク試験の差はすべてこれが原因）。**新規**。
+  - D2 REQ_STAT・REQ_SES のバイト 0：純正は切替のあと 01（一時停止）、NetGD は 02（待機）。R117 では純正も 02 で、状態による。
+  - D3 REQ_STAT バイト 1 の下位（繰り返し回数）：純正 F、NetGD 0。
+  - D4 GD-ROM の待機中のヘッド位置：純正はトラック 3・FAD 45150、NetGD はトラック 1・FAD 150（CDI はどちらもトラック 1・FAD 150）。
+  - D5 CHECK のレジスタ：純正は status 0x11・err = センスキー << 4。NetGD は 0x51、範囲外で err 0x04（ABRT）など（R118 の「データ待ち」）。
+  - D6 範囲外のセッション：純正は CHECK・センスキー 5、NetGD は ABRT でキーは 0。
+  - D7 **REQ_ERROR の ASC/ASCQ**：純正は 3A/00・04/01・28/00・64/00 を入れる。NetGD は常に 0。
+  - D8・D9 CD_READ の種別検査（R118 で保留のまま）、D10 `0x10` の生セクタ（同）。
+  - D11 **06・09 の GDI**：純正はマウントしない（R121）、NetGD はマウントし、低密度領域の音声トラックを area 1 の TOC に入れる。**新規**、方針の問題。
+  - D12 **空フォルダ（07）**：純正は切替を受け付けて「ディスクなし」になる（あとの切替で戻る）。NetGD は `52 82 07` を断り（0x51/0x54、センスキー 5）、前のディスクがマウントされたまま。
+  - D13 **切替のあとの NOT READY**：純正は 2/3A/00 → 約 150 ms 2/04/01 → 約 300 ms 6/28/00 → 約 340 ms READY。NetGD は即座に UNIT ATTENTION 1 回のあと READY
+    （`ide.rs` の `APPLY_SWAP_WINDOW = false`。この仕組みは「純正のデータ待ち」で止めてあり、オンにする条件がコメントに列挙されている）。
+  - D14 CDI の postgap のセクタ：純正 2,324 バイト、NetGD 2,048 バイト。
+  - D15 GDEMU_VERSION（R118 で NetGD のままと決定）。
+- 一致したもの：REQ_MODE の 3 つの窓、何も無いときの REQ_ERROR、GD-ROM の GET_TOC area 0（03・08）、area 1 のトラック（lead-out 以外）、CDI の TOC（両方の領域）、
+  GD-ROM のセッション数 1・CDI の 2、REQ_STAT のディスク形式、CDI の GET_SCD、IP_READ、各フラグでの CRC、HASH と TP のデータ（postgap の 2 件以外）。
+- 判断：D1・D3・D7 は純正に合わせる（R125 で実装。R124 で見つかった IDENTIFY の差 D16 も同時に）。D5・D13 はエラーを返すすべての経路に関わるので別作業。D12 は方針をユーザーと決める。D2・D4・D6・D14 は影響が小さいので保留。
+- 根拠：サブエージェントの比較の出力（scratchpad の `compare2\cmp_*.txt`）、`common/discimg/src/atapi.rs:23-86`、`mcu/netgd/src/ide.rs:1340-1366`。
+- 信頼度：純正の値は確認済み（実機）。NetGD 側はホストでの予測（`expect`）とソースの読み取りで、実機では未確認。
+- 関連：R18、R117〜R122、R118。
+
+### R124 純正 GDEMU 6.0 の IDENTIFY PACKET と、時間の値のぶれ（Opus）
+
+- 担当：Opus。問いは (1) 純正は ATA の IDENTIFY PACKET DEVICE（0xA1）に何を返すか、(2) R119〜R122 の時間の値は実行ごとにどれだけぶれるか。
+- 方法：gdprobe を `identify=on`、`images=3`、`return_to=2` で実行（R119 の 1 回目と同じ条件 + IDENTIFY）。
+- 記録：`docs/research/probe-records/stock_20261122_08_identify.txt`（`abort=0`、HASH 1,050 件一致）。
+- 結論：
+  - **IDENTIFY PACKET は 80 バイト**（status 0x50）：バイト 0〜2 が 0x20、3〜15 が 0、16〜31 = `SE`、32〜47 = `CD-ROM DRIVE`、48〜63 = `6.42`（それぞれ空白で 16 バイトに埋める）、64〜79 が 0。
+    本物の GD-ROM ドライブの形式（ATA 標準の 512 バイトではない）。**NetGD は標準の 512 バイト（機種 `OpenGDEMU GD-ROM`、版 `1.00`）を返していて違う（D16、新規）**。
+  - **時間のぶれ**（03 を 4 回：R119 の 2 回、R121、今回）：切替から READY まで 331〜341 ms、CD_READ 16 セクタの中央値 13.999〜14.010 ms（スループット 2,278〜2,285 KiB/s）、
+    シーク読みの中央値 1.73〜1.77 ms・最大 3.16〜3.26 ms、GET_SCD 形式 1 は 24.4〜24.9 ms。**どれも 1〜3 % 以内で、基準値として使える**。
+- 根拠：上の記録と R119・R121 の記録（`stock_20261121_03_img3.txt`・`04_img3-7.txt`・`06_gdi-variants.txt`）の img=3 の行。
+- 信頼度：確認済み（実機）。
+- 関連：R119、R121、R123、`mcu/netgd/src/ide.rs` の `stage_identify_packet`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
