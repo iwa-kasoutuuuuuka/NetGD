@@ -23,6 +23,11 @@ fpga/Quartus/simulation/
 fpga/Quartus/output_files/*
 !fpga/Quartus/output_files/OpenGDEMU.rbf
 
+# fpga — AGM Supra (AG16K, GDEMU 6.0). Bitstreams are never committed: the
+# only pinout there is so far is a placeholder (fpga/agm/README_ja.md).
+# fpga/agm/build/ (Supra's work directory) is covered by `build/` above.
+fpga/agm/output/
+
 # fpga — Verilator
 fpga/verilator/obj_dir/
 fpga/verilator/out/
