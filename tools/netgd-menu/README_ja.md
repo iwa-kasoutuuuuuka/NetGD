@@ -36,6 +36,7 @@ PowerShell からは `.\build.ps1 [-Debug] [-Cdi] -BbaTools <Dreamcast-Dev-Tools
 - オブジェクトは `build/kos/` に出る（`tools/netgd-recv/src/*.c` と FatFs のオブジェクトもここ。netgd-recv 側のビルドには触らない）。
 - `make cdi` が使うツール（`sh-elf-objcopy`、`scramble`、`makeip`、`mkisofs`、`cdi4dc`）は変数で差し替えられる（`MKISOFS=... make cdi`）。**`mkisofs`・`cdi4dc` が DreamSDK に入っているかは未確認**（無ければ `mkdcdisc` に替える）。`ip.txt` の書式も実機の DreamSDK の `makeip` で確かめること。
 - `make NM_HANDOFF_DEFAULT=1`：既定の渡し方を再起動にする（0 = BIOS メニュー）。`make NM_SHOW_SLOT1=1`：フォルダ `01` も一覧に出す。
+- `make NM_HANDOFF_TUR=1`：BIOS に渡す前に TEST UNIT READY を 20 ms ごとに送って待つ（2 回続けて READY で渡す。実機試験 H2 の変種 B）。**既定（0）は送らず、`52 82` が成功した時点で BIOS に渡す**（変種 A）。ファームは UNIT ATTENTION を BIOS に残す設計なので、メニューの TUR がそれを消費すると、BIOS が古い目次のままになるおそれがある（R104 の指摘 3、推測）。
 
 開発中の実行：`dc-tool-ip -t <IP> -x netgd-menu.elf`（一覧と起動だけ。dcload-ip が BBA を使っているので、取り込みは無効：Y を押すと「Started from dcload: use netgd-recv」と出る）。
 
@@ -71,12 +72,13 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 2. 画面：53 桁が収まるか。PAL（50 Hz）・VGA でも（H10：`plat_kos.c` の `X0`・`Y0` で余白を調整）。右上に `fw 5.20.0` のようにファームの版が出るか。
 3. 一覧：番号フォルダが出るか。タイトルが正しいか。100 本で走査にかかる時間（H5）。
 4. 起動：A で `0x52` が通り、READY になり、BIOS に戻って「プレイ」で起動するか（H2：BIOS が新しいディスクを認識するか。UNIT ATTENTION の扱い）。
+   - **H2 の 2 変種（両方を試す）**：変種 A（既定、`make`）＝ `52 82` の成功の直後に BIOS へ渡す。変種 B ＝ `make NM_HANDOFF_TUR=1`（TEST UNIT READY で READY を確かめてから渡す。待ちが長引くと「Drive not ready」の画面が出る）。どちらで BIOS が新しいディスクを認識し、「プレイ」で起動するかを記録する。A で認識しなければ B、B で古い目次のままなら A が原因。ホスト試験は両方の組み立てで通る（`test/run_tests.py`）。いずれも実機は未確認。
 5. 再起動方式（情報画面で切り替え）：`arch_reboot()` が G1 のハードリセットを出すか。`reset_goto=1` のカードでメニューに戻ってしまわないか（H3、ファームのログ「hard reset」）。
 6. イメージをマウントしたまま、セカンダリの読み出しが正しく通るか（H4）。
 7. 同じ番号のフォルダが 2 つあるときにファームがどちらを選ぶか（H8）。
 8. `reset_goto`・`open_time`・`detect_time` の表示が `GDEMU.INI` と合っているか。
 
-9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありで IP が出るか（DHCP の待ち時間、固定 IP が使われるか）。`netgd-send push` が最後まで通り、実効速度はどれくらいか（`WANT`／`DATA` の往復、64 KiB ごと）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
+9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。（R104 の指摘 1：KOS は `INIT_NET` が無いと BBA のドライバを登録しないので、`nm_net_up` が `net_init` の前に `bba_init()`（あれば `la_init()`）を呼ぶ。DHCP の待ちの前に「Starting network ...」が出る。IP が出なかったとき、もう一度 Y で DHCP をやり直す。）BBA ありで IP が出るか（DHCP の待ち時間、固定 IP が使われるか）。`netgd-send push` が最後まで通り、実効速度はどれくらいか（`WANT`／`DATA` の往復、64 KiB ごと）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
 
 KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`arch_menu()`／`arch_reboot()`（K1）、`bfont` の色設定（netgd-fwupd が使用）、`maple`（netgd-recv が使用）、ネットワーク：`net_init`・`net_default_dev->ip_addr`・TCP の `listen`／`accept`・`O_NONBLOCK`（K2〜K4、`net_kos.c`）。
 

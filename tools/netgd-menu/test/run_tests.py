@@ -70,6 +70,9 @@ if _ours:
     atexit.register(shutil.rmtree, WORK_ROOT, True)
 
 EXE = os.path.join(ROOT, "build", "menu_host.exe" if os.name == "nt" else "menu_host")
+# the same core built with -DNM_HANDOFF_TUR=1: the menu polls TEST UNIT READY before the hand-off (R104 finding 3); EXE is the default
+# build, which hands over right after 52 82
+EXE_TUR = os.path.join(ROOT, "build", "menu_host_tur.exe" if os.name == "nt" else "menu_host_tur")
 RECV_EXE = os.path.join(RECV, "build", "test_host.exe" if os.name == "nt" else "test_host")
 
 MENU_SRCS = ["src/nm_text.c", "src/nm_slot.c", "src/nm_cfgparse.c", "src/nm_ipbin.c", "src/nm_list.c", "src/nm_input.c",
@@ -91,14 +94,15 @@ def build():
         for f in os.listdir(d):
             if f.endswith(".h"):
                 newest = max(newest, os.path.getmtime(os.path.join(d, f)))
-    if os.path.exists(EXE) and os.path.getmtime(EXE) >= newest:
-        return build_recv_tool()
-    cmd = ["gcc", "-O1", "-g", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-format-truncation", "-DNG_HOST",
-           "-Isrc", "-I../netgd-recv/src", "-I../netgd-recv/third_party/fatfs", "-I../netgd-recv/test", "-Itest",
-           "-o", EXE] + SRCS + ["../netgd-recv/" + s for s in RECV_SRCS] + (["-lws2_32"] if os.name == "nt" else [])
-    r = run_child(cmd, cwd=ROOT, timeout=max(CHILD_TIMEOUT, 600))
-    if r.returncode:
-        raise RuntimeError("build failed:\n" + r.stdout + r.stderr)
+    for exe, extra in ((EXE, []), (EXE_TUR, ["-DNM_HANDOFF_TUR=1"])):
+        if os.path.exists(exe) and os.path.getmtime(exe) >= newest:
+            continue
+        cmd = ["gcc", "-O1", "-g", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-format-truncation", "-DNG_HOST"] + extra + [
+               "-Isrc", "-I../netgd-recv/src", "-I../netgd-recv/third_party/fatfs", "-I../netgd-recv/test", "-Itest",
+               "-o", exe] + SRCS + ["../netgd-recv/" + s for s in RECV_SRCS] + (["-lws2_32"] if os.name == "nt" else [])
+        r = run_child(cmd, cwd=ROOT, timeout=max(CHILD_TIMEOUT, 600))
+        if r.returncode:
+            raise RuntimeError("build failed:" + chr(10) + r.stdout + r.stderr)
     build_recv_tool()
 
 
@@ -133,9 +137,10 @@ class Base(unittest.TestCase):
 
 class TestSelftest(Base):
     def test_selftest(self):
-        r = run_child([EXE, "selftest"])
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("SELFTEST OK", r.stdout)
+        for exe in (EXE, EXE_TUR):
+            r = run_child([exe, "selftest"])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("SELFTEST OK", r.stdout)
 
 
 GDI3 = (b"3\r\n1 0 4 2352 track01.bin 0\r\n2 450 0 2352 track02.raw 0\r\n"
@@ -180,8 +185,10 @@ class UiBase(Base):
             self.assertEqual(r.returncode, 0, "addfile %s: %s" % (path, r.stdout + r.stderr))
         return img
 
+    exe = EXE                    # a subclass can run the TEST UNIT READY build instead (EXE_TUR)
+
     def ui(self, img, script, *opts, sectors=None):
-        cmd = [EXE, "ui", img, str(sectors or self.SECTORS), "--script", script] + list(opts)
+        cmd = [self.exe, "ui", img, str(sectors or self.SECTORS), "--script", script] + list(opts)
         r = run_child(cmd)
         return UiRun(r.stdout, r.returncode)
 
@@ -369,8 +376,50 @@ class TestNetStart(UiBase):
         self.assertIn("127.0.0.1", NL.join(r.rows))                    # the transfer screen after the second Y
 
 
+class TestLaunchDefault(UiBase):
+    """R104 finding 3, variant A (the default build, NM_HANDOFF_TUR=0): READY is taken from the success of `52 82`; no TEST UNIT
+    READY is sent, so the UNIT ATTENTION stays for the BIOS."""
+
+    def games(self):
+        return self.card({"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi"})
+
+    def test_no_test_unit_ready_before_the_hand_off(self):
+        run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3")
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertEqual([p[:11] for p in run.packets[:2]], ["E0 03 00 00", "52 00 00 00"])
+        self.assertEqual([p[:2] for p in run.packets[2:]], ["52"], run.text)     # only the mount: no 00 (TEST UNIT READY)
+        self.assertEqual(run.packets[2][:11], "52 82 03 00")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertIn("H04|  Starting 03 ...", run.text)
+
+    def test_a_drive_that_would_never_be_ready_does_not_hold_the_hand_off(self):
+        run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3", "--notready", "1000000")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertEqual([p for p in run.packets if p.startswith("00 ")], [])
+
+    def test_unit_attention_is_left_for_the_bios(self):
+        run = self.ui(self.games(), "scan D ua A t:2000", "--slots", "2,3")
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        mounts = [p for p in run.packets if p.startswith("52 82")]
+        self.assertEqual(len(mounts), 2, run.text)                                # the mount is still repeated once (not executed)
+        self.assertEqual([p for p in run.packets if p.startswith("00 ")], [])
+
+    def test_by_name_and_reboot_variants(self):
+        run = self.ui(self.card({"/02/DISC.GDI": GDI3, "/SECOND_GAME_X/DISC.GDI": GDI3}), "scan X A B D A t:2000", "--slots", "2")
+        self.assertEqual(run.handoff, ["reboot"], run.text)
+        self.assertEqual([p for p in run.packets if p.startswith("00 ")], [])
+        self.assertEqual(run.n("named_mounts"), 1)
+
+    def test_no_image_still_shows_the_dialog(self):
+        run = self.ui(self.games(), "scan A dump", "--slots", "3")               # 02 is not mountable in the model
+        self.assertEqual(run.handoff, [])
+        self.assertEqual(run.screens[0][0]["state"], "6", run.text)
+
+
 class TestLaunch(UiBase):
-    """Design 11.2 L3-L7, L13, L14: the 0x52 mount, the READY wait and the hand-off."""
+    """Design 11.2 L3-L7, L13, L14: the 0x52 mount, the READY wait and the hand-off.  This is the NM_HANDOFF_TUR=1 build (the
+    menu polls TEST UNIT READY); TestLaunchDefault below is the default build (hand over right after 52 82)."""
+    exe = EXE_TUR
 
     def games(self, extra=None):
         files = {"/02/DISC.GDI": GDI3, "/03/DISC.CDI": b"cdi", "/MYGAME/DISC.GDI": GDI3}

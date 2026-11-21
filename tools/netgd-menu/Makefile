@@ -30,6 +30,11 @@ endif
 ifneq ($(NM_SHOW_SLOT1),)
   KOS_CFLAGS += -DNM_SHOW_SLOT1=$(NM_SHOW_SLOT1)
 endif
+# the hand-off variant (R104 finding 3; hardware test H2): make NM_HANDOFF_TUR=1 polls TEST UNIT READY before the hand-off;
+# the default (0) hands over right after `52 82` succeeded
+ifneq ($(NM_HANDOFF_TUR),)
+  KOS_CFLAGS += -DNM_HANDOFF_TUR=$(NM_HANDOFF_TUR)
+endif
 ifeq ($(DEBUG),1)
   KOS_CFLAGS += -g -O0
 else
