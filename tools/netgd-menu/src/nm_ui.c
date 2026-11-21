@@ -7,6 +7,8 @@
 #include "ngfs.h"
 #include "ngtp.h"
 #include "nm_net.h"
+#include "nm_disc.h"
+#include "nm_art.h"
 #include "ng_plat.h"
 
 #define LIST_ROW0 2
@@ -14,6 +16,7 @@
 #define STATUS_ROW 17
 #define HINT_ROW 18
 #define TITLE_COLS 38
+#define TITLE_COLS_ART (NM_ART_COL - 12)    /* the row is 12 + title columns wide: it ends where the art block starts */
 
 void nm_ui_reset_text(unsigned reset_goto, char *out, size_t n)
 {
@@ -30,6 +33,7 @@ void nm_ui_init(nm_ui_t *ui)
     ui->idle_ms = 300000;
     ui->controller = 1;
     nm_input_init(&ui->in);
+    nm_art_init(&ui->art);
     nm_ini_defaults(&ui->ini);
     nm_screen_clear(&ui->scr);
 }
@@ -52,7 +56,7 @@ static void draw_frame(nm_ui_t *ui, const char *hint1, const char *hint2)
     nm_screen_row(&ui->scr, HINT_ROW + 1, hint2, NM_ATTR_DIM);
 }
 
-static void game_row(const nm_game_t *g, int selected, char *out, int *attr)
+static void game_row(const nm_game_t *g, int selected, int tcols, char *out, int *attr)
 {
     char t[NM_TITLE_MAX + 24], fit[TITLE_COLS + 1], num[8];
     const char *kind = g->kind == NM_KIND_GDI ? "GDI" : g->kind == NM_KIND_CDI ? "CDI" : "   ";
@@ -62,8 +66,8 @@ static void game_row(const nm_game_t *g, int selected, char *out, int *attr)
     else if (g->state == NM_ST_ERROR) snprintf(t, sizeof t, "%s (read error)", g->title);
     else snprintf(t, sizeof t, "%s", g->title);
     if (!selected && (g->state == NM_ST_PARTIAL || g->state == NM_ST_EMPTY || g->state == NM_ST_ERROR)) *attr = NM_ATTR_DIM;
-    nm_text_fit(fit, sizeof fit, t, TITLE_COLS);
-    snprintf(out, NM_COLS + 1, "%c%s  %-*s %s %c", selected ? '>' : ' ', num, TITLE_COLS, fit,
+    nm_text_fit(fit, sizeof fit, t, tcols);
+    snprintf(out, NM_COLS + 1, "%c%s  %-*s %s %c", selected ? '>' : ' ', num, tcols, fit,
              g->state == NM_ST_COMPLETE ? kind : "   ", (g->flags & NM_F_DEFAULT) ? '*' : ' ');
 }
 
@@ -111,8 +115,10 @@ static void draw_list(nm_ui_t *ui)
         char line[NM_COLS + 8];
         int attr;
         if (i >= ui->list.count) break;
-        game_row(&ui->list.items[i], i == ui->cursor, line, &attr);
+        game_row(&ui->list.items[i], i == ui->cursor, ui->art_layout ? TITLE_COLS_ART : TITLE_COLS, line, &attr);
         nm_screen_row(&ui->scr, LIST_ROW0 + r, line, attr);
+        if (ui->art_layout)                                         /* the art block stays blank (the platform draws the picture there) */
+            for (int c = NM_ART_COL; c < NM_COLS; c++) { ui->scr.ch[LIST_ROW0 + r][c] = ' '; ui->scr.attr[LIST_ROW0 + r][c] = NM_ATTR_NORMAL; }
     }
     if (ui->list.count == 0 && ui->scan.state == NM_SCAN_DONE)
         nm_screen_put(&ui->scr, LIST_ROW0 + 1, 2, "No game folders on the card.", NM_ATTR_NORMAL);
@@ -207,6 +213,7 @@ static void to_nosd(nm_ui_t *ui, const char *why)
 static void start_scan(nm_ui_t *ui)
 {
     ui->cursor = ui->top = 0;
+    nm_art_cancel(&ui->art);
     if (nm_scan_begin(&ui->scan, &ui->list, NM_SHOW_SLOT1) != 0) { to_nosd(ui, "read error"); return; }
     ui->ini = ui->scan.ini;
     ui->scan_gen_seen = ui->scan.generation;
@@ -263,6 +270,7 @@ static void begin_launch(nm_ui_t *ui)
     snprintf(ui->dlg_folder, sizeof ui->dlg_folder, "%s", g->folder);
     if (g->state == NM_ST_EMPTY) { show_dialog(ui, NM_DLG_NOIMAGE); return; }
     if (g->state == NM_ST_PARTIAL) { show_dialog(ui, NM_DLG_INCOMPLETE); return; }
+    nm_art_cancel(&ui->art);                                        /* its file must be closed before the volume goes */
     nm_launch_begin(&ui->launch, g->number, g->folder, nm_ini_ready_limit_ms(&ui->ini));
     ui->sd_mounted = 0;
     ui->state = NM_S_LAUNCH;
@@ -469,6 +477,7 @@ static uint32_t hk_millis(void *ctx) { (void)ctx; return nm_plat_millis(); }
 static void hk_before_session(void *ctx)
 {
     nm_ui_t *ui = (nm_ui_t *)ctx;
+    nm_art_cancel(&ui->art);
     if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
 }
 
@@ -511,6 +520,8 @@ static void net_start(nm_ui_t *ui)
     if (r == NM_NET_NODEV) { set_msg(ui, "BBA not found", 3000); return; }
     if (r != 0) { set_msg(ui, "No IP address", 3000); return; }
     if (nm_net_listen(NGTP_PORT) != 0) { set_msg(ui, "Cannot listen on the port", 3000); return; }
+    nm_net_udp_listen(NGTP_PORT);                                   /* discovery is optional: no message when it fails */
+    nm_art_cancel(&ui->art);
     if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }     /* the light mount and a write session never coexist */
     ui->code = nm_ui_code_from_seed(nm_plat_entropy());
     memset(&hk, 0, sizeof hk);
@@ -545,6 +556,7 @@ static void net_frame(nm_ui_t *ui)
 {
     int ev;
     if (ui->events & NM_BTN_B) { net_close(ui); return; }
+    nm_disc_service(ui->srv.connected);
     ev = ngtp_srv_service(&ui->srv);
     if (ui->srv.code_expired) {
         ui->code = nm_ui_code_from_seed(nm_plat_entropy() + (uint32_t)ui->now);
@@ -557,6 +569,15 @@ static void net_frame(nm_ui_t *ui)
     ui->now = nm_plat_millis();
     /* signed: a request may have finished after this frame's clock was read */
     if (ui->srv.session && (int32_t)(ui->now - ui->srv.last_frame_ms) >= (int32_t)ui->idle_ms) net_close(ui);
+}
+
+/* The box art of the game under the cursor: choose, load a piece per frame (design step 11).  Only in the list. */
+static void art_frame(nm_ui_t *ui)
+{
+    const char *want = (ui->sd_mounted && ui->list.count > 0 && ui->cursor < ui->list.count) ? ui->list.items[ui->cursor].folder : NULL;
+    nm_art_select(&ui->art, want, ui->now);
+    nm_art_step(&ui->art, ui->now);
+    if (nm_art_pixels(&ui->art)) ui->art_layout = 1;
 }
 
 static void scan_frame(nm_ui_t *ui)
@@ -599,6 +620,7 @@ void nm_ui_step(nm_ui_t *ui)
         if (ui->events & NM_BTN_Y) net_start(ui);
         if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
         if (ui->state == NM_S_LIST || ui->state == NM_S_INFO || ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);
+        if (ui->state == NM_S_LIST) art_frame(ui);
         break;
 
     case NM_S_INFO:
@@ -622,6 +644,7 @@ void nm_ui_step(nm_ui_t *ui)
 
     case NM_S_CONFIRM_BIOS:
         if (ui->events & NM_BTN_A) {
+            nm_art_cancel(&ui->art);
             if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
             enter_handoff(ui, "Returning to the BIOS menu ...", NM_HANDOFF_BIOS);
         } else if (ui->events & NM_BTN_B) {
@@ -647,6 +670,7 @@ void nm_ui_step(nm_ui_t *ui)
         break;
     }
 
+    nm_plat_set_art(ui->state == NM_S_LIST ? nm_art_pixels(&ui->art) : NULL);
     draw_state(ui);
     nm_plat_present(&ui->scr);
 }

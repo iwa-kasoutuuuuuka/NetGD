@@ -52,7 +52,7 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 
 `menu_host`（`test/menu_host.c`）はメニューの中核を仮想時計で動かす。`menu_host ui <img> <sectors> --script "scan D A t:2000 dump"` のように、ボタンの列を与えて画面とファームへのパケットを見られる。カードのイメージは `tools/netgd-recv` の `test_host mkimage`／`addfile`／`mkdirs` で作る（`run_tests.py` が両方をビルドする）。
 
-実装したもの：一覧・走査・タイトル・起動（0x52／名前）・READY 待ち・情報画面・BIOS への渡し、BBA からの取り込み（NGTP 版 1）。**すべて実機未検証。** 無いもの：UDP の探索、ファーム更新の統合、箱絵（設計の手順 9〜12、任意）。
+実装したもの：一覧・走査・タイトル・起動（0x52／名前）・READY 待ち・情報画面・BIOS への渡し、BBA からの取り込み（NGTP 版 1）。**すべて実機未検証。** UDP の探索（設計の手順 9）、箱絵（設計の手順 11）。無いもの：ファーム更新の統合、実機の数字で決めるもの（設計の手順 10・12、任意）。
 
 ## BBA からの取り込み（実機未検証）
 
@@ -79,3 +79,22 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありで IP が出るか（DHCP の待ち時間、固定 IP が使われるか）。`netgd-send push` が最後まで通り、実効速度はどれくらいか（`WANT`／`DATA` の往復、64 KiB ごと）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
 
 KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`arch_menu()`／`arch_reboot()`（K1）、`bfont` の色設定（netgd-fwupd が使用）、`maple`（netgd-recv が使用）、ネットワーク：`net_init`・`net_default_dev->ip_addr`・TCP の `listen`／`accept`・`O_NONBLOCK`（K2〜K4、`net_kos.c`）。
+
+## 実装メモ（設計の任意の手順 9 と 11。設計書は書き換えていない）
+
+### 手順 9：UDP の探索（実機未検証）
+
+- 取り込み画面を開いている間（`NET_IDLE`／`NET_BUSY`）だけ、UDP 20039 で待つ。`net_start` で開き（開けなくても何も出さない。IP を手で指定すればよい）、`nm_net_stop` で閉じる。
+- 要求は `NGTP-DISCOVER 1`（後ろに空白・改行が続いてもよい。`NGTP-DISCOVER 10` や別の版には答えない）。答えは `NGTP-HERE 1 name=NetGD app=<版> state=idle|busy`。`busy` は「PC が TCP でつながっている」（もう 1 台は入れない）。**合言葉と TCP のポートは答えに入れない**（ポートは NGTP の 20039 固定。PC は `--port`）。
+- 1 フレームに 1 通だけ見る（`nm_disc_service`）。操作の最中（`RECV_BUSY`）は 1 つの操作が終わるまで答えない。そのとき PC は 2 秒で諦めて `--host` を求める。
+- 中核は `src/nm_disc.c`（文字列だけ。ソケットは持たない）。境界に `nm_net_udp_listen`／`nm_net_udp_recv`（待っていなければ 0 を返す）／`nm_net_udp_reply`（最後に受けた相手へ）を足した。KOS 側（`net_kos.c`）は `SOCK_DGRAM`・`recvfrom`・`sendto`・`socklen_t`・データグラムソケットの `O_NONBLOCK` が `KOS-API-UNVERIFIED`。
+
+### 手順 11：箱絵（実機未検証）
+
+- **形式**：ゲームのフォルダの `NETGD.ART`（大文字小文字は問わない）。無圧縮。ヘッダ 16 バイト（`"NGAR"`、版 u16 = 1、幅 u16 = 128、高さ u16 = 128、予約 6 バイト（見ない））＋ 128×128 の RGB565（リトルエンディアン、左上から行順）。計 32,784 バイト。デコーダ無し（読んで並べ替えるだけ）。後ろに余分なバイトがあってもよい。
+- **無視するもの**（エラーにも一覧の停止にもしない。絵が出ないだけ）：ファイルが無い／短い／ヘッダの魔法数・版・大きさが違う／読み取りエラー。失敗したフォルダは、カーソルが別の所へ動くまで再試行しない。
+- **いつ読むか**：カーソルが同じゲームに 300 ms 止まったら（`nm_art.c`、`NM_ART_DEBOUNCE_MS`）、軽いマウントのまま 1 フレームに 4 KiB ずつ読む（全部で約 9 フレーム。1 回の読み取りで画面が止まらない）。完成するまで出さない。カーソルが動く、情報画面・確認・起動・取り込みに移ると、すぐ消す／読みかけを閉じる（起動・取り込み・BIOS への確認の前に `nm_art_cancel`：FatFs のファイルを閉じてからボリュームを外す）。
+- **置き場所**：メモリは `nm_ui_t` の中の 32 KiB 1 枚（`nm_art_t`）だけ。画面は既存の 53×20 のマス目の右端の 11 桁×6 行（桁 42〜52、行 2〜7）を空けて、その上に 128×128 を直接描く（`nm_plat_set_art()`。KOS は `vram_s` へ書く）。マス目の層に画像は混ぜない。絵が一度でも出たら、一覧の行は題名 30 桁（絵が無いゲームの上でも。行が伸び縮みしない）に狭め、絵のブロックのマスは空白・通常属性に保つ（ホスト試験が毎回検査：`dirty=0`）。プラットフォームは絵を変えるとき、そのブロックのマスを描き直してから絵を描く（消した絵が残らない）。絵が一度も出ていないとき（`NETGD.ART` が 1 つも無い SD カード）の画面は従来と同じ。
+- **PC 側**：`netgd-send push --art` と `netgd-send art`（`tools/netgd-send/README_ja.md`）。絵の変換は PC で行い、Dreamcast は縮小も色変換もしない。
+- KOS：新しい API は使っていない（`vram_s`・FatFs・`bfont` は既存の使い方のまま）。`KOS-API-UNVERIFIED` は増えない。
+- 実機で見ること：絵が出るまでの時間（32 KiB を 4 KiB ずつ読むので H5 の 1 コマンドの時間次第）、カーソルを速く動かしたときに読みかけで固まらないか、PAL・VGA で右端の 11 桁（132 px）に絵が収まるか（H10）。

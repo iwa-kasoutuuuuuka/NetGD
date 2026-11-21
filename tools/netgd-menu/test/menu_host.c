@@ -17,6 +17,9 @@
 #include "nm_input.h"
 #include "ngtp.h"
 #include "nm_ui.h"
+#include "nm_disc.h"
+#include "nm_art.h"
+#include "crc32.h"
 #include "nm_plat.h"
 #include "plat_host.h"
 #include "ngdev.h"
@@ -313,6 +316,15 @@ static void dump_screen(void)
         printf("S%02d|%s\n", r, row);
     }
     printf("END\n");
+    {
+        uint8_t le[NM_ART_BYTES];
+        uint32_t crc = 0;
+        if (nm_host_art) {
+            for (int i = 0; i < NM_ART_PW * NM_ART_PH; i++) { le[i * 2] = (uint8_t)nm_host_art[i]; le[i * 2 + 1] = (uint8_t)(nm_host_art[i] >> 8); }
+            crc = ng_crc32(0, le, sizeof le);
+        }
+        printf("ART shown=%d crc=%08X dirty=%d layout=%d state=%d\n", nm_host_art ? 1 : 0, (unsigned)crc, nm_host_art_dirty, ui.art_layout, ui.art.state);
+    }
 }
 
 static uint32_t button_by_name(const char *n)
@@ -338,6 +350,8 @@ static void run_event(char *ev)
         return;
     }
     if (!strcmp(ev, "rflipall")) { sim_rflip_every = 1; return; }
+    if (!strcmp(ev, "rflipboth")) { sim_rflip_every = 1; sim_rflipn_every = 1; return; }
+    if (!strcmp(ev, "rflipoff")) { sim_rflip_every = 0; sim_rflipn_every = 0; return; }
     if (!strcmp(ev, "ua")) { sim_ua_mode = 1; sim_ua_pending = 1; return; }
     if (!strcmp(ev, "nocontroller")) { nm_host_controller = 0; return; }
     if (!strcmp(ev, "controller")) { nm_host_controller = 1; return; }
@@ -475,6 +489,51 @@ static void u8_frame(void)
     for (uint32_t s = 0; s < 1000; s++) CHECK(nm_ui_code_from_seed(s) < 10000 && nm_ui_code_from_seed(s) == nm_ui_code_from_seed(s));
 }
 
+/* U10: the header of a box art file (step 11) */
+static void u10_art(void)
+{
+    uint8_t h[16] = { 'N', 'G', 'A', 'R', 1, 0, 128, 0, 128, 0, 0, 0, 0, 0, 0, 0 };
+    CHECK(nm_art_check_header(h) == 0);
+    h[10] = 0xAA; h[15] = 0x55;
+    CHECK(nm_art_check_header(h) == 0);                 /* the reserved bytes are not looked at */
+    h[0] = 'X'; CHECK(nm_art_check_header(h) != 0); h[0] = 'N';
+    h[3] = 'r'; CHECK(nm_art_check_header(h) != 0); h[3] = 'R';
+    h[4] = 0; CHECK(nm_art_check_header(h) != 0);       /* version 0 */
+    h[4] = 2; CHECK(nm_art_check_header(h) != 0);       /* version 2: a newer file than this menu knows */
+    h[4] = 1; h[5] = 1; CHECK(nm_art_check_header(h) != 0); h[5] = 0;
+    h[6] = 64; CHECK(nm_art_check_header(h) != 0); h[6] = 128;
+    h[7] = 1; CHECK(nm_art_check_header(h) != 0); h[7] = 0;
+    h[8] = 127; CHECK(nm_art_check_header(h) != 0); h[8] = 128;
+    h[9] = 1; CHECK(nm_art_check_header(h) != 0); h[9] = 0;
+    CHECK(nm_art_check_header(h) == 0);
+    CHECK(NM_ART_COL + NM_ART_COLS == NM_COLS && NM_ART_COLS * 12 >= NM_ART_PW && NM_ART_ROWS * 24 >= NM_ART_PH);
+}
+
+/* U9: the discovery request and reply (step 9) */
+static void u9_disc(void)
+{
+    char out[NM_DISC_MAX];
+    size_t l;
+    static const char ok[] = "NGTP-DISCOVER 1";
+    CHECK(nm_disc_is_request(ok, sizeof ok - 1));
+    CHECK(nm_disc_is_request("NGTP-DISCOVER 1\n", 16));
+    CHECK(nm_disc_is_request("NGTP-DISCOVER 1 from=pc\r\n", 26));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVER 2", 15));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVER 10", 16));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVER", 13));
+    CHECK(!nm_disc_is_request("NGTP-DISCOVEX 1", 15));
+    CHECK(!nm_disc_is_request("ngtp-discover 1", 15));
+    CHECK(!nm_disc_is_request("", 0));
+    CHECK(!nm_disc_is_request("NGTP-HERE 1 name=NetGD", 22));            /* another Dreamcast's reply is not a request */
+    l = nm_disc_reply(ok, sizeof ok - 1, 0, out, sizeof out);
+    CHECK(l && l == strlen(out));
+    CHECK_STR(out, "NGTP-HERE 1 name=NetGD app=" NM_VERSION " state=idle");
+    l = nm_disc_reply(ok, sizeof ok - 1, 1, out, sizeof out);
+    CHECK_STR(out, "NGTP-HERE 1 name=NetGD app=" NM_VERSION " state=busy");
+    CHECK(nm_disc_reply("junk", 4, 0, out, sizeof out) == 0);
+    CHECK(nm_disc_reply(ok, sizeof ok - 1, 0, out, 10) == 0);               /* too small: nothing half-written is sent */
+}
+
 /* ---- menu_host serve: the transfer screen on a real 127.0.0.1 socket, real time ---- */
 
 static int serve_confirm;       /* 1 = A is held while the confirm screen shows, 2 = B */
@@ -487,7 +546,7 @@ static uint32_t serve_buttons(void)
 }
 
 /* menu_host serve <img> <sectors> --port P --code C [--cut N] [--idle-ms N] [--stopafter N] [--confirm allow|deny]
-                   [--slots ..] [--ua] [--failend2] [--caps C] [--nobba] [--timeout-ms T] [--dump] [--trace] */
+                   [--slots ..] [--ua] [--failend2] [--caps C] [--nobba] [--no-udp] [--timeout-ms T] [--dump] [--trace] */
 static int serve_cmd(int argc, char **argv)
 {
     const char *img = argv[2];
@@ -506,6 +565,7 @@ static int serve_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--failend2")) sim_fail_end2 = 1;
         else if (!strcmp(argv[i], "--caps") && i + 1 < argc) sim_caps = (uint8_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
+        else if (!strcmp(argv[i], "--no-udp")) nm_host_no_udp = 1;
         else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--dump")) dump = 1;
         else if (!strcmp(argv[i], "--trace")) sim_trace = 1;
@@ -561,6 +621,8 @@ static int selftest(void)
     u6_list();
     u7_input();
     u8_frame();
+    u9_disc();
+    u10_art();
     printf(bad ? "SELFTEST FAIL (%d)\n" : "SELFTEST OK\n", bad);
     return bad ? 1 : 0;
 }

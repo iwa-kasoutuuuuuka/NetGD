@@ -7,6 +7,8 @@ extern uint32_t nm_host_now;            /* the virtual clock, ms */
 extern uint32_t nm_host_buttons;        /* what nm_plat_buttons() returns */
 extern int nm_host_controller;
 extern nm_screen_t nm_host_screen;      /* the last presented screen */
+extern const uint16_t *nm_host_art;     /* the box art the core asked for (NULL = none) */
+extern int nm_host_art_dirty;
 extern int nm_host_frames;
 extern int nm_host_dcload;
 extern uint32_t nm_host_entropy;
@@ -19,5 +21,6 @@ uint64_t nm_host_real_ms(void);         /* net_host.c */
 void nm_host_real_sleep(uint32_t ms);
 extern uint16_t nm_host_net_port;       /* net_host.c */
 extern int nm_host_net_nodev;
+extern int nm_host_no_udp;
 
 #endif

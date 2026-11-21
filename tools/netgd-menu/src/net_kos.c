@@ -15,7 +15,7 @@
 #include "nm_net.h"
 
 static int net_started;
-static int lsock = -1, csock = -1;
+static int lsock = -1, csock = -1, usock = -1;
 
 static uint64_t now_ms(void) { return timer_ms_gettime64(); }
 
@@ -121,4 +121,45 @@ void nm_net_stop(void)
 {
     if (lsock >= 0) close(lsock);
     lsock = -1;
+    if (usock >= 0) close(usock);
+    usock = -1;
+}
+
+/* ---- UDP discovery (step 9).  KOS-API-UNVERIFIED (K3): SOCK_DGRAM, recvfrom/sendto and O_NONBLOCK on a datagram socket
+   in KOS 2.3.0; a failure only means that the PC has to be given the IP address by hand. ---- */
+
+static struct sockaddr_in udp_peer;
+static int udp_have_peer;
+
+int nm_net_udp_listen(uint16_t port)
+{
+    struct sockaddr_in a;
+    if (usock >= 0) { close(usock); usock = -1; }
+    udp_have_peer = 0;
+    usock = socket(PF_INET, SOCK_DGRAM, 0);                    /* KOS-API-UNVERIFIED (K3) */
+    if (usock < 0) return -1;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(usock, (struct sockaddr *)&a, sizeof a) != 0) { close(usock); usock = -1; return -1; }
+    set_nonblock(usock);
+    return 0;
+}
+
+int nm_net_udp_recv(void *buf, size_t cap)
+{
+    socklen_t l = sizeof udp_peer;                              /* KOS-API-UNVERIFIED (K3): socklen_t */
+    int r;
+    if (usock < 0) return -1;
+    r = (int)recvfrom(usock, buf, cap, 0, (struct sockaddr *)&udp_peer, &l);
+    if (r > 0) { udp_have_peer = 1; return r; }
+    if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+    return 0;
+}
+
+int nm_net_udp_reply(const void *buf, size_t n)
+{
+    if (usock < 0 || !udp_have_peer) return -1;
+    return sendto(usock, buf, n, 0, (struct sockaddr *)&udp_peer, sizeof udp_peer) == (int)n ? 0 : -1;
 }

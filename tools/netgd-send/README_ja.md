@@ -125,6 +125,9 @@ python netgd-send.py remote delete 05 --host 192.168.0.20 --code 4821
 - `remote statfs|list [フォルダ]|delete フォルダ [--force]|verify フォルダ|finish [--mount フォルダ|--none]`：単発の操作。`NGD:` の行がそのまま出る。
 - 認証は 4 桁の合言葉だけ（誤操作よけ。暗号化は無い。LAN 用）。3 回間違えると本体が合言葉を作り直す。
 - プロトコルの定義は `netgd_send/ngtp.py`（標準ライブラリだけ）。
+- **`--host` を省略すると探索する**（`push`・`remote` とも）：UDP 20039 に `NGTP-DISCOVER 1` を送り（既定の宛先は `255.255.255.255`）、メニューの `NGTP-HERE 1 name=NetGD app=... state=idle|busy` を 2 秒待つ。答えが 1 台ならそれを使い、0 台・2 台以上なら `--host` を求めて終了コード 1。合言葉（`--code`）は探索では分からないので、いつでも要る。見つからないとき（ルータの設定でブロードキャストが届かない、PC に複数の NIC がある）は `--broadcast 192.168.0.255`（そのネットワークのブロードキャストアドレス）か本体の IP を指定する。`--discover-timeout` で待ち時間を変える。
+- `discover`：探索だけして一覧を出す（`python netgd-send.py discover [--broadcast ADDR] [--port P]`）。見つかれば 0、無ければ 1。本体の取り込み画面（Y）が開いている間だけ答える。
+- **箱絵**：`push --art 絵.png` で、ゲームのフォルダに `NETGD.ART`（128×128、RGB565、32,784 バイト。形式は `tools/netgd-menu/README_ja.md` の実装メモ）を一緒に書く。縦横比を保って 128×128 に収め（余白は黒）、メニューが一覧の右に出す。`絵.png` の代わりに作り済みの `NETGD.ART` も渡せる。`python netgd-send.py art 絵.png -o NETGD.ART` はファイルを作るだけ（SD カードのフォルダへ自分で置く用）。**Pillow は任意**：入っていれば JPEG・BMP など何でも読む（LANCZOS で縮小）。無ければ内蔵の PNG 読み取り（8／16 ビットの灰色・RGB・RGBA・パレット。インターレース無し）と箱形平均の縮小を使う（`--no-pillow` で強制）。試験は Pillow 無しでも通る。
 
 ## テスト
 
@@ -137,7 +140,7 @@ python -m unittest discover -s tests -v
 
 ## 未実装・今後
 
-- T2 の探索（UDP の `NGTP-DISCOVER`、`--host` の省略）は未実装（設計の手順 9、任意）。
+- T2 の探索は実装済み・実機未検証（`discover`、`--host` の省略）。複数の NIC の PC では各 NIC のブロードキャストへは送らないので、`--broadcast` が要ることがある。
 - `prepare` が作る `job.ngj` は `statfs` と `put` と `finish` だけ（`list` / `delete` / `verify` の単発は T2 の `remote` で行う）。
 
 `prepare` は前回の `result.ngr` で `DONE ok` だった項目を `job.ngj` から外す（再送を防ぐ）。失敗・未完の項目は残る。.gdi のトラック名は UTF-8、ANSI コードページ、latin-1 の順に読み、ディスク上にあるファイルに当たった読み方を採る。

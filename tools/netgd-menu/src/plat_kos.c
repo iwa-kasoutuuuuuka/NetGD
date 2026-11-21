@@ -12,6 +12,7 @@
 #include <dc/maple/controller.h>
 #include "nm.h"
 #include "nm_plat.h"
+#include "nm_art.h"
 #include "ng_plat.h"
 #include "ff.h"
 
@@ -64,6 +65,17 @@ uint32_t nm_plat_buttons(void)
 
 /* ---- screen: only the cells that changed since the last call ---- */
 
+/* ---- box art (design step 11): a 128 x 128 RGB565 picture written straight into the frame buffer, in the block of cells
+   that the core keeps blank while a picture is set (nm_art.h).  The block is repainted as text (blank or not) whenever the
+   picture changes, so a removed picture never leaves pixels behind. ---- */
+
+#define ART_X (X0 + NM_ART_COL * CELL_W + 2)
+#define ART_Y (Y0 + NM_ART_ROW * CELL_H + 8)
+
+static const uint16_t *art_want, *art_shown;
+
+void nm_plat_set_art(const uint16_t *px) { art_want = px; }
+
 static char prev_ch[NM_ROWS][NM_COLS];
 static uint8_t prev_attr[NM_ROWS][NM_COLS];
 static int have_prev;
@@ -85,6 +97,10 @@ static int changed(const nm_screen_t *s, int r, int c)
 
 void nm_plat_present(const nm_screen_t *s)
 {
+    if (art_want != art_shown && have_prev) {
+        for (int r = NM_ART_ROW; r < NM_ART_ROW + NM_ART_ROWS; r++)
+            for (int c = NM_ART_COL; c < NM_COLS; c++) prev_ch[r][c] = 0;       /* never a screen character: drawn again below */
+    }
     for (int r = 0; r < NM_ROWS; r++) {
         int c = 0;
         while (c < NM_COLS) {
@@ -105,6 +121,10 @@ void nm_plat_present(const nm_screen_t *s)
     memcpy(prev_ch, s->ch, sizeof prev_ch);
     memcpy(prev_attr, s->attr, sizeof prev_attr);
     have_prev = 1;
+    if (art_want && art_want != art_shown) {
+        for (int y = 0; y < NM_ART_PH; y++) memcpy(vram_s + (ART_Y + y) * 640 + ART_X, art_want + y * NM_ART_PW, NM_ART_PW * 2);
+    }
+    art_shown = art_want;
 }
 
 void nm_plat_handoff(int mode)

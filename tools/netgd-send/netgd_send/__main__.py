@@ -1,6 +1,6 @@
-"""CLI: python -m netgd_send {prepare,collect,status,push,remote} ...
+"""CLI: python -m netgd_send {prepare,collect,status,push,remote,discover,art} ...
 
-`prepare`/`collect`/`status` never talk to the Dreamcast: sending, running, logging and noexec detection
+`discover` (UDP) finds the menu without its IP address.  `prepare`/`collect`/`status` never talk to the Dreamcast: sending, running, logging and noexec detection
 belong to the owner's dc_auto / dc_gui (design 7.1).  `push` and `remote` talk to the NetGD menu over a BBA
 (docs/design/menu-app.md 8): the menu's transfer screen shows the IP address and the 4-digit code.
 """
@@ -9,6 +9,7 @@ import argparse
 import sys
 
 from . import __version__
+from . import art as artmod
 from . import image as imgmod
 from . import job as jobmod
 from . import ngtp
@@ -83,11 +84,31 @@ def _slot_arg(v):
         raise argparse.ArgumentTypeError("--slot takes a number or auto")
 
 
+def cmd_art(a):
+    data = artmod.make_art(a.picture, use_pillow=False if a.no_pillow else None)
+    with open(a.output, "wb") as f:
+        f.write(data)
+    print("wrote %s (%d bytes): copy it into the game's folder on the SD card as NETGD.ART" % (a.output, len(data)))
+    return 0
+
+
+def cmd_discover(a):
+    return pushmod.cmd_discover(a)
+
+
+def _add_discover_args(p):
+    p.add_argument("--broadcast", default=ngtp.DISCOVER_BROADCAST,
+                   help="where the discovery request goes (default %s; if it finds nothing give your network's broadcast "
+                        "address, e.g. 192.168.1.255, or the console's IP)" % ngtp.DISCOVER_BROADCAST)
+    p.add_argument("--discover-timeout", type=float, default=2.0, help="seconds to wait for answers (default 2)")
+
+
 def _add_net_args(p):
-    p.add_argument("--host", required=True, help="IP address shown on the menu's transfer screen")
+    p.add_argument("--host", help="IP address shown on the menu's transfer screen (default: look for the menu with the UDP discovery)")
     p.add_argument("--code", required=True, type=int, help="the 4-digit code shown there")
     p.add_argument("--port", type=int, default=ngtp.DEFAULT_PORT)
     p.add_argument("--timeout", type=float, default=60.0, help="network timeout in seconds (default 60)")
+    _add_discover_args(p)
 
 
 def build_parser():
@@ -128,7 +149,20 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="allow overwriting a protected folder (the console asks too)")
     p.add_argument("--allow-fragmented", action="store_true", help="accept a fragmented allocation")
     p.add_argument("--no-finish", action="store_true", help="do not close the session at the end")
+    p.add_argument("--art", metavar="PICTURE", help="box art: a picture (PNG; any format with Pillow installed) or a finished "
+                   "NETGD.ART, sent as NETGD.ART next to the image")
     p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("art", help="make a NETGD.ART (the menu's 128 x 128 box art) from a picture")
+    p.add_argument("picture", help="PNG (any format Pillow reads, if it is installed)")
+    p.add_argument("-o", "--output", default="NETGD.ART")
+    p.add_argument("--no-pillow", action="store_true", help="use the built-in PNG reader even if Pillow is installed")
+    p.set_defaults(func=cmd_art)
+
+    p = sub.add_parser("discover", help="look for NetGD menus on the network (UDP); the menu's transfer screen must be open")
+    p.add_argument("--port", type=int, default=ngtp.DEFAULT_PORT)
+    _add_discover_args(p)
+    p.set_defaults(func=cmd_discover)
 
     p = sub.add_parser("remote", help="one operation on the menu's transfer screen: statfs, list, delete, verify, finish")
     p.add_argument("op", choices=("statfs", "list", "delete", "verify", "finish"))
@@ -149,7 +183,7 @@ def main(argv=None):
         build_parser().error("%s needs a folder" % a.op)
     try:
         return a.func(a)
-    except (imgmod.ImageError, ManifestError, jobmod.JobError, ngtp.NgtpError) as e:
+    except (imgmod.ImageError, ManifestError, jobmod.JobError, ngtp.NgtpError, artmod.ArtError, OSError) as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
 
