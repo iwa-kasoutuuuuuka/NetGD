@@ -8,7 +8,11 @@
 
 ### 共通の約束
 
-- **一度に 1 回だけ**。`dc_auto` を 2 つ同時に走らせない。前の実行の `dc-tool-ip` が残っている（stale）と、次の実行は待たされる（`dc_auto.ps1` は「Dreamcast がまだ前のプログラムを動かしている → リセットを待つ」と表示して止まる）。残ったら次のとおり。
+- **一度に 1 回だけ**。`dc_auto` を 2 つ同時に走らせない。`dc_auto.ps1` のコードでの動き（実機では未確認）：
+  - 別の `dc_auto` の窓が動いている場合、新しい実行はその窓と `dc-tool-ip` を止めて置き換える（`Stop-OtherRuns`、`[replace]` と表示）。そのあと `Waiting for the reset` で、Dreamcast の電源の入れ直しを待つ。`-Wait` を付けると、置き換えずに終わるのを待つ。
+  - 持ち主の `dc_auto` がいない `dc-tool-ip` が残っている（stale）場合は、置き換えられない。`Another dc-tool-ip is running (PID …). Waiting for it to end...` と出て止まる。
+  - 前の実行が止まらずに置き換わると、その記録は途中で終わる。だから、前の実行が終わったのを確かめてから次を始める。
+  - 残ったら次のとおり。
   1. `Set-Location H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\dc_auto.ps1 -Stop -Ip 192.168.10.2`（この Dreamcast 向けの `dc_auto` と `dc-tool-ip` を止める。`-Stop` は `dc_auto.ps1` にある）
   2. Dreamcast の電源を切って 5 秒待ち、入れ直し、GDmenu で SD の `02`（dcload-ip）を選ぶ。
 - **純正 GDEMU が固まったら、Dreamcast の電源スイッチを OFF にする。リセットボタンでは GDEMU は電源が入れ直されない**（`gdprobe` の README と LOG R183 の「電源の入れ直しが要る」）。OFF → 5 秒 → ON → `02` を選ぶ。
@@ -351,4 +355,4 @@ TV の写真（NOFW の画面、PAL・VGA を試したならその両方）、�
 3. g2netbench（g2x）：PC のファイアウォールのプロファイル。
 4. netgd-t2：`remote finish --none` の実機での終了の形、PC 側のファイル出力の有無。
 5. netgd-menu：純正で Y に入る手段、空きメモリの測り方、dcload から BIOS への引き渡し、dcload のコンソールの出力、`make cdi` のツール（`mkisofs`・`cdi4dc`）。
-6. 共通：`Exclusive` のプリセット（g2bench 系と gdprobe 系）が、`dc_auto` を別の窓から 2 つ起動したときに互いを待つか置き換えるか（`dc_auto.ps1` の `Stop-OtherRuns` は「前のテストを止めて置き換える」と読めるが、実機で確かめていない）。
+6. 共通：`dc_auto` を別の窓から 2 つ起動したときの動き。コードでは、既定は前の実行を止めて置き換え、`-Wait` なら待つ。持ち主のいない `dc-tool-ip` は止めずに待つ（§0）。この動きは実機では確かめていない。
