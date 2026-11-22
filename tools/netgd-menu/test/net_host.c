@@ -31,6 +31,14 @@ int nm_host_net_nodev;                  /* nm_net_up answers "no BBA" */
 int nm_host_no_udp;                     /* nm_net_udp_listen fails */
 int nm_host_net_noaddr;                 /* nm_net_up answers "no IP address" this many more times (DHCP failed) */
 int nm_host_net_up_calls;
+int nm_host_net_nolink;                 /* nm_net_up answers "no link" this many more times (a retry with Y works after it) */
+
+void (*nm_net_log)(const char *line);
+uint32_t nm_net_rcvbuf = NM_NET_RCVBUF_DEFAULT;
+uint32_t nm_net_static_ip = NM_NET_STATIC_IP;
+uint32_t nm_net_arp_ms;
+static char net_why[72];
+const char *nm_net_error(void) { return net_why; }
 
 static sock_t lsock = BAD_SOCK, csock = BAD_SOCK, usock = BAD_SOCK;
 static struct sockaddr_in udp_peer;
@@ -65,7 +73,21 @@ int nm_net_up(char *ip, size_t n)
     nm_screen_row_text(&nm_host_screen, 3, row);       /* what the user sees while this (possibly long) call runs */
     printf("NETUP call=%d screen3=|%s|\n", nm_host_net_up_calls, row);
     fflush(stdout);
-    if (nm_host_net_nodev) { if (n) ip[0] = 0; return NM_NET_NODEV; }
+    net_why[0] = 0;
+    if (nm_net_log) {                                       /* the UI shows the steps while the call runs */
+        char r5[NM_COLS + 1], r7[NM_COLS + 1];
+        nm_net_log("host: bring-up step");
+        nm_screen_row_text(&nm_host_screen, 5, r5);
+        nm_screen_row_text(&nm_host_screen, 7, r7);
+        printf("NETLOG screen5=|%s| screen7=|%s|\n", r5, r7);
+    }
+    if (nm_host_net_nodev) { if (n) ip[0] = 0; snprintf(net_why, sizeof net_why, "BBA not found"); return NM_NET_NODEV; }
+    if (nm_host_net_nolink > 0) {
+        nm_host_net_nolink--;
+        if (n) ip[0] = 0;
+        snprintf(net_why, sizeof net_why, "No network link: check the cable (Y: try again)");
+        return NM_NET_NOLINK;
+    }
     if (!started) {
 #ifdef _WIN32
         WSADATA wd;
@@ -75,7 +97,12 @@ int nm_net_up(char *ip, size_t n)
 #endif
         started = 1;
     }
-    if (nm_host_net_noaddr > 0) { nm_host_net_noaddr--; if (n) ip[0] = 0; return NM_NET_NOADDR; }
+    if (nm_host_net_noaddr > 0) {
+        nm_host_net_noaddr--;
+        if (n) ip[0] = 0;
+        snprintf(net_why, sizeof net_why, "No IP address (none built in)");
+        return NM_NET_NOADDR;
+    }
     snprintf(ip, n, "127.0.0.1");
     return 0;
 }
@@ -165,6 +192,12 @@ void nm_net_stop(void)
     lsock = BAD_SOCK;
     if (usock != BAD_SOCK) CLOSESOCK(usock);
     usock = BAD_SOCK;
+}
+
+void nm_net_shutdown(void)
+{
+    nm_net_close_client();
+    nm_net_stop();
 }
 
 /* ---- UDP discovery: a datagram socket on 127.0.0.1 (the same port number as the TCP one) ---- */

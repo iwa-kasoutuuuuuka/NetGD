@@ -1,7 +1,8 @@
 /* Host test driver for netgd-menu's core.  Driven by test/run_tests.py.
      menu_host selftest                 pure functions (design 11.2 U1..U7; U8 is in the frame tests)
      menu_host ui <img> <sectors> --script "<events>" [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--caps C] [--noimg]
-                  [--rflip K] [--rflip-all] [--nocontroller] [--names A|B]
+                  [--rflip K] [--rflip-all] [--nocontroller] [--names A|B] [--stock] [--gdemu-version V] [--nolink N]
+     menu_host serve <img> <sectors> --port P --code C [--tcpfix] ...   (the transfer screen on a localhost socket)
         events: U D L R A B X Y S LT RT (press and release), hold:A:1200, t:500, scan, step, dump, rflipall, ua,
                 nocontroller, controller
    Nothing here runs on a Dreamcast. */
@@ -19,6 +20,8 @@
 #include "nm_ui.h"
 #include "nm_disc.h"
 #include "nm_art.h"
+#include "nm_netup.h"
+#include "nm_net.h"
 #include "crc32.h"
 #include "nm_plat.h"
 #include "plat_host.h"
@@ -408,6 +411,9 @@ static int ui_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--nocontroller")) nm_host_controller = 0;
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(argv[i], "--noaddr") && i + 1 < argc) nm_host_net_noaddr = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--nolink") && i + 1 < argc) nm_host_net_nolink = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stock")) sim_stock = 1;
+        else if (!strcmp(argv[i], "--gdemu-version") && i + 1 < argc) sim_fw_version = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--names") && i + 1 < argc) snprintf(sim_names, sizeof sim_names, "%s", argv[++i]);
     }
     if (!noimg && sim_open(img, sectors)) { printf("cannot open image\n"); return 2; }
@@ -564,7 +570,7 @@ static int serve_cmd(int argc, char **argv)
     const char *img = argv[2];
     uint32_t sectors = (uint32_t)strtoul(argv[3], NULL, 10), seed = 0, timeout_ms = 120000;
     unsigned code = 4821;
-    int dump = 0, entered = 0, k = 0;
+    int dump = 0, entered = 0, k = 0, tcpfix = 0;
     uint64_t t0;
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) nm_host_net_port = (uint16_t)atoi(argv[++i]);
@@ -580,6 +586,7 @@ static int serve_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--caps") && i + 1 < argc) sim_caps = (uint8_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(argv[i], "--no-udp")) nm_host_no_udp = 1;
+        else if (!strcmp(argv[i], "--tcpfix")) tcpfix = 1;
         else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--dump")) dump = 1;
         else if (!strcmp(argv[i], "--trace")) sim_trace = 1;
@@ -599,6 +606,7 @@ static int serve_cmd(int argc, char **argv)
         uint32_t keep_idle = ui.idle_ms;
         nm_ui_init(&ui);
         if (keep_idle) ui.idle_ms = keep_idle;
+        if (tcpfix) nm_ui_set_tcpfix(&ui, 1);
     }
     for (int i = 0; i < 2000 && ui.state != NM_S_LIST; i++) {
         frame();
@@ -609,6 +617,8 @@ static int serve_cmd(int argc, char **argv)
     serve_btn = 0;
     frame();
     if (ui.state != NM_S_NET_IDLE) { printf("SERVE-END state=%d (the transfer screen did not open)\n", ui.state); if (dump) dump_screen(); return 0; }
+    printf("WINDOW want=%u depth=%d tcpfix=%d rcvbuf=%u\n", (unsigned)ui.srv.want_max, ui.srv.depth, ui.tcpfix,
+           (unsigned)nm_net_rcvbuf);
     printf("LISTENING %u code %04u\n", (unsigned)nm_host_net_port, code);
     fflush(stdout);
     t0 = nm_host_real_ms();
@@ -625,6 +635,171 @@ static int serve_cmd(int argc, char **argv)
     return 0;
 }
 
+/* U11: the BBA bring-up steps (nm_netup.c) over fake KOS operations and a fake clock: order, time limits, error texts */
+typedef struct {
+    uint64_t now;
+    int nifs;                   /* netifs eth_init gives */
+    int drivers_calls, starts, devices, arps, logs;
+    int done_after_ms;          /* net_init returns this long after the start (-1 = never) */
+    int rc;                     /* ... with this result */
+    uint64_t started_at;
+    int have_dev;
+    int arp_after_ms;           /* the PC answers the ARP this long after the first lookup (-1 = never) */
+    uint64_t arp_t0;
+    uint32_t ip_seen, gw_seen, mask_seen, bcast_seen, dev_ip;
+    uint32_t arp_ip;
+    char last[80];
+} fake_net_t;
+
+static uint64_t fk_now(void *c) { return ((fake_net_t *)c)->now; }
+static void fk_sleep(void *c, uint32_t ms) { ((fake_net_t *)c)->now += ms; }
+static int fk_drivers(void *c, uint32_t ip, uint32_t mask, uint32_t bcast, uint32_t gw)
+{
+    fake_net_t *f = (fake_net_t *)c;
+    f->drivers_calls++;
+    f->ip_seen = ip; f->mask_seen = mask; f->bcast_seen = bcast; f->gw_seen = gw;
+    return f->nifs;
+}
+static int fk_start(void *c) { fake_net_t *f = (fake_net_t *)c; f->starts++; f->started_at = f->now; return 0; }
+static int fk_done(void *c, int *rc)
+{
+    fake_net_t *f = (fake_net_t *)c;
+    if (f->done_after_ms < 0 || f->now - f->started_at < (uint64_t)f->done_after_ms) return 0;
+    *rc = f->rc;
+    return 1;
+}
+static int fk_device(void *c, uint32_t ip, uint32_t mask, uint32_t bcast, uint32_t gw, const char **name)
+{
+    fake_net_t *f = (fake_net_t *)c;
+    (void)mask; (void)bcast; (void)gw;
+    f->devices++;
+    if (!f->have_dev) return -1;
+    f->dev_ip = ip;
+    *name = "bba";
+    return 0;
+}
+static int fk_arp(void *c, uint32_t pc)
+{
+    fake_net_t *f = (fake_net_t *)c;
+    if (!f->arps++) f->arp_t0 = f->now;
+    f->arp_ip = pc;
+    return f->arp_after_ms >= 0 && f->now - f->arp_t0 >= (uint64_t)f->arp_after_ms ? 0 : -1;
+}
+static void fk_log(void *c, const char *line) { fake_net_t *f = (fake_net_t *)c; f->logs++; snprintf(f->last, sizeof f->last, "%s", line); }
+
+static void fake_reset(fake_net_t *f, nm_netup_ops_t *ops, nm_netup_t *st, nm_netup_cfg_t *cfg)
+{
+    memset(f, 0, sizeof *f);
+    f->now = 1000;
+    f->nifs = 1;
+    f->done_after_ms = 1200;
+    f->have_dev = 1;
+    f->arp_after_ms = 300;
+    ops->ctx = f; ops->now_ms = fk_now; ops->sleep_ms = fk_sleep; ops->drivers = fk_drivers; ops->init_start = fk_start;
+    ops->init_done = fk_done; ops->device = fk_device; ops->arp = fk_arp; ops->log = fk_log;
+    memset(st, 0, sizeof *st);
+    memset(cfg, 0, sizeof *cfg);
+    cfg->static_ip = 0xC0A80A02u;
+}
+
+static void u11_netup(void)
+{
+    fake_net_t f;
+    nm_netup_ops_t ops;
+    nm_netup_t st;
+    nm_netup_cfg_t cfg;
+    char s[16];
+    uint32_t m, b, g, pc;
+
+    nm_netup_ipstr(0xC0A80A02u, s, sizeof s);
+    CHECK_STR(s, "192.168.10.2");
+    nm_netup_addrs(0xC0A80A02u, 0, &m, &b, &g, &pc);
+    CHECK(m == 0xffffff00u && b == 0xC0A80AFFu && g == 0xC0A80A01u && pc == 0xC0A80A01u);
+    nm_netup_addrs(0x0A000005u, 0x0A000063u, &m, &b, &g, &pc);
+    CHECK(b == 0x0A0000FFu && g == 0x0A000063u && pc == 0x0A000063u);
+
+    /* the direct cable: static IP, net_init in 1.2 s, the PC answers ARP */
+    fake_reset(&f, &ops, &st, &cfg);
+    CHECK(nm_netup_run(&st, &cfg, &ops) == 0);
+    CHECK(st.stage == NM_NETUP_UP && st.arp_ok && st.why[0] == 0);
+    CHECK(f.ip_seen == 0xC0A80A02u && f.gw_seen == 0xC0A80A01u && f.mask_seen == 0xffffff00u && f.bcast_seen == 0xC0A80AFFu);
+    CHECK(f.dev_ip == 0xC0A80A02u && f.arp_ip == 0xC0A80A01u && f.starts == 1);
+    CHECK(f.logs >= 4);
+    /* a later call: no second start */
+    CHECK(nm_netup_run(&st, &cfg, &ops) == 0 && f.starts == 1 && f.drivers_calls == 1);
+
+    /* dcload-ip: its own IP and the PC's */
+    fake_reset(&f, &ops, &st, &cfg);
+    cfg.dcload = 1; cfg.dcload_ip = 0xC0A80114u; cfg.dcload_pc = 0xC0A80164u;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == 0 && f.ip_seen == 0xC0A80114u && f.arp_ip == 0xC0A80164u && f.gw_seen == 0xC0A80164u);
+    fake_reset(&f, &ops, &st, &cfg);
+    cfg.dcload = 1;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOADDR && f.drivers_calls == 0 && strstr(st.why, "No IP address"));
+
+    /* no IP built in */
+    fake_reset(&f, &ops, &st, &cfg);
+    cfg.static_ip = 0;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOADDR && st.stage == NM_NETUP_DEAD && f.drivers_calls == 0);
+
+    /* no BBA: no netif; final (DEAD), a later call does nothing */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.nifs = 0;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NODEV && st.stage == NM_NETUP_DEAD && f.starts == 0);
+    CHECK(!strcmp(st.why, "BBA not found"));
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NODEV && f.drivers_calls == 1);
+
+    /* no link: net_init returns -1 (the BBA's 10 s link wait); a retry starts net_init again and can succeed */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.done_after_ms = 10000; f.rc = -1;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && st.stage == NM_NETUP_NEW);
+    CHECK(strstr(st.why, "link") != NULL && strlen(st.why) <= 51);
+    CHECK(f.devices == 0 && f.arps == 0);
+    f.rc = 0;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == 0 && f.starts == 2 && st.stage == NM_NETUP_UP && st.why[0] == 0);
+
+    /* net_init never returns: bounded by init_ms (default 30 s), WAITING; a retry never starts a second net_init */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.done_after_ms = -1;
+    {
+        uint64_t t0 = f.now;
+        CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && st.stage == NM_NETUP_WAITING);
+        CHECK(f.now - t0 >= NM_NETUP_INIT_MS && f.now - t0 <= NM_NETUP_INIT_MS + NM_NETUP_POLL_MS);
+        CHECK(strlen(st.why) <= 51);
+        t0 = f.now;
+        CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && f.starts == 1 && f.now - t0 <= NM_NETUP_INIT_MS + NM_NETUP_POLL_MS);
+        CHECK(strstr(st.why, "restart") != NULL);
+    }
+    /* ... and when it does return later, the next call completes the bring-up */
+    f.done_after_ms = 0;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == 0 && f.starts == 1 && st.stage == NM_NETUP_UP);
+
+    /* a short init limit from the config */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.done_after_ms = -1; cfg.init_ms = 2000;
+    {
+        uint64_t t0 = f.now;
+        CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && f.now - t0 <= 2000 + NM_NETUP_POLL_MS);
+    }
+
+    /* net_init ok but no default device */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.have_dev = 0;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NODEV && st.stage == NM_NETUP_DEAD && f.arps == 0);
+    CHECK(strstr(st.why, "BBA not found") == st.why);
+
+    /* the PC never answers the ARP: still up, bounded by arp_ms */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.arp_after_ms = -1; cfg.arp_ms = 3000;
+    {
+        uint64_t t0;
+        f.done_after_ms = 0;
+        t0 = f.now;
+        CHECK(nm_netup_run(&st, &cfg, &ops) == 0 && !st.arp_ok && st.stage == NM_NETUP_UP);
+        CHECK(f.now - t0 >= 3000 && f.now - t0 <= 3000 + 100);
+        CHECK(strstr(f.last, "no ARP answer") != NULL);
+    }
+}
+
 static int selftest(void)
 {
     u1_slot();
@@ -637,6 +812,7 @@ static int selftest(void)
     u8_frame();
     u9_disc();
     u10_art();
+    u11_netup();
     printf(bad ? "SELFTEST FAIL (%d)\n" : "SELFTEST OK\n", bad);
     return bad ? 1 : 0;
 }

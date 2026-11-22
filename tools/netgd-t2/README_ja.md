@@ -11,7 +11,7 @@ PC の `tools/netgd-send`（`push` / `remote`）が NGTP（`docs/design/menu-app
 | 中核（ホストで試験） | `src/t2_app.c/.h` | 状態（ネット開始 → 待ち受け → 応答 → 終了）、画面（53 × 20）、書き込みの関門、待ち時間の上限 |
 | NGTP サーバ | `../netgd-menu/src/ngtp_srv.c`・`ngtp_frame.c` | メニューと共用。WANT の大きさと同時数（`ngtp_srv_set_window`）と書き込みの関門（`may_write`）を足した |
 | 受信コア | `../netgd-recv/src/*` | 変更なし |
-| KOS 層 | `src/main_kos.c`・`src/net_kos.c`、`../netgd-menu/src/plat_kos.c` | BBA は手で立ち上げる（INIT_NET・DHCP なし） |
+| KOS 層 | `src/main_kos.c`、`../netgd-menu/src/net_kos.c`・`nm_netup.c`・`plat_kos.c` | BBA は手で立ち上げる（INIT_NET・DHCP なし）。ネットワーク層はメニューと共用 |
 
 ### WANT の大きさと同時数
 
@@ -40,7 +40,7 @@ PC の `tools/netgd-send`（`push` / `remote`）が NGTP（`docs/design/menu-app
 
 ### BBA の立ち上げ
 
-`tools/g2bench/main_net.c`（feat/g2-transport）と同じ手順：`eth_init()` → 各 netif に IP を設定（DHCP させない）→ `net_init(0)` をスレッドで 30 秒まで → PC の ARP を 8 秒まで → dcload-ip から起動したときは終了の引き渡しのためだけに `fs_dclsocket`。IP は dcload-ip のもの、それ以外は `T2_IP`（既定 192.168.10.2、`make T2_IP=0xC0A80A02`）。各手順は画面と（KOS が BBA を取るまで）dc-tool-ip に出る。
+メニューと共用のコード（`../netgd-menu/src/net_kos.c`、手順と時間の上限は `nm_netup.c`、ホスト試験は netgd-menu の `menu_host selftest` U11）。`tools/g2bench/main_net.c`（feat/g2-transport）と同じ手順：`eth_init()` → 各 netif に IP を設定（DHCP させない）→ `net_init(0)` をスレッドで 30 秒まで → PC の ARP を 8 秒まで → dcload-ip から起動したときは終了の引き渡しのためだけに `fs_dclsocket`。IP は dcload-ip のもの、それ以外は `T2_IP`（既定 192.168.10.2、`make T2_IP=0xC0A80A02`）。各手順は画面と（KOS が BBA を取るまで）dc-tool-ip に出る。
 
 ### 待ち時間の上限・終わり方
 

@@ -1,6 +1,6 @@
 /* netgd-t2 (KOS build): start, then run the steps of the core (t2_app.c).  NOT run on hardware.
    Start it with dc-tool-ip (dcload-ip) or from a disc; the PC runs netgd-send push --host <IP> --code <code>.
-   No INIT_NET (the BBA is brought up by hand, net_kos.c), no INIT_CDROM (the drive gets raw ATAPI packets only, and only
+   No INIT_NET (the BBA is brought up by hand, ../netgd-menu/src/net_kos.c, shared with the menu), no INIT_CDROM (the drive gets raw ATAPI packets only, and only
    through the write gate: fwxfer_kos.c via fwctl.c, as netgd-recv). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +10,7 @@
 #include <dc/biosfont.h>
 #include "nm_plat.h"
 #include "t2_app.h"
+#include "nm_net.h"
 
 KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
 
@@ -23,7 +24,9 @@ KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
 #define T2_CODE -1                  /* a fixed pass code (0..9999); -1 = a new one every start */
 #endif
 
-void t2_net_shutdown(void);         /* net_kos.c */
+#ifndef T2_IP
+#define T2_IP 0xC0A80A02u           /* 192.168.10.2 when not started from dcload-ip */
+#endif
 
 static t2_app_t app;
 
@@ -48,17 +51,18 @@ int main(int argc, char **argv)
     cfg.depth = T2_DEPTH;
 #endif
 #ifdef T2_RCVBUF
-    t2_net_rcvbuf = T2_RCVBUF;
+    nm_net_rcvbuf = T2_RCVBUF;
 #endif
     cfg.drive = !T2_NO_DRIVE;
     cfg.code = T2_CODE >= 0 ? (uint16_t)(T2_CODE % 10000) : (uint16_t)(nm_plat_entropy() % 10000u);
     printf("NGT2: netgd-t2 %s port %u code %04u want %u depth %d tcpfix %d drive %d\n", T2_VERSION, (unsigned)cfg.port,
            (unsigned)cfg.code, (unsigned)cfg.want_bytes, cfg.depth, T2_TCPFIX, cfg.drive);
     fflush(stdout);
-    t2_net_log = net_log;
+    nm_net_log = net_log;
+    nm_net_static_ip = T2_IP;
     t2_init(&app, &cfg);
     while (t2_step(&app)) thd_sleep(16);
     thd_sleep(5000);                /* the result stays on the screen */
-    t2_net_shutdown();              /* DC00 to dc-tool-ip when started from it */
+    nm_net_shutdown();              /* DC00 to dc-tool-ip when started from it */
     exit(app.state == T2_S_DONE && app.result == T2_R_FINISH ? 0 : 1);
 }
