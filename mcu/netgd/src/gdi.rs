@@ -472,17 +472,14 @@ where
     // a quarter of it.
     //
     // One byte more than is parsed: reading 257 tells a file of exactly 256
-    // bytes (parsed as is, as before) from a longer one, which is cut at 256
-    // and then back to the last complete UTF-8 character, so a character split
-    // by the cut does not discard the valid lines before it.
+    // bytes (parsed as is, as before) from a longer one. A longer one is cut
+    // back to its last whole line (`complete_lines`), so a line broken by the
+    // cut is dropped instead of being parsed half-read or failing UTF-8
+    // validation for the whole buffer.
     static mut CFG_BUF: [u8; 257] = [0; 257];
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG_BUF) };
     let got = f.read(buf).unwrap_or(0);
-    let got = if got > 256 {
-        gamecfg::complete_utf8_prefix(&buf[..256]).len()
-    } else {
-        got
-    };
+    let got = if got > 256 { gamecfg::complete_lines(&buf[..257]).len() } else { got };
     // Not UTF-8 as a whole: the defaults, as `from_utf8(..).unwrap_or("")`
     // gave before (`parse_bytes` checks).
     gamecfg::Meta::parse_bytes(&buf[..got])

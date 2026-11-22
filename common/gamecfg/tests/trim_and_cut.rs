@@ -2,13 +2,21 @@
 //! the firmware's `configured_name` line scan before/after it used `trim_bytes`.
 //!
 //! Behaviour differences pinned here (input -> before -> after):
-//! * GDEMU.CFG, VT (0x0B) around a line/key/value: `image=foo\x0B` ->
-//!   name "foo\x0B" -> name "foo"; a line holding only VT -> search ended
-//!   (no '=') -> line skipped, later `image=` found.
-//! * GAME.CFG longer than 256 B whose byte 256 splits a multi-byte char ->
-//!   all defaults -> the lines before the split character are used.
+//! * GDEMU.CFG `image=foo<VT>` -> "foo<VT>" -> "foo"
+//! * `<VT>image=foo` -> key does not match, no image -> "foo"
+//! * `image<VT>=foo` -> key "image<VT>" does not match, no image -> "foo"
+//! * `image=<VT>foo` -> "<VT>foo" -> "foo"
+//! * `image=<VT>` -> "<VT>" -> "" (empty name)
+//! * `<VT># comment` -> not a comment, no '=' ends the search -> skipped
+//! * a `<VT>`-only line before `image=` -> search ended (None) -> skipped
+//! * GAME.CFG > 256 B -> cut back to the last LF within the first 256 bytes
+//!   (all 256 kept when byte 257 is LF; no LF at all: first 256 bytes as
+//!   before). Latin-1 0xE9 at byte 255 -> all defaults -> the lines before
+//!   its line parse; `next = <katakana>2` straddling 256 -> defaults -> that
+//!   line dropped, earlier lines parse; a bare value cut short
+//!   (`next = Disc 2 long`) -> truncated value -> line dropped.
 
-use gamecfg::{complete_utf8_prefix, trim_bytes, Meta};
+use gamecfg::{complete_lines, trim_bytes, Meta};
 
 #[test]
 fn trim_bytes_byte_set_is_exactly_the_six_ascii_whitespace() {
@@ -73,48 +81,42 @@ fn gdemu_cfg_default_cards_are_unchanged() {
 }
 
 #[test]
-fn gdemu_cfg_vt_difference() {
-    // before: VT kept in the name; after: trimmed.
-    assert_eq!(image_name(b"image=foo\x0B\n", old_trim_ascii).unwrap(), b"foo\x0B");
-    assert_eq!(image_name(b"image=foo\x0B\n", trim_bytes).unwrap(), b"foo");
-    assert_eq!(image_name(b"\x0Bimage=foo\n", old_trim_ascii).unwrap_or_default(), b"");
-    assert_eq!(image_name(b"\x0Bimage=foo\n", trim_bytes).unwrap(), b"foo");
-    // before: a VT-only line has no '=' and ends the search; after: skipped.
-    assert_eq!(image_name(b"\x0B\nimage=foo\n", old_trim_ascii), None);
-    assert_eq!(image_name(b"\x0B\nimage=foo\n", trim_bytes).unwrap(), b"foo");
+fn gdemu_cfg_vt_differences() {
+    let b4 = |s: &[u8]| image_name(s, old_trim_ascii);
+    let af = |s: &[u8]| image_name(s, trim_bytes);
+    assert_eq!(b4(b"image=foo\x0B\n").unwrap(), b"foo\x0B");
+    assert_eq!(af(b"image=foo\x0B\n").unwrap(), b"foo");
+    assert_eq!(b4(b"\x0Bimage=foo\n"), None);
+    assert_eq!(af(b"\x0Bimage=foo\n").unwrap(), b"foo");
+    assert_eq!(b4(b"image\x0B=foo\n"), None);
+    assert_eq!(af(b"image\x0B=foo\n").unwrap(), b"foo");
+    assert_eq!(b4(b"image=\x0Bfoo\n").unwrap(), b"\x0Bfoo");
+    assert_eq!(af(b"image=\x0Bfoo\n").unwrap(), b"foo");
+    assert_eq!(b4(b"image=\x0B\n").unwrap(), b"\x0B");
+    assert_eq!(af(b"image=\x0B\n").unwrap(), b"");
+    assert_eq!(b4(b"\x0B# comment\nimage=foo\n"), None);
+    assert_eq!(af(b"\x0B# comment\nimage=foo\n").unwrap(), b"foo");
+    assert_eq!(b4(b"\x0B\nimage=foo\n"), None);
+    assert_eq!(af(b"\x0B\nimage=foo\n").unwrap(), b"foo");
 }
 
 #[test]
-fn utf8_prefix_cuts() {
-    let two = "\u{e9}".as_bytes(); // 2
-    let three = "\u{3042}".as_bytes(); // 3
-    let four = "\u{1F600}".as_bytes(); // 4
-    for ch in [two, three, four] {
-        let n = ch.len();
-        for k in 1..n {
-            let mut v = b"title=\"a\"\n".to_vec();
-            v.extend_from_slice(&ch[..k]);
-            assert_eq!(complete_utf8_prefix(&v), b"title=\"a\"\n", "cut {k}/{n}");
-        }
-        let mut v = b"ab".to_vec();
-        v.extend_from_slice(ch);
-        assert_eq!(complete_utf8_prefix(&v), &v[..], "complete char");
-    }
-    assert_eq!(complete_utf8_prefix(b""), b"");
-    assert_eq!(complete_utf8_prefix(b"abc"), b"abc");
-    // Cut at a boundary: nothing dropped.
-    assert_eq!(complete_utf8_prefix("ab\u{3042}".as_bytes()), "ab\u{3042}".as_bytes());
-    // Invalid bytes are left for the validator.
-    assert_eq!(complete_utf8_prefix(b"a\xFF"), b"a\xFF");
-    assert_eq!(complete_utf8_prefix(b"a\x80"), b"a\x80");
-    assert_eq!(complete_utf8_prefix(b"\x80\x80\x80\x80\x80"), b"\x80\x80\x80\x80\x80");
+fn complete_lines_cuts() {
+    // byte N+1 is LF: all of head kept
+    assert_eq!(complete_lines(b"ab\ncd\n"), b"ab\ncd");
+    // cut mid line: back to the last LF (kept)
+    assert_eq!(complete_lines(b"ab\ncdX"), b"ab\n");
+    assert_eq!(complete_lines(b"ab\ncd\nef"), b"ab\ncd\n");
+    // no LF at all: head as is
+    assert_eq!(complete_lines(b"abcdX"), b"abcd");
+    assert_eq!(complete_lines(b""), b"");
+    assert_eq!(complete_lines(b"x"), b"");
 }
 
 /// What `read_game_cfg` does with a file: reads up to 257 bytes.
 fn read_cfg(file: &[u8]) -> Meta {
-    let got = file.len().min(257);
-    let buf = &file[..got];
-    let got = if got > 256 { complete_utf8_prefix(&buf[..256]).len() } else { got };
+    let buf = &file[..file.len().min(257)];
+    let got = if buf.len() > 256 { complete_lines(buf).len() } else { buf.len() };
     Meta::parse_bytes(&buf[..got])
 }
 
@@ -130,13 +132,23 @@ fn same(a: &Meta, b: &Meta) -> bool {
         && a.kind == b.kind
 }
 
+/// `prefix`, then `#` filler (one comment line, no newline) up to `len` bytes.
 fn padded(prefix: &[u8], len: usize) -> Vec<u8> {
-    // `prefix` then comment filler up to exactly `len` bytes.
     let mut v = prefix.to_vec();
     while v.len() < len {
         v.push(b'#');
     }
     v.truncate(len);
+    v
+}
+
+const HEAD: &[u8] = b"title = \"Skies\"\nnext = \"B\"\n";
+
+/// HEAD, a comment line of `#` up to byte `at`, a LF, then `tail`.
+fn with_tail_at(at: usize, tail: &[u8]) -> Vec<u8> {
+    let mut v = padded(HEAD, at);
+    v.push(b'\n');
+    v.extend_from_slice(tail);
     v
 }
 
@@ -147,44 +159,74 @@ fn game_cfg_up_to_256_bytes_unchanged() {
         let f = padded(head, len);
         assert!(same(&read_cfg(&f), &old_read_cfg(&f)), "len {len}");
     }
-    // Files whose last bytes are a split character, <= 256 B: still defaults.
-    let mut f = padded(head, 253);
-    f.extend_from_slice(&"\u{3042}".as_bytes()[..2]); // exactly 255 B, invalid tail
-    assert!(read_cfg(&f).title.is_none() && old_read_cfg(&f).title.is_none());
-    let mut f = padded(head, 254);
-    f.extend_from_slice(&"\u{3042}".as_bytes()[..2]); // exactly 256 B, invalid tail
-    assert!(read_cfg(&f).title.is_none() && old_read_cfg(&f).title.is_none());
-    // Invalid UTF-8 early in a long file: defaults, as before.
-    let mut f = padded(head, 300);
+    // Split character at the end of a file <= 256 B: still defaults.
+    for n in [253usize, 254] {
+        let mut f = padded(head, n);
+        f.extend_from_slice(&"\u{3042}".as_bytes()[..2]);
+        assert!(f.len() <= 256);
+        assert!(read_cfg(&f).title.is_none() && old_read_cfg(&f).title.is_none());
+    }
+    // Invalid UTF-8 inside a file <= 256 B: defaults.
+    let mut f = padded(head, 200);
     f[5] = 0xFF;
-    assert!(read_cfg(&f).title.is_none() && old_read_cfg(&f).title.is_none());
+    assert!(read_cfg(&f).title.is_none());
 }
 
 #[test]
-fn game_cfg_over_256_bytes_cut_inside_a_char() {
-    for ch in ["\u{e9}", "\u{3042}", "\u{1F600}"] {
-        let cb = ch.as_bytes();
-        for k in 1..cb.len() {
-            // Character starts so that exactly k of its bytes fit below 256.
-            let mut f = padded(b"title = \"Skies\"\nnext = \"B\"\n", 256 - k);
-            f.extend_from_slice(cb);
-            f.extend_from_slice(b"\nboot = \"x\"\n");
-            assert!(f.len() > 256);
-            let old = old_read_cfg(&f);
-            assert!(old.title.is_none(), "before: defaults");
-            let new = read_cfg(&f);
-            assert_eq!(new.title.as_deref(), Some("Skies"));
-            assert_eq!(new.next.as_deref(), Some("B"));
-            assert!(new.boot.is_none());
+fn game_cfg_over_256_latin1_at_the_cut() {
+    // 0xE9 at byte 255 (a lead-looking byte), then 'e': before defaults,
+    // now the lines before its line parse.
+    let mut f = padded(HEAD, 254);
+    f.push(b'\n');
+    f.push(0xE9);
+    f.extend_from_slice(b"e\nboot = \"x\"\n");
+    assert_eq!(f[255], 0xE9);
+    assert!(f.len() > 257);
+    assert!(old_read_cfg(&f).title.is_none());
+    let n = read_cfg(&f);
+    assert_eq!((n.title.as_deref(), n.next.as_deref()), (Some("Skies"), Some("B")));
+    assert!(n.boot.is_none());
+}
+
+#[test]
+fn game_cfg_over_256_katakana_bare_value() {
+    let tail = "next = ディスク2\n".as_bytes();
+    let mut splits = 0;
+    for at in 235..255 {
+        let f = with_tail_at(at, tail);
+        if f.len() <= 256 || std::str::from_utf8(&f[..256]).is_ok() {
+            continue;
         }
-        // Cut exactly at a boundary, and a char wholly inside: same as before.
-        let mut f = padded(b"title = \"Skies\"\n", 256 - cb.len());
-        f.extend_from_slice(cb);
-        f.extend_from_slice(b"tail\n");
-        assert!(same(&read_cfg(&f), &old_read_cfg(&f)));
-        assert_eq!(read_cfg(&f).title.as_deref(), Some("Skies"));
+        splits += 1;
+        assert!(old_read_cfg(&f).title.is_none(), "before: defaults (at {at})");
+        let n = read_cfg(&f);
+        assert_eq!((n.title.as_deref(), n.next.as_deref()), (Some("Skies"), Some("B")));
     }
-    // ASCII-only long file: identical.
-    let f = padded(b"title = \"Skies\"\n", 400);
+    assert!(splits >= 2, "placements that split a character: {splits}");
+}
+
+#[test]
+fn game_cfg_over_256_bare_value_cut_short() {
+    let f = with_tail_at(256 - 14, b"next = Disc 2 long name\n");
+    assert!(f.len() > 257);
+    assert!(old_read_cfg(&f).next.as_deref().unwrap().starts_with("Disc"));
+    assert_eq!(read_cfg(&f).next.as_deref(), Some("B"));
+}
+
+#[test]
+fn game_cfg_over_256_unchanged_cases() {
+    // Byte 257 is LF: the cut is on a line end, everything kept, as before.
+    let mut f = padded(HEAD, 256);
+    f.extend_from_slice(b"\ntitle = \"Z\"\n");
+    assert_eq!(f[256], b'\n');
     assert!(same(&read_cfg(&f), &old_read_cfg(&f)));
+    assert_eq!(read_cfg(&f).title.as_deref(), Some("Skies"));
+    // No LF at all in a > 256 B file: the first 256 bytes as before.
+    let f = padded(b"title = \"Skies\"", 400);
+    assert!(same(&read_cfg(&f), &old_read_cfg(&f)));
+    assert_eq!(read_cfg(&f).title.as_deref(), Some("Skies"));
+    // Invalid UTF-8 earlier in a long file: defaults, as before.
+    let mut f = with_tail_at(300, b"x\n");
+    f[3] = 0xFF;
+    assert!(read_cfg(&f).title.is_none() && old_read_cfg(&f).title.is_none());
 }
