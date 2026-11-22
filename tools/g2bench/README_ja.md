@@ -36,14 +36,14 @@ dcload の syscall が SH-4 を占有する（BBA を CPU がポーリングす�
    （リポジトリの場所に合わせてパスを変える。dc-tool-ip は NetGD リポジトリと同じドライブから動かす = `/pc/` の規則。）
    終わると PostRun が最新の結果ファイルを表示する。**1 回ずつ**実行（`Exclusive`）。
 3. 所要時間：B は約 5 秒、A は 5 回 × 最大 30 秒（約 2.5 分）、C は約 10 秒 × 3 回。全体で約 3〜4 分。
-4. 大きいブロックで dc-tool-ip が落ちる場合（`error: 10055`）は、上限を下げてビルド：`.uild.ps1 -BbaTools ... -MaxBs 4096`（または `$env:G2BENCH_MAXBS`）。
+4. 大きいブロックで dc-tool-ip が落ちる場合（`error: 10055`）は、上限を下げてビルド：`.\build.ps1 -BbaTools ... -MaxBs 4096`（または `$env:G2BENCH_MAXBS`）。
 5. 速度が dc-tool-ip の遅延で決まっているかは、`dc_auto.ps1 -Fast`（`dc-tool-ip -f`）と比べる。
 
 ## ホストテスト
 
 `sh tests/run_tests.sh`（gcc と python が要る）。CRC-32/FNV の標準ベクタ、データ生成器、`mkdata.py` との一致、key=value の書き出しと読み取り（コメント・CRLF・不正行・桁あふれ）を確認する。
 
-## ファイル
+## ファイル（段 A〜C）
 
 | ファイル | 内容 |
 |---|---|
@@ -53,10 +53,73 @@ dcload の syscall が SH-4 を占有する（BBA を CPU がポーリングす�
 | `Makefile` / `build.ps1` / `profiles/g2bench.ps1` | ビルドと dc_auto のプリセット |
 | `tests/` | ホストテスト |
 
+## 段 D：KOS の TCP/IP での受信速度（g2netbench）
+
+`menu-app.md` 8 章の **T2（NGTP）** を受け取る側の速さを、SD にも GD-ROM にも触れずに測る。`docs/design/menu-app.md` の試験表 **H6**（「KOS の TCP + BBA の受信速度、`WANT`／`DATA` の往復での実効速度」）にあたる。
+
+> **前提の確認**：今の `netgd-recv`（T1）はソケットを一切使わず、`/pc/`（dcload の syscall）から読むだけ。UDP を使うのは探索（`NGTP-DISCOVER`）だけで、データの経路は **TCP の NGTP（Dreamcast が `WANT`、PC が最大 64 KiB の `DATA`）**。その Dreamcast 側（`ngtp_srv.c`）はまだ無いので、フレームの形・`WANT`／`DATA` の流れ・検査（フレームの CRC-32、ファイルの CRC-32、FNV-1a）をこのツールの中で同じに作って測る。UDP は「独自の UDP 転送を作るなら当てにできる速さと取りこぼし」を見る参考として、バースト送信（段 D の最後）だけ測る。
+
+### KOS のネットワークは dcload-ip と一緒に動くか
+
+動く（KOS 2.3 の `INIT_NET`）。`KOS_INIT_FLAGS(... | INIT_NET)` で起動すると、`arch_init_net_dcload_ip` が dcload-ip から **IP を引き継いで** KOS 自前のスタックで BBA を初期化し、dc-tool-ip とのコンソールと `/pc/` は KOS の `fs_dclsocket`（UDP 経由）に切り替わる。つまり dc_auto で起動でき、printf も `/pc/` も使える。ただし：
+
+- **BBA を KOS が取り直す**ので、以降の `/pc/` は dcload の syscall ではなく `fs_dclsocket`（別経路）になる。`g2bench` の段 A（`/pc/` の速さ）と **同じ値にはならない**（このツールは `/pc/` を使わない）。
+- KOS の TCP は RFC 793 のみ（窓の拡大なし、受信バッファは既定 **8 KiB**、`SO_RCVBUF` で最大 65535）。段 D の最初の 2 回（8192 と 65535）で差を見る。
+- 結果は `/pc/` に書かず、TCP の `LINE` フレームで PC に返し、PC が `host\g2net_NNN.txt` に保存する（ネットワーク以外の経路に頼らない）。
+- 実機で未確認のこと：INIT_NET の初期化が dcload-ip の BBA 状態の上で成功するか、dc-tool-ip のコンソールが途切れないか。動かなければ `[g2net] KOS has no network device` が出る。
+
+### 測るもの
+
+PC の `g2n_send.py` が TCP 20039（NGTP の既定ポート）に接続し、`HELLO` → `PUT`（マニフェストは無視）。Dreamcast は 1 パスにつき最大 32 MiB（**20 秒で打ち切り**）を、次の設定で順に要求する：
+
+| パス | `WANT` の大きさ | 同時に出す `WANT` | 受信バッファ | 検査 |
+|---|---|---|---|---|
+| p1 | 16 KiB | 1 | 8192（KOS 既定） | あり |
+| p2 | 16 KiB | 1 | 65535 | あり |
+| p3 | 64 KiB | 1 | 65535 | あり（`menu-app.md` D6 の計画どおり） |
+| p4 | 64 KiB | 2（1 つ先読み） | 65535 | あり |
+| p5 | 64 KiB | 1 | 65535 | なし（ネットワークだけ） |
+| p6 | 64 KiB | 2 | 65535 | なし |
+
+検査 = フレームの CRC-32（`ng_crc32`、ヘッダ + ペイロード）+ ファイルの CRC-32（連鎖）+ FNV-1a（`netgd-recv` が読み戻しで使う）。どのパスも受信したデータを 64 KiB のバッファへ `memcpy`（`ng_src_t.read` と同じ）して捨てる。最後に UDP バースト（1400 バイト × 4000 個を、PC が最大速度 / 2500 pps / 1200 pps で送る）で、届いた数・取りこぼし・KB/s を測る。
+
+キー（`pN_`、N = 1..6）：`want` `depth` `rcvbuf` `checksums`、`bytes` `us` `kbps`、`status`（`ok` / `time_limit` / `timeout` / `bad_*` ...）、`frames`、`recv_calls`、時間の内訳 **`recv_wait_us`（recv の中 = 待ちを含むネットワーク）`send_us` `copy_us` `crc_frame_us` `crc_file_us` `fnv_us` `other_us`**、`max_frame_us`、`crc` `fnv`。PC が配った側の CRC と比べた結果が `pN_pc_crc_ok`（検査ありのパス）、全体が `pc_all_ok`。UDP は `uN_`：`pps` `got` `missing` `late` `bytes` `span_us` `kbps`。
+
+読み方：`recv_wait_us` が支配的なら TCP / BBA / PC 側が律速、`crc_*` `fnv_us` が大きければ SH-4 の計算が律速。p3 と p5 の差が「検査を足したときの落ち」、p3 と p4 の差が「先読みの効き」。KOS のネットワークは別スレッドで動くので、p4 の検査ありで `kbps` が p5 に近づけば計算と受信が重なっている。
+
+### 使い方
+
+1. DreamSDK でビルド（入力ファイルは要らない）：
+
+   ```powershell
+   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net
+   ```
+2. GDmenu から DCLOAD-IP BBA を起動してから、`H:\DC\tools\dc-bba-tools` で：
+
+   ```powershell
+   .\scripts\dc_auto.ps1 -Preset H:\OpenGDEmu-g2bench\tools\g2bench\profiles\g2netbench.ps1
+   ```
+   プリセットの `Prepare` が、ELF を送る直前に **PC 側の `g2n_send.py` を自動で起動**する（Python 3 が要る。Dreamcast の IP は dc_auto の `-Ip` / `config\bba.config.ps1`、`$env:G2NET_DC_IP` で上書き可）。送り手は ELF が起動して 20039 を開けるまで最大 900 秒、1 秒おきに接続を試す。終わると `PostRun` が送り手のログと最新の `host\g2net_NNN.txt` を表示する。**1 回ずつ**実行（`g2bench` と同じ `Exclusive`）。
+3. 手で動かすなら：ELF を `dc-tool-ip -x g2netbench.elf` で送ってから、`python g2n_send.py --host <Dreamcast の IP> --out-dir host --wait 60`。
+4. 所要時間：TCP 6 パス（各 20 秒以内。速ければ 32 MiB で早く終わる）+ UDP 3 回（各約 3〜10 秒）で、**おおよそ 2〜3 分**（最悪で約 2.5 分 + 20 秒）。
+5. `dc_auto.ps1 -Fast` は関係しない（`/pc/` を使わない）。ただし KOS の `fs_dclsocket` のコンソール出力（`[g2net] ...` 行）は測定中に出ない（各パスの終わりだけ）。
+
+**ホストテスト**（`sh tests/run_tests.sh` に含まれる）：フレームの組み立て・検査、`WANT`／`DATA` の数え方（深さ 2、末尾の短い断片、順序違い）、UDP パケットと欠落の数え方（C）、送り手とテストパターンの C との一致、偽の Dreamcast を相手にした送り手の通し動作と CRC 不一致の検出（Python）。
+
+### 段 D のファイル
+
+| ファイル | 内容 |
+|---|---|
+| `main_net.c` | KOS 側（`INIT_NET`、TCP サーバ、パス、UDP 受信） |
+| `g2n_core.c/h` | NGTP フレーム、`WANT`／`DATA` の数え方、UDP パケット（ホストでテスト） |
+| `g2n_send.py` | PC 側の送り手（`netgd_send.ngtp` のクライアントを使う） |
+| `profiles/g2netbench.ps1` | dc_auto のプリセット（送り手を自動起動） |
+| `tests/test_net.c` `tests/test_sender.py` | ホストテスト |
+
 ## 初回の実機結果と原因の読み取り（2026-11-22）
 
 4 KiB で 38 KB/s（約 105 ms / 呼び出し、最大 165 ms）。16 KiB で dc-tool-ip が `error: 10055`（WSAENOBUFS）を 2 回出して終了。
-`H:\DC	ools\dc-bba-toolsuild\dcload-ip` のソースから：
+`H:\DC\tools\dc-bba-tools\build\dcload-ip` のソースから：
 
 - dcload の `read` は 1 回ごとに dc-tool の `dc_read`（`syscalls.c`）を呼び、これは **ファイルの読み出し + 「PC → DC のバイナリ転送」`send_data`**（アップロードと同じ経路）で返す：`CMD_LOADBIN` の往復 → 1440 B の `CMD_PARTBIN` を連続送信（10 パケットごとに 1800 µs 待つ）→ **（`-f` 無しだと）固定 25 ms の待ち**（`PACKET_TIMEOUT/10`）→ `CMD_DONEBIN` の往復（欠落があれば再送と再度の `DONEBIN`）→ `CMD_RETVAL`。つまり 1 呼び出しあたり固定費が「往復 3 回 + 25 ms」あり、ブロックを大きくすれば薄まる（ただし 1 呼び出しは 1 本の同期処理）。
 - `send_cmd` は送信エラーを（`WSAEWOULDBLOCK` 以外）致命とみなして `return -1` する（`dc-io.h`）。`dc_read` は `send_data` の失敗を無視して `CMD_RETVAL` も送ろうとし、それも失敗すると `CatchError` で dc-tool 全体が終了する。2 回続く `10055` はこの流れ。

@@ -1,12 +1,19 @@
 <#
 .SYNOPSIS  Builds g2bench.elf with the DreamSDK toolchain and creates host\ with the 32 MiB input file.
 .EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools
+.EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net   # g2netbench.elf (phase D: KOS TCP/IP receive)
 #>
-param([string]$BbaTools = $env:BBA_TOOLS, [int]$MaxBs = $(if ($env:G2BENCH_MAXBS) { [int]$env:G2BENCH_MAXBS } else { 65536 }))
+param([string]$BbaTools = $env:BBA_TOOLS, [switch]$Net, [int]$MaxBs = $(if ($env:G2BENCH_MAXBS) { [int]$env:G2BENCH_MAXBS } else { 65536 }))
 if (-not $BbaTools -or -not (Test-Path (Join-Path $BbaTools 'scripts\_common.ps1'))) {
     throw 'Set $env:BBA_TOOLS (or -BbaTools) to the Dreamcast-Dev-Tools-for-BBA folder.'
 }
 . (Join-Path $BbaTools 'scripts\_common.ps1')
+
+if ($Net) {
+    Invoke-DreamSdkBash "rm -f main_net.o g2n_core.o g2netbench.elf; make net" $PSScriptRoot
+    Write-Host "Built $(Join-Path $PSScriptRoot 'g2netbench.elf')"
+    return
+}
 
 $hostDir = Join-Path $PSScriptRoot 'host'
 New-Item -ItemType Directory -Force $hostDir | Out-Null
