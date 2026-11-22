@@ -7,8 +7,11 @@
    steps and their limits are nm_netup.c (host-tested); this file only gives the KOS calls.  Every step goes to nm_net_log.
    The IP: dcload-ip's own when started from dc-tool-ip, else nm_net_static_ip (NM_NET_STATIC_IP; netgd-t2: T2_IP).
    The listener gets SO_RCVBUF = nm_net_rcvbuf BEFORE bind/listen (accepted sockets inherit it; set later the window stays
-   at 8 KiB, R175).  NOT run on hardware; the calls are the ones g2netbench made on KOS 2.3 (R175, R178).  A second
-   net_init after one that failed (no link) is not tried on hardware yet. */
+   at 8 KiB, R175).  KOS 2.3 net_tcp.c never frees that buffer of a listening socket (net_tcp_close, TCP_STATE_LISTEN, frees
+   only listen.queue; data.rcvbuf is a separate union member it does not touch), so the listener is made once per port and
+   kept, "parked", by nm_net_stop until nm_net_shutdown (see nm_net_listen).  A net_init that returned an error (no link) is
+   final: KOS 2.3 aborts on a second one (nm_netup.h, init_again).  NOT run on hardware; the calls are the ones g2netbench
+   made on KOS 2.3 (R175, R178). */
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -36,6 +39,9 @@ uint32_t nm_net_arp_ms;
 static nm_netup_t up;
 static int dcls_up, eth_done, dbgio_off;
 static int lsock = -1, csock = -1, usock = -1;
+static uint16_t lport;          /* the port and SO_RCVBUF lsock was made with */
+static uint32_t lrcvbuf;
+static int lparked;             /* lsock stays listening between nm_net_stop and the next nm_net_listen (no accept) */
 
 static uint64_t now_ms(void) { return timer_ms_gettime64(); }
 
@@ -73,7 +79,8 @@ static int op_init_start(void *c)
     if (g_net_running) return 0;                    /* never two net_init threads */
     g_net_done = 0;
     g_net_running = 1;
-    if (!thd_create(0, netinit_thd, NULL)) { g_net_running = 0; return -1; }
+    /* detached: nothing joins it (it may outlive a timed-out wait); it only sets the flags above */
+    if (!thd_create(1, netinit_thd, NULL)) { g_net_running = 0; return -1; }
     return 0;
 }
 
@@ -102,7 +109,9 @@ static void op_log(void *c, const char *line) { (void)c; if (nm_net_log) nm_net_
 
 int nm_net_up(char *ip, size_t n)
 {
-    static const nm_netup_ops_t ops = { NULL, op_now, op_sleep, op_drivers, op_init_start, op_init_done, op_device, op_arp, op_log };
+    /* init_again NULL: no second net_init after one that returned an error (KOS 2.3 asserts, nm_netup.h) */
+    static const nm_netup_ops_t ops = { NULL, op_now, op_sleep, op_drivers, op_init_start, op_init_done, op_device, op_arp, op_log,
+                                        NULL };
     nm_netup_cfg_t cfg;
     uint32_t port = 0;
     int was_up = up.stage == NM_NETUP_UP, r;
@@ -131,10 +140,20 @@ int nm_net_up(char *ip, size_t n)
 
 const char *nm_net_error(void) { return up.err ? up.why : ""; }
 
+int nm_net_final(void) { return up.stage == NM_NETUP_DEAD; }
+
+static void close_listener(void)
+{
+    if (lsock >= 0) close(lsock);
+    lsock = -1;
+    lparked = 0;
+}
+
 void nm_net_shutdown(void)
 {
     nm_net_close_client();
     nm_net_stop();
+    close_listener();
     if (dcls_up) { fs_dclsocket_shutdown(); dcls_up = 0; }
     /* never while the net_init() thread may still run (it timed out): KOS would tear the stack down under it */
     if (up.stage == NM_NETUP_UP && !g_net_running) net_shutdown();
@@ -153,6 +172,18 @@ int nm_net_listen(uint16_t port)
     uint32_t rb = nm_net_rcvbuf;
     char l[48];
     nm_net_stop();
+    if (lsock >= 0 && lport == port && lrcvbuf == rb) {
+        /* the parked listener again (no new SO_RCVBUF buffer to lose): drop what connected while it was parked - SYNs queued
+           without an answer, from a PC that has given up by now (lsock is non-blocking: this ends when the queue is empty) */
+        for (;;) {
+            int c = accept(lsock, NULL, NULL);
+            if (c < 0) break;
+            close(c);
+        }
+        lparked = 0;
+        return 0;
+    }
+    close_listener();                               /* another port or window (not done by the menu or netgd-t2) */
     lsock = socket(PF_INET, SOCK_STREAM, 0);
     if (lsock < 0) return -1;
     if (rb && setsockopt(lsock, SOL_SOCKET, SO_RCVBUF, &rb, sizeof rb) != 0 && nm_net_log) {
@@ -163,15 +194,18 @@ int nm_net_listen(uint16_t port)
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
     a.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(lsock, (struct sockaddr *)&a, sizeof a) != 0 || listen(lsock, 1) != 0) { nm_net_stop(); return -1; }
+    if (bind(lsock, (struct sockaddr *)&a, sizeof a) != 0 || listen(lsock, 1) != 0) { close_listener(); return -1; }
     set_nonblock(lsock);
+    lport = port;
+    lrcvbuf = rb;
+    lparked = 0;
     return 0;
 }
 
 int nm_net_accept(uint32_t timeout_ms)
 {
     uint64_t t0 = now_ms();
-    if (lsock < 0) return -1;
+    if (lsock < 0 || lparked) return -1;
     for (;;) {
         int c = accept(lsock, NULL, NULL);
         if (c >= 0) {
@@ -228,8 +262,7 @@ void nm_net_close_client(void)
 
 void nm_net_stop(void)
 {
-    if (lsock >= 0) close(lsock);
-    lsock = -1;
+    if (lsock >= 0) lparked = 1;                    /* not closed: its SO_RCVBUF buffer would be lost (see the top) */
     if (usock >= 0) close(usock);
     usock = -1;
 }

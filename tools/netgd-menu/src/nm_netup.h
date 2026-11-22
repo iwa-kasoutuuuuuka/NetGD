@@ -13,6 +13,9 @@
 #define NM_NET_NODEV  1         /* no BBA (no network driver registered, or net_init found no device) */
 #define NM_NET_NOADDR 2         /* no IP address to use */
 #define NM_NET_NOLINK 3         /* net_init did not finish in time or failed: no link (cable, PC port down) */
+/* the texts after net_init returned an error: a retry possible (ops->init_again) or not (KOS) */
+#define NM_NETUP_MSG_RETRY "No network link: check the cable (Y: try again)"
+#define NM_NETUP_MSG_FINAL "No link: check the cable and restart the console"
 
 #define NM_NETUP_INIT_MS 30000u     /* net_init() (the driver's link-up wait included) must finish within this */
 #define NM_NETUP_ARP_MS  8000u      /* the ARP of the PC (not fatal: the PC may still connect) */
@@ -32,6 +35,11 @@ typedef struct {
     int (*device)(void *ctx, uint32_t ip, uint32_t mask, uint32_t bcast, uint32_t gw, const char **name);
     int (*arp)(void *ctx, uint32_t pc);                 /* one ARP lookup of the PC: 0 = answered (inserted), else not yet */
     void (*log)(void *ctx, const char *line);           /* every step (the screen); may be NULL */
+    /* 1 = net_init may be called again after it RETURNED an error (no link).  NULL or 0 = never: that failure is final
+       (DEAD).  KOS 2.3 cannot: bba_if_start() leaves its rx thread running (bba_rx_thread set) when the 10 s link wait
+       times out, and the next net_init() hits assert(bba_rx_thread == NULL) in broadband_adapter.c - an abort (the
+       asserts are on in libkallisti.a). */
+    int (*init_again)(void *ctx);
 } nm_netup_ops_t;
 
 typedef struct {
@@ -55,8 +63,10 @@ typedef struct {
 void nm_netup_addrs(uint32_t ip, uint32_t pc, uint32_t *mask, uint32_t *bcast, uint32_t *gw, uint32_t *pc_out);
 /* a.b.c.d */
 void nm_netup_ipstr(uint32_t ip, char *out, size_t n);
-/* Bring the network up (the first call) or report how it stands (later calls; a WAITING one is looked at again, without
-   another wait: if net_init has finished meanwhile the bring-up completes).  0 or NM_NET_*; st->why has the reason. */
+/* Bring the network up (the first call) or report how it stands (later calls).  A WAITING one waits again, up to init_ms
+   more, for the SAME net_init thread (never a second net_init); if it returns in that time the bring-up completes.  After
+   net_init returned an error the stage is NEW (the next call runs net_init again) only when ops->init_again says so, else
+   DEAD with NM_NETUP_MSG_FINAL.  0 or NM_NET_*; st->why has the reason. */
 int nm_netup_run(nm_netup_t *st, const nm_netup_cfg_t *cfg, const nm_netup_ops_t *ops);
 
 #endif

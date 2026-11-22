@@ -411,6 +411,7 @@ class TestNetStart(UiBase):
         self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 2)
         self.assertIn("No IP address", NL.join(r.screens[0][1]))
         self.assertIn("127.0.0.1", NL.join(r.rows))                    # the transfer screen after the second Y
+        self.assertIn("window 16 KiB x 1 (stock tcp)", NL.join(r.rows))
 
     def test_no_dhcp_text_and_steps_on_the_screen(self):
         r = self.ui(self.lib(), "scan Y", "--slots", "2")
@@ -419,12 +420,23 @@ class TestNetStart(UiBase):
         self.assertIn("static IP, no DHCP", m.group(1))
         self.assertEqual(m.group(2), "  host: bring-up step")          # nm_net_log lines are drawn (and shown) while it runs
 
-    def test_no_link_is_reported_and_y_tries_again(self):
+    def test_no_link_is_final_and_y_does_not_start_again(self):
+        # KOS 2.3 aborts on a second net_init after one that returned -1 (bba_rx_thread assert): one start, then a final
+        # message, no Y:Network hint, and a second Y only shows the message again (nm_net_up is not called)
         r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--nolink", "1")
-        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 2)
-        self.assertIn("No network link: check the cable (Y: try again)", NL.join(r.screens[0][1]))
-        self.assertIn("127.0.0.1", NL.join(r.rows))
-        self.assertIn("window 16 KiB x 1 (stock tcp)", NL.join(r.rows))
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
+        first = NL.join(r.screens[0][1])
+        self.assertIn("No link: check the cable and restart the console", first)
+        self.assertNotIn("Y: try again", first)
+        self.assertNotIn("Y:Network", first)
+        self.assertIn("A:Start  X:Info  START:BIOS menu", first)
+        self.assertIn("No link: check the cable and restart the console", NL.join(r.rows))
+        self.assertNotIn("127.0.0.1", NL.join(r.rows))
+        self.assertNotIn("Starting network", NL.join(r.rows))
+
+    def test_y_network_is_offered_before_a_failure(self):
+        r = self.ui(self.lib(), "scan dump", "--slots", "2", "--nolink", "1")
+        self.assertIn("Y:Network", NL.join(r.rows))
 
 
 class TestStockGate(UiBase):

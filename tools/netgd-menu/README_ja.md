@@ -95,7 +95,7 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 
 1. IP を決める：dcload-ip から起動したときはその IP と PC の IP、それ以外は固定 IP（既定 **192.168.10.2**、`make NM_IP=…`）。ネットマスク 255.255.255.0、PC（ゲートウェイ）は x.y.z.1。**PC 側は 192.168.10.1/24 などを手で設定する**。
 2. `eth_init()` でドライバを登録し、すべての netif に IP を入れる（netif が 0 個 =「BBA not found」）。
-3. `net_init(0)` をスレッドで動かし **30 秒まで**待つ（BBA のドライバ自身がリンクを 10 秒待つ）。`-1` が返ったら「No network link: check the cable (Y: try again)」で、Y でやり直せる。30 秒で返らなければ「No network link yet (Y: wait again)」：次の Y では 2 つ目の `net_init` を起こさず、同じスレッドをもう 30 秒待つ（それでも返らなければ「Network start hangs: restart the console」）。
+3. `net_init(0)` をスレッドで動かし **30 秒まで**待つ（BBA のドライバ自身がリンクを 10 秒待つ）。`-1` が返ったら「No link: check the cable and restart the console」で**終わり**（Y の表示も消え、Y を押してもこのメッセージが出るだけ）。KOS 2.3 の `bba_if_start()` はリンク待ちに失敗しても rx スレッドを止めず `bba_rx_thread` を残すので、2 回目の `net_init()` は `assert(bba_rx_thread == NULL)` で abort する（`nm_netup.h` の `init_again`）。ケーブルを挿してから本体を再起動する。30 秒で返らなければ「No network link yet (Y: wait again)」：次の Y では 2 つ目の `net_init` を起こさず、同じスレッドをもう 30 秒待つ（それでも返らなければ「Network start hangs: restart the console」）。
 4. 既定のデバイスに IP を入れ直す（ドライバが flashrom の ISP 設定を読むことがあるため）。PC の ARP を **8 秒まで**（答えがなくても失敗にしない）。
 5. 各手順は「Starting network ...」の画面の 7 行目から 1 行ずつ出る。どの待ちにも上限があり、無限に待つループは無い。
 
@@ -115,7 +115,7 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 7. 同じ番号のフォルダが 2 つあるときにファームがどちらを選ぶか（H8）。
 8. `reset_goto`・`open_time`・`detect_time` の表示が `GDEMU.INI` と合っているか。
 
-9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありでケーブルを抜いたまま Y：約 10 秒で「No network link: check the cable (Y: try again)」が出て、挿してから Y で通るか。直結ケーブル（PC 192.168.10.1/24）で 192.168.10.2 が出て、ARP の行が「PC 192.168.10.1 answered ARP」になるか。`netgd-send push` が最後まで通り、実効速度はどれくらいか（既定 16 KiB × 1 で約 2 MB/s の見込み（R178）、tcpfix 版 64 KiB × 2 と比べる）。純正 GDEMU で起動したとき `52 00` だけで止まるか（ファームのログ、または gdprobe の記録と比べる）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
+9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありでケーブルを抜いたまま Y：約 10 秒で「No link: check the cable and restart the console」が出て、もう一度 Y を押しても落ちない（net_init を再び呼ばない）か。挿して再起動すれば通るか。取り込み画面を何度も出入りしても空きメモリが減らないか（リッスンソケットは閉じずに使い回す）。直結ケーブル（PC 192.168.10.1/24）で 192.168.10.2 が出て、ARP の行が「PC 192.168.10.1 answered ARP」になるか。`netgd-send push` が最後まで通り、実効速度はどれくらいか（既定 16 KiB × 1 で約 2 MB/s の見込み（R178）、tcpfix 版 64 KiB × 2 と比べる）。純正 GDEMU で起動したとき `52 00` だけで止まるか（ファームのログ、または gdprobe の記録と比べる）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
 
 KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`arch_menu()`／`arch_reboot()`（K1）、`bfont` の色設定（netgd-fwupd が使用）、`maple`（netgd-recv が使用）、ネットワーク：`net_init`・`net_default_dev->ip_addr`・TCP の `listen`／`accept`・`O_NONBLOCK`（K2〜K4、`net_kos.c`）。
 
@@ -123,7 +123,7 @@ KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`
 
 ### 手順 9：UDP の探索（実機未検証）
 
-- 取り込み画面を開いている間（`NET_IDLE`／`NET_BUSY`）だけ、UDP 20039 で待つ。`net_start` で開き（開けなくても何も出さない。IP を手で指定すればよい）、`nm_net_stop` で閉じる。
+- 取り込み画面を開いている間（`NET_IDLE`／`NET_BUSY`）だけ、UDP 20039 で待つ。`net_start` で開き（開けなくても何も出さない。IP を手で指定すればよい）、`nm_net_stop` で閉じる。TCP のリッスンソケットは `nm_net_stop` では閉じず（accept しないだけ）、次の `nm_net_listen` で溜まった接続を捨ててから使い回す：KOS 2.3 の `net_tcp.c` はリッスン中のソケットを閉じるとき `SO_RCVBUF` で確保した受信バッファ（20 KiB）を解放しないため。
 - 要求は `NGTP-DISCOVER 1`（後ろに空白・改行が続いてもよい。`NGTP-DISCOVER 10` や別の版には答えない）。答えは `NGTP-HERE 1 name=NetGD app=<版> state=idle|busy`。`busy` は「PC が TCP でつながっている」（もう 1 台は入れない）。**合言葉と TCP のポートは答えに入れない**（ポートは NGTP の 20039 固定。PC は `--port`）。
 - 1 フレームに 1 通だけ見る（`nm_disc_service`）。操作の最中（`RECV_BUSY`）は 1 つの操作が終わるまで答えない。そのとき PC は 2 秒で諦めて `--host` を求める。
 - 中核は `src/nm_disc.c`（文字列だけ。ソケットは持たない）。境界に `nm_net_udp_listen`／`nm_net_udp_recv`（待っていなければ 0 を返す）／`nm_net_udp_reply`（最後に受けた相手へ）を足した。KOS 側（`net_kos.c`）は `SOCK_DGRAM`・`recvfrom`・`sendto`・`socklen_t`・データグラムソケットの `O_NONBLOCK` が `KOS-API-UNVERIFIED`。

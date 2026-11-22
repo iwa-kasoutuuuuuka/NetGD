@@ -648,6 +648,8 @@ typedef struct {
     uint64_t arp_t0;
     uint32_t ip_seen, gw_seen, mask_seen, bcast_seen, dev_ip;
     uint32_t arp_ip;
+    int again;                  /* init_again: 1 = a second net_init is possible (0 = as KOS 2.3: it would abort) */
+    int again_calls;
     char last[80];
 } fake_net_t;
 
@@ -685,6 +687,7 @@ static int fk_arp(void *c, uint32_t pc)
     f->arp_ip = pc;
     return f->arp_after_ms >= 0 && f->now - f->arp_t0 >= (uint64_t)f->arp_after_ms ? 0 : -1;
 }
+static int fk_again(void *c) { fake_net_t *f = (fake_net_t *)c; f->again_calls++; return f->again; }
 static void fk_log(void *c, const char *line) { fake_net_t *f = (fake_net_t *)c; f->logs++; snprintf(f->last, sizeof f->last, "%s", line); }
 
 static void fake_reset(fake_net_t *f, nm_netup_ops_t *ops, nm_netup_t *st, nm_netup_cfg_t *cfg)
@@ -696,7 +699,7 @@ static void fake_reset(fake_net_t *f, nm_netup_ops_t *ops, nm_netup_t *st, nm_ne
     f->have_dev = 1;
     f->arp_after_ms = 300;
     ops->ctx = f; ops->now_ms = fk_now; ops->sleep_ms = fk_sleep; ops->drivers = fk_drivers; ops->init_start = fk_start;
-    ops->init_done = fk_done; ops->device = fk_device; ops->arp = fk_arp; ops->log = fk_log;
+    ops->init_done = fk_done; ops->device = fk_device; ops->arp = fk_arp; ops->log = fk_log; ops->init_again = fk_again;
     memset(st, 0, sizeof *st);
     memset(cfg, 0, sizeof *cfg);
     cfg->static_ip = 0xC0A80A02u;
@@ -748,14 +751,44 @@ static void u11_netup(void)
     CHECK(!strcmp(st.why, "BBA not found"));
     CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NODEV && f.drivers_calls == 1);
 
-    /* no link: net_init returns -1 (the BBA's 10 s link wait); a retry starts net_init again and can succeed */
+    /* no link: net_init returns -1 (the BBA's 10 s link wait).  As KOS 2.3 (init_again 0: a second net_init would hit
+       assert(bba_rx_thread == NULL)): final, and no later call ever starts net_init again */
     fake_reset(&f, &ops, &st, &cfg);
     f.done_after_ms = 10000; f.rc = -1;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && st.stage == NM_NETUP_DEAD && f.again_calls == 1);
+    CHECK_STR(st.why, NM_NETUP_MSG_FINAL);
+    CHECK(strstr(st.why, "restart") != NULL && strlen(st.why) <= 51);
+    CHECK(f.devices == 0 && f.arps == 0 && f.starts == 1);
+    f.rc = 0; f.done_after_ms = 0;
+    {
+        uint64_t t0 = f.now;
+        CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && f.starts == 1 && f.drivers_calls == 1 && f.now == t0);
+        CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && f.starts == 1 && st.stage == NM_NETUP_DEAD);
+    }
+    /* ... the same with no init_again at all (NULL = never) */
+    fake_reset(&f, &ops, &st, &cfg);
+    ops.init_again = NULL;
+    f.done_after_ms = 10000; f.rc = -1;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && st.stage == NM_NETUP_DEAD);
+    f.rc = 0;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && f.starts == 1);
+    /* a platform that can run net_init again (init_again 1): NEW, the retry text, and a retry can succeed */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.again = 1;
+    f.done_after_ms = 10000; f.rc = -1;
     CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && st.stage == NM_NETUP_NEW);
-    CHECK(strstr(st.why, "link") != NULL && strlen(st.why) <= 51);
-    CHECK(f.devices == 0 && f.arps == 0);
+    CHECK_STR(st.why, NM_NETUP_MSG_RETRY);
+    CHECK(strlen(st.why) <= 51);
     f.rc = 0;
     CHECK(nm_netup_run(&st, &cfg, &ops) == 0 && f.starts == 2 && st.stage == NM_NETUP_UP && st.why[0] == 0);
+
+    /* net_init times out (WAITING), and then returns -1 while waited for again: final as well, still one start */
+    fake_reset(&f, &ops, &st, &cfg);
+    f.done_after_ms = -1; f.rc = -1;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && st.stage == NM_NETUP_WAITING);
+    f.done_after_ms = 0;
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && st.stage == NM_NETUP_DEAD && f.starts == 1);
+    CHECK(nm_netup_run(&st, &cfg, &ops) == NM_NET_NOLINK && f.starts == 1);
 
     /* net_init never returns: bounded by init_ms (default 30 s), WAITING; a retry never starts a second net_init */
     fake_reset(&f, &ops, &st, &cfg);

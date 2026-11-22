@@ -31,14 +31,17 @@ int nm_host_net_nodev;                  /* nm_net_up answers "no BBA" */
 int nm_host_no_udp;                     /* nm_net_udp_listen fails */
 int nm_host_net_noaddr;                 /* nm_net_up answers "no IP address" this many more times (DHCP failed) */
 int nm_host_net_up_calls;
-int nm_host_net_nolink;                 /* nm_net_up answers "no link" this many more times (a retry with Y works after it) */
+int nm_host_net_nolink;                 /* nm_net_up answers "no link" as KOS does when net_init returns -1: final, later
+                                           calls give the same answer at once (KOS 2.3 cannot run net_init twice) */
 
 void (*nm_net_log)(const char *line);
 uint32_t nm_net_rcvbuf = NM_NET_RCVBUF_DEFAULT;
 uint32_t nm_net_static_ip = NM_NET_STATIC_IP;
 uint32_t nm_net_arp_ms;
 static char net_why[72];
+static int net_final;
 const char *nm_net_error(void) { return net_why; }
+int nm_net_final(void) { return net_final; }
 
 static sock_t lsock = BAD_SOCK, csock = BAD_SOCK, usock = BAD_SOCK;
 static struct sockaddr_in udp_peer;
@@ -82,10 +85,10 @@ int nm_net_up(char *ip, size_t n)
         printf("NETLOG screen5=|%s| screen7=|%s|\n", r5, r7);
     }
     if (nm_host_net_nodev) { if (n) ip[0] = 0; snprintf(net_why, sizeof net_why, "BBA not found"); return NM_NET_NODEV; }
-    if (nm_host_net_nolink > 0) {
-        nm_host_net_nolink--;
+    if (nm_host_net_nolink > 0 || net_final) {
+        net_final = 1;
         if (n) ip[0] = 0;
-        snprintf(net_why, sizeof net_why, "No network link: check the cable (Y: try again)");
+        snprintf(net_why, sizeof net_why, "%s", NM_NETUP_MSG_FINAL);
         return NM_NET_NOLINK;
     }
     if (!started) {

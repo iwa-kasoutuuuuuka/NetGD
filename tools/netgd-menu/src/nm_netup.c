@@ -62,7 +62,9 @@ static int after_init(nm_netup_t *st, const nm_netup_cfg_t *cfg, const nm_netup_
     if (rc < 0) {
         /* KOS: net_init returns -1 when no device started; the BBA's start waits 10 s for the link and gives up */
         say(ops, "net_init rc=%d after %u ms: no link", rc, (unsigned)took);
-        return fail(st, NM_NETUP_NEW, NM_NET_NOLINK, "No network link: check the cable (Y: try again)");
+        if (ops->init_again && ops->init_again(ops->ctx)) return fail(st, NM_NETUP_NEW, NM_NET_NOLINK, NM_NETUP_MSG_RETRY);
+        /* KOS: a second net_init would abort (nm_netup.h, init_again), so this is final */
+        return fail(st, NM_NETUP_DEAD, NM_NET_NOLINK, NM_NETUP_MSG_FINAL);
     }
     if (ops->device(ops->ctx, st->ip, st->mask, st->bcast, st->gw, &name) != 0) {
         say(ops, "net_init rc=%d, no device", rc);
@@ -108,7 +110,7 @@ int nm_netup_run(nm_netup_t *st, const nm_netup_cfg_t *cfg, const nm_netup_ops_t
         break;
     }
 
-    /* NEW: the first call, or a retry after net_init returned an error (no link) */
+    /* NEW: the first call, or a retry after net_init returned an error (no link; only when ops->init_again allowed it) */
     st->arp_ok = 0;
     st->ip = cfg->dcload ? cfg->dcload_ip : cfg->static_ip;
     if (!st->ip) return fail(st, NM_NETUP_DEAD, NM_NET_NOADDR,

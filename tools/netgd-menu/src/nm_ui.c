@@ -130,7 +130,9 @@ static void draw_list(nm_ui_t *ui)
     }
     if (ui->list.count == 0 && ui->scan.state == NM_SCAN_DONE)
         nm_screen_put(&ui->scr, LIST_ROW0 + 1, 2, "No game folders on the card.", NM_ATTR_NORMAL);
-    draw_frame(ui, "A:Start  X:Info  Y:Network  START:BIOS menu", "Up/Down:Select  Left/Right, L/R:Page");
+    /* no Y when the network failed for good (KOS: no second net_init, nm_net.h) */
+    draw_frame(ui, nm_net_final() ? "A:Start  X:Info  START:BIOS menu" : "A:Start  X:Info  Y:Network  START:BIOS menu",
+               "Up/Down:Select  Left/Right, L/R:Page");
     draw_status(ui, NM_ATTR_NORMAL);
 }
 
@@ -567,6 +569,11 @@ static void net_start(nm_ui_t *ui)
     int r;
     const char *why;
     if (nm_plat_dcload()) { set_msg(ui, "Started from dcload: use netgd-recv", 4000); return; }
+    if (nm_net_final()) {                                           /* Y does nothing but say why again: never a second start */
+        why = nm_net_error();
+        set_msg(ui, why[0] ? why : "No network: restart the console", 6000);
+        return;
+    }
     /* the bring-up can block for up to about 40 s without a link: say so before it starts (R104 finding 1) */
     nm_screen_clear(&ui->scr);
     draw_frame(ui, "", "");
@@ -582,7 +589,7 @@ static void net_start(nm_ui_t *ui)
     net_log_ui = NULL;
     why = nm_net_error();
     if (r == NM_NET_NODEV) { set_msg(ui, why[0] ? why : "BBA not found", 6000); return; }
-    if (r == NM_NET_NOLINK) { set_msg(ui, why[0] ? why : "No network link: check the cable (Y: try again)", 6000); return; }
+    if (r == NM_NET_NOLINK) { set_msg(ui, why[0] ? why : NM_NETUP_MSG_FINAL, 6000); return; }
     if (r != 0) { set_msg(ui, why[0] ? why : "No IP address", 6000); return; }
     if (nm_net_listen(NGTP_PORT) != 0) { set_msg(ui, "Cannot listen on the port", 3000); return; }
     nm_net_udp_listen(NGTP_PORT);                                   /* discovery is optional: no message when it fails */
