@@ -16,3 +16,11 @@ gcc $FLAGS -fsanitize=address,undefined -o test_net test_net.c $NSRC 2>/dev/null
 ./test_net xcheck.bin
 python test_sender.py xcheck.bin
 rm -f xcheck.bin
+# g2x (custom UDP transfer): codecs, receiver window, the protocol over a simulated lossy link (C), and the
+# Python sender over localhost UDP through a lossy shim; xport_vec.bin cross-checks the two codecs
+XSRC="../g2x_core.c ../../netgd-recv/src/crc32.c"
+gcc $FLAGS -O1 -fsanitize=address,undefined -o test_xport test_xport.c $XSRC 2>/dev/null \
+  || gcc $FLAGS -O1 -o test_xport test_xport.c $XSRC
+./test_xport xport_vec.bin
+python test_g2x.py xport_vec.bin
+rm -f xport_vec.bin

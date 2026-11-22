@@ -3,7 +3,8 @@
 
 Connects to g2netbench.elf on the Dreamcast (TCP port 20039, the NGTP framing of tools/netgd-send/netgd_send/ngtp.py),
 answers its WANT frames with DATA from the g2bench test pattern (same bytes as g2b_gen_block / mkdata.py), and at
-the Dreamcast's request sends UDP bursts to port 20040. The Dreamcast's key=value lines (LINE frames) are saved to
+the Dreamcast's request sends UDP bursts to port 20040 and runs g2x passes (the custom UDP transfer of
+g2x_send.py / g2x_core.h: paced 1,400-byte datagrams, selective ACKs). The Dreamcast's key=value lines (LINE frames) are saved to
 <out-dir>/g2net_NNN.txt together with the PC's own checks (CRC of the bytes it served against the CRC the
 Dreamcast computed while receiving).
 
@@ -21,6 +22,8 @@ import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "netgd-send"))
 from netgd_send import ngtp  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import g2x_send  # noqa: E402
 
 BLOCK = 65536
 WORDS = BLOCK // 4
@@ -103,6 +106,26 @@ def udp_burst(host, port, pass_no, count, size, pps, log=print):
         s.close()
 
 
+_STREAM = {}
+
+
+def stream(n):
+    """the first n bytes of the test pattern (cached: a g2x pass reads it at random offsets)"""
+    if _STREAM.get("n", 0) < n:
+        _STREAM["b"] = gen_range(0, n)
+        _STREAM["n"] = n
+    return _STREAM["b"]
+
+
+def g2x_pass(host, port, kv, log=print, drop=None):
+    """runs the g2x pass the Dreamcast asked for ("G2X go pass=.. bytes=.. pps=.. min=.. max=.. crc=.."), returns
+    the PC's lines"""
+    n, total = int(kv["pass"]), int(kv["bytes"])
+    r = g2x_send.send_pass(host, port, n, total, stream(total), int(kv["pps"]), int(kv.get("min", 0)), int(kv.get("max", 0)),
+                           kv.get("crc", "1") == "1", log=log, max_s=float(kv.get("limit_s", 20)) + 30.0, drop=drop)
+    return ["x%d_pc_%s=%s" % (n, k, v) for k, v in sorted(r.items())]
+
+
 def connect(host, port, wait_s, log=print):
     """ngtp.Client, retrying until `wait_s` have passed"""
     deadline, shown = time.time() + wait_s, 0
@@ -136,7 +159,7 @@ def parse_kv(lines):
     return kv
 
 
-def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print):
+def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print, g2x_drop=None):
     """-> (ok, result path, kv dict)"""
     src = Source()
     lines = []
@@ -152,6 +175,10 @@ def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print):
         log("[g2n_send] HELLO_OK app=%s max_data=%d" % (info.app, info.max_data))
 
         def on_line(text, throttled):
+            if text.startswith("G2X go"):
+                kv = dict(w.split("=", 1) for w in text.split()[2:] if "=" in w)
+                lines.extend(g2x_pass(host, udp_port, kv, log, g2x_drop))
+                return
             if text.startswith("G2N-UDP go"):
                 kv = dict(w.split("=") for w in text.split()[2:] if "=" in w)
                 udp_burst(host, udp_port, int(kv["pass"]), int(kv["count"]), int(kv["size"]), int(kv["pps"]), log)
@@ -186,8 +213,20 @@ def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print):
             lines.append("%s_pc_bytes_ok=%d" % (p, 1 if done == int(kv[p + "_bytes"]) else 0))
         all_ok = all_ok and kv.get(p + "_status_ok") == "1"
         n += 1
+    n = 1
+    while ("x%d_bytes" % n) in kv:
+        p = "x%d" % n
+        got = int(kv[p + "_bytes"])
+        if kv.get(p + "_ck") == "2":
+            crc = zlib.crc32(memoryview(stream(got))[:got]) & 0xFFFFFFFF
+            match = crc == int(kv.get(p + "_crc", "0"), 16)
+            lines.append("%s_pc_crc=0x%08x" % (p, crc))
+            lines.append("%s_pc_crc_ok=%d" % (p, 1 if match else 0))
+            all_ok = all_ok and match
+        all_ok = all_ok and kv.get(p + "_status_ok") == "1"
+        n += 1
     # the PC's own checks go after the Dreamcast's lines; pc_partial=1 above is superseded by pc_partial=0
-    fout.write("\n".join(l for l in lines if l.startswith("p") and "_pc_" in l or l.startswith("u") and "_pc_" in l) + "\n")
+    fout.write("\n".join(l for l in lines if l[:1] in ("p", "u", "x") and "_pc_" in l) + "\n")
     fout.write("pc_partial=0\npc_all_ok=%d\n" % (1 if all_ok else 0))
     fout.close()
     return all_ok, path, kv
@@ -206,6 +245,14 @@ def summary(kv, log=print):
         p = "u%d_" % n
         log("[g2n_send] UDP %d: pps %s: got %s of %s, missing %s, %s KB/s" % (
             n, kv.get(p + "pps"), kv.get(p + "got"), kv.get(p + "count"), kv.get(p + "missing"), kv.get(p + "kbps")))
+        n += 1
+    n = 1
+    while ("x%d_bytes" % n) in kv:
+        p = "x%d_" % n
+        log("[g2n_send] g2x %d: pps %s (%s..%s), ck %s: %s KB/s (%s bytes in %.2f s) %s, dgrams %s bad %s dups %s gaps %s acks %s" % (
+            n, kv.get(p + "pps"), kv.get(p + "pps_min"), kv.get(p + "pps_max"), kv.get(p + "ck"), kv.get(p + "kbps"),
+            kv.get(p + "bytes"), int(kv.get(p + "us", 0)) / 1e6, kv.get(p + "status"), kv.get(p + "dgrams"), kv.get(p + "bad"),
+            kv.get(p + "dups"), kv.get(p + "gaps"), kv.get(p + "acks")))
         n += 1
 
 

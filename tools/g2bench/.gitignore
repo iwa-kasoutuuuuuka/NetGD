@@ -6,3 +6,6 @@ tests/*.bin
 host/
 tests/test_net
 tests/test_net.exe
+tests/test_xport
+tests/test_xport.exe
+build-fix/

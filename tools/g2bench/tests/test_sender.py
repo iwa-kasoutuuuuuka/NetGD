@@ -6,12 +6,14 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 import g2n_send  # noqa: E402
+import g2x_send  # noqa: E402
 from netgd_send import ngtp  # noqa: E402
 
 XCHECK = sys.argv.pop(1) if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else None
@@ -95,6 +97,39 @@ class FakeDc(threading.Thread):
                     got += 1
             for s in ("u1_pps=0", "u1_count=50", "u1_got=%d" % got, "u1_missing=%d" % (50 - got), "u1_kbps=1"):
                 line(s)
+            # one g2x pass (custom UDP transfer), every 7th datagram lost once
+            total = 150000
+            line("G2X go pass=1 bytes=%d pps=4000 min=0 max=0 crc=1 win=64 limit_s=20" % total)
+            out = bytearray()
+            rx = g2x_send.Rx(1, total, lambda seq, d: out.extend(d), True)
+            self.us.settimeout(0.001)
+            t0, peer, lost = time.perf_counter(), None, set()
+            now = lambda: int((time.perf_counter() - t0) * 1e6) + 1
+            while not rx.complete() and time.perf_counter() - t0 < 20:
+                try:
+                    d, a = self.us.recvfrom(2048)
+                except socket.timeout:
+                    if peer and rx.poll(now()):
+                        self.us.sendto(rx.make_ack(0, now()).pack(), peer)
+                    continue
+                if d[:4] != b"G2X1":
+                    continue                       # the burst's late end packets (another source port)
+                peer = peer or a
+                seq = int.from_bytes(d[8:12], "little")
+                if seq % 7 == 3 and seq not in lost:
+                    lost.add(seq)
+                    continue
+                if rx.input(d, now()):
+                    self.us.sendto(rx.make_ack(0, now()).pack(), peer)
+            for _ in range(3):
+                self.us.sendto(rx.make_ack(0, now()).pack(), peer)
+            assert bytes(out) == g2n_send.gen_range(0, total)
+            crc = zlib.crc32(bytes(out)) & 0xFFFFFFFF
+            if self.corrupt:
+                crc ^= 1
+            for s in ("x1_pps=4000", "x1_ck=2", "x1_status=done", "x1_status_ok=1", "x1_bytes=%d" % len(out),
+                      "x1_us=100000", "x1_kbps=1", "x1_dgrams=%d" % rx.dgrams, "x1_crc=0x%08x" % crc):
+                line(s)
             line("status=done")
             c.sendall(ngtp.build_frame(ngtp.DONE, b"\x01", 0, seq))
             c.settimeout(3.0)
@@ -130,11 +165,15 @@ class SenderTests(unittest.TestCase):
         self.assertIn("p2_pc_crc_ok=1", text)
         self.assertIn("pc_all_ok=1", text)
         self.assertEqual(kv["u1_got"], "50")
+        self.assertIn("x1_pc_crc_ok=1", text)
+        self.assertIn("x1_pc_reason=done", text)
+        self.assertNotIn("x1_pc_resent=0\n", text)        # every 7th datagram had to be resent
 
     def test_crc_mismatch_is_reported(self):
         ok, kv, text = self.go(True)
         self.assertFalse(ok)
         self.assertIn("p1_pc_crc_ok=0", text)
+        self.assertIn("x1_pc_crc_ok=0", text)
         self.assertIn("pc_all_ok=0", text)
 
     def test_no_dreamcast(self):
