@@ -367,6 +367,12 @@ class TestCheck(FakeEnv):
     def test_bad_chip(self):
         self.assertEqual(self.status("badchip")["status"], fb.ST_BAD_CHIP)
 
+    def test_no_target_responded_is_not_bad_chip(self):
+        # probe-rs 0.32.0 "No target responded to the debug port" must reach `info`, not BAD_CHIP_NAME
+        r = self.status("noresp")
+        self.assertEqual(r["status"], fb.ST_NO_TARGET)
+        self.assertTrue(any(l.split()[:1] == ["info"] for l in self.calls()))
+
     def test_no_probe_rs(self):
         r = fb.classify(fb.ProbeRs(cmd=[]), "ATSAM3U2E", None)
         self.assertEqual(r["status"], fb.ST_NO_PROBE_RS)

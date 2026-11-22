@@ -2,7 +2,7 @@
 """Fake probe-rs for fwbackup tests.  Emulates `list`, `info`, `read`, `--version`.
 
 Environment:
-  FAKE_SCENARIO  unlocked2e | unlocked4e | locked | notarget | noprobe | multiprobe | badchip
+  FAKE_SCENARIO  unlocked2e | unlocked4e | locked | notarget | noprobe | multiprobe | badchip | noresp
   FAKE_STATE     directory for counters / invocation log (required)
   FAKE_FMT       normal | crlf | upper | noaddr | noise | simple (output-format edge cases)
   FAKE_FLAKY     hex address: the first read covering it returns one flipped byte
@@ -89,8 +89,17 @@ def main():
     if scen in ("noprobe", "multiprobe", "notarget"):
         print("Error: Failed to open the debug probe / attach: no response from target", file=sys.stderr)
         return 1
+    if scen == "noresp":
+        print("Error: Connecting to the chip was unsuccessful.\n"
+              "Caused by:\n"
+              "    0: An ARM specific error occurred.\n"
+              "    1: No target responded to the debug port. Check that the target is connected and powered, "
+              "and that the SWD/JTAG wiring is correct.\n"
+              "    2: An error occurred in the communication with an access port or debug port.\n"
+              "    3: Target device did not respond to request.", file=sys.stderr)
+        return 1
     if scen == "badchip":
-        print("Error: The connection to the chip could not be established: chip ATSAM3U9Z not found in the registry", file=sys.stderr)
+        print("Error: The connection to the chip could not be established: The requested chip 'ATSAM3U9Z' was not found in the list of known targets.", file=sys.stderr)
         return 1
     if scen == "locked":
         print("Error: Failed to read memory: AP access denied (FAULT)", file=sys.stderr)
