@@ -8,6 +8,9 @@ edition = "2021"
 # Let the firmware log these types. Off by default so the host tests do not
 # need defmt.
 defmt = ["dep:defmt"]
+# FAT16 volumes in the `vol`/`dir` reader (fixed root directory, 16-bit FAT).
+# Off: such a card does not mount. Undecided whether the firmware keeps them.
+fat16 = []
 
 [dependencies]
 defmt = { version = "0.3", optional = true }

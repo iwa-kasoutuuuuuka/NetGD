@@ -8,9 +8,18 @@
 //! * [`extent`]: turn a cluster chain into contiguous block runs, either all
 //!   at once or a window at a time.
 //!
+//! * [`vol`], [`dir`], [`sfn`]: a small read-only FAT32 reader (volume,
+//!   directory listing with long names, look-up, file reading with seek, 8.3
+//!   names), meant to replace `embedded_sdmmc` in the firmware. Not used by
+//!   the firmware yet; `tests/reader.rs` holds it to `embedded_sdmmc`'s
+//!   answers. FAT16 only with the `fat16` feature.
+//!
 //! Everything takes the bytes or the FAT lookup as an argument; the firmware
 //! supplies the SD reads.
 #![cfg_attr(not(test), no_std)]
 
+pub mod dir;
 pub mod extent;
 pub mod lfn;
+pub mod sfn;
+pub mod vol;
