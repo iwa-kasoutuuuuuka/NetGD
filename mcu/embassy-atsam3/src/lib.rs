@@ -138,7 +138,10 @@ pub fn init(config: config::Config) -> UserPeripherals {
                 .pid12().set_bit() // PIOC
         });
         pac_p.PMC.pmc_pcer0.write_with_zero(|w| w.bits(1 << 17)); // HSMCI
-
+    }
+    // `no-board-io` (netgd `pinfind`): nothing below touches a pin.
+    #[cfg(not(feature = "no-board-io"))]
+    unsafe {
         // Configure the SMC chip select 3 window where the FPGA lives.
         smc::init();
 

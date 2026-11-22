@@ -1,0 +1,2 @@
+# mklist.py and pins2asf.py are run inside WSL too.
+*.py text eol=lf

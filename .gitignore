@@ -69,3 +69,7 @@ tools/fwbackup/**/*.bin
 tools/fwbackup/**/*.sha256
 tools/fwbackup/**/*.part
 gdemu60_flash_*
+
+# fpga — pin-finder (fpga/pinfind). The ball list and generated design live in
+# fpga/pinfind/build/ (covered by `build/` above); bitstreams are never committed.
+fpga/pinfind/output/

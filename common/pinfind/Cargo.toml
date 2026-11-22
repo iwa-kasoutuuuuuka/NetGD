@@ -1,0 +1,13 @@
+[package]
+name = "pinfind"
+description = "Decoder for the AG16K pin-finder bitstream's self-clocking frames (fpga/pinfind): pulse widths -> bits -> ball index, tolerant of an unknown and drifting FPGA clock. Pure logic, host-tested; used by the `pinfind` firmware and by the logic-analyser example"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Let the firmware log these types. Off by default so the host tests do not
+# need defmt.
+defmt = ["dep:defmt"]
+
+[dependencies]
+defmt = { version = "0.3", optional = true }

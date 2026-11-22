@@ -24,6 +24,8 @@ sdfast = { path = "../../common/sdfast", optional = true }
 # Stack high-water mark scan and reply layout (feature `stack-hw`; pure,
 # host-tested).
 stackmark = { path = "../../common/stackmark", optional = true }
+# Frame decoder for the `pinfind` feature (pure, host-tested).
+pinfind = { path = "../../common/pinfind", optional = true, features = ["defmt"] }
 
 embassy-atsam3 = { path = "../embassy-atsam3", features = ["rt", "time-driver"] }
 # The resident boot region's pure logic. In the app: the clock constants
@@ -59,6 +61,18 @@ heapless = { version = "0.8", features = ["defmt-03"] }
 default = ["board-v55", "lazy-extents"]
 board-v55 = []
 board-v60 = ["sam3u2e", "lazy-extents"]
+
+# GDEMU 6.0 pin-finder (docs/design/g1-ag16k-port.md 2-4 method 2,
+# fpga/pinfind/README_ja.md). NOT a NetGD firmware: it loads the pin-finder
+# bitstream (fpga/pinfind/output/pinfind_ag16k.rbf, embedded like the
+# board-v60 one and optional the same way), turns every MCU line except the
+# five PS lines into an input with pull-up, and reports over RTT which FPGA
+# ball arrives on which MCU pin. No SD, no IDE, no LED, and `init` sets up no
+# SMC / UART / PCK0 / HSMCI pins (embassy-atsam3 `no-board-io`). Keep the
+# logging on:
+#   cargo build --release --no-default-features --features pinfind
+# Off by default; the other builds do not change. Not run on hardware.
+pinfind = ["board-v60", "dep:pinfind", "embassy-atsam3/no-board-io"]
 
 # Read a track file that is too fragmented for the shared extent pool
 # through a small on-demand window over its cluster chain (fat.rs, `lazy_*`),

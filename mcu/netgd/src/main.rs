@@ -6,6 +6,8 @@ use embassy_executor::{Spawner, Executor};
 use embassy_time::{Duration, Timer};
 // use gpio::{Level, Output};
 use defmt_rtt as _;
+// The pin-finder has its own panic handler (nCONFIG low first): src/pinfind.rs.
+#[cfg(not(feature = "pinfind"))]
 use panic_probe as _;
 
 use embassy_atsam3::{config::Config, gpio::{Output, Level}, smc, UserPeripherals};
@@ -28,6 +30,8 @@ mod ide;
 mod sdcard;
 #[cfg(feature = "stack-hw")]
 mod stack;
+#[cfg(feature = "pinfind")]
+mod pinfind;
 #[cfg(feature = "resident")]
 mod resident;
 
@@ -35,6 +39,9 @@ static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 
 #[exception]
 unsafe fn DefaultHandler(irqn: i16) {
+    // Pin-finder: the FPGA off before anything else (LOG R143 item 4).
+    #[cfg(feature = "pinfind")]
+    pinfind::fpga_off();
     cortex_m::asm::bkpt();
     defmt::panic!("Unhandled exception (IRQn = {})", irqn);
 }
@@ -93,7 +100,14 @@ async fn blink_stamp_mismatch(led: &mut Output<'static, embassy_atsam3::peripher
 }
 
 #[embassy_executor::task]
+// `pinfind` never comes back from `pinfind::run`: the rest is dead code there.
+#[cfg_attr(feature = "pinfind", allow(unreachable_code, unused_variables, unused_mut))]
 async fn main_task(spawner: Spawner, p: UserPeripherals) {
+    // Pin-finder build: every non-PS MCU line back to input + pull-up before
+    // the FPGA comes up (src/pinfind.rs).
+    #[cfg(feature = "pinfind")]
+    pinfind::prepare_pins();
+
     // Load the FPGA first. When the GDEMU board is powered by the DC
     // every millisecond between MCU power-on and an alive FPGA is one
     // more millisecond the DC sees a dead GD-ROM bus and CDCLK silent.
@@ -107,6 +121,11 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
         p.nstatus,
         p.done,
     );
+    // Pin-finder build: the whole run, then halt. Never returns, so nothing
+    // below runs: no LED output (PB18), no retries, no IDE side.
+    #[cfg(feature = "pinfind")]
+    pinfind_main(&mut fpga);
+
     // Only set up on the failure path below; `main_task` needs it later in
     // any case.
     let mut led_pin = Some(p.led);
@@ -398,4 +417,15 @@ fn log_entry(parent: &str, entry: &embedded_sdmmc::DirEntry) {
         entry.size,
         entry.attributes.is_directory()
     );
+}
+
+/// `pinfind`: hand the PS pins and the embedded bitstream to the pin-finder
+/// (src/pinfind.rs). Never returns. LOG R143 items 3 and 4.
+#[cfg(feature = "pinfind")]
+fn pinfind_main(fpga: &mut cyclone::McuPins) -> ! {
+    pinfind::main(fpga, BITSTREAM_PRESENT, BITSTREAM_RAW_LEN, || {
+        let scratch = lzma::Scratch::from_buf(ide::loader_scratch())
+            .expect("CD_READ_BUF too small for the LZMA scratch");
+        cyclone::LzSource(lzma::Decoder::new(&BITSTREAM_LZMA, BITSTREAM_RAW_LEN, scratch))
+    })
 }
