@@ -83,7 +83,7 @@ def bracify(port):
 
 
 def ports_from_file(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         text = f.read()
     if path.endswith(".asf"):
         out = []
@@ -108,7 +108,7 @@ def ports_from_file(path):
 
 def read_csv_map(path):
     out = {}
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         for row in csv.reader(f):
             if not row or row[0].strip().startswith("#"):
                 continue

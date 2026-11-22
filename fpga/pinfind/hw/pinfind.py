@@ -16,8 +16,16 @@ What the core does, per candidate ball `k` (in the order of the ball list):
   2. FRAME   -- `frames` frames carrying index k (line code below), with
                 ball k's output enable on and every other ball off.
   3. NEXT    -- output off, k + 1. After the last ball, one loop is done;
-                after `max_loops` loops (0 = never) the core stops for good
-                with every output off (DONE).
+                after `max_loops` loops (1..8) the core stops for good with
+                every output off (DONE).
+
+Drive watchdog: a counter of clocks (not ticks) spent with an output enabled
+on the current ball. FRAME of one ball can never legitimately last longer
+than `drive_cap` ticks (computed from the frame length, or given); if the
+counter reaches that many clocks the output enable drops in the same cycle
+and the core goes to DONE for good. It guards against a sequencer that
+stays in FRAME (a bug, or an upset); it is not an absolute time limit, since
+the clock frequency itself is unknown (README_ja.md section 6).
 
 The line code is the one `common/pinfind` decodes (format 1): ticks of
 `2^prescale` clocks; SYNC = active 8T + idle 1T; each bit active 1T (0) or
@@ -27,7 +35,7 @@ count per probe, and an 8-bit sum. "Active" is `pad_o = 0`; the wrapper
 decides whether idle is driven high (push-pull) or released (open-drain).
 
 At most one bit of `pad_oe` is ever set (checked in test_pinfind.py), and it
-is clear outside FRAME.
+is clear outside FRAME and after the watchdog tripped.
 
 Clock probes: each `probe[c]` (a dedicated clock-input ball, which cannot be
 driven and so cannot be found by the scan) clocks a `div_bits`-bit counter in
@@ -55,8 +63,15 @@ MAX_PROBES = 12
 
 # FSM states. START must be 0 (power-up value).
 START, LISTEN, FRAME, NEXT, DONE = range(5)
+MAX_LOOPS = 8
 # Symbol phases inside FRAME.
 PH_SYNC_A, PH_SYNC_I, PH_BIT_A, PH_BIT_I = range(4)
+
+
+def frame_ticks_max(nbits):
+    """Longest FRAME of one frame, in ticks: SYNC 8 + idle 1, each bit at
+    most 3 + 1, and the last bit's idle is GAP (4) instead of 1."""
+    return SYNC_ACTIVE + IDLE + nbits * (BIT1_ACTIVE + IDLE) + (GAP - IDLE)
 
 
 def frame_bytes(idx, counts=None, div_bits=10, win_bits=6):
@@ -72,7 +87,8 @@ def frame_bytes(idx, counts=None, div_bits=10, win_bits=6):
 
 class PinFindCore(Elaboratable):
     def __init__(self, n_drive, n_probe=0, *, prescale=8, frames=3, listen=16,
-                 start=64, max_loops=8, skip_if_low=True, div_bits=10, win_bits=6):
+                 start=64, max_loops=1, skip_if_low=True, div_bits=10, win_bits=6,
+                 drive_cap=None):
         if not 1 <= n_drive <= 256:
             raise ValueError("n_drive must be 1..256 (the index is one byte)")
         if not 0 <= n_probe <= MAX_PROBES:
@@ -81,6 +97,8 @@ class PinFindCore(Elaboratable):
             raise ValueError("div_bits 1..15, win_bits 0..15 (they share one header byte)")
         if frames < 1 or listen < 1 or start < 1 or prescale < 0:
             raise ValueError("frames, listen, start >= 1; prescale >= 0")
+        if not 1 <= max_loops <= MAX_LOOPS:
+            raise ValueError(f"max_loops must be 1..{MAX_LOOPS} (no endless mode)")
         self.n_drive = n_drive
         self.n_probe = n_probe
         self.prescale = prescale
@@ -91,6 +109,12 @@ class PinFindCore(Elaboratable):
         self.skip_if_low = skip_if_low
         self.div_bits = div_bits
         self.win_bits = win_bits
+        self.nbits = 8 * (2 + ((2 + 2 * n_probe) if n_probe else 0))
+        # Ticks one ball may spend in FRAME: every frame at its longest, plus
+        # one tick of slack. In clocks: << prescale.
+        self.drive_cap = (frames * frame_ticks_max(self.nbits) + 1) if drive_cap is None else drive_cap
+        if self.drive_cap < 1:
+            raise ValueError("drive_cap >= 1")
 
         # Pads (asynchronous inputs; synchronised inside).
         self.pad_i = Signal(n_drive)
@@ -102,6 +126,7 @@ class PinFindCore(Elaboratable):
         self.ball = Signal(range(n_drive))
         self.state = Signal(3)
         self.skipped = Signal()     # pulses in NEXT when the ball was skipped
+        self.tripped = Signal()     # the drive watchdog fired (sticky)
 
     def ports(self):
         p = [self.pad_i, self.pad_oe, self.pad_o]
@@ -181,13 +206,24 @@ class PinFindCore(Elaboratable):
         sr = Signal(nbits)
         bits_left = Signal(range(nbits + 1))
         frame_no = Signal(range(self.frames + 1))
-        loops = Signal(range(max(self.max_loops, 1) + 1))
+        loops = Signal(range(self.max_loops + 1))
         skip = Signal()
         level = Signal()        # 1 = idle, 0 = active
 
+        # Drive watchdog, in clocks.
+        cap_clocks = self.drive_cap << self.prescale
+        wd = Signal(range(cap_clocks + 1))
+        wd_ok = Signal()
+        m.d.comb += wd_ok.eq(wd < cap_clocks)
+        with m.If(state == FRAME):
+            with m.If(wd_ok):
+                m.d.sync += wd.eq(wd + 1)
+        with m.Else():
+            m.d.sync += wd.eq(0)
+
         m.d.comb += [
             self.pad_o.eq(level),
-            self.pad_oe.eq(Mux(state == FRAME, Const(1, n) << ball, 0)),
+            self.pad_oe.eq(Mux((state == FRAME) & wd_ok, Const(1, n) << ball, 0)),
             self.done.eq(state == DONE),
         ]
 
@@ -219,7 +255,9 @@ class PinFindCore(Elaboratable):
                         m.d.sync += left.eq(left + 1)
 
             with m.Case(FRAME):
-                with m.If(tick):
+                with m.If(~wd_ok):
+                    m.d.sync += [state.eq(DONE), level.eq(1), self.tripped.eq(1)]
+                with m.Elif(tick):
                     with m.If(left > 1):
                         m.d.sync += left.eq(left - 1)
                     with m.Else():
@@ -252,11 +290,10 @@ class PinFindCore(Elaboratable):
                 m.d.sync += [left.eq(0), skip.eq(0), level.eq(1), state.eq(LISTEN)]
                 with m.If(ball == n - 1):
                     m.d.sync += ball.eq(0)
-                    if self.max_loops:
-                        with m.If(loops == self.max_loops - 1):
-                            m.d.sync += state.eq(DONE)
-                        with m.Else():
-                            m.d.sync += loops.eq(loops + 1)
+                    with m.If(loops == self.max_loops - 1):
+                        m.d.sync += state.eq(DONE)
+                    with m.Else():
+                        m.d.sync += loops.eq(loops + 1)
                 with m.Else():
                     m.d.sync += ball.eq(ball + 1)
 

@@ -117,14 +117,15 @@ fn every_index_at_one_rate() {
 #[test]
 fn rate_does_not_matter() {
     // From 3 time units per tick (a logic analyser barely oversampling) to
-    // 100k (a slow oscillator seen by a 96 MHz cycle counter).
-    for unit in [3.0, 4.0, 7.0, 16.0, 100.0, 1234.0, 25_000.0, 100_000.0] {
+    // 1M (a 10 ms tick seen by the 96 MHz cycle counter: the R143 prescales
+    // give T >= 20 us, and a slow oscillator makes it ms).
+    for unit in [3.0, 4.0, 7.0, 16.0, 100.0, 1234.0, 25_000.0, 100_000.0, 400_000.0, 1_000_000.0] {
         let mut l = Line::new(unit);
         l.idle(8);
         for i in [0u8, 1, 0x5a, 0xa5, 0xff, 37] {
             l.index_frame(i);
         }
-        let (fs, dropped) = decode(&l.edges, false, l.t as u32 + 1_000_000);
+        let (fs, dropped) = decode(&l.edges, false, l.t as u32 + 1_000_000.max((10.0 * unit) as u32));
         assert_eq!(indices(&fs), vec![0, 1, 0x5a, 0xa5, 0xff, 37], "unit {unit}");
         assert_eq!(dropped, 0, "unit {unit}");
         // The tick estimate is close to the truth.

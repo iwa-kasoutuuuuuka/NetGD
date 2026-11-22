@@ -48,6 +48,7 @@ class Trace:
         self.states = []
         self.skips = []                         # ball index each time NEXT skipped
         self.max_oe = 0
+        self.tripped = False
 
     def edges(self, k):
         out, prev = [], 1
@@ -73,7 +74,7 @@ class Trace:
         return out
 
 
-def run(core, cycles, held_low=(), probe_hz=()):
+def run(core, cycles, held_low=(), probe_hz=(), expect_trip=False):
     """Simulate `cycles` clocks. Balls in `held_low` read 0 (something else
     drives them); `probe_hz[c]` is the frequency fed to clock probe c."""
     sim = Simulator(core)
@@ -109,12 +110,15 @@ def run(core, cycles, held_low=(), probe_hz=()):
             if st == NEXT and ctx.get(core.skipped):
                 tr.skips.append(ctx.get(core.ball))
             tr.states.append(st)
+            if ctx.get(core.tripped):
+                tr.tripped = True
             await ctx.tick()
 
     sim.add_testbench(tb)
     os.makedirs("vcd", exist_ok=True)
     sim.run()
     assert tr.max_oe <= 1, f"{tr.max_oe} outputs enabled at once"
+    assert tr.tripped == expect_trip, f"drive watchdog tripped={tr.tripped}, expected {expect_trip}"
     return tr
 
 
@@ -183,10 +187,41 @@ def test_stops_after_max_loops_and_stays_off():
 
 def test_large_index():
     # The index is a byte; check one beyond the low bits with a big list.
-    core = PinFindCore(200, prescale=0, frames=1, listen=1, start=1, max_loops=0)
+    core = PinFindCore(200, prescale=0, frames=1, listen=1, start=1, max_loops=1)
     # Only simulate until ball 2 has talked; check the encoding of index 1 and 2.
     tr = run(core, 3 * 80 + 50)
     check_frames_exact(tr, 1, 0, 1, 1)
+
+
+def test_max_loops_is_bounded():
+    import warnings
+    warnings.filterwarnings("ignore", message=".*created but never used")
+    for bad in (0, 9, -1):
+        try:
+            PinFindCore(2, max_loops=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"max_loops={bad} accepted")
+
+
+def test_drive_watchdog_cuts_a_long_frame():
+    # A cap shorter than one frame: the watchdog must drop the output enable
+    # within cap << prescale clocks, go to DONE, and never drive again.
+    core = PinFindCore(3, prescale=1, frames=2, listen=2, start=2, max_loops=1, drive_cap=5)
+    tr = run(core, 2000, expect_trip=True)
+    assert 0 < sum(1 for lv in tr.levels[0] if lv == 0) <= 5 << 1, "ball 0 driven beyond the cap"
+    done_at = tr.states.index(DONE)
+    for k in range(3):
+        assert all(lv == 1 for lv in tr.levels[k][done_at:]), f"ball {k} driven after the watchdog"
+    assert all(lv == 1 for lv in tr.levels[1]) and all(lv == 1 for lv in tr.levels[2]), "scan went on"
+
+
+def test_drive_watchdog_default_never_trips_with_probes():
+    # The default cap covers the longest frames (with probes, all frames).
+    core = PinFindCore(2, n_probe=3, prescale=0, frames=3, listen=2, start=2, max_loops=1,
+                       div_bits=2, win_bits=2)
+    tr = run(core, 2 * 3 * 450 + 400, probe_hz=(12.5e6, 6e6, 1e6))
+    assert tr.states[-1] == DONE
 
 
 def decode_runs_python(runs, tick):
@@ -227,10 +262,7 @@ def test_clock_probes_count():
         assert f[7] == sum(f[:7]) & 0xFF, "bad sum"
 
 
-def test_gen_outputs_are_consistent():
-    """gen.py on a synthetic ball list (tools/pinfind/tests): every port of
-    the top level gets exactly one ball, no ball twice, all three clock modes."""
-    import re
+def _gen_env():
     import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     tools = os.path.join(here, "..", "..", "tools", "pinfind")
@@ -239,30 +271,242 @@ def test_gen_outputs_are_consistent():
     import mklist
     import gen
     from test_pinfind_tools import fake_pinmap
+    return tempfile, mklist, gen, fake_pinmap
+
+
+def _quiet(f, *a):
+    import contextlib
+    import io
+    with contextlib.redirect_stderr(io.StringIO()):
+        return f(*a)
+
+
+def _locs(out):
+    import re
+    asf = open(os.path.join(out, "PinFind.asf")).read()
+    return [(q.strip("{}"), b) for q, b in re.findall(r"^set_location_assignment -to (\S+) (\S+)$", asf, re.M)]
+
+
+def _fake_list(tmp, *args):
+    tempfile, mklist, gen, fake_pinmap = _gen_env()
+    pm = os.path.join(tmp, "fake.pinmap")
+    with open(pm, "w") as f:
+        f.write(fake_pinmap())
+    balls = os.path.join(tmp, "balls.txt")
+    _quiet(mklist.main, [pm, "-o", balls, *args])
+    plain, special = mklist.parse_pinmap(fake_pinmap())
+    return balls, set(mklist.user_capable(plain, special))
+
+
+def test_gen_outputs_are_consistent():
+    """gen.py on a synthetic ball list (tools/pinfind/tests): every port of
+    the top level gets exactly one ball, no ball twice, all clock modes, the
+    PS balls G1/G2 and the DDR balls are inputs, clock balls are inputs
+    unless probed, DCLK is toggled only when G1 is the clock."""
+    tempfile, mklist, gen, fake_pinmap = _gen_env()
+    import portmap
     with tempfile.TemporaryDirectory() as tmp:
-        pm = os.path.join(tmp, "fake.pinmap")
-        with open(pm, "w") as f:
-            f.write(fake_pinmap())
-        balls = os.path.join(tmp, "balls.txt")
-        import contextlib, io
-        with contextlib.redirect_stderr(io.StringIO()):
-            mklist.main([pm, "-o", balls, "--exclude", "T16", "--max-drive", "150"])
-        for clock in ("osc", "ring", "ball:PIN_G1"):
-            out = os.path.join(tmp, clock.split(":")[0])
-            with contextlib.redirect_stderr(io.StringIO()):
-                p = gen.generate(gen.build_args(["--balls", balls, "--out", out, "--clock", clock]))
-            asf = open(os.path.join(out, "PinFind.asf")).read()
-            locs = re.findall(r"^set_location_assignment -to (\S+) (\S+)$", asf, re.M)
+        balls, user = _fake_list(tmp, "--exclude", "T16", "--max-drive", "150")
+        lst = mklist.read_list(balls)
+        for clock, extra in (("osc", []), ("ring", []), ("ball:PIN_G1", []), ("osc", ["--probes"]),
+                             ("ball:PIN_J4", [])):
+            out = os.path.join(tmp, clock.replace(":", "_") + "".join(extra))
+            p = _quiet(gen.generate, gen.build_args(["--balls", balls, "--out", out, "--clock", clock] + extra))
+            locs = _locs(out)
             assert len(locs) == p["total_pins"], (clock, len(locs), p["total_pins"])
             assert len({b for _, b in locs}) == len(locs), "a ball assigned twice"
             assert len({q for q, _ in locs}) == len(locs), "a port assigned twice"
+            # The .asf is exactly what portmap (and so build.sh's checkpnr.py) expects.
+            plan = portmap.plan(lst, clock, probes="--probes" in extra)
+            assert locs == portmap.ports(plan), clock
+            # Every user-capable ball of the pinmap is in the design; nothing dedicated is.
+            assert {b for _, b in locs} == user, (clock, user ^ {b for _, b in locs})
             top = open(os.path.join(out, "PinFind.v")).read()
             assert f"inout  [{p['n_drive'] - 1}:0] P" in top
             assert ("CLKIN" in top) == clock.startswith("ball")
-            # Configuration balls never carry a design port (DCLK only as CLKIN).
+            port_of = {b: q for q, b in locs}
+            for b in ("PIN_H3", "PIN_F3", "PIN_F16", "PIN_F15", "PIN_H1", "PIN_H2", "PIN_J1", "PIN_J2", "PIN_H4"):
+                assert b not in port_of, (clock, b)
+            assert port_of["PIN_G2"].startswith("HOLD["), port_of["PIN_G2"]
+            if clock == "ball:PIN_G1":
+                assert port_of["PIN_G1"] == "CLKIN"
+            else:
+                assert port_of["PIN_G1"].startswith("HOLD["), port_of["PIN_G1"]
+            for b in ("PIN_C1", "PIN_D2", "PIN_F10", "PIN_M10", "PIN_L11", "PIN_M11"):
+                assert port_of[b].startswith("HOLD["), (b, port_of[b])
+            assert p["toggle_dclk"] == (1 if clock == "ball:PIN_G1" else 0), clock
+            assert p["n_drive"] == 150
+            if "--probes" in extra:
+                assert p["n_probe"] == 11 and port_of["PIN_J4"] == "PROBE[0]"
+            else:
+                assert p["n_probe"] == 0
+                if clock == "ball:PIN_J4":
+                    assert port_of["PIN_J4"] == "CLKIN"
+                else:
+                    assert port_of["PIN_J4"].startswith("HOLD[")
+            # First-run defaults (R143): 2 frames, 1 loop, T >= 20 us.
+            assert (p["frames"], p["max_loops"], p["stage0"]) == (2, 1, 0)
+            assert p["prescale"] == {"osc": 10, "ring": 12, "ball": 6}[clock.split(":")[0]]
+            assert p["drive_cap_ticks"] > 0
+
+
+def test_gen_stage0_has_no_outputs():
+    tempfile, mklist, gen, fake_pinmap = _gen_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        balls, user = _fake_list(tmp)
+        out = os.path.join(tmp, "s0")
+        p = _quiet(gen.generate, gen.build_args(["--balls", balls, "--out", out, "--stage0"]))
+        top = open(os.path.join(out, "PinFind.v")).read()
+        import re
+        assert not re.search(r"^\s*(inout|output)\b|\bassign\b", top, re.M), "stage 0 drives something"
+        assert "PinFindCore" not in top and not os.path.exists(os.path.join(out, "PinFindCore.v"))
+        assert (p["stage0"], p["toggle_dclk"], p["n_probe"], p["clock"]) == (1, 0, 0, "none")
+        locs = _locs(out)
+        assert len(locs) == p["total_pins"] and len({b for _, b in locs}) == len(locs)
+        assert {b for _, b in locs} == user
+        assert all(q.startswith(("P[", "HOLD[")) for q, _ in locs)
+
+
+def test_gen_refuses_unsafe_options():
+    tempfile, mklist, gen, fake_pinmap = _gen_env()
+    bad = [
+        ["--drive", "pp", "--no-skip-low"],
+        ["--max-loops", "0"], ["--max-loops", "9"],
+        ["--frames", "0"], ["--frames", "9"],
+        ["--stage0", "--probes"], ["--stage0", "--clock", "ring"],
+        ["--prescale", "21"],
+    ]
+    for extra in bad:
+        a = gen.build_args(["--balls", "unused.txt"] + extra)
+        assert gen.check_args(a), f"accepted {extra}"
+    assert gen.check_args(gen.build_args(["--balls", "x"])) is None
+    assert gen.check_args(gen.build_args(["--balls", "x", "--drive", "pp"])) is None
+    assert gen.check_args(gen.build_args(["--balls", "x", "--no-skip-low"])) is None
+
+
+def _fake_supra_work(tmp, out, placement, run_out=""):
+    """A work directory with a pin table in the Quartus .pin style (SYNTHETIC:
+    the real Supra report format is unknown) and a run.out."""
+    work = os.path.join(tmp, "work")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "run.out"), "w") as f:
+        f.write("Info: synthetic\n" + run_out)
+    with open(os.path.join(work, "PinFind.pin"), "w") as f:
+        f.write("Pin Name/Usage : Location : Dir\n")
+        for q, b in placement:
+            f.write(f"{q} : {b} : input\n")
+    return work
+
+
+def _checkpnr(gen_out, work, pinmap, *extra):
+    import contextlib
+    import io
+    import checkpnr
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = checkpnr.main(["--gen", gen_out, "--work", work, "--pinmap", pinmap, *extra])
+    except SystemExit as e:
+        return 1, str(e)
+    return code, buf.getvalue()
+
+
+def test_checkpnr_placement_and_coverage():
+    """build.sh's post-route check on synthetic Supra outputs: passes only on
+    an exact placement, with no auto-placement, every user-capable ball used."""
+    tempfile, mklist, gen, fake_pinmap = _gen_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        balls, user = _fake_list(tmp, "--max-drive", "20")
+        pinmap = os.path.join(tmp, "fake.pinmap")
+        out = os.path.join(tmp, "gen")
+        _quiet(gen.generate, gen.build_args(["--balls", balls, "--out", out]))
+        locs = _locs(out)
+
+        work = _fake_supra_work(os.path.join(tmp, "ok"), out, locs)
+        code, text = _checkpnr(out, work, pinmap)
+        assert code == 0, text
+        assert "all %d ports on their expected balls" % len(locs) in text, text
+
+        # Two balls swapped by the placer.
+        bad = list(locs)
+        bad[0], bad[1] = (bad[0][0], bad[1][1]), (bad[1][0], bad[0][1])
+        code, text = _checkpnr(out, _fake_supra_work(os.path.join(tmp, "swap"), out, bad), pinmap)
+        assert code == 1 and "differs" in text, text
+
+        # Supra placed something by itself.
+        work = _fake_supra_work(os.path.join(tmp, "auto"), out, locs,
+                                "Warn: IO P[3] is not assigned, placed at pin PIN_A9\n")
+        code, text = _checkpnr(out, work, pinmap)
+        assert code == 1 and "automatic placement" in text, text
+
+        # The normal pre-.asf "Error: Pin ...'s locatiion is not assigned." is not auto-placement.
+        work = _fake_supra_work(os.path.join(tmp, "pre"), out, locs,
+                                "Error: Pin P[3]'s locatiion is not assigned.\n")
+        assert _checkpnr(out, work, pinmap)[0] == 0
+
+        # No placement source at all: fail, never "assume the .asf".
+        work = os.path.join(tmp, "none", "work")
+        os.makedirs(work)
+        open(os.path.join(work, "run.out"), "w").write("Info\n")
+        import shutil
+        shutil.copy(os.path.join(out, "PinFind.asf"), work)
+        code, text = _checkpnr(out, work, pinmap)
+        assert code == 1 and "NOT confirmed" in text, text
+
+        # A placement source named by a human, with a regex.
+        rep_file = os.path.join(work, "io.rpt")
+        with open(rep_file, "w") as f:
             for q, b in locs:
-                assert b not in ("PIN_G2", "PIN_H3", "PIN_F3", "PIN_F16") and                     (b != "PIN_G1" or q == "CLKIN"), (q, b)
-            assert p["n_drive"] == 150 and p["n_probe"] == 11
+                f.write(f"IO {q} placed {b} (x,y)\n")
+        code, text = _checkpnr(out, work, pinmap, "--placement", rep_file,
+                               "--placement-regex", r"^IO (?P<port>\S+) placed (?P<ball>PIN_\w+)")
+        assert code == 0, text
+        # ... but never the .asf.
+        code, text = _checkpnr(out, work, pinmap, "--placement", os.path.join(work, "PinFind.asf"),
+                               "--placement-regex", r"-to (?P<port>\S+) (?P<ball>\S+)")
+        assert code == 1, text
+
+        # A user-capable ball left out of the design fails unless accepted.
+        balls2 = os.path.join(tmp, "balls2.txt")
+        _quiet(mklist.main, [pinmap, "-o", balls2, "--max-drive", "20", "--leave-out", "C1"])
+        out2 = os.path.join(tmp, "gen2")
+        _quiet(gen.generate, gen.build_args(["--balls", balls2, "--out", out2]))
+        locs2 = _locs(out2)
+        work2 = _fake_supra_work(os.path.join(tmp, "lo"), out2, locs2)
+        code, text = _checkpnr(out2, work2, pinmap)
+        assert code == 1 and "PIN_C1" in text and "not in the design" in text, text
+        code, text = _checkpnr(out2, work2, pinmap, "--unused-ok", "C1")
+        assert code == 0, text
+
+        # A stale ball list (not the one params.txt was made from).
+        with open(os.path.join(out, "balls.txt"), "a") as f:
+            f.write("# edited\n")
+        code, text = _checkpnr(out, _fake_supra_work(os.path.join(tmp, "st"), out, locs), pinmap)
+        assert code == 1 and "not the list" in text, text
+
+
+def test_gatesim_testbench_reads_both_port_styles():
+    """gatesim.py's port parser and testbench on two synthetic routed-netlist
+    headers (bus ports; escaped per-bit ports). The real format is unknown."""
+    import gatesim
+    import tempfile
+    p = {"n_drive": "3", "n_hold": "2", "n_probe": "0", "stage0": "0", "clock": "ball:PIN_G1"}
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "a.v")
+        open(a, "w").write("module PinFind (P, HOLD, CLKIN);\n inout [2:0] P;\n input [1:0] HOLD;\n"
+                           " input CLKIN;\n alta_dio x ();\nendmodule\n")
+        tb = gatesim.testbench(p, gatesim.top_ports(a), 5)
+        assert ".P(pad)" in tb and ".HOLD({2{1'b1}})" in tb and ".CLKIN(clkin)" in tb, tb
+        assert "pads low at once" in tb and "lows > 1" in tb
+        b = os.path.join(tmp, "b.v")
+        open(b, "w").write("module PinFind (\\P[0] , \\P[1] , \\P[2] , \\HOLD[0] , \\HOLD[1] , CLKIN);\n"
+                           " inout \\P[0] ;\n inout \\P[1] ;\n inout \\P[2] ;\n"
+                           " input \\HOLD[0] ;\n input \\HOLD[1] ;\n input CLKIN;\nendmodule\n")
+        tb = gatesim.testbench(p, gatesim.top_ports(b), 5)
+        assert ".\\P[2] (pad[2])" in tb and ".\\HOLD[1] (1'b1)" in tb, tb
+        p0 = dict(p, stage0="1", clock="none")
+        tb = gatesim.testbench(p0, gatesim.top_ports(a), 5)
+        assert "lows > 0" in tb and "clkin" not in tb
 
 
 def write_golden():
@@ -288,7 +532,14 @@ TESTS = [
     test_stops_after_max_loops_and_stays_off,
     test_large_index,
     test_clock_probes_count,
+    test_max_loops_is_bounded,
+    test_drive_watchdog_cuts_a_long_frame,
+    test_drive_watchdog_default_never_trips_with_probes,
     test_gen_outputs_are_consistent,
+    test_gen_stage0_has_no_outputs,
+    test_gen_refuses_unsafe_options,
+    test_checkpnr_placement_and_coverage,
+    test_gatesim_testbench_reads_both_port_styles,
 ]
 
 

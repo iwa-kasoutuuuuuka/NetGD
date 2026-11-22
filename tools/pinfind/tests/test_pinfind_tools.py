@@ -71,21 +71,43 @@ class MklistTest(unittest.TestCase):
         b = self.make()
         never = set(mklist.CONFIG) | {c for c, _ in mklist.CLOCKS}
         self.assertFalse(never & set(b["drive"]), never & set(b["drive"]))
-        self.assertFalse(never & set(b["hold"]))
+        # Dedicated balls are not in the design at all; the PS balls that
+        # become user I/O (G1 G2 C1 D2) and the DDR balls are hold inputs.
+        self.assertFalse(set(mklist.DEDICATED) & set(b["hold"]))
+        for x in ("PIN_G1", "PIN_G2", "PIN_C1", "PIN_D2", "PIN_F10", "PIN_M10", "PIN_L11", "PIN_M11"):
+            self.assertIn(x, b["hold"])
         self.assertEqual(b["clock"], [c for c, _ in mklist.CLOCKS])
         # Specials and unbonded balls are left out.
         for x in ("PIN_C1", "PIN_D2", "PIN_A16"):
             self.assertNotIn(x, b["drive"])
-        # 256 balls - 1 unbonded - 2 special - 15 config/JTAG/DDR - 11 clock.
-        self.assertEqual(len(b["drive"]), 256 - 1 - 2 - len(mklist.CONFIG) - len(mklist.CLOCKS))
+        # 256 balls - 1 unbonded - 17 config/JTAG/DDR (C1 D2 included) - 11 clock.
+        self.assertEqual(len(b["drive"]), 256 - 1 - len(mklist.CONFIG) - len(mklist.CLOCKS))
         # Order follows the pinmap.
         self.assertEqual(b["drive"][:3], ["PIN_A1", "PIN_A2", "PIN_A3"])
 
     def test_exclude_moves_to_hold_and_keeps_order(self):
         b = self.make("--exclude", "A2,pin_b5", "--exclude", "C1")
-        self.assertEqual(b["hold"], ["PIN_A2", "PIN_B5"])
+        self.assertEqual(b["hold"][:2], ["PIN_A2", "PIN_B5"])
         self.assertNotIn("PIN_A2", b["drive"])
         self.assertEqual(b["drive"][:2], ["PIN_A1", "PIN_A3"])
+
+    def test_design_covers_every_user_capable_ball(self):
+        # What build.sh checks against the real pinmap: nothing that may be
+        # user I/O is left out of the design.
+        b = self.make()
+        plain, special = mklist.parse_pinmap(fake_pinmap())
+        design = set(b["drive"]) | set(b["hold"]) | set(b["clock"])
+        self.assertEqual(set(mklist.user_capable(plain, special)) - design, set())
+        self.assertFalse(set(mklist.DEDICATED) & design)
+
+    def test_no_hold_ddr_and_leave_out(self):
+        b = self.make("--no-hold-ddr", "--leave-out", "C1")
+        for x in ("PIN_F10", "PIN_M10", "PIN_L11", "PIN_M11", "PIN_C1"):
+            self.assertNotIn(x, b["hold"])
+            self.assertNotIn(x, b["drive"])
+        self.assertIn("PIN_G1", b["hold"])
+        text = open(os.path.join(self.tmp.name, "balls.txt")).read()
+        self.assertIn("--unused-ok PIN_C1", text)
 
     def test_max_drive(self):
         b = self.make("--max-drive", "4")
@@ -173,7 +195,7 @@ class Pins2AsfTest(unittest.TestCase):
         self.assertIn("set_location_assignment -to {MCU_DATA[0]} PIN_A1", lines)   # PB9 = idx 0
         self.assertIn("PA26", text)   # reported as a note
         # The same check fpga/agm/build.sh makes: every port exactly once, same spelling.
-        for port in open(os.path.join(REPO, "fpga/agm/pins/PROVISIONAL.asf")).read().splitlines():
+        for port in open(os.path.join(REPO, "fpga/agm/pins/PROVISIONAL.asf"), encoding="utf-8").read().splitlines():
             if port.startswith("set_location_assignment -to "):
                 key = port.rsplit(" ", 1)[0] + " "
                 self.assertEqual(sum(1 for l in lines if l.startswith(key)), 1, key)
