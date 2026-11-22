@@ -55,6 +55,8 @@ typedef struct {
 
     ng_fwinfo_t fw;
     uint32_t gdemu_fw;                  /* the 52 00 firmware word (0 = not answered) */
+    ng_fwstack_t stack;                 /* E0 09, read on entering the info screen (FW_CAP_STACK only) ... */
+    int stack_ok;                       /* ... 1 when it answered */
     int handoff_mode;
     char why[96];                       /* NOSD: the reason */
 

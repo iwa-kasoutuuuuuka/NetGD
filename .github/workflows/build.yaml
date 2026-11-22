@@ -81,7 +81,7 @@ jobs:
         run: cargo build --release --features sam3u2e
 
   host-tests:
-    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, fwupdater)
+    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, stackmark, fwupdater)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -94,6 +94,7 @@ jobs:
           - crate: mcu/bootcore
           - crate: common/sdfast
           - crate: common/fatmap
+          - crate: common/stackmark
           # .cargo/config.toml defaults to thumbv7m-none-eabi, so the host
           # target has to be named explicitly.
           - crate: mcu/fwupdater

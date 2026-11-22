@@ -1,0 +1,7 @@
+[package]
+name = "stackmark"
+description = "Stack high-water mark for the NetGD firmware: the scan over the painted stack and the 0xE0 STACK reply layout, kept free of hardware so it can be tested on the host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]

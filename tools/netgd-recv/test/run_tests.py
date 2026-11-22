@@ -318,6 +318,24 @@ class TestBasics(Base):
         self.assertEqual(fc.errors, [])
         self.assertIn("/Crazy Taxi (US)/DISC.GDI", fc.files)
 
+    def test_stack_line_only_from_a_stack_hw_firmware(self):
+        # caps bit3 (FW_CAP_STACK, firmware feature stack-hw): HELLO is followed by the E0 09 reply
+        # (fwctl_sim: 7128 reserved, 4816 used, 96 unpainted); without the bit E0 09 is never sent.
+        for caps, want in ((15, True), (7, False)):
+            img = self.mkimage()
+            gdi = self.make_gdi("src%d" % caps)
+            self.prepare(gdi, "job%d" % caps, "GAME1", mode="new")
+            run = self.run_app(img, "job%d" % caps, "--caps", str(caps), "--readback", "0")
+            self.assertEqual(run.rc, 0, run.text)
+            line = "NGD:STACK fmt=1 reserved=7128 used=4816 free=2312 unpainted=96"
+            self.assertEqual(bool(run.has(line)), want, run.text)
+            if want:
+                self.assertLess(run.text.index("NGD:HELLO"), run.text.index("NGD:STACK"))
+            else:
+                self.assertNotIn("NGD:STACK", run.text)
+            code, out = self.collect("job%d" % caps)            # netgd-send collect ignores the extra line
+            self.assertEqual(code, 0, out)
+
     def test_firmware_without_session_and_checksum_is_refused(self):
         img = self.mkimage()
         before = self.file_hash(img)

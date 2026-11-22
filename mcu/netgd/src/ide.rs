@@ -1522,6 +1522,12 @@ const SEGA_GET_SCD: u8 = 0x40;
 ///                               failed mount: ILLEGAL REQUEST.
 ///   packet[1] = 8  WSESSION_STATUS data-in, 48 bytes ("NGST"; see
 ///                               `discimg::wsession::WriteSession::status`).
+///   packet[1] = 9  STACK      -> data-in, 20 bytes ("NGSK"; see
+///                               `stackmark::Report::encode`): the stack's
+///                               high-water mark since reset. Read-only. Only
+///                               in a `stack-hw` build (VERSION feature bit 3);
+///                               otherwise ILLEGAL REQUEST like any unknown
+///                               sub-command.
 const OGDM_IMAGE_CTL: u8 = 0xE0;
 /// Bumped when the 0xE0 reply layouts or field meanings change.
 ///
@@ -1536,8 +1542,13 @@ const OGDM_PROTOCOL_VERSION: u8 = 3;
 ///   bit0 = write session (sub-commands 6/7/8, `discimg::wsession`)
 ///   bit1 = write checksum (STATUS reports the FNV-1a of the last write)
 ///   bit2 = DMA advertised in the secondary's IDENTIFY DEVICE
-/// Bytes 6..8 stay reserved zeros.
+///   bit3 = STACK (sub-command 9), the stack high-water mark (`stack-hw`)
+/// Bytes 6..8 stay reserved zeros. A new bit is not a protocol bump: hosts
+/// test the bits they know.
+#[cfg(not(feature = "stack-hw"))]
 const OGDM_FEATURES: u8 = 0x07;
+#[cfg(feature = "stack-hw")]
+const OGDM_FEATURES: u8 = 0x07 | stackmark::FEATURE_BIT;
 /// MOUNT's packet[2], meaning "forget the runtime choice and mount whatever
 /// GDEMU.CFG names" -- what a power cycle would do.
 const NO_SELECTION: u8 = 0xFF;
@@ -2580,6 +2591,15 @@ async fn handle_image_ctl(
         discimg::wsession::SUB_WSESSION_STATUS => {
             let st = wsession().status(media_present());
             send_alloc(dev, packet, &st).await;
+        }
+        #[cfg(feature = "stack-hw")]
+        stackmark::SUB_STACK => {
+            let r = crate::stack::report();
+            info!(
+                "{}: stack high-water {} of {} bytes ({} free, top {} unpainted)",
+                label, r.used, r.reserved, r.free(), r.unpainted
+            );
+            send_alloc(dev, packet, &r.encode()).await;
         }
         SUB_VERSION => {
             let mut out = [0u8; 32];

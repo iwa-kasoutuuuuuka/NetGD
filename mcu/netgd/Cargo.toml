@@ -21,6 +21,9 @@ fatmap = { path = "../../common/fatmap", features = ["defmt"] }
 # Pure logic for the sd-multiblock / sd-highspeed features. Optional, so the
 # default build does not even see it.
 sdfast = { path = "../../common/sdfast", optional = true }
+# Stack high-water mark scan and reply layout (feature `stack-hw`; pure,
+# host-tested).
+stackmark = { path = "../../common/stackmark", optional = true }
 
 embassy-atsam3 = { path = "../embassy-atsam3", features = ["rt", "time-driver"] }
 # The resident boot region's pure logic. In the app: the clock constants
@@ -132,6 +135,17 @@ sd-bench = []
 # Log the card's root directory (two levels) at boot. Debug only: ~2.5 KB
 # of flash and extra boot time even with DEFMT_LOG=off (LOG R81).
 sd-list = []
+
+# Measure the stack's high-water mark on the board (docs/PLAN.md A-1).
+# `main` paints the free stack (from `__sheap` up to just below its own SP)
+# with 0xC5C5C5C5 right after the clock init, and `0xE0` sub-command 9
+# (STACK) scans for the deepest word that lost the paint and returns
+# {format, reserved, used, unpainted} (common/stackmark). VERSION's feature
+# byte gets bit 3. Off by default: it adds ~0.2 ms of RAM writes at boot and
+# some flash, and has not run on hardware. Works with every other feature:
+#   DEFMT_LOG=off cargo build --profile release-z --features sam3u2e,resident,sd-fast,stack-hw
+# Read it with the netgd-menu info screen (X) or netgd-recv's NGD:STACK line.
+stack-hw = ["dep:stackmark"]
 
 # Once-a-second FPGA liveness line on the UART. Off by default: uart_println!
 # is unsynchronized, so it interleaves mid-word with the IDE task's per-command

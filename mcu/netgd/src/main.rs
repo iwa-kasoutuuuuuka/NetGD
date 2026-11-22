@@ -26,6 +26,8 @@ mod fwupdate;
 mod gdi;
 mod ide;
 mod sdcard;
+#[cfg(feature = "stack-hw")]
+mod stack;
 #[cfg(feature = "resident")]
 mod resident;
 
@@ -46,6 +48,11 @@ fn main() -> ! {
     let config = Config::new(XTAL_HZ, PLLA_MUL as u16, PLLA_DIV as u8);
 
     let p = embassy_atsam3::init(config);
+    // Paint the free stack for the high-water mark (stack.rs). After the
+    // clock init so it runs at PLL speed; before anything is spawned. The
+    // mark is logged whenever 0xE0 sub-command 9 reads it (ide.rs).
+    #[cfg(feature = "stack-hw")]
+    stack::paint();
     // What the resident said about this boot (contract 6-1). Reads two words
     // of GPBR/flash; the logging is compiled out with DEFMT_LOG=off.
     #[cfg(feature = "resident")]

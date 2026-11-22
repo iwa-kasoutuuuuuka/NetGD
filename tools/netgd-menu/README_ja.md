@@ -44,6 +44,28 @@ PowerShell からは `.\build.ps1 [-Debug] [-Cdi] -BbaTools <Dreamcast-Dev-Tools
 
 フォルダ `01` に `netgd-menu.cdi` を入れる（他の `.gdi`／`.cdi` は置かない）。ゲームは `02`、`03`、…（2〜4 桁の数字）に置く。`GDEMU.INI` の `reset_goto=1` は、再起動方式を使うかどうか（H3）が分かるまで、渡し方を BIOS（既定）にしたときだけにする。
 
+## スタックの最高水位を読む（ファームの機能 `stack-hw`、実機未検証）
+
+`docs/PLAN.md` A-1 の実測用。ファームを cargo の機能 `stack-hw` 付きでビルドしたときだけ使える（既定のビルドには入らない。入れないときのイメージは従来と同じバイト列）。
+
+- ファーム：`main` がクロックの初期化の直後に、空いているスタック（`__sheap` から、そのときの SP の 32 バイト下まで）を `0xC5C5C5C5` で塗る。
+  `0xE0` のサブコマンド 9（STACK、読むだけ）が、下から見て最初に塗りが消えた語を探し、20 バイトの応答を返す：
+  `"NGSK"`、形式 1、予約 3 バイト、`reserved`（スタック領域の大きさ）、`used`（リセット以降の最高水位）、`unpainted`（塗らなかった上端。`used` はこれより小さくならない）。すべて u32 リトルエンディアン、バイト数。
+  VERSION の機能バイトの bit 3（`0x08`）が「STACK に答える」の印。形式の定義は `common/stackmark/src/lib.rs`。
+- メニュー：情報画面（**X**）に入るたびに 1 回だけ読み、`Stack         4816 of 7128 bytes used` の行（9 行目）を出す。`used` が `reserved` に届いていれば末尾に `OVERRUN`（スタックが静的変数の領域まで来た）。bit 3 の無いファームには送らず、行も出ない。
+
+実機での手順：
+
+1. ファームをビルドして書き込む（2E の常駐部レイアウトの例）：
+   `DEFMT_LOG=off cargo build --profile release-z --features sam3u2e,resident,sd-fast,stack-hw`（4E は `cargo build --release --features stack-hw`）。封印・書き込みはいつもどおり。
+2. 電源を入れ、測りたい操作をする（ゲームの起動、ディスクの切り替え、CDDA、GDI の多いフォルダなど）。値は **MCU のリセット（電源投入）からの最大**で、電源を切ると消える。
+3. 電源を切らずにメニュー（フォルダ `01`）へ戻る（`reset_goto=1` で本体のリセット、など）。**本体のリセットボタンで MCU までリセットされるかは未確認**：戻った直後に値が小さければ、リセットされている。
+4. 一覧で **X**。情報画面の `Stack` の行を読む。機能の欄が `features 0x0F` なら `stack-hw` のファーム。
+5. BBA があれば `netgd-recv` でも読める：書き込みセッションの開始時、`NGD:HELLO` の次の行に `NGD:STACK fmt=1 reserved=… used=… free=… unpainted=…` が出る（`dc_auto` のログと `result.ngr`）。
+6. defmt のログを有効にしたビルド（4E、プローブ）では、STACK を読むたびに `stack high-water … of … bytes` がログに出る。
+
+読み方の注意：塗りの方式なので、書き込まずに確保しただけのスタック（埋めなかったバッファ）は数えない（実際より小さく出ることがある）。静的見積もり（LOG R127・R131）の最深経路 5,200 B（release）／4,800 B（release-z resident）と比べる。
+
 ## テスト（この PC でできるもの）
 
 ```
