@@ -571,6 +571,22 @@ pub fn swap_secnr(phase: SwapPhase, medium: bool, disc_format: u8) -> u8 {
     }
 }
 
+/// SECNR to put back after a host bus reset (or when a swap window is cut
+/// short) outside a swap window, from the byte the FPGA left latched.
+///
+/// With no medium it is NO DISC with format 0 (`0x07`), as stock shows for no
+/// medium (R144) and as start-up and DEVICE RESET already write: the FPGA's
+/// reset reloads its fixed `0x81`, and keeping that status nibble -- or a
+/// stale format after an EJECT -- would claim a disc. With a medium only the
+/// format nibble is replaced and the latched status nibble is kept (the
+/// FPGA's `1` after a bus reset), as before.
+pub fn reset_secnr(medium: bool, disc_format: u8, latched: u8) -> u8 {
+    if !medium {
+        return DRIVE_NODISC;
+    }
+    (disc_format & 0xF0) | (latched & 0x0F)
+}
+
 /// How a command is answered while the drive is not ready (swap window, or
 /// no medium).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
