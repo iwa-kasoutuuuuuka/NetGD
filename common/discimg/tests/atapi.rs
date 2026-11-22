@@ -811,3 +811,25 @@ fn what_stock_answers_with_no_medium() {
         assert_eq!(not_ready_answer(&c), want, "{}", name);
     }
 }
+
+#[test]
+fn cd_read_type_check_follows_the_stock_records() {
+    // Stock GDEMU 6.0, CDREAD_FLAGS in every record (D8, D9):
+    //   GDI (data ctrl 4): 0x20 ok, 0x24 ok,    0x28 5/64/00, 0x10 ok
+    //   CDI (data ctrl 4): 0x20 ok, 0x24 5/64/00, 0x28 ok,    0x10 ok
+    for (flags, gdi_bad, cdi_bad) in [(0x20u8, false, false), (0x24, false, true), (0x28, true, false), (0x10, false, false)] {
+        assert_eq!(cd_read_type_mismatch(flags, false, 4), gdi_bad, "GDI flags {:#x}", flags);
+        assert_eq!(cd_read_type_mismatch(flags, true, 4), cdi_bad, "CDI flags {:#x}", flags);
+        // Bit 0 (address type) does not change it.
+        assert_eq!(cd_read_type_mismatch(flags | 1, true, 4), cdi_bad);
+        // Audio tracks were never probed: let through.
+        assert!(!cd_read_type_mismatch(flags, true, 0));
+        assert!(!cd_read_type_mismatch(flags, false, 0));
+    }
+    // Types stock was not asked about: let through.
+    for ty in [1u8, 3, 5, 6, 7] {
+        assert!(!cd_read_type_mismatch(0x20 | (ty << 1), true, 4));
+        assert!(!cd_read_type_mismatch(0x20 | (ty << 1), false, 4));
+    }
+    assert_eq!(ASC_ILLEGAL_MODE, (0x64, 0x00));
+}

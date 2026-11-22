@@ -312,12 +312,38 @@ pub fn req_mode_reply(offset: u8, len: u8) -> Option<&'static [u8]> {
 /// ASC/ASCQ pairs stock GDEMU 6.0 reports with the sense key (records
 /// 03-07): NOT READY with no medium (2/3A/00, e.g. an empty image slot),
 /// NOT READY while becoming ready (2/04/01, the swap window), UNIT
-/// ATTENTION after a medium change (6/28/00). Stock also sends 5/64/00
-/// (illegal mode for this track) for a CD_READ data-type mismatch, which
-/// NetGD does not reject.
+/// ATTENTION after a medium change (6/28/00), and ILLEGAL REQUEST / illegal
+/// mode for this track (5/64/00) for a CD_READ data-type mismatch
+/// ([`cd_read_type_mismatch`]).
 pub const ASC_NO_MEDIUM: (u8, u8) = (0x3A, 0x00);
+pub const ASC_ILLEGAL_MODE: (u8, u8) = (0x64, 0x00);
 pub const ASC_BECOMING_READY: (u8, u8) = (0x04, 0x01);
 pub const ASC_MEDIUM_CHANGED: (u8, u8) = (0x28, 0x00);
+
+/// CD_READ / CD_READ2 byte 1, bits 3..1: the sector type the host expects.
+pub const CD_READ_TYPE_ANY: u8 = 0;
+pub const CD_READ_TYPE_MODE1: u8 = 2;
+pub const CD_READ_TYPE_MODE2_FORM1: u8 = 4;
+
+/// Does a CD_READ asking for sector type `(flags >> 1) & 7` (CDB byte 1) not
+/// fit the data track it reads (D8, D9)? Then stock GDEMU 6.0 answers CHECK
+/// 5/64/00 and sends nothing. Its records (R117, R119-R132; dcload-ip, two
+/// GD-ROM GDIs, three CDIs, every run) all follow one rule: a GDI's data is
+/// Mode 1, a CDI's is Mode 2 Form 1 (the CD-ROM XA it reports), so Mode 1
+/// (`0x24`) is refused on a CDI and Mode 2 Form 1 (`0x28`) on a GDI, for one
+/// sector or seven. "Any type" (`0x20`, `0x10`) always reads. Other types
+/// (CD-DA, Mode 2 formless, Form 2) and audio tracks were never probed, so
+/// they are let through as before.
+pub fn cd_read_type_mismatch(flags: u8, is_cdi: bool, track_ctrl: u8) -> bool {
+    if track_ctrl & 0x04 == 0 {
+        return false; // audio track: not probed
+    }
+    match (flags >> 1) & 0x07 {
+        CD_READ_TYPE_MODE1 => is_cdi,
+        CD_READ_TYPE_MODE2_FORM1 => !is_cdi,
+        _ => false,
+    }
+}
 
 /// Sense keys NetGD reports.
 pub const SENSE_NOT_READY: u8 = 0x02;

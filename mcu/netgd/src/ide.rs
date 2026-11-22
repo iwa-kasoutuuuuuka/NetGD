@@ -2000,6 +2000,18 @@ async fn handle_cd_read(
         return;
     };
 
+    // The sector type the host expects (byte 1, bits 3..1) must fit the
+    // data track, as on stock: Mode 1 on a CDI or Mode 2 Form 1 on a GDI is
+    // CHECK 5/64/00 (D8, D9).
+    let track = gdi.track_for_lba(lba);
+    if let Some(t) = track {
+        if discimg::atapi::cd_read_type_mismatch(packet[1], gdi.is_cdi, t.ctrl) {
+            warn!("{}: CD_READ type {=u8:#x} does not fit the track", label, packet[1]);
+            finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, discimg::atapi::ASC_ILLEGAL_MODE);
+            return;
+        }
+    }
+
     // For now: read the (cooked) 2048-byte data area of each sector.
     // Real GD-ROM mode 1 sectors on disk are 2352 bytes raw; for the
     // user-data subset we'd want a proper sync/header skip — punt for
@@ -2016,9 +2028,9 @@ async fn handle_cd_read(
     // Still reject a request that runs off the end of the track; better an
     // ILLEGAL REQUEST the host can see than a read that silently returns
     // garbage.
-    let track_sectors = gdi.track_for_lba(lba).map(|t| t.sector_count).unwrap_or(0);
+    let track_sectors = track.map(|t| t.sector_count).unwrap_or(0);
     let available = track_sectors.saturating_sub(lba.saturating_sub(
-        gdi.track_for_lba(lba).map(|t| t.start_lba).unwrap_or(0),
+        track.map(|t| t.start_lba).unwrap_or(0),
     ));
     if total == 0 || count > available {
         warn!(

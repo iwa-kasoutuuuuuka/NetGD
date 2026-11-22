@@ -96,12 +96,18 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(self.one(4, 'REQ_SES_0')['data'][4:6], '02')       # CDI: session count 2 in the track byte
         self.assertEqual(self.one(4, 'IP_READ')['fad'], '11852')
 
-    def test_cd_read_ignores_flags_and_is_always_2048(self):
-        for img in (3, 4, 5, 6):
+    def test_cd_read_checks_the_sector_type_and_is_always_2048(self):
+        # D8/D9 (stock, every record): Mode 1 (0x24) is refused on a CDI, Mode 2 Form 1 (0x28) on a GDI,
+        # with CHECK 5/64/00; whatever reads is 2048 bytes (no raw 2352 sectors, D10).
+        for img, bad in ((3, '0x28'), (4, '0x24'), (5, '0x24'), (6, '0x28')):
             rows = [e for e in self.entries if e['img'] == img and e['probe'] == 'CDREAD_FLAGS']
             self.assertEqual([r['flags'] for r in rows], ['0x20', '0x24', '0x28', '0x10'])
-            self.assertEqual(len({(r['ssz'], r['crc'], r['bytes'], r['rc']) for r in rows}), 1)
-            self.assertEqual(rows[0]['ssz'], '2048')
+            good = [r for r in rows if r['flags'] != bad]
+            self.assertEqual(len({(r['ssz'], r['crc'], r['bytes'], r['rc']) for r in good}), 1)
+            self.assertEqual(good[0]['ssz'], '2048')
+            refused = [r for r in rows if r['flags'] == bad][0]
+            self.assertEqual((refused['rc'], refused['status'], refused['err'], refused['sense']),
+                             ('check', '0x11', '0x50', '5/64/00'))
 
     def test_hashes_match_the_generator(self):
         man = os.path.join(self.card, 'NETGD-PROBE-MANIFEST.json')

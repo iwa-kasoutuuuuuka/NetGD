@@ -394,7 +394,14 @@ fn cut(data: &[u8], alloc: usize) -> Res {
 }
 
 /// What the runner prints for the CD_READ at `fad` (`handle_cd_read`).
-fn read_res(d: &Disc, fad: u32, count: u32) -> (Res, Option<Vec<u8>>) {
+fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>) {
+    // handle_cd_read: the expected sector type is checked first (D8, D9).
+    let lba = fad.saturating_sub(FAD_OFFSET);
+    if let Some(t) = atapi::track_for_lba(&d.tracks, lba) {
+        if atapi::cd_read_type_mismatch(flags, d.is_cdi, t.ctrl) {
+            return (Res::illegal(), None);
+        }
+    }
     match d.cd_read(fad, count) {
         Some(data) => (Res::ok_big(data.len(), &data[..data.len().min(REC_DATA_MAX)]), Some(data)),
         None => (Res::illegal(), None),
@@ -518,17 +525,21 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
     };
 
     let c = cdb_read(opt.cdread_flags, ip, 7);
-    let (r, data) = read_res(d, ip, 7);
+    let (r, data) = read_res(d, opt.cdread_flags, ip, 7);
     o.probe("IP_READ", Some(&format!("fad={} count=7", ip)), Some(&c), &r, true);
     hash_sectors(o, ip, 7, &data);
 
     if opt.flags_test {
-        // CD_READ byte 1 is not looked at: all four variants return the same 2048 bytes.
+        // The sector type in byte 1 is checked (D8, D9); what reads is always 2048 bytes (no raw 2352, D10).
         for flags in [0x20u8, 0x24, 0x28, 0x10] {
             let c = cdb_read(flags, ip, 1);
-            let (r, data) = read_res(d, ip, 1);
+            let (r, data) = read_res(d, flags, ip, 1);
+            let lba = ip.saturating_sub(FAD_OFFSET);
+            let mismatch = atapi::track_for_lba(&d.tracks, lba)
+                .map_or(false, |t| atapi::cd_read_type_mismatch(flags, d.is_cdi, t.ctrl));
             let (ssz, crc, sense) = match &data {
                 Some(dd) => ("2048".to_string(), format!("{:08x}", crc32(dd)), "none"),
+                None if mismatch => ("-".to_string(), "-".to_string(), "5/64/00"), // illegal mode for this track
                 None => ("-".to_string(), "-".to_string(), "5/00/00"), // ILLEGAL REQUEST, ASC 0 (stock's is not known)
             };
             let ex = format!("flags=0x{:02x} fad={} count=1 ssz={} crc={} sense={}", flags, ip, ssz, crc, sense);
@@ -545,7 +556,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
                 break;
             }
             let c = cdb_read(opt.cdread_flags, fad, n);
-            let (r, data) = read_res(d, fad, n);
+            let (r, data) = read_res(d, opt.cdread_flags, fad, n);
             o.probe(&format!("TP_{:03}", b), Some(&format!("fad={} count={}", fad, n)), Some(&c), &r, false);
             if r.ok {
                 ok += 1;
@@ -566,7 +577,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             let idx = if i % 2 == 0 { i / 2 } else { n - 1 - i / 2 };
             let fad = ip + ((span as u64 * idx as u64) / (n as u64 - 1)) as u32;
             let c = cdb_read(opt.cdread_flags, fad, 1);
-            let (r, data) = read_res(d, fad, 1);
+            let (r, data) = read_res(d, opt.cdread_flags, fad, 1);
             o.probe(&format!("SEEK_{:02}", i), Some(&format!("fad={}", fad)), Some(&c), &r, false);
             hash_sectors(o, fad, 1, &data);
         }
