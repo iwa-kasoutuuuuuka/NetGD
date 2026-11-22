@@ -8,7 +8,8 @@
 //! * `root_cluster_top_bits`, `subdir_cluster_top_bits`: a start cluster
 //!   with bits above 28 set reads (aliased) and then panicked in
 //!   `next_cluster`;
-//! * `cyclic_directory_chain`: a FAT loop in a directory never returned.
+//! * `cyclic_directory_chain*`: a FAT loop in a directory never returned;
+//!   now the walk ends after the largest legal directory size.
 
 mod common;
 
@@ -158,19 +159,21 @@ fn big_cluster_card(items: Vec<Item>) -> Card {
 }
 
 /// B. BPB root cluster 0x40000002 (aliases cluster 2 with 4 blocks per
-/// cluster): an error, not a panic.
+/// cluster): no panic.
 #[test]
 fn root_cluster_top_bits() {
     let items: Vec<Item> = (0..70).map(|i| file(sfn(&format!("F{i:03}"), "BIN"), vec![])).collect();
     let mut c = big_cluster_card(items);
     assert_eq!(list(&c), Ok(70));
     c.sector_mut(2048)[0x2C..0x30].copy_from_slice(&0x4000_0002u32.to_le_bytes());
+    // The first cluster reads aliased (cluster 2, 64 entries); the walk ends
+    // at `next_cluster`, which refuses the cluster instead of panicking.
     let r = catch_unwind(|| list(&c));
-    assert!(matches!(r, Ok(Err(_))), "{:?}", r.map_err(|_| "PANIC"));
+    assert!(matches!(r, Ok(Ok(64))), "{:?}", r.map_err(|_| "PANIC"));
 }
 
 /// B. A folder whose entry's cluster-high word is 0x4000: listing it and
-/// looking a file up in it give errors, not panics.
+/// looking a file up in it do not panic.
 #[test]
 fn subdir_cluster_top_bits() {
     let inner: Vec<Item> = (0..70).map(|i| file(sfn(&format!("F{i:03}"), "BIN"), vec![])).collect();
@@ -182,10 +185,12 @@ fn subdir_cluster_top_bits() {
         let vol = vm.open_volume(sd::VolumeIdx(0)).unwrap();
         let mut d = vol.open_root_dir().unwrap();
         d.change_dir("GAME").unwrap();
-        let e = d.iterate_dir(|_| {}).is_err();
-        e
+        let mut n = 0;
+        let e = d.iterate_dir(|_| n += 1).is_ok();
+        (e, n)
     });
-    assert!(matches!(listed, Ok(true)), "{:?}", listed.map_err(|_| "PANIC"));
+    // Same: the aliased first cluster is listed, then the walk ends.
+    assert!(matches!(listed, Ok((true, 64))), "{:?}", listed.map_err(|_| "PANIC"));
     let found = catch_unwind(|| {
         let vm = sd::VolumeManager::new(D(&c), C);
         let vol = vm.open_volume(sd::VolumeIdx(0)).unwrap();
@@ -198,8 +203,8 @@ fn subdir_cluster_top_bits() {
 }
 
 /// C. The root's first cluster points back at itself in the FAT (and the
-/// cluster is full, so no end marker stops the walk): returns an error
-/// within the deadline.
+/// cluster is full, so no end marker stops the walk): returns within the
+/// deadline.
 #[test]
 fn cyclic_directory_chain() {
     let fmt = Fmt { fat16: false, spc: 1, clusters: 65600, mbr: Some((2048, 0x0C)), frag: false };
@@ -208,8 +213,10 @@ fn cyclic_directory_chain() {
     let fat = 2048 + 32;
     c.sector_mut(fat)[8..12].copy_from_slice(&2u32.to_le_bytes()); // FAT[2] = 2
     match list_within(c, 10) {
-        Some(Err(e)) => assert_ne!(e, "PANIC"),
-        Some(Ok(n)) => panic!("cyclic chain listed {n} entries"),
+        // The walk ends after 2 MiB of directory (4096 one-block clusters of
+        // 16 entries), like any other broken chain: no error, no hang.
+        Some(Ok(n)) => assert_eq!(n, 4096 * 16),
+        Some(Err(e)) => panic!("{e}"),
         None => panic!("cyclic chain: no return within 10 s"),
     }
 }
@@ -231,7 +238,7 @@ fn cyclic_directory_chain_fat16() {
             let vol = vm.open_volume(sd::VolumeIdx(0)).unwrap();
             let mut d = vol.open_root_dir().unwrap();
             d.change_dir("GAME").unwrap();
-            let a = d.iterate_dir(|_| {}).is_err();
+            let a = d.iterate_dir(|_| {}).is_ok();
             let b = d.open_file_in_dir("NOPE.GDI", sd::Mode::ReadOnly).is_err();
             (a, b)
         });

@@ -291,23 +291,25 @@ impl FatVolume {
         cluster.0 >= 2 && cluster.0 - 2 < self.cluster_count
     }
 
-    /// OpenGDEmu patch: called for each cluster of a directory walk. Refuses a
-    /// cluster outside the data area and a chain longer than the largest
-    /// legal directory (65,536 entries = 2 MiB), so a damaged or cyclic FAT
-    /// chain ends the walk with an error instead of looping forever.
-    fn check_dir_cluster<E: core::fmt::Debug>(
+    /// OpenGDEmu patch: `next_cluster` for a directory walk. `hops` counts the
+    /// clusters walked; a chain longer than the largest legal directory
+    /// (65,536 entries = 2 MiB) is cyclic or damaged and ends the walk like
+    /// any other broken chain, instead of looping forever.
+    #[inline(never)]
+    fn next_dir_cluster<D>(
         &self,
+        block_cache: &mut BlockCache<D>,
         cluster: ClusterId,
         hops: &mut u32,
-    ) -> Result<(), Error<E>> {
-        if cluster == ClusterId::ROOT_DIR {
-            return Ok(());
-        }
+    ) -> Result<ClusterId, Error<D::Error>>
+    where
+        D: BlockDevice,
+    {
         *hops += 1;
-        if !self.is_data_cluster(cluster) || *hops > (2 << 20) / self.bytes_per_cluster() {
+        if *hops >= (2 << 20) / self.bytes_per_cluster() {
             return Err(Error::BadCluster);
         }
-        Ok(())
+        self.next_cluster(block_cache, cluster)
     }
 
     /// Look in the FAT to see which cluster comes next.
@@ -729,7 +731,6 @@ impl FatVolume {
 
         let mut hops = 0u32; // OpenGDEmu patch
         while let Some(cluster) = current_cluster {
-            self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
             for block_idx in first_dir_block_num.range(dir_size) {
                 trace!("Reading FAT");
                 let block = block_cache.read(block_idx)?;
@@ -747,7 +748,7 @@ impl FatVolume {
                 }
             }
             if cluster != ClusterId::ROOT_DIR {
-                current_cluster = match self.next_cluster(block_cache, cluster) {
+                current_cluster = match self.next_dir_cluster(block_cache, cluster, &mut hops) { // OpenGDEmu patch
                     Ok(n) => {
                         first_dir_block_num = self.cluster_to_block(n);
                         Some(n)
@@ -780,7 +781,6 @@ impl FatVolume {
         };
         let mut hops = 0u32; // OpenGDEmu patch
         while let Some(cluster) = current_cluster {
-            self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
             let start_block_idx = self.cluster_to_block(cluster);
             for block_idx in start_block_idx.range(BlockCount(u32::from(self.blocks_per_cluster))) {
                 trace!("Reading FAT");
@@ -798,7 +798,7 @@ impl FatVolume {
                     }
                 }
             }
-            current_cluster = match self.next_cluster(block_cache, cluster) {
+            current_cluster = match self.next_dir_cluster(block_cache, cluster, &mut hops) { // OpenGDEmu patch
                 Ok(n) => Some(n),
                 _ => None,
             };
@@ -838,7 +838,6 @@ impl FatVolume {
 
                 let mut hops = 0u32; // OpenGDEmu patch
                 while let Some(cluster) = current_cluster {
-                    self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
                     for block in first_dir_block_num.range(dir_size) {
                         match self.find_entry_in_block(
                             block_cache,
@@ -851,7 +850,7 @@ impl FatVolume {
                         }
                     }
                     if cluster != ClusterId::ROOT_DIR {
-                        current_cluster = match self.next_cluster(block_cache, cluster) {
+                        current_cluster = match self.next_dir_cluster(block_cache, cluster, &mut hops) { // OpenGDEmu patch
                             Ok(n) => {
                                 first_dir_block_num = self.cluster_to_block(n);
                                 Some(n)
@@ -871,7 +870,6 @@ impl FatVolume {
                 };
                 let mut hops = 0u32; // OpenGDEmu patch
                 while let Some(cluster) = current_cluster {
-                    self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
                     let block_idx = self.cluster_to_block(cluster);
                     for block in block_idx.range(BlockCount(u32::from(self.blocks_per_cluster))) {
                         match self.find_entry_in_block(
@@ -884,7 +882,7 @@ impl FatVolume {
                             x => return x,
                         }
                     }
-                    current_cluster = match self.next_cluster(block_cache, cluster) {
+                    current_cluster = match self.next_dir_cluster(block_cache, cluster, &mut hops) { // OpenGDEmu patch
                         Ok(n) => Some(n),
                         _ => None,
                     }

@@ -24,9 +24,9 @@ against arbitrary corrupt cards**: other paths were not audited, in
 particular:
 
 * the write and delete paths (the firmware does not write through this crate);
-* file data read from a file's first cluster, which is not range-checked and
-  can alias another part of the card. That gives wrong data, but no panic
-  or hang;
+* first clusters (of files and directories), which are not range-checked
+  and can alias another part of the card. That gives wrong data, but no
+  panic or hang;
 * unchecked arithmetic in other BPB fields, which wraps in release builds.
 
 1. **Long names with lone surrogates** (`filesystem/filename.rs`).
@@ -46,14 +46,20 @@ particular:
      value. 0x40000002 with 4 blocks per cluster aliased cluster 2, read
      fine, and then `next_cluster` hit its `panic!`.
    - **Fix:** `next_cluster` returns `Error::BadCluster` for any cluster
-     outside the data area (no `panic!` left there). Directory walks check
-     each cluster before reading it.
+     outside the data area (no `panic!` left there). As with every other
+     broken chain, the crate's directory walks treat that as the end of
+     the directory. The aliased first cluster is still read and listed:
+     wrong entries, but no panic.
 4. **Cyclic directory chains** (`fat/volume.rs`).
    - **Bug:** `iterate_fat16`/`iterate_fat32` (listing) and
      `find_directory_entry` (open by name) followed a looping FAT chain
      forever.
-   - **Fix:** each walk stops with `Error::BadCluster` after more clusters
-     than the largest legal directory can have (65,536 entries = 2 MiB).
+   - **Fix:** each walk ends after as many clusters as the largest legal
+     directory can have (65,536 entries = 2 MiB). It ends the way the crate
+     ends any broken chain: the listing returns `Ok` with what it has seen,
+     possibly repeated, and a look-up returns `NotFound`. An error return
+     would cost about 0.9 KB more on the 2E build, because the walk is
+     inlined into every caller; this costs about 0.1 KB.
 
 ### Tests
 
