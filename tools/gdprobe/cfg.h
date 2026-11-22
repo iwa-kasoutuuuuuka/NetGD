@@ -40,6 +40,12 @@
  *   devreset_only=off      on = after each image's battery, 500 ms idle, NO switch command, ATA DEVICE RESET, register
  *                          poll for devreset_only_wait_ms, then the TUR / REQ_ERROR flow (DR_* lines)
  *   devreset_only_wait_ms=1000   (100..10000)
+ *
+ * seq 20 probe (only with switch=on; default off):
+ *   devreset_cmd=off       on = after each image's battery, once per devreset_cmd_ms value: 500 ms idle, ATA DEVICE RESET,
+ *                          wait that many ms, then TEST UNIT READY / REQ_STAT / REQ_ERROR (what does the drive answer while
+ *                          it re-detects?), then TUR every 10 ms until READY (max 2 s) (DC<ms>_* lines)
+ *   devreset_cmd_ms=10,50,100    delays after the reset (up to 4 values, 0..5000)
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
@@ -77,6 +83,9 @@ typedef struct {
     uint32_t swap_reswitch_wait_ms;
     int devreset_only;    /* seq 17: DEVICE RESET with no switch command */
     uint32_t devreset_only_wait_ms;
+    int devreset_cmd;     /* seq 20: commands right after a DEVICE RESET (DC<ms>_) */
+    int devreset_cmd_ms[GP_MAX_DEVRESET];
+    int n_devreset_cmd;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 

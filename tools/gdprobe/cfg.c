@@ -24,6 +24,10 @@ void gp_config_defaults(gp_config *c)
     c->n_devreset = 2;
     c->swap_reswitch_wait_ms = 1000;
     c->devreset_only_wait_ms = 1000;
+    c->devreset_cmd_ms[0] = 10;
+    c->devreset_cmd_ms[1] = 50;
+    c->devreset_cmd_ms[2] = 100;
+    c->n_devreset_cmd = 3;
 }
 
 static int parse_bool(const char *v, int *out)
@@ -79,7 +83,7 @@ static void trim(char *s)
 
 /* "50,200": up to GP_MAX_DEVRESET delays of 0..5000 ms. Any bad token rejects the whole value (the
  * previous list stays). Returns 1 if parsed. */
-static int parse_delays(gp_config *c, char *v)
+static int parse_delays(int *dst, int *n_dst, char *v)
 {
     int tmp[GP_MAX_DEVRESET], n = 0;
     char *tok = v, *next;
@@ -98,8 +102,8 @@ static int parse_delays(gp_config *c, char *v)
     }
     if (!n)
         return 0;
-    memcpy(c->devreset_ms, tmp, sizeof(tmp[0]) * (size_t)n);
-    c->n_devreset = n;
+    memcpy(dst, tmp, sizeof(tmp[0]) * (size_t)n);
+    *n_dst = n;
     return 1;
 }
 
@@ -134,11 +138,13 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "swap_regpoll_ms")) { n = parse_num(v, &ok); if (ok) c->swap_regpoll_ms = (uint32_t)clampi(n, 100, 10000);
     } else if (!strcmp(k, "swap_regpoll_interval_ms")) { n = parse_num(v, &ok); if (ok) c->swap_regpoll_interval_ms = (uint32_t)clampi(n, 1, 50);
     } else if (!strcmp(k, "swap_devreset")) { if (parse_bool(v, &b)) c->swap_devreset = b; else ok = 0;
-    } else if (!strcmp(k, "swap_devreset_ms")) { ok = parse_delays(c, v);
+    } else if (!strcmp(k, "swap_devreset_ms")) { ok = parse_delays(c->devreset_ms, &c->n_devreset, v);
     } else if (!strcmp(k, "swap_reswitch")) { if (parse_bool(v, &b)) c->swap_reswitch = b; else ok = 0;
     } else if (!strcmp(k, "swap_reswitch_wait_ms")) { n = parse_num(v, &ok); if (ok) c->swap_reswitch_wait_ms = (uint32_t)clampi(n, 100, 10000);
     } else if (!strcmp(k, "devreset_only")) { if (parse_bool(v, &b)) c->devreset_only = b; else ok = 0;
     } else if (!strcmp(k, "devreset_only_wait_ms")) { n = parse_num(v, &ok); if (ok) c->devreset_only_wait_ms = (uint32_t)clampi(n, 100, 10000);
+    } else if (!strcmp(k, "devreset_cmd")) { if (parse_bool(v, &b)) c->devreset_cmd = b; else ok = 0;
+    } else if (!strcmp(k, "devreset_cmd_ms")) { ok = parse_delays(c->devreset_cmd_ms, &c->n_devreset_cmd, v);
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

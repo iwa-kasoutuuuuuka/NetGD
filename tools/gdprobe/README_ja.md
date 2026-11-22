@@ -121,6 +121,8 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 | `swap_reswitch_wait_ms` | 1000 | 上の観測時間（100〜10000）。`switch_timeout_ms` はこのあとから数える |
 | `devreset_only` | `off` | **seq 17**。`on` で、各イメージの試験一式のあと（`swap_reswitch` があればその後）、**切替コマンドを 1 つも送らず**、まず 500 ms 何も送らずに待ち（`DR_IDLE idle_ms=500`）、ATA DEVICE RESET を送ってシグネチャのレジスタを `DR_SW_DEVRESET`（`delay_ms=0`）に記録、`devreset_only_wait_ms` のあいだレジスタを読み（`DR_SW_REGPOLL`）、TUR / REQ_ERROR の流れ（`DR_SW_POLL`・`DR_SW_RESULT` の `ua_28`・`DR_REQ_STAT`・`DR_REQ_ERROR`）。DEVICE RESET の許可は `swap_devreset` と同じ許可リスト（`switch=on` かつ `swap_devreset=on` または `devreset_only=on`）。`switch=on` のときだけ |
 | `devreset_only_wait_ms` | 1000 | リセット後の観測時間（100〜10000） |
+| `devreset_cmd` | `off` | **seq 20**。`on` で、各イメージの試験一式のあと、`devreset_cmd_ms` の値ごとに：500 ms 何も送らずに待ち（`DC<ms>_IDLE`）、ATA DEVICE RESET（`DC<ms>_SW_DEVRESET`）、`<ms>` ミリ秒待ってから **TEST UNIT READY**（`DC<ms>_CMD_TUR`：`rc`・`status`・`err`・`sense`・`secnr`・`altst`）、**REQ_STAT**（`DC<ms>_CMD_REQ_STAT`）、**REQ_ERROR**（`DC<ms>_CMD_REQ_ERROR`、保留中のセンス）、そのあと TUR を 10 ms ごとに READY になるまで（最大 2 秒）送り、変化だけを `DC<ms>_CMD_POLL` に、READY までの時間（リセットコマンドから）を `DC<ms>_CMD_RESULT` の `ready_ms` に書く。**リセット中の再検出のあいだ純正がどう答えるか**（NetGD は NOT READY 2/04/01）を見る。DEVICE RESET の許可は他と同じ許可リスト（`switch=on` かつ `swap_devreset` / `devreset_only` / `devreset_cmd` のどれか）。3 回続けてタイムアウトしたら中止。`switch=on` のときだけ |
+| `devreset_cmd_ms` | `10,50,100` | **seq 20**。`devreset_cmd` の、DEVICE RESET から最初の TUR までの待ち（ms）。最大 4 個、0〜5000 |
 
 ### 実行の流れ
 
@@ -273,7 +275,7 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 | `hash.c/.h` | CRC-32（`zlib.crc32` と同じ） | あり |
 | `cfg.c/.h` | 設定ファイルの解析 | あり |
 | `compare.py` | 比較・イメージ照合 | あり（合成の記録と GDI） |
-| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` / `gdprobe.cfg.r137.example`（R137 の実行用）/ `gdprobe.cfg.r148.example`（R148 の実行用）/ `gdprobe.cfg.seq17.example`・`gdprobe.cfg.seq18.example`（seq 17・18 の実行用） | ビルド、dc_auto のプリセット、設定の雛形 | — |
+| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` / `gdprobe.cfg.r137.example`（R137 の実行用）/ `gdprobe.cfg.r148.example`（R148 の実行用）/ `gdprobe.cfg.seq17.example`・`gdprobe.cfg.seq18.example`・`gdprobe.cfg.seq20.example`（seq 17・18・20 の実行用） | ビルド、dc_auto のプリセット、設定の雛形 | — |
 | `tests/` | `sh tests/run_tests.sh`（gcc と python が要る。make は不要）。DreamSDK の `python` は環境変数を渡さないので、C の偽ドライブの記録を使う 2 件はスキップになる（Windows の `py tests/test_compare.py` なら通る） | — |
 
 ## ホストテストでできていないこと（実機で最初に確認すること）
@@ -394,3 +396,24 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 
 安全：新しく送るコマンドは無い（`52 82 n` と ATA DEVICE RESET は R148 までと同じ許可リスト）。すべて読み取り専用・時間制限つき、3 回続けてタイムアウトしたら中止。
 固まったら Dreamcast の電源を入れ直す。照合は `compare.py` で seq 17 と seq 18（または NetGD の記録）を比べる（`t_ms`・`idle_ms` などの時間は差分にならず、`ua_28` と `sense` は差分になる）。
+
+## seq 20 の実行計画（DEVICE RESET の再検出中、純正はコマンドにどう答えるか）
+
+**状態：用意しただけ。実機では未実行。** NetGD は DEVICE RESET のあと（`detect_time` のあいだ）に来たコマンドへ NOT READY 2/04/01 を返す。
+KOS の `cdrom_reinit_ex` はセンスキー 2 を「ディスクなし」と扱うかもしれず、起動に関わる。純正がこの時間帯に何を返すかを記録する。
+
+| 問い | 記録のどこを見るか |
+|---|---|
+| 1. リセットの 10・50・100 ms 後に TUR を送ると、純正は何を返すか（CHECK か OK か、センスは 2/04/01 か 6/29/00 か） | `DC<ms>_CMD_TUR` の `rc`・`status`・`err`・`sense`・`secnr`・`altst` |
+| 2. 同じ時刻の REQ_STAT・保留中のセンス | `DC<ms>_CMD_REQ_STAT`（`data`）、`DC<ms>_CMD_REQ_ERROR`（`data` の 2 バイト目の下位 4 ビット = センスキー、8・9 バイト目 = ASC・ASCQ） |
+| 3. READY になるまでの状態の移り変わりと、リセットから READY までの時間 | `DC<ms>_CMD_POLL`（変化ごと）、`DC<ms>_CMD_RESULT` の `ready_ms`（`t_ms`・`polls`・`changes` も） |
+
+準備と実行：
+
+1. `gdprobe.cfg.seq20.example` を `host\gdprobe.cfg` にコピー（`label=stock`、`seq=20`、`images=4,3,7`、`return_to=2`、`switch_timeout_ms=5000`、`swap_regpoll=off`、`swap_devreset=off`、
+   `swap_reswitch=off`、`devreset_only=off`、`devreset_cmd=on`、`devreset_cmd_ms=10,50,100`、`cdread_flags_test=off`、`throughput=off`、`seek=off`、`identify=off`）。SD カードは seq 17 と同じ（`02`・`03`・`04`・`07`）。
+2. `cd H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\dc_auto.ps1 -Preset <このフォルダ>\profiles\gdprobe.ps1` を 1 回。
+   所要は約 1 分半（各イメージ：切替と試験一式 + 3 回 ×（待ち 0.5 秒 + リセット + コマンド + READY まで最大 2 秒）。空フォルダ 07 は READY にならないので各回 2 秒の上限まで）。
+
+安全：新しく送るコマンドは無い（TUR・REQ_STAT・REQ_ERROR・`52 82 n`・ATA DEVICE RESET は既存の許可リスト）。すべて読み取り専用・時間制限つき、3 回続けてタイムアウトしたら中止。
+固まったら Dreamcast の電源を入れ直す。照合は `compare.py`：`ready_ms`・`t_ms`・`polls` などの時間は差分にならず（比の注記だけ）、`rc`・`status`・`err`・`sense`・`secnr`・`altst`・`ready` は差分になる。

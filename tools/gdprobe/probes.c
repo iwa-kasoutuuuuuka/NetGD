@@ -436,7 +436,7 @@ static void wait_step(runner *r, uint32_t ms)
 /* ATA DEVICE RESET inside the window, then one line with the registers right after it:
  *   img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=50 rc=ok reset_us=2000 bsy_seen=0 altst=0x.. err=0x.. irr=0x.. secnr=0x.. bcl=0x14 bch=0xeb
  * Only reached with switch=on and swap_devreset=on (and the ATA whitelist agrees). */
-static void swap_devreset(runner *r, const char *pfx, uint64_t t0, int delay_ms)
+static int swap_devreset(runner *r, const char *pfx, uint64_t t0, int delay_ms)
 {
     gd_regs g;
     uint32_t us = 0;
@@ -447,7 +447,7 @@ static void swap_devreset(runner *r, const char *pfx, uint64_t t0, int delay_ms)
     if (r->abort) {
         rc = GD_REFUSED;
     } else if (!r->ops->ata_reset || !wl_ata_check(0x08, r->cfg->do_identify,
-                                                    r->cfg->do_switch && (r->cfg->swap_devreset || r->cfg->devreset_only))) {
+                                                    r->cfg->do_switch && (r->cfg->swap_devreset || r->cfg->devreset_only || r->cfg->devreset_cmd))) {
         rc = GD_REFUSED;
     } else {
         rc = r->ops->ata_reset(r->ops->ctx, r->cfg->timeout_ms, &g, &us, &bsy);
@@ -466,6 +466,7 @@ static void swap_devreset(runner *r, const char *pfx, uint64_t t0, int delay_ms)
         event(r, "ABORT", "reason=drive-not-answering");
         say(r, "drive stopped answering: giving up");
     }
+    return rc;
 }
 
 /* After `52 82 n`: send NO packet command until `until_ms` (from t0), only read the registers every
@@ -696,6 +697,137 @@ static int switch_to(runner *r, int n, int tag, int regpoll, int reset_at_ms, in
     return ready;
 }
 
+/* ---- seq 20: commands right after a DEVICE RESET -------------------------- */
+
+/* One TEST UNIT READY (silent: no record line). If it fails with CHECK, the sense is fetched at once with
+ * REQ_ERROR (sk/asc/ascq = -1 if none). */
+static void dc_tur(runner *r, gd_result *tr, int *sk, int *asc, int *ascq)
+{
+    uint8_t c[12];
+    *sk = *asc = *ascq = -1;
+    memset(c, 0, 12);
+    send_cmd(r, c, 0, r->cfg->timeout_ms, tr);
+    if (tr->rc == GD_CHECK && !r->abort) {
+        gd_result sr;
+        cdb_simple(c, 0x13, 0, 0, 10);
+        send_cmd(r, c, 10, r->cfg->timeout_ms, &sr);
+        if (sr.rc == GD_OK && sr.stored >= 10) {
+            *sk = r->buf[2] & 0x0F;
+            *asc = r->buf[8];
+            *ascq = r->buf[9];
+        }
+    }
+}
+
+/* "t_ms=.. rc=.. status=.. err=.. sense=sk/asc/ascq|none [secnr=..] [altst=..]" (altst: a register read right after) */
+static void dc_tur_fields(runner *r, char *f, size_t cap, uint64_t t0, const gd_result *tr, int sk, int asc, int ascq)
+{
+    char sn[24], sec[16], alt[16];
+    gd_regs g;
+    uint64_t t_ms = (r->ops->now_us(r->ops->ctx) - t0) / 1000u;
+    if (sk < 0)
+        strcpy(sn, "none");
+    else
+        snprintf(sn, sizeof(sn), "%d/%02x/%02x", sk, asc, ascq);
+    if (tr->has_secnr)
+        snprintf(sec, sizeof(sec), " secnr=0x%02x", tr->secnr);
+    else
+        sec[0] = 0;
+    alt[0] = 0;
+    if (r->ops->regs && !r->abort) {
+        memset(&g, 0, sizeof(g));
+        if (!r->ops->regs(r->ops->ctx, &g))
+            snprintf(alt, sizeof(alt), " altst=0x%02x", g.altst);
+    }
+    snprintf(f, cap, "t_ms=%lu rc=%s status=0x%02x err=0x%02x sense=%s%s%s", (unsigned long)t_ms, rec_rc_name(tr->rc),
+             tr->status, tr->error, sn, sec, alt);
+}
+
+/* DEVICE RESET, `delay` ms of silence, then: TUR (DC<d>_CMD_TUR), REQ_STAT, REQ_ERROR, then TUR every 10 ms until
+ * READY (DC<d>_CMD_POLL per change) for at most 2 s, and DC<d>_CMD_RESULT with the time to READY counted from the
+ * reset command. Read-only. Stops at once if the run was aborted (3 timeouts in a row). */
+#define DC_POLL_MAX_MS 2000u
+static void devreset_cmd_run(runner *r, int n, int delay)
+{
+    char pfx[16], nm[40], f[200];
+    gd_result tr, res;
+    uint8_t c[12];
+    uint64_t t0, tp;
+    int sk, asc, ascq;
+    int polls = 1, changes = 0, ready, iter = 0;
+    int last_rc, last_st, last_er, last_sk, last_asc, last_ascq, last_sec;
+    unsigned long ready_ms = 0, total_ms;
+
+    r->img = n;
+    snprintf(pfx, sizeof(pfx), "DC%d_", delay);
+    snprintf(f, sizeof(f), "DEVICE RESET, command after %d ms (image %d)...", delay, n);
+    say(r, f);
+    r->ops->sleep_ms(r->ops->ctx, 500);
+    snprintf(nm, sizeof(nm), "%sIDLE", pfx);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, "idle_ms=500"), 0);
+    t0 = r->ops->now_us(r->ops->ctx);
+    if (swap_devreset(r, pfx, t0, 0) == GD_REFUSED || r->abort)
+        return;
+    wait_step(r, (uint32_t)delay);
+
+    dc_tur(r, &tr, &sk, &asc, &ascq);
+    snprintf(nm, sizeof(nm), "%sCMD_TUR", pfx);
+    snprintf(f, sizeof(f), "delay_ms=%d ", delay);
+    dc_tur_fields(r, f + strlen(f), sizeof(f) - strlen(f), t0, &tr, sk, asc, ascq);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+    ready = (tr.rc == GD_OK);
+    if (ready)
+        ready_ms = (unsigned long)((r->ops->now_us(r->ops->ctx) - t0) / 1000u);
+    last_rc = tr.rc; last_st = tr.status; last_er = tr.error; last_sk = sk; last_asc = asc; last_ascq = ascq;
+    last_sec = tr.has_secnr ? tr.secnr : -1;
+
+    if (!r->abort) {
+        cdb_simple(c, 0x10, 0, 0, 10);
+        snprintf(nm, sizeof(nm), "%sCMD_REQ_STAT", pfx);
+        do_cmd(r, nm, NULL, c, 10, r->cfg->timeout_ms, 1, &res);
+    }
+    if (!r->abort) {
+        cdb_simple(c, 0x13, 0, 0, 10);
+        snprintf(nm, sizeof(nm), "%sCMD_REQ_ERROR", pfx);
+        do_cmd(r, nm, NULL, c, 10, r->cfg->timeout_ms, 1, &res);
+    }
+
+    tp = r->ops->now_us(r->ops->ctx);
+    snprintf(nm, sizeof(nm), "%sCMD_POLL", pfx);
+    while (!ready && !r->abort && iter++ < 500) {
+        int sec;
+        if ((r->ops->now_us(r->ops->ctx) - tp) / 1000u >= DC_POLL_MAX_MS)
+            break;
+        r->ops->sleep_ms(r->ops->ctx, 10);
+        dc_tur(r, &tr, &sk, &asc, &ascq);
+        polls++;
+        sec = tr.has_secnr ? tr.secnr : -1;
+        if (tr.rc != last_rc || tr.status != last_st || tr.error != last_er || sk != last_sk || asc != last_asc ||
+            ascq != last_ascq || sec != last_sec) {
+            changes++;
+            snprintf(f, sizeof(f), "poll=%d ", polls);
+            dc_tur_fields(r, f + strlen(f), sizeof(f) - strlen(f), t0, &tr, sk, asc, ascq);
+            out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+            last_rc = tr.rc; last_st = tr.status; last_er = tr.error; last_sk = sk; last_asc = asc; last_ascq = ascq;
+            last_sec = sec;
+        }
+        if (tr.rc == GD_OK) {
+            ready = 1;
+            ready_ms = (unsigned long)((r->ops->now_us(r->ops->ctx) - t0) / 1000u);
+        }
+    }
+    total_ms = (unsigned long)((r->ops->now_us(r->ops->ctx) - t0) / 1000u);
+    snprintf(nm, sizeof(nm), "%sCMD_RESULT", pfx);
+    if (ready)
+        snprintf(f, sizeof(f), "delay_ms=%d rc=ok ready=1 ready_ms=%lu t_ms=%lu polls=%d changes=%d", delay, ready_ms, total_ms,
+                 polls, changes);
+    else
+        snprintf(f, sizeof(f), "delay_ms=%d rc=%s ready=0 ready_ms=- t_ms=%lu polls=%d changes=%d", delay,
+                 r->abort ? "abort" : "timeout", total_ms, polls, changes);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+    sync_out(r);
+}
+
 /* ---- entry --------------------------------------------------------------- */
 
 int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
@@ -737,6 +869,9 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
                 switch_to(r, n, n, 1, -1, SK_RESWITCH);
             if (cfg->devreset_only && !r->abort)
                 switch_to(r, n, n, 1, -1, SK_DEVRESET_ONLY);
+            /* seq 20: commands at several delays after a DEVICE RESET */
+            for (j = 0; cfg->devreset_cmd && j < cfg->n_devreset_cmd && !r->abort; j++)
+                devreset_cmd_run(r, n, cfg->devreset_cmd_ms[j]);
         }
         if (cfg->return_to > 0 && !r->abort)
             switch_to(r, cfg->return_to, cfg->return_to, 0, -1, SK_NORMAL);

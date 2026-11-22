@@ -326,6 +326,7 @@ typedef struct {
     uint64_t quiet_us;       /* no packet may arrive within this long after a mount (0 = not checked) */
     int quiet_violations;
     int resets;              /* ATA DEVICE RESETs seen */
+    uint64_t reset_notready_us; /* after a DEVICE RESET the drive answers NOT READY 2/04/01 for this long */
     uint64_t reset_t[8];     /* their time after the mount, us */
     int reset_flag;          /* registers show the post-reset signature until the next packet */
     int reset_timeout;       /* DEVICE RESET never clears BSY */
@@ -528,6 +529,7 @@ static int f_reset(void *ctx, uint32_t timeout_ms, gd_regs *after, uint32_t *us,
     f->reset_flag = 1;
     f->ua = 1;                   /* reset: UNIT ATTENTION 6/29/00 for the next command */
     f->ua_asc = 0x29;
+    if (f->reset_notready_us) f->ready_at = f->now + f->reset_notready_us;
     f_regs(ctx, after);
     return GD_OK;
 }
@@ -1067,6 +1069,114 @@ static void test_runner_seq17(void)
     CHECK(find_line("probe=END"));
 }
 
+/* seq 20: devreset_cmd (DC<ms>_) */
+static void test_runner_seq20(void)
+{
+    static fake f;
+    gp_config c;
+    const char *p, *q;
+    gp_config_defaults(&c);
+    CHECK(!c.devreset_cmd && c.n_devreset_cmd == 3 && c.devreset_cmd_ms[0] == 10 && c.devreset_cmd_ms[1] == 50 && c.devreset_cmd_ms[2] == 100);
+    gp_config_parse(&c, "devreset_cmd=on\ndevreset_cmd_ms=0, 20\n");
+    CHECK(c.devreset_cmd && c.n_devreset_cmd == 2 && c.devreset_cmd_ms[0] == 0 && c.devreset_cmd_ms[1] == 20 && c.unknown_keys == 0);
+    gp_config_parse(&c, "devreset_cmd_ms=1,2,3,4,5\ndevreset_cmd_ms=x\ndevreset_cmd=maybe\n");
+    CHECK(c.n_devreset_cmd == 2 && c.unknown_keys == 3);
+    CHECK(c.n_devreset == 2 && c.devreset_ms[0] == 50 && c.devreset_ms[1] == 200);   /* the R148 list is untouched */
+
+    /* NOT READY for 150 ms after the reset: early commands see 2/04/01, then UA 6/29/00, then READY */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.reset_notready_us = 150000;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\ndevreset_cmd=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(f.resets == 3 && f.n_mounts == 1);
+    p = find_line("img=3 probe=DC10_IDLE idle_ms=500");
+    CHECK(p != NULL);
+    q = find_line("img=3 probe=DC10_SW_DEVRESET delay_ms=0 t_ms=0 rc=ok reset_us=2000");
+    CHECK(q > p);
+    q = find_line("img=3 probe=DC10_CMD_TUR delay_ms=10 ");
+    CHECK(q != NULL && strstr(q, "rc=check") && strstr(q, "sense=2/04/01") && strstr(q, "altst=0x50"));
+    CHECK(strstr(q, "secnr=0x81"));
+    CHECK(find_line("img=3 probe=DC10_CMD_REQ_STAT") > q);
+    CHECK(find_line("img=3 probe=DC10_CMD_REQ_ERROR") > find_line("img=3 probe=DC10_CMD_REQ_STAT"));
+    CHECK(find_line("img=3 probe=DC10_CMD_POLL") > find_line("img=3 probe=DC10_CMD_REQ_ERROR"));
+    q = find_line("img=3 probe=DC10_CMD_RESULT delay_ms=10 rc=ok ready=1 ready_ms=");
+    CHECK(q != NULL);
+    if (q) {
+        long ms = strtol(strstr(q, "ready_ms=") + 9, NULL, 10);
+        CHECK(ms >= 150 && ms < 400);
+    }
+    CHECK(find_line("img=3 probe=DC50_CMD_RESULT") > q);
+    CHECK(find_line("img=3 probe=DC100_CMD_RESULT") > find_line("img=3 probe=DC50_CMD_RESULT"));
+    CHECK(find_line("img=3 probe=DC100_CMD_TUR delay_ms=100 ") != NULL);
+    CHECK(count_of("probe=DC10_CMD_POLL") >= 1 && !find_line("probe=DR_") && !find_line("probe=RS_") && !find_line("probe=R50_"));
+    CHECK(find_line("probe=END abort=0"));
+
+    /* READY at once (delay 0 works): the first TUR reports the UNIT ATTENTION, the next poll is READY */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\ndevreset_cmd=on\ndevreset_cmd_ms=0\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.resets == 1);
+    q = find_line("img=3 probe=DC0_CMD_TUR delay_ms=0 ");
+    CHECK(q != NULL && strstr(q, "sense=6/29/00"));
+    CHECK(find_line("img=3 probe=DC0_CMD_RESULT") && strstr(find_line("img=3 probe=DC0_CMD_RESULT"), "ready=1"));
+
+    /* an empty folder never gets READY: bounded by 2 s, recorded as a timeout, the run ends cleanly */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.empty_folder = 7;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=7\nreturn_to=0\ndevreset_cmd=on\ndevreset_cmd_ms=10\nswitch_timeout_ms=1000\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(find_line("img=7 probe=DC10_CMD_RESULT delay_ms=10 rc=timeout ready=0 ready_ms=- ") != NULL);
+    CHECK(find_line("img=7 probe=DC10_CMD_TUR") && strstr(find_line("img=7 probe=DC10_CMD_TUR"), "sense=2/3a/00"));
+    CHECK(find_line("probe=END abort=0"));
+
+    /* a reset that hangs: recorded as a timeout, the commands still go out, nothing loops */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.reset_timeout = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\ndevreset_cmd=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    run_fake(&f, &c);
+    CHECK(find_line("probe=DC10_SW_DEVRESET") && strstr(find_line("probe=DC10_SW_DEVRESET"), "rc=timeout") && find_line("probe=END"));
+
+    /* the drive stops answering: abort after 3 timeouts */
+    memset(&f, 0, sizeof(f)); f.mounted = 2; f.stuck = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,4\nreturn_to=0\ndevreset_cmd=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 1 && find_line("probe=END abort=1"));
+
+    /* switch=off: nothing */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\ndevreset_cmd=on\n");
+    CHECK(run_fake(&f, &c) == 0 && f.resets == 0 && !find_line("probe=DC"));
+}
+
+/* The shipped seq 20 run configuration, end to end against the fake drive */
+static void test_seq20_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    FILE *in = fopen("../gdprobe.cfg.seq20.example", "rb");
+    CHECK(in != NULL);
+    if (!in) return;
+    n = fread(text, 1, sizeof(text) - 1, in);
+    fclose(in);
+    text[n] = 0;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, text);
+    CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == 20);
+    CHECK(c.do_switch && c.n_images == 3 && c.images[0] == 4 && c.images[1] == 3 && c.images[2] == 7 && c.return_to == 2);
+    CHECK(c.switch_timeout_ms == 5000 && !c.swap_regpoll && !c.swap_devreset && !c.swap_reswitch && !c.devreset_only);
+    CHECK(c.devreset_cmd && c.n_devreset_cmd == 3 && c.devreset_cmd_ms[0] == 10 && c.devreset_cmd_ms[2] == 100);
+    CHECK(!c.do_cdread_flags && !c.do_throughput && !c.do_seek && !c.do_identify);
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7; f.passive = 1; f.reset_notready_us = 150000;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 9 && f.n_mounts == 3 + 1);
+    CHECK(count_of("probe=DC10_CMD_RESULT") == 3 && count_of("probe=DC50_CMD_RESULT") == 3 && count_of("probe=DC100_CMD_RESULT") == 3);
+    CHECK(!find_line("probe=SW_REGPOLL") && !find_line("probe=DR_") && !find_line("probe=RS_"));
+    CHECK(find_line("probe=END abort=0"));
+}
+
 /* The shipped seq 17 / 18 run configurations, end to end against the fake drive */
 static void test_seq17_example_cfg(void)
 {
@@ -1186,6 +1296,8 @@ int main(void)
     test_runner_regpoll_safety();
     test_runner_seq17();
     test_seq17_example_cfg();
+    test_runner_seq20();
+    test_seq20_example_cfg();
     test_runner_audio_only();
     test_r148_example_cfg();
     printf("OK: %d checks passed\n", g_checks);

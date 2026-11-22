@@ -130,6 +130,10 @@ int main(int argc, char **argv)
              cfg.swap_reswitch, (unsigned long)cfg.swap_reswitch_wait_ms, cfg.devreset_only,
              (unsigned long)cfg.devreset_only_wait_ms);
     header(h);
+    n = (size_t)snprintf(h, sizeof(h), "config devreset_cmd=%d devreset_cmd_ms=", cfg.devreset_cmd);
+    for (i = 0; i < cfg.n_devreset_cmd && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.devreset_cmd_ms[i]);
+    header(h);
     sink_sync(NULL);
 
     /* Without cdrom_init the G1 bus protection may still be closed: every
