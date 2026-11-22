@@ -24,7 +24,7 @@ powershell -File tools\ci-local\run.ps1 --only builds   # PowerShell から
   2E の `release-z,resident,sd-fast` は `tools/fwsize/check.py --gate-2e`(パッド前の使用量が 122,880 B 以下)で検査し、余裕を表示する。
 - tests: `cargo test`(lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, stackmark, pinfind, tools/sdmmc-robustness)、
   fwupdater は `--lib --target <rustc のホスト>`(自動判定)、gdprobe の C テスト(作業コピー上で実行)。
-- tools: mksdcard, netgd-send, fwbackup(約 12 分、`FWBACKUP_TEST_WRAPPER=1`), fwimage, netgd-recv, netgd-menu, pinfind, fwsize。
+- tools: mksdcard, netgd-send, fwbackup(約 12 分、`FWBACKUP_TEST_WRAPPER=1`), fwimage, netgd-recv, netgd-menu, netgd-t2, pinfind, fwsize。
   CI の対象外だが netgd-expect も実行する。netgd-fwupd も実行する(gen_msgs.py --check は改行コードを無視する)。
 - fpga: Amaranth のシミュレーションと生成 Verilog のコミット済み確認（約 7 分、うち FIFO の等価性の確認が約 4.5 分）。Python は既定で本体のチェックアウトの `fpga/amaranth/amaranth_env`（`git rev-parse --git-common-dir` の親から探すので、worktree からでも見つかる）。Verilog の確認のあとは生成ファイルを元に戻す（不一致でも作業ツリーを汚さない）。
 

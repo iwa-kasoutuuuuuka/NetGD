@@ -88,32 +88,42 @@ static ng_sink_t sink_of(ngtp_srv_t *s)
     return sk;
 }
 
-static int src_open(void *ctx, int idx, uint64_t off)
+/* The source handed to ng_put: the receive core reads, this side asks the PC (WANT) and takes its answers (DATA).
+   WANTs go out in chunks of want_max bytes at fixed offsets from where the core opened the file, never past the
+   manifest size, with up to `depth` of them outstanding: with depth 2 the PC sends the next chunk while the core writes
+   the last one to the card.  The DATA frames must come back in the order of the WANTs.  Bytes of a DATA that the core
+   did not ask for yet wait in `held`.  Before the file changes, and before DONE, the outstanding WANTs are drained (their
+   DATA is read and dropped) so that no DATA frame is left in the stream when the next request is read. */
+static uint8_t held[NGTP_MAX_DATA];
+
+static int issue_want(ngtp_srv_t *s)
 {
-    ngtp_srv_t *s = (ngtp_srv_t *)ctx;
-    s->src_idx = idx;
-    s->src_off = off;
+    uint8_t w[16];
+    uint64_t left = s->src_size - s->issue_off;
+    uint32_t n = s->want_max;
+    int slot;
+    if (left < n) n = (uint32_t)left;
+    ngtp_put16(w, (uint32_t)s->src_idx);
+    ngtp_put16(w + 2, 0);
+    ngtp_put64(w + 4, s->issue_off);
+    ngtp_put32(w + 12, n);
+    if (send_frame(s, NGTP_WANT, 0, s->seq, w, sizeof w)) return -1;
+    slot = (s->qh + s->nq) % NGTP_DEPTH_MAX;
+    s->q[slot].off = s->issue_off;
+    s->q[slot].len = n;
+    s->nq++;
+    s->issue_off += n;
+    s->wants++;
     return 0;
 }
 
-static void src_close(void *ctx) { (void)ctx; }
-
-/* WANT {file, offset, n} -> DATA.  Anything but a matching DATA ends the connection. */
-static int32_t src_read(void *ctx, void *buf, uint32_t n)
+/* The DATA answering the oldest outstanding WANT, into rx.  Its data length, or -1 (the connection is closed). */
+static int32_t take_data(ngtp_srv_t *s)
 {
-    ngtp_srv_t *s = (ngtp_srv_t *)ctx;
-    uint8_t w[16];
     ngtp_hdr_t h;
     uint32_t waited = 0, dlen;
+    const uint8_t *p;
     int r;
-    if (s->broken || !s->connected) return -1;
-    if (n > NGTP_MAX_DATA) n = NGTP_MAX_DATA;
-    ngtp_put16(w, (uint32_t)s->src_idx);
-    ngtp_put16(w + 2, 0);
-    ngtp_put64(w + 4, s->src_off);
-    ngtp_put32(w + 12, n);
-    if (send_frame(s, NGTP_WANT, 0, s->seq, w, sizeof w)) return -1;
-
     for (;;) {                                  /* slices, so the screen stays alive while the PC is slow */
         r = nm_net_recv_all(rx, NGTP_HDR_LEN, 100);
         if (r == 0) break;
@@ -132,18 +142,71 @@ static int32_t src_read(void *ctx, void *buf, uint32_t n)
         send_error(s, s->seq, "ESTATE", "expected the DATA that answers the WANT");
         return -1;
     }
-    {
-        const uint8_t *p = rx + NGTP_HDR_LEN;
-        dlen = h.len - 12;
-        if (ngtp_get16(p) != (uint32_t)s->src_idx || ngtp_get64(p + 4) != s->src_off || dlen > n) {
-            send_error(s, s->seq, "ESTATE", "DATA does not match the WANT (file, offset or length)");
-            return -1;
-        }
-        memcpy(buf, p + 12, dlen);
+    p = rx + NGTP_HDR_LEN;
+    dlen = h.len - 12;
+    if (ngtp_get16(p) != (uint32_t)s->src_idx || ngtp_get64(p + 4) != s->q[s->qh].off || dlen > s->q[s->qh].len) {
+        send_error(s, s->seq, "ESTATE", "DATA does not match the WANT (file, offset or length)");
+        return -1;
     }
     if (h.flags & NGTP_F_ABORT) s->abort_asked = 1;
-    s->src_off += dlen;
+    if (dlen < s->q[s->qh].len) s->src_eof = 1;     /* the PC's file is shorter than the manifest says */
+    s->qh = (s->qh + 1) % NGTP_DEPTH_MAX;
+    s->nq--;
+    s->data_frames++;
     return (int32_t)dlen;
+}
+
+/* read and drop the DATA of every outstanding WANT (quietly: a broken link just ends the connection) */
+static void drain_wants(ngtp_srv_t *s)
+{
+    while (s->nq > 0) {
+        if (s->broken || !s->connected || take_data(s) < 0) { s->nq = 0; break; }
+    }
+    s->held_len = s->held_pos = 0;
+}
+
+static int src_open(void *ctx, int idx, uint64_t off)
+{
+    ngtp_srv_t *s = (ngtp_srv_t *)ctx;
+    drain_wants(s);
+    s->src_idx = idx;
+    s->src_size = (idx >= 0 && idx < man.nfiles) ? man.files[idx].size : 0;
+    s->issue_off = off;
+    s->src_eof = 0;
+    s->qh = s->nq = 0;
+    return 0;
+}
+
+static void src_close(void *ctx) { drain_wants((ngtp_srv_t *)ctx); }
+
+static int32_t src_read(void *ctx, void *buf, uint32_t n)
+{
+    ngtp_srv_t *s = (ngtp_srv_t *)ctx;
+    int32_t dlen;
+    if (s->broken || !s->connected) return -1;
+    if (s->held_pos < s->held_len) {
+        uint32_t k = s->held_len - s->held_pos;
+        if (k > n) k = n;
+        memcpy(buf, held + s->held_pos, k);
+        s->held_pos += k;
+        return (int32_t)k;
+    }
+    while (!s->src_eof && s->nq < s->depth && s->issue_off < s->src_size)
+        if (issue_want(s)) return -1;
+    if (s->nq == 0) return 0;                   /* end of the file (or the PC ended it early) */
+    dlen = take_data(s);
+    if (dlen < 0) return -1;
+    {
+        const uint8_t *d = rx + NGTP_HDR_LEN + 12;
+        uint32_t k = (uint32_t)dlen < n ? (uint32_t)dlen : n;
+        memcpy(buf, d, k);
+        if ((uint32_t)dlen > k) {               /* the rest waits for the next read (rx is reused by the next frame) */
+            memcpy(held, d + k, (uint32_t)dlen - k);
+            s->held_len = (uint32_t)dlen - k;
+            s->held_pos = 0;
+        }
+        return (int32_t)k;
+    }
 }
 
 /* ---- requests ---- */
@@ -152,6 +215,13 @@ static ng_err_t ensure_session(ngtp_srv_t *s, const ng_sink_t *sk)
 {
     ng_err_t e;
     if (s->session) return NG_OK;
+    if (s->hk.may_write) {
+        char why[96] = "writing is not allowed";
+        if (!s->hk.may_write(s->hk.ctx, why, sizeof why)) {
+            ng_emit_error(sk, "session", NG_E_FW, 0, 0, why);
+            return NG_E_FW;
+        }
+    }
     if (s->hk.before_session) s->hk.before_session(s->hk.ctx);
     e = ng_session_open(sk);
     if (e == NG_OK) s->session = 1;
@@ -229,7 +299,11 @@ static ng_err_t do_put(ngtp_srv_t *s, const ng_sink_t *sk, const uint8_t *p, uin
     if (forceflag && ngfs_protected(man.image))
         ng_cfg.force = s->hk.confirm ? s->hk.confirm(s->hk.ctx, "overwrite", man.image) : 0;
     src.ctx = s; src.open = src_open; src.read = src_read; src.close = src_close;
+    s->nq = s->qh = 0;
+    s->held_len = s->held_pos = 0;
+    s->abort_asked = 0;                     /* a stop the PC asked for ends that PUT only, not the next one on the link */
     e = ng_put(sk, tag, &man, mftext, n - 8, &src, mode);
+    drain_wants(s);                         /* no DATA may follow the DONE */
     ng_cfg.force = 0;
     ng_cfg.allow_frag = 0;
     return e;
@@ -300,7 +374,15 @@ void ngtp_srv_init(ngtp_srv_t *s, const ngtp_hooks_t *hk, const ng_fwinfo_t *fw,
     s->fw = fw;
     s->code = code;
     s->last_frame_ms = now_ms(s);
+    s->want_max = NGTP_MAX_DATA;
+    s->depth = 1;
     ng_cfg_defaults();
+}
+
+void ngtp_srv_set_window(ngtp_srv_t *s, uint32_t want_max, int depth)
+{
+    s->want_max = want_max < 1 ? 1 : want_max > NGTP_MAX_DATA ? NGTP_MAX_DATA : want_max;
+    s->depth = depth < 1 ? 1 : depth > NGTP_DEPTH_MAX ? NGTP_DEPTH_MAX : depth;
 }
 
 void ngtp_srv_new_code(ngtp_srv_t *s, uint16_t code)

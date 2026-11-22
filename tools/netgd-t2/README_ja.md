@@ -1,0 +1,70 @@
+# netgd-t2：単体の T2 受け手（NGTP、KOS の TCP → NetGD の SD）
+
+**実機では一度も動かしていない。NetGD もまだ実機に無い。** ホスト試験（模擬ディスク・模擬ファーム・127.0.0.1）と DreamSDK でのビルドだけ。
+
+PC の `tools/netgd-send`（`push` / `remote`）が NGTP（`docs/design/menu-app.md` §8）で送るファイルを受け取り、netgd-recv の受信コア（`recv_core.c`：書き込みセッション、FatFs、CRC・FNV、チェックポイント、読み戻し）で SD に書く。書き方は T1（dcload-ip の `/pc/`、`tools/netgd-recv`）とまったく同じで、違うのはデータの来る道だけ。
+
+## 構成
+
+| 部分 | ファイル | 備考 |
+|---|---|---|
+| 中核（ホストで試験） | `src/t2_app.c/.h` | 状態（ネット開始 → 待ち受け → 応答 → 終了）、画面（53 × 20）、書き込みの関門、待ち時間の上限 |
+| NGTP サーバ | `../netgd-menu/src/ngtp_srv.c`・`ngtp_frame.c` | メニューと共用。WANT の大きさと同時数（`ngtp_srv_set_window`）と書き込みの関門（`may_write`）を足した |
+| 受信コア | `../netgd-recv/src/*` | 変更なし |
+| KOS 層 | `src/main_kos.c`・`src/net_kos.c`、`../netgd-menu/src/plat_kos.c` | BBA は手で立ち上げる（INIT_NET・DHCP なし） |
+
+### WANT の大きさと同時数
+
+| ビルド | 既定 | 理由 |
+|---|---|---|
+| `make`（KOS の TCP のまま） | 16 KiB × 1 | R178：窓より大きいフレームは止まりかけ、窓を広げると壊れる |
+| `make tcpfix`（直した `net_tcp.c` を一緒にリンク） | 64 KiB × 2 | `docs/research/g2-transport.md` §3。`../kos-patches/net_tcp-rx-fix.patch`（fix/g2-transport-review `f02c1518` の版、FIN を順番の検査に含める）をそのまま使う |
+
+どちらも `make T2_WANT=… T2_DEPTH=…` で変えられる（1〜65536 B、1〜4）。受信バッファ（＝TCP の窓）は `T2_RCVBUF`（既定 20480、listen の前に設定）。
+同時数 2 では、受け手は 2 つ目の WANT を出したまま SD に書くので、PC は次の塊をその間に送れる。DATA は WANT の順に返すこと（netgd-send はそうしている）。ファイルが変わる前と DONE の前には、残った WANT の DATA を読み捨てる。
+
+### 書き込みの関門（純正 GDEMU では何も書かない）
+
+- 書き込みセッションを開く前に、ドライブに **VERSION（`E0 03`、読むだけ）を 1 回だけ** 問い合わせる。`OGDM` で、機能ビットに SESSION と CHECKSUM が両方あるときだけ書く。それ以外は `NGD:ERROR session code=EFW` と `DONE EFW` を返し、**以後ドライブには何も送らない**（ホスト試験で、純正の模型に送るパケットは 1 個だけと確かめている）。
+- HELLO・PING・合言葉違いではドライブに触れない。問い合わせは最初の STATFS／LIST／PUT／DELETE／VERIFY のとき。
+- `make T2_NO_DRIVE=1` はドライブに 1 パケットも送らない（ネットだけの確認用。書き込みは全部断る）。
+- KOS の cdrom ドライバは使わない（`INIT_CDROM` なし。netgd-recv と同じ）。
+
+### BBA の立ち上げ
+
+`tools/g2bench/main_net.c`（feat/g2-transport）と同じ手順：`eth_init()` → 各 netif に IP を設定（DHCP させない）→ `net_init(0)` をスレッドで 30 秒まで → PC の ARP を 8 秒まで → dcload-ip から起動したときは終了の引き渡しのためだけに `fs_dclsocket`。IP は dcload-ip のもの、それ以外は `T2_IP`（既定 192.168.10.2、`make T2_IP=0xC0A80A02`）。各手順は画面と（KOS が BBA を取るまで）dc-tool-ip に出る。
+
+### 待ち時間の上限・終わり方
+
+| 条件 | 動作 |
+|---|---|
+| PC が FINISH | セッションを閉じ（指定どおり）、終了（dcload に戻る、終了コード 0） |
+| 待機中に B | セッションを閉じて（既定のイメージを戻す）終了 |
+| 作業中に B | 次の安全な点で止まる（`NGD:STOP`、チェックポイントは残る。もう一度 `push` で続き） |
+| セッションが開いたまま 5 分フレームなし | セッションを閉じる |
+| 15 分フレームなし | 全部閉じて終了 |
+| フレームの途中 15 秒、WANT に対する DATA 30 秒 | 接続を切る（セッションは残る。同じ PC がつなぎ直して続ける） |
+| BBA なし・`net_init` が返らない | `FAILED: no network` を出して終了 |
+
+## ビルド（DreamSDK）
+
+```powershell
+cd tools\netgd-t2
+.\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools            # netgd-t2.elf
+.\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -TcpFix    # + netgd-t2-tcpfix.elf
+```
+
+DreamSDK は書き換えない（tcpfix は `$(KOS_BASE)/kernel/net/net_tcp.c` を `build/kos-fix/` に写してパッチを当て、リンクのマップで KOS の `net_tcp.o` が入っていないことを確かめる）。
+
+## 使い方（NetGD が実機に載ってから）
+
+1. dc-tool-ip で `netgd-t2.elf` を起動。画面（と dc-tool-ip の最初の行 `NGT2: ... code NNNN`）に IP・ポート 20039・合言葉。
+2. PC：`py -3 tools\netgd-send\netgd-send.py push game.gdi --host <IP> --code <合言葉> --slot auto`
+
+## ホスト試験
+
+```sh
+py -3 tools/netgd-t2/test/run_tests.py
+```
+
+22 件：既定の窓（16 KiB × 1、64 KiB × 2）、半端な WANT（5000 B × 3）、WANT が 2 つ同時に出ていること、PC の中止フラグと再開、B での中止、PC の切断とつなぎ直し、電源断と再開、ファイルの CRC 不一致と上書き、フレームの CRC 不一致、DATA の後半が届かず FIN が来た場合（EOF をファイルの終わりと取らない）、純正（`--nofw`）・機能ビット不足・`--no-drive` で何も書かない、HELLO・PING でドライブに触れない、待ち時間の上限、B での終了、BBA なし、`netgd-send.py push`。

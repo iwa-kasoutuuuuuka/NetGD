@@ -1,0 +1,103 @@
+--- a/kernel/net/net_tcp.c	(KallistiOS 2.3.0)
++++ b/kernel/net/net_tcp.c	(NetGD receive fix)
+@@ -244,6 +244,12 @@
+ 
+ #define MAX(x, y)       ((x) > (y) ? (x) : (y))
+ 
++/* NetGD receive fix (OpenGDEmu tools/kos-patches/net_tcp-rx-fix.patch): what the
++   two fixes did, for the application to report. */
++volatile uint32_t net_tcp_fix_ooo_dropped = 0;  /* data past rcv.nxt: dropped, dup ACK */
++volatile uint32_t net_tcp_fix_trimmed = 0;      /* data starting before rcv.nxt: cut */
++volatile uint32_t net_tcp_fix_wnd_updates = 0;  /* window-update ACKs sent by recv() */
++
+ /* Forward declarations */
+ static fs_socket_proto_t proto;
+ static void tcp_rst(netif_t *net, const struct in6_addr *src,
+@@ -1254,8 +1260,23 @@
+ 
+     /* Advance the window if we're pulling data out of the queue. */
+     if(!(flags & MSG_PEEK)) {
++        uint32_t half = sock->rcvbuf_sz / 2;
++        uint32_t before = sock->data.rcv.wnd;
++
+         sock->data.rcv.wnd += size;
+         sock->data.rcvbuf_cur_sz -= size;
++
++        /* Tell the other side when the window opens again (RFC 1122 4.2.3.3
++           receiver SWS avoidance: once it reaches half the buffer). Without
++           this a sender facing a small or zero window waits for its persist
++           timer, which stalls every frame larger than the window. */
++        if(before < half && sock->data.rcv.wnd >= half &&
++           (sock->state == TCP_STATE_ESTABLISHED ||
++            sock->state == TCP_STATE_FIN_WAIT_1 ||
++            sock->state == TCP_STATE_FIN_WAIT_2)) {
++            tcp_send_ack(sock);
++            ++net_tcp_fix_wnd_updates;
++        }
+     }
+ 
+     if(sock->data.rcvbuf_head + size <= sock->rcvbuf_sz) {
+@@ -2485,7 +2506,7 @@
+ static int process_pkt(netif_t *src, const struct in6_addr *srca,
+                        const struct in6_addr *dsta, const tcp_hdr_t *tcp,
+                        struct tcp_sock *s, uint16_t flags, size_t size) {
+-    uint32_t seq, ack, up;
++    uint32_t seq, ack, up, seglen;
+     size_t sz;
+     int bad_pkt = 0, tmp, acksyn = 0;
+     const uint8_t *buf = (const uint8_t *)tcp;
+@@ -2500,6 +2521,8 @@
+     /* Check the validity of the incoming segment's sequence number */
+     sz = size - TCP_GET_OFFSET(flags);
+     buf += TCP_GET_OFFSET(flags);
++    /* NetGD fix: a FIN occupies one sequence number (RFC 793 SEG.LEN). */
++    seglen = (uint32_t)sz + ((flags & TCP_FLAG_FIN) ? 1 : 0);
+ 
+     if(s->data.rcv.wnd == 0) {
+         if(sz || seq != s->data.rcv.nxt)
+@@ -2512,8 +2535,16 @@
+                 bad_pkt = 1;
+         }
+         else {
++            /* RFC 793: acceptable if the segment starts in the window, or
++               starts before rcv.nxt and reaches into it (a retransmission
++               overlapping data we already have, maybe with its FIN; trimmed
++               below). The second case is not taken for RST or SYN segments:
++               their acceptance stays as it was. */
+             if(!(SEQ_GE(seq, s->data.rcv.nxt) &&
+-                    SEQ_LT(seq, s->data.rcv.nxt + s->data.rcv.wnd)))
++                    SEQ_LT(seq, s->data.rcv.nxt + s->data.rcv.wnd)) &&
++               !(!(flags & (TCP_FLAG_RST | TCP_FLAG_SYN)) &&
++                    SEQ_LT(seq, s->data.rcv.nxt) &&
++                    SEQ_GT(seq + seglen, s->data.rcv.nxt)))
+                 bad_pkt = 1;
+         }
+     }
+@@ -2656,6 +2687,27 @@
+ 
+     if(s->state == TCP_STATE_ESTABLISHED || s->state == TCP_STATE_FIN_WAIT_1 ||
+             s->state == TCP_STATE_FIN_WAIT_2) {
++        /* Only the next byte in sequence may go into the buffer: the buffer is
++           a plain FIFO, so a segment past a lost one would be appended as if
++           it followed the data we have (stream corruption). Drop it and send a
++           duplicate ACK (the sender's fast retransmit fills the hole); cut
++           off the part of a retransmission that we already have. A FIN counts
++           as one byte here: a bare FIN past a hole is dropped too (taking it
++           would end the stream with the lost bytes missing), and one at the
++           end of a trimmed retransmission is taken below. */
++        if(sz && SEQ_LT(seq, s->data.rcv.nxt)) {
++            /* <= sz: the acceptance test above has seq + seglen > rcv.nxt */
++            buf += s->data.rcv.nxt - seq;
++            sz -= s->data.rcv.nxt - seq;
++            ++net_tcp_fix_trimmed;
++        }
++        else if(seglen && seq != s->data.rcv.nxt) {
++            ++net_tcp_fix_ooo_dropped;
++            sz = 0;
++            bad_pkt = 1;            /* and no FIN from this segment */
++            tcp_send_ack(s);
++        }
++
+         /* Next, check the data size versus our window. If its more than the
+            window, truncate the data and copy out what we can. */
+         if(sz > s->data.rcv.wnd) {
