@@ -32,6 +32,12 @@ mod sdcard;
 mod stack;
 #[cfg(feature = "pinfind")]
 mod pinfind;
+#[cfg(feature = "census")]
+mod census;
+#[cfg(all(feature = "census", feature = "pinfind"))]
+compile_error!("`census` and `pinfind` are separate firmwares; build one of them");
+#[cfg(all(feature = "census", feature = "resident"))]
+compile_error!("`census` is flashed on its own at 0x80000 (no resident); drop `resident`");
 #[cfg(feature = "resident")]
 mod resident;
 
@@ -101,8 +107,14 @@ async fn blink_stamp_mismatch(led: &mut Output<'static, embassy_atsam3::peripher
 
 #[embassy_executor::task]
 // `pinfind` never comes back from `pinfind::run`: the rest is dead code there.
-#[cfg_attr(feature = "pinfind", allow(unreachable_code, unused_variables, unused_mut))]
+#[cfg_attr(any(feature = "pinfind", feature = "census"), allow(unreachable_code, unused_variables, unused_mut))]
 async fn main_task(spawner: Spawner, p: UserPeripherals) {
+    // Pin census build: before anything touches a pin -- the PS loader below
+    // would drive nCONFIG / DCLK / DATA0 on pins not yet confirmed on 6.0.
+    // Never returns (src/census.rs).
+    #[cfg(feature = "census")]
+    census::run();
+
     // Pin-finder build: every non-PS MCU line back to input + pull-up before
     // the FPGA comes up (src/pinfind.rs).
     #[cfg(feature = "pinfind")]

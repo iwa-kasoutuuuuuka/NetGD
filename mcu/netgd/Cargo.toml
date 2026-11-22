@@ -26,6 +26,8 @@ sdfast = { path = "../../common/sdfast", optional = true }
 stackmark = { path = "../../common/stackmark", optional = true }
 # Frame decoder for the `pinfind` feature (pure, host-tested).
 pinfind = { path = "../../common/pinfind", optional = true, features = ["defmt"] }
+# Line classification for the `census` feature (pure, host-tested).
+pincensus = { path = "../../common/pincensus", optional = true, features = ["defmt"] }
 
 embassy-atsam3 = { path = "../embassy-atsam3", features = ["rt", "time-driver"] }
 # The resident boot region's pure logic. In the app: the clock constants
@@ -73,6 +75,19 @@ board-v60 = ["sam3u2e", "lazy-extents"]
 #   cargo build --release --no-default-features --features pinfind
 # Off by default; the other builds do not change. Not run on hardware.
 pinfind = ["board-v60", "dep:pinfind", "embassy-atsam3/no-board-io"]
+
+# GDEMU 6.0 pin census (docs/research/gdemu60-bringup.md 2-4). NOT a NetGD
+# firmware: the first thing to flash on an erased 6.0 board. It drives no
+# line at all -- every PIO line stays an input, only the internal pull-up is
+# switched off and on -- classifies each line (high / low / floating /
+# toggling, common/pincensus), checks the v5.5 PS-loader and button pins
+# against what an unconfigured FPGA should look like, and reports lines that
+# change while the button is pressed or the SD card goes in and out. No
+# bitstream is embedded and the FPGA is never configured; no SD, IDE, LED,
+# SMC, UART, PCK0 or HSMCI. Keep the logging on:
+#   cargo build --release --no-default-features --features census
+# Off by default; the other builds do not change. Not run on hardware.
+census = ["board-v60", "dep:pincensus", "embassy-atsam3/no-board-io"]
 
 # Read a track file that is too fragmented for the shared extent pool
 # through a small on-demand window over its cluster chain (fat.rs, `lazy_*`),
@@ -149,6 +164,10 @@ raw-sectors = []
 # that fits one staging round of a mapped track and whose sectors are all
 # Form 2 (the subheaders are read first); a read mixing Form 1 and Form 2,
 # 0x28, and unmapped tracks keep 2,048 bytes (stock's answer not recorded).
+# A read from a CDI Mode 2 track's pregap sends the zero sectors at 2,324
+# too, then the track's own sectors at their size, in one transfer (stock
+# seq 23/24 GP_XPRE2: 10 x 2,324 + 6 x 2,048 = 35,528 B). Without the
+# feature every pregap zero sector of a data track is 2,048 bytes.
 # Off by default and not run on hardware: 2,324-byte transfers, like
 # raw-sectors' 2,352, are not multiples of 2,048 (R72). gdprobe's seek test
 # hits the postgap of images 04/05.

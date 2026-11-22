@@ -9,6 +9,15 @@ prebuilt firmware `.elf`, a host flashing tool, and a prepared SD card with
 > back — the original image is not dumpable. Only do this on a board you are
 > willing to lose.
 
+> **GDEMU 6.0（前提、LOG R177 と 2026-11-22 の判断）:** 6.0 の ATSAM3U2E は
+> **ロックされている前提**で扱います。この前提での見込みは次のとおりです。
+> - SWD はおそらく**一切応答しません**（R177 では DP が無応答。`NO_TARGET`）。配線不良と区別できません。
+> - **純正ファームのバックアップは取れません。** 取れないまま進めることになります。
+> - ERASE は**今は行いません**。行うかどうか・いつ行うかは**ユーザーの判断**です。
+> - ERASE をすると、**純正ファームと純正の更新経路は二度と戻りません。** NetGD と
+>   実ピンの AG16K ビットストリームが動くまで、その基板は**使えません**（Dreamcast で何も読めない）。
+> - 6.0 で NetGD が動いた実績はまだありません。**予備の基板を 1 枚用意することを推奨**します。
+
 ---
 
 ## 1. What you need
@@ -115,9 +124,10 @@ when the board is back in the Dreamcast.
 Connect only GND, SWCLK and SWDIO. R1 and R2 are already in the signal lines,
 so direct wiring is fine.
 
-Which end of the row is pin 7 was not recorded. Before wiring, check continuity
-between the SD slot's metal shell and each end hole; the end that connects is
-pin 7. Count 6, then 5 (SWCLK), then 4 (SWDIO) from there.
+The end of the row nearest the SD card slot is pin 1, the far end pin 7 (GND)
+(checked on the owner's board, LOG R177). Before wiring, still check continuity
+between the SD slot's metal shell and the pin-7 hole. Count 6, then 5 (SWCLK),
+then 4 (SWDIO) from there.
 
 ---
 
@@ -195,8 +205,10 @@ rev 1:
 
 > **GDEMU 6.0:** use `--chip ATSAM3U2E` instead of `ATSAM3U4E` in the commands in
 > this section. The expected CHIPID is `0x281A0761`. Before flashing anything to a
-> 6.0 board, back up the stock firmware with `tools/fwbackup` (see its README),
-> because it cannot be restored otherwise.
+> 6.0 board that still runs the stock firmware, back it up with `tools/fwbackup`
+> if `check` says `UNLOCKED_2E` (see its README), because it cannot be restored
+> otherwise. A locked board cannot be backed up (LOG R177); after an ERASE follow
+> [`docs/research/gdemu60-bringup.md`](docs/research/gdemu60-bringup.md).
 
 > **Don't use `probe-rs info` as the "is it working" test.** It only ever
 > auto-detects the target from its chip registry, and it cannot auto-detect
@@ -259,6 +271,13 @@ pad next to the MCU** (it is not on any header).
 > cannot be recovered afterwards. Do not touch ERASE on a 6.0 board until you have
 > decided to give up the stock firmware. If `fwbackup` can still read the board,
 > back it up first.
+>
+> **6.0（日本語、R177・2026-11-22 の判断）:** 6.0 は**ロック済みとみなし、バックアップは不可能**です。
+> `fwbackup check` が `NO_TARGET` でも**正常な結果**です。ERASE はこの手順書の対象外で、
+> **今は行いません**（ユーザーが決めるまで触らない）。行った場合：純正ファームと純正の更新経路は
+> **永久に失われ**、NetGD と実ピンの AG16K ビットストリームが動くまで基板は使えません。
+> 6.0 の ERASE パッドの位置は未確認です（U1 の左の辺、137 番ピンの高さの横にあるパッドが
+> 候補。触らない）。予備の基板を推奨します。
 
 ### Procedure
 
@@ -292,6 +311,21 @@ empty at this point — the MCU is running nothing, which is expected. Go to §7
 
 > **GDEMU 6.0:** use `--chip ATSAM3U2E` instead of `ATSAM3U4E` (expected CHIPID
 > `0x281A0761`).
+>
+> **6.0 after ERASE（日本語）:** 手順の全体は
+> [`docs/research/gdemu60-bringup.md`](docs/research/gdemu60-bringup.md) §1-3。要点：
+> - ERASE の直後は GPNVM1 = 0 で **ROM（SAM-BA）から起動**する。GPNVM は
+>   `probe-rs write --chip ATSAM3U2E --protocol swd b32 0x400E0804 0x5A00000D` →
+>   `probe-rs read --chip ATSAM3U2E --protocol swd b32 0x400E080C 1` で読める（読むだけのコマンド）。
+>   ERASE の直後は `00000000`。
+> - **`probe-rs download` は書き込みの最後に GPNVM1 を立てる**（probe-rs 0.32.0 の
+>   `atsam3u_128` アルゴリズム）。書いた後にもう一度読んで `00000002` を確かめる。
+>   OpenOCD の手順（§7）は GPNVM1 を立てないので、6.0 では使わない。
+> - GPNVM を手で書かない。`0x5A00000B` は**セキュリティビットを立てる**語で、立てると
+>   もう一度 ERASE するしかない。
+> - 最初に書くのは NetGD ではなく、何も駆動しない `census`
+>   （`--no-default-features --features census`）。`cargo run` は使わない
+>   （`mcu/netgd/.cargo/config.toml` の runner は `ATSAM3U4E`）。
 
 Do this once per board. Re-flashing later needs no erase: NetGD does not
 set the security bit, so the debug port stays open.
@@ -304,10 +338,14 @@ set the security bit, so the debug port stays open.
 
 > **GDEMU 6.0:** use `--chip ATSAM3U2E` instead of `ATSAM3U4E` in every command
 > below. Before the first flash to a 6.0 board, back up the stock firmware with
-> `tools/fwbackup` (see its README), because it cannot be restored otherwise. The
+> `tools/fwbackup` (see its README), because it cannot be restored otherwise
+> (**in practice the 6.0 is treated as locked and cannot be backed up: LOG R177**). The
 > 6.0 uses a different FPGA (AGM AG16K, not the Cyclone II), and the board docs say
 > the 6.0 port still needs work, so do not assume the v5.5 flow below is verified
 > on 6.0.
+>
+> **6.0（日本語）:** SWD が応答しない限り、この章は 6.0 では実行できません（R177）。
+> 書き込めるのは、ERASE を行ったあとに限られます（§6 の 6.0 の注意を参照）。
 
 ```sh
 probe-rs download --chip ATSAM3U4E --protocol swd --binary-format elf netgd.elf
@@ -481,6 +519,7 @@ Note the file name is `GDEMU.CFG`, 8.3 — not `OPENGDEMU.CFG`.
 |---------|--------------|
 | Target locked / secured / not responding, on a board never flashed before | Stock firmware's security bit. Erase the chip via the ERASE pad (§6). |
 | Board goes blank after every power cycle despite a successful flash | ERASE wire still attached to the pad (§6). |
+| After ERASE the flash verifies, but the firmware never runs (no RTT, no LED) | GPNVM1 is still 0, so the chip boots the ROM's SAM-BA. `probe-rs download` sets it; OpenOCD's `flash write_image` does not. Read it as in §6 (6.0 note) and see `docs/research/gdemu60-bringup.md` §1-3. Never write `0x5A00000B` (that sets the security bit). |
 | `probe-rs` : *"firmware on the probe is outdated"* | Legacy `picoprobe.uf2` on the Pico. Flash `debugprobe.uf2` ≥ 2.2.0 (§2). |
 | No probe listed at all | udev rules not installed, or the Pico is still in BOOTSEL mode. |
 | `probe-rs info` : *"the connected chip could not automatically be determined"* | Not a fault. `info` can't auto-detect Atmel parts and ignores `--chip`. Check the link with the CHIPID read in §5 instead. |

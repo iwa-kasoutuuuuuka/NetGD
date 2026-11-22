@@ -2385,11 +2385,14 @@ async fn handle_cd_read(
     // index 1, on no track's sectors) is served as that track's: zero
     // sectors, then the track's own if it runs on (stock seq 22/23: CRCs of
     // zeros; a CDI stores its pregaps as zeros, a GDI does not store them).
+    // Every check here -- the type, the count -- is against that (next)
+    // track for a start in its pregap, whether or not the read ends in it
+    // (`track_of_start`, the predictor's rule too).
     let pregap = discimg::atapi::pregap_read(gdi.tracks(), starting_fad, count);
-    let track = match pregap {
-        Some((t, _)) => Some(t),
-        None => gdi.track_for_lba(lba),
-    };
+    let track = discimg::atapi::track_of_start(gdi.tracks(), starting_fad);
+    // The start lies before its track's index 1: a pregap start, served only
+    // by `pregap_read` (else refused below).
+    let in_pregap = track.map_or(false, |t| t.start_lba.wrapping_add(150) > starting_fad);
     // The head goes to the start of every request with a sector, whatever
     // follows (stock seq 17/21/22: refused 5/64/00 for its type, 5/21/00 from
     // a gap or the lead-out, REQ_STAT shows the start FAD), and on by the
@@ -2398,6 +2401,16 @@ async fn handle_cd_read(
     let head_start = discimg::atapi::read_head_start(starting_fad, count);
     if head_start.is_some() {
         set_last_read_fad(head_start);
+    }
+    // A start no track holds, nor its pregap (a gap, the lead-out): LBA out of
+    // range, 5/21/00 -- checked BEFORE the sector type, so a typed read there
+    // answers as the untyped rule does, not 5/64/00 by the previous track's
+    // mode. Unmeasured on stock: it follows the untyped rule.
+    if discimg::atapi::cd_read_start_outside(gdi.tracks(), starting_fad) {
+        warn!("{}: CD_READ from FAD {} outside every track", label, starting_fad);
+        clear_out_layout();
+        finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, discimg::atapi::ASC_LBA_OUT_OF_RANGE);
+        return;
     }
     if let Some(t) = track {
         if discimg::atapi::cd_read_type_mismatch(packet[1], t.mode()) {
@@ -2433,20 +2446,43 @@ async fn handle_cd_read(
     }
     // Feature `form2-sectors` (D14): a `0x20` read of a CDI's Form 2 sectors
     // (the postgap) sends their 2,324 data bytes each, as stock does.
+    //
+    // A pregap read's zero sectors go at the size stock gives them
+    // (`pregap_zero_bytes`): with this feature 2,324 on a CDI's Mode 2 track
+    // (stock seq 23/24 CDI 04), followed by the track's own sectors at
+    // theirs -- `GP_XPRE2`, 11842 x 16: 10 x 2,324 + 6 x 2,048. Without it,
+    // 2,048 there as for every data sector.
     #[cfg(feature = "form2-sectors")]
     if let Some(t) = track {
-        // A CDI Mode 2 track's pregap, wholly: Form 2 zero sectors (stock
-        // seq 23/24 CDI 04: 2,324 zero bytes each). A read on into the track
-        // mixes 2,324 and 2,048 on stock (`GP_XPRE2`), not modelled: 2,048.
+        let may = !raw_out() && discimg::atapi::cd_read_may_be_form2(packet[1], t.mode(), t.sector_size as u32);
         let form2 = match pregap {
-            Some((_, zeros)) => zeros == count,
+            // The track's own part (if any) as Form 2 only if it all is.
+            Some((_, zeros)) => zeros == count || (may && form2_request(gdi, t, t.start_lba, count - zeros)),
+            None if in_pregap => false,
+            // Relies on PREGAP_OUT not being set yet here (it is set only
+            // further down, for this request): `form2_request` sizes its
+            // check with `stage_sectors_for`, which then counts by the
+            // track's own sector size (the 5-sector cap of a 2,336-byte
+            // track), not by a pregap read's larger zero sectors.
             None => form2_request(gdi, t, lba, count),
         };
-        if !raw_out() && discimg::atapi::cd_read_may_be_form2(packet[1], t.mode(), t.sector_size as u32) && form2 {
+        if may && form2 {
             unsafe { FORM2_OUT = true };
         }
     }
-    let total = (count as usize).saturating_mul(out_sector_bytes());
+    // Zero sectors of a pregap read: as the track's own (2,048 or whole
+    // 2,352), Form 2 on a Mode 2 track with `form2-sectors`.
+    if let Some((t, _)) = pregap {
+        let raw = unsafe { RAW_OUT };
+        let form2 = cfg!(feature = "form2-sectors");
+        unsafe {
+            PREGAP_ZERO_BYTES = discimg::atapi::pregap_zero_bytes(packet[1], t.mode(), t.sector_size as u32, raw, form2);
+        }
+    }
+    let total = match pregap {
+        Some((_, zeros)) => out_offset(count, zeros),
+        None => (count as usize).saturating_mul(out_sector_bytes()),
+    };
     // No upper bound on the request size any more: stream_from_sd stages the
     // transfer a chunk at a time rather than buffering it whole, so a request
     // is limited by the disc, not by our RAM. Games ask for far more than the
@@ -2460,9 +2496,10 @@ async fn handle_cd_read(
     let available = track_sectors.saturating_sub(lba.saturating_sub(
         track.map(|t| t.start_lba).unwrap_or(0),
     ));
-    // A pregap request is checked by `pregap_read` already. Never take a
-    // start below FAD 150 for LBA 0.
-    if total == 0 || (pregap.is_none() && (count > available || starting_fad < 150)) {
+    // A pregap request is checked by `pregap_read` already; one it does not
+    // serve (it runs past the track's end) is refused. Never take a start
+    // below FAD 150 for LBA 0.
+    if total == 0 || (pregap.is_none() && (in_pregap || count > available || starting_fad < 150)) {
         warn!(
             "{}: CD_READ rejected: {} sectors from LBA {} ({} available in track)",
             label, count, lba, available
@@ -2506,7 +2543,8 @@ async fn handle_cd_read(
     // Whole sectors that reached the host, in the layout just sent (2,048,
     // 2,352 or 2,324 B), before `clear_out_layout` below.
     if head_start.is_some() {
-        let done = STREAM_DELIVERED.load(core::sync::atomic::Ordering::Relaxed) as usize / out_sector_bytes();
+        let delivered = STREAM_DELIVERED.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        let done = out_sectors(delivered);
         set_last_read_fad(Some(discimg::atapi::read_end_fad(starting_fad, (done as u32).min(count))));
     }
     if unsafe { PREGAP_OUT } {
@@ -2636,12 +2674,48 @@ static mut FORM2_OUT: bool = false;
 static mut PREGAP_OUT: bool = false;
 static mut PREGAP_ZEROS: u32 = 0;
 static mut PREGAP_BASE: u32 = 0;
+/// Bytes each of those zero sectors takes on the bus
+/// (`discimg::atapi::pregap_zero_bytes`): [`out_sector_bytes`] unless
+/// feature `form2-sectors` sends a Mode 2 track's pregap as Form 2 (2,324)
+/// ahead of the track's 2,048-byte sectors -- one transfer of mixed sizes.
+static mut PREGAP_ZERO_BYTES: usize = 2048;
+
+/// Byte offset of sector `i` (from the request's first) in the transfer in
+/// flight: `i` x [`out_sector_bytes`], or for a pregap read
+/// `discimg::atapi::pregap_out_offset` with its zero sectors' size.
+fn out_offset(i: u32, zeros: u32) -> usize {
+    let osz = out_sector_bytes();
+    if zeros != 0 {
+        discimg::atapi::pregap_out_offset(i, zeros, unsafe { PREGAP_ZERO_BYTES }, osz)
+    } else {
+        i as usize * osz
+    }
+}
+
+/// Bytes of `n` sectors from sector `first` of the transfer in flight.
+fn out_bytes(first: u32, n: u32) -> usize {
+    let z = pregap_zeros();
+    out_offset(first + n, z) - out_offset(first, z)
+}
+
+/// Whole sectors in the first `bytes` of the transfer in flight.
+fn out_sectors(bytes: usize) -> u32 {
+    let z = pregap_zeros();
+    discimg::atapi::pregap_out_sectors(bytes, z, unsafe { PREGAP_ZERO_BYTES }, out_sector_bytes())
+}
+
+/// The zero sectors of the pregap read in flight, 0 for any other.
+#[inline(always)]
+fn pregap_zeros() -> u32 {
+    if unsafe { PREGAP_OUT } { unsafe { PREGAP_ZEROS } } else { 0 }
+}
 
 /// Back to 2,048-byte payloads once a request is over.
 fn clear_out_layout() {
     unsafe {
         RAW_OUT = false;
         FORM2_OUT = false;
+        PREGAP_ZERO_BYTES = 2048;
     }
 }
 
@@ -2718,7 +2792,13 @@ pub fn loader_scratch() -> &'static mut [u8] {
 /// up to a block of lead-in) and compacted in place, so fewer fit than the
 /// 2048-byte payloads they turn into: 5 instead of 7.
 fn stage_sectors_for(gdi: &crate::gdi::Gdi, lba: u32) -> u32 {
-    let payload_max = (CD_READ_BUF_BYTES / out_sector_bytes()) as u32;
+    // A pregap read's zero sectors may be larger than the track's (Form 2).
+    let osz = if unsafe { PREGAP_OUT } {
+        out_sector_bytes().max(unsafe { PREGAP_ZERO_BYTES })
+    } else {
+        out_sector_bytes()
+    };
+    let payload_max = (CD_READ_BUF_BYTES / osz) as u32;
     match gdi.track_for_lba(lba) {
         Some(t) if t.is_mapped() && t.sector_size as usize > 2048 => {
             let sec = t.sector_size as usize;
@@ -2939,7 +3019,6 @@ async fn stage_pregap_chunk(gdi: &'static crate::gdi::Gdi, lba: u32, count: u32)
     let (zeros, base) = unsafe { (PREGAP_ZEROS, PREGAP_BASE) };
     let first = lba - base;
     let z = zeros.saturating_sub(first).min(count);
-    let sec = out_sector_bytes();
     if z < count {
         let data_lba = base + (first + z - zeros);
         if fill_cd_read_buf_from_sd(gdi, data_lba, count - z).await.is_err() {
@@ -2948,8 +3027,9 @@ async fn stage_pregap_chunk(gdi: &'static crate::gdi::Gdi, lba: u32, count: u32)
     }
     invalidate_cd_read_cache();
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(CD_READ_BUF) };
-    let zb = z as usize * sec;
-    let n = (count as usize * sec).min(CD_READ_BUF_BYTES);
+    // Zero sectors at their size, then the track's (`out_bytes`).
+    let zb = out_bytes(first, z);
+    let n = out_bytes(first, count).min(CD_READ_BUF_BYTES);
     if zb < n {
         buf.copy_within(0..n - zb, zb);
     }
@@ -3487,9 +3567,9 @@ async fn stream_from_sd(
     }
 
     #[cfg(feature = "dma-pattern")]
-    fill_pattern(0, (first as usize) * out_sector_bytes());
+    fill_pattern(0, out_bytes(0, first));
 
-    let staged_bytes = (first as usize) * out_sector_bytes();
+    let staged_bytes = out_bytes(0, first);
     let buf = unsafe { &mut CD_READ_BUF[..staged_bytes] };
     let mut hash = fnv1a(FNV_INIT, &buf[..]);
     info!("  staged {} of {} bytes; arming DMA", staged_bytes, total_bytes);
@@ -3586,9 +3666,9 @@ async fn stream_from_sd(
             break;
         }
         #[cfg(feature = "dma-pattern")]
-        fill_pattern((sectors_done as usize) * out_sector_bytes(), (this as usize) * out_sector_bytes());
+        fill_pattern(out_offset(sectors_done, pregap_zeros()), out_bytes(sectors_done, this));
 
-        let chunk = unsafe { &CD_READ_BUF[..(this as usize) * out_sector_bytes()] };
+        let chunk = unsafe { &CD_READ_BUF[..out_bytes(sectors_done, this)] };
         hash = fnv1a(hash, chunk);
         let n = push_buf_to_fifo(dev, chunk).await;
         pushed_bytes += n;
@@ -3771,8 +3851,12 @@ async fn stream_pio_from_sd(
     let mut hash = FNV_INIT;
     let mut sent = 0usize;
     let mut blocks = 0u32;
+    // The staged chunk: its first sector, sector count and byte range in the
+    // transfer (sectors may differ in size, see `out_bytes`).
     let mut chunk_start = 0u32;
     let mut chunk_sectors = 0u32;
+    let mut chunk_byte = 0usize;
+    let mut chunk_len = 0usize;
     let mut ok = true;
     let mut sd_failed = false;
 
@@ -3782,18 +3866,19 @@ async fn stream_pio_from_sd(
     while sent < total_bytes {
         // Stage the chunk holding the next block. Blocks are cut at chunk
         // boundaries, so a block always lies inside the staged window.
-        let osz = out_sector_bytes();
-        let sector = (sent / osz) as u32;
-        if chunk_sectors == 0 || sector >= chunk_start + chunk_sectors {
+        if chunk_sectors == 0 || sent >= chunk_byte + chunk_len {
+            let sector = chunk_start + chunk_sectors;
             chunk_start = sector;
             chunk_sectors = (count - sector).min(stage_sectors);
+            chunk_byte = sent;
+            chunk_len = out_bytes(sector, chunk_sectors);
             if !stage_chunk(gdi, start_lba + sector, chunk_sectors).await {
                 warn!("stream_pio_from_sd: SD read failed at sector {}", sector);
                 sd_failed = true;
                 ok = false;
                 break;
             }
-            let chunk = unsafe { &CD_READ_BUF[..(chunk_sectors as usize) * osz] };
+            let chunk = unsafe { &CD_READ_BUF[..chunk_len] };
             hash = fnv1a(hash, chunk);
         }
         // Before announcing another block: a reset, or a new command to this
@@ -3804,10 +3889,10 @@ async fn stream_pio_from_sd(
             ok = false;
             break;
         }
-        let off = sent - (chunk_start as usize) * osz;
+        let off = sent - chunk_byte;
         let block = (total_bytes - sent)
             .min(limit)
-            .min((chunk_sectors as usize) * osz - off)
+            .min(chunk_len - off)
             & !1;
         let data = unsafe { &CD_READ_BUF[off..off + block] };
 

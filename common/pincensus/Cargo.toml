@@ -1,0 +1,13 @@
+[package]
+name = "pincensus"
+description = "Pin census for a GDEMU 6.0 board after ERASE: classify every SAM3U PIO line from input samples taken with the internal pull-up on and off, without ever driving a line. Pure logic, host-tested; used by the netgd `census` firmware"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Let the firmware log these types. Off by default so the host tests do not
+# need defmt.
+defmt = ["dep:defmt"]
+
+[dependencies]
+defmt = { version = "0.3", optional = true }

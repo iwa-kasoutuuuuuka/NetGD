@@ -15,6 +15,16 @@ GDEMU 6.0 (クローン) の MCU (ATSAM3U2E、フラッシュ 128 KB) の純正�
 - NetGD は dump の中身を使いません (流用しません)。目的は「純正に戻せる保険」だけです。
 - Claude に送るのは **`check` の出力だけ**です。dump ファイルは送らないでください。
 
+## 6.0 の現状（LOG R177、2026-11-22 の判断）
+
+**6.0 の MCU はロック済みとみなします。純正ファームのバックアップはできない前提です。**
+実機（Pico + debugprobe v2.3.1、probe-rs 0.32.0、正しい配線・電源）では DP がまったく応答せず、`check` は `NO_TARGET`（終了コード 12）でした（R177）。
+
+- **ロックされた 6.0 では `NO_TARGET` が想定どおりの結果**です。配線不良とは区別できませんが、すでに導通・電圧は確認済みです。
+- **再試行を繰り返さないでください。** 周波数や電源の順番を変えて何度も `check` を回しても結果は変わりません。
+- **ERASE には触りません。** 行うかどうかはユーザーの判断で、今は行いません。ERASE すると純正ファームと純正の更新経路が永久に失われます（INSTALL.md §6）。
+- 6.0 の別個体が `UNLOCKED_2E` になったときだけ、下の手順で `dump` に進めます。
+
 ## 事前準備
 
 - Raspberry Pi Pico に debugprobe (**2.2.3 以上**、CMSIS-DAP v2) が入っていること。
@@ -75,7 +85,7 @@ python fwbackup.py inspect <file> --strings    # 自分の解析用 (共有し�
 | `UNLOCKED_2E` | 0 | CIDR が `0x281A0761`。読める。`dump` でバックアップを取る。 |
 | `UNLOCKED_OTHER` | 10 | 別の SAM3U (例: 4E = `0x28100961`) か別の MCU。`dump` は拒否。出力を Claude に送る。 |
 | `LOCKED_OR_NO_ACCESS` | 11 | SWD の DP は見えるが読めない = セキュリティビット (GPNVM0) の可能性大。**ここで止める。** |
-| `NO_TARGET` | 12 | 何も応答しない。Dreamcast の電源、GND/SWDIO/SWCLK、JTAGSEL (ローであること)、他ソフトがプローブを掴んでいないか。**配線も電源も確実に正しいのにこの結果なら、セキュリティビットで SWD 自体が無効になっている可能性もある (配線不良と区別できない)。ERASE には触らず、出力を Claude に送る。** |
+| `NO_TARGET` | 12 | **ロックされた 6.0 では想定どおりの結果（R177）。再試行を繰り返さない。** 何も応答しない。Dreamcast の電源、GND/SWDIO/SWCLK、JTAGSEL (ローであること)、他ソフトがプローブを掴んでいないか。**配線も電源も確実に正しいのにこの結果なら、セキュリティビットで SWD 自体が無効になっている可能性もある (配線不良と区別できない)。ERASE には触らず、出力を Claude に送る。** |
 | `NO_PROBE` / `NO_PROBE_RS` / `MULTIPLE_PROBES` / `BAD_CHIP_NAME` | 2 | プローブ未検出 (すべて `(inaccessible)` の場合を含む。WinUSB ドライバを確認)、probe-rs 無し、プローブ複数 (`--probe` 指定)、チップ名が古い probe-rs に無い。 |
 | `OLD_PROBE_RS` | 2 | probe-rs が `unexpected argument` 等でオプションを拒否した。0.32.0 を入れる。 |
 | `UNREVIEWED_PROBE_RS` | 2 | 0.32.0 以外。安全確認済みなのは 0.32.0 だけ。ちょうど 0.32.0 を入れる。 |
@@ -87,6 +97,8 @@ CIDR が ATSAM3U2E と同系列 (`0x281A0760`〜`0x281A077F`) で `0x281A0761` �
 データシート 8.2.3.5 / 20.4.3.6: セキュリティビット (GPNVM bit 0) が立っていると、ICE (JTAG/SWD) からのフラッシュ・SRAM・コアレジスタ・内部周辺へのアクセスは**すべて禁止**です。
 解除は ERASE ピンでフラッシュ全体を消すしかなく、**純正ファームは二度と戻りません。** 純正を捨てると決めるまで ERASE には触らないでください。
 このツールは ERASE を一切行いません。`check` の出力を Claude に送ってください。
+ユーザーが ERASE を決めた場合の、その後の手順（SWD の確認・GPNVM・最初に書くファーム）は `docs/research/gdemu60-bringup.md`。
+ERASE の後の `check` は、CHIPID を読むだけの確認として使える（`UNLOCKED_2E` になるはず）。消えた後のフラッシュは全部 0xFF なので `dump` は要らない。
 
 ## 読み取り専用であること (安全策)
 
@@ -94,7 +106,7 @@ CIDR が ATSAM3U2E と同系列 (`0x281A0760`〜`0x281A077F`) で `0x281A0761` �
 次は実行前に拒否されます (ユニットテストあり): `download` `erase` `write` `run` `reset` `attach` `gdb` `serve` など他の全サブコマンド、`--connect-under-reset`、`--allow-erase-all`、`--cycle-power`、`-o/--output`、`--format`、`--chip-description-path`、SWD 以外のプロトコル、フラッシュ範囲と CHIPID レジスタ (`0x400E0740`〜`0x400E0747`) 以外へのアドレスの `read`。
 さらに、環境変数 `PROBE_RS_*` (`PROBE_RS_CONNECT_UNDER_RESET` など clap が環境変数から読むもの) は子プロセスに渡しません。
 probe-rs は `.probe-rs.{toml,json,yaml,yml}` をカレント・実行ファイルのフォルダ・ホームから読み、`[presets.default]` で黙ってオプションを足せます (環境変数の除去では防げない)。そのため、これらのファイルが 1 つでもあると**実行を拒否**し、さらに probe-rs は毎回新しい空の一時フォルダをカレントにして起動します。
-probe-rs の `download` / `erase` / `reset` などを**手で実行してはいけません**。`SAM3U.yaml` には `atsam3u_gpnvm` というフラッシュアルゴリズムまで入っており、GPNVM (セキュリティビット) を書き換えられてしまいます。
+**純正ファームが残っている間は**、probe-rs の `download` / `erase` / `reset` などを**手で実行してはいけません**（ERASE をした後の基板は `docs/research/gdemu60-bringup.md` §1-3 に従う）。`SAM3U.yaml` には `atsam3u_gpnvm` というフラッシュアルゴリズムまで入っており、GPNVM (セキュリティビット) を書き換えられてしまいます。
 `dump` は `<名前>.bin.part` に排他的に作って flush + fsync し、読み戻して SHA-256 を照合してから最終名へリネームします (既存ファイルは上書きされず、不一致なら `.part` を消して終了コード 3)。
 `dump` の `--chunk` は 4 の倍数で 256〜65536 (範囲外は終了コード 2)。
 **バックアップに含まれないもの**: GPNVM ビット、ユニーク ID、ユーザーシグネチャ (読むには EEFC コマンドが必要で、意図的に行っていません)。フラッシュの内容だけです。

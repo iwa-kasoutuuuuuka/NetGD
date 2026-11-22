@@ -177,6 +177,12 @@ if want tools; then
         else
             skip tools-netgd-expect "cargo not found"
         fi
+        # g2bench host tests (gcc + python; not in the CI matrix)
+        if command -v gcc >/dev/null 2>&1; then
+            step tools-g2bench tools/g2bench "TMPDIR='$LOGDIR' sh tests/run_tests.sh"
+        else
+            skip tools-g2bench "gcc not found"
+        fi
         # not in the CI matrix; gen_msgs.py --check ignores CRLF vs LF, so it is safe on an autocrlf checkout.
         if command -v gcc >/dev/null 2>&1; then
             step tools-netgd-fwupd "$WT/tools/netgd-fwupd" "TMPDIR='$LOGDIR' sh tests/run_tests.sh"

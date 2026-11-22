@@ -698,27 +698,26 @@ fn cut(data: &[u8], alloc: usize) -> Res {
 
 /// What the runner prints for the CD_READ at `fad` (`handle_cd_read`).
 fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>) {
-    // From a track's pregap (`atapi::pregap_read`): zero sectors, then the track's own if the request runs on
-    // (2,352 B a sector for an audio track, else 2,048 B, also with --form2-sectors). Else never a start below 150.
+    // From a track's pregap (`atapi::pregap_read`): zero sectors, then the track's own if the request runs on.
+    // The zero sectors take `atapi::pregap_zero_bytes` (2,352 B on an audio track, 2,324 on a CDI Mode 2 track
+    // with --form2-sectors, else 2,048), the track's own sectors their usual size (2,324 only if all Form 2).
+    // Else never a start below 150.
     if let Some((t, zeros)) = atapi::pregap_read(&d.tracks, fad, count) {
         if atapi::cd_read_type_mismatch(flags, t.mode) || atapi::cd_read_unservable(t.mode, t.sector_size as u32) {
             return (Res::illegal(), None);
         }
         let raw = atapi::cd_read_raw_out(flags, t.mode, t.sector_size as u32, false);
-        // Feature `form2-sectors`: a Mode 2 CDI track's pregap, wholly, as Form 2 zero sectors.
-        let form2 = d.form2_sectors && zeros == count && atapi::cd_read_may_be_form2(flags, t.mode, t.sector_size as u32);
-        let ssz = if raw {
-            atapi::RAW_SECTOR_BYTES
-        } else if form2 {
-            atapi::FORM2_SECTOR_BYTES
-        } else {
-            2048
-        };
+        let ssz = atapi::pregap_zero_bytes(flags, t.mode, t.sector_size as u32, raw, d.form2_sectors);
         let mut data = vec![0u8; ssz * zeros as usize];
         let rest = count - zeros;
         if rest > 0 {
             let tf = t.start_lba + FAD_OFFSET;
-            match if raw { d.cd_read_raw_n(tf, rest) } else { d.cd_read(tf, rest) } {
+            let form2 = if !raw && d.form2_sectors && atapi::cd_read_may_be_form2(flags, t.mode, t.sector_size as u32) {
+                d.cd_read_form2(tf, rest)
+            } else {
+                None
+            };
+            match form2.or_else(|| if raw { d.cd_read_raw_n(tf, rest) } else { d.cd_read(tf, rest) }) {
                 Some(m) => data.extend_from_slice(&m),
                 None => return (Res::illegal(), None),
             }
@@ -728,11 +727,11 @@ fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>)
     if fad < FAD_OFFSET {
         return (Res::illegal(), None);
     }
-    // handle_cd_read: the expected sector type is checked first, by the
-    // track's mode (D8, D9, R144).
-    let lba = fad.saturating_sub(FAD_OFFSET);
-    if let Some(t) = atapi::track_for_lba(&d.tracks, lba) {
-        if atapi::cd_read_type_mismatch(flags, t.mode) {
+    // handle_cd_read: the expected sector type is checked first, by the start's track (`atapi::track_of_start`:
+    // the next track for a start in its pregap; D8, D9, R144). A pregap start `pregap_read` does not serve (it
+    // runs past the track's end) is refused.
+    if let Some(t) = atapi::track_of_start(&d.tracks, fad) {
+        if atapi::cd_read_type_mismatch(flags, t.mode) || t.start_lba + FAD_OFFSET > fad {
             return (Res::illegal(), None);
         }
         // An audio track not stored 2,352 bytes a sector: ILLEGAL REQUEST.
@@ -960,9 +959,8 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) -> HeadT
                     data = Some(raw);
                 }
             }
-            let lba = ip.saturating_sub(FAD_OFFSET);
-            let mismatch = atapi::track_for_lba(&d.tracks, lba)
-                .map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode));
+            let mismatch = !atapi::cd_read_start_outside(&d.tracks, ip)
+                && atapi::track_of_start(&d.tracks, ip).map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode));
             let (ssz, crc, sense) = match &data {
                 Some(dd) => (dd.len().to_string(), format!("{:08x}", crc32(dd)), "none"),
                 None if mismatch => ("-".to_string(), "-".to_string(), "5/64/00"), // illegal mode for this track
@@ -1024,15 +1022,16 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) -> HeadT
 }
 
 /// The sense gdprobe reads after a refused CD_READ, as `handle_cd_read` sets it: 5/64/00 for a sector type that
-/// does not fit the track (by the open-ended `track_for_lba`, checked first), 5/21/00 for a start no track holds
-/// (`atapi::cd_read_start_outside`), else 5/00/00 (past the track's end, an audio track not stored as whole sectors).
+/// does not fit the start's track (`atapi::track_of_start`: the next track for a start in its pregap, checked
+/// first), 5/21/00 for a start no track holds (`atapi::cd_read_start_outside`), else 5/00/00 (past the track's end,
+/// an audio track not stored as whole sectors).
 fn refusal_sense(d: &Disc, flags: u8, fad: u32) -> &'static str {
-    let lba = fad.saturating_sub(FAD_OFFSET);
-    let t = atapi::pregap_read(&d.tracks, fad, 1).map(|p| p.0).or_else(|| atapi::track_for_lba(&d.tracks, lba));
-    if t.map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode)) {
-        "5/64/00"
-    } else if atapi::cd_read_start_outside(&d.tracks, fad) {
+    let t = atapi::track_of_start(&d.tracks, fad);
+    // The range check first: a typed read from a gap is 5/21/00 like an untyped one (unmeasured on stock).
+    if atapi::cd_read_start_outside(&d.tracks, fad) {
         "5/21/00"
+    } else if t.map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode)) {
+        "5/64/00"
     } else {
         "5/00/00"
     }
@@ -1128,7 +1127,11 @@ impl HeadProbe<'_> {
         let c = cdb_read(flags, fad, count);
         let (r, data) = read_res(d, flags, fad, count);
         let (ssz, sense) = match &data {
-            Some(dd) if r.ok && !dd.is_empty() => ((dd.len() / count as usize).to_string(), "none"),
+            // gdprobe prints the sector size only when the bytes divide by the count (`GP_XPRE2` on stock:
+            // 10 x 2,324 + 6 x 2,048 -> `ssz=-`).
+            Some(dd) if r.ok && !dd.is_empty() && dd.len() % count as usize == 0 => {
+                ((dd.len() / count as usize).to_string(), "none")
+            }
             _ if r.ok => ("-".to_string(), "none"),
             _ => ("-".to_string(), refusal_sense(d, flags, fad)),
         };

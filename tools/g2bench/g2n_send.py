@@ -26,6 +26,10 @@ BLOCK = 65536
 WORDS = BLOCK // 4
 TCP_PORT = ngtp.DEFAULT_PORT
 UDP_PORT = 20040
+MAX_WANT = 8 * 1024 * 1024      # one WANT: far above anything g2netbench asks for (it asks for <= 64 KiB steps)
+MAX_UDP_COUNT = 1000000
+MAX_UDP_SIZE = 1472             # one Ethernet frame's UDP payload
+MAX_UDP_PPS = 1000000
 
 
 def _base():
@@ -66,6 +70,8 @@ class Source(object):
 
     def read(self, idx, off, n):
         crc, done = self.crc.get(idx, (0, 0))
+        if not (0 <= n <= MAX_WANT and 0 <= off < (1 << 40)):
+            raise ngtp.NgtpError("WANT out of range: idx %d off %d len %d" % (idx, off, n))
         data = gen_range(off, n)
         if off == done:
             self.crc[idx] = (zlib.crc32(data, crc) & 0xFFFFFFFF, done + len(data))
@@ -147,15 +153,30 @@ def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print):
     fout.write("pc_time=%s\npc_partial=1\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
     fout.flush()
     log("[g2n_send] result file (written as lines arrive): %s" % path)
+    try:
+        return _run(cli, fout, src, lines, host, path, udp_port, log)
+    finally:
+        fout.close()            # also when a failure escapes before the normal close (close() twice is harmless)
+        cli.close()
+
+
+def _run(cli, fout, src, lines, host, path, udp_port, log):
     with cli:
         info = cli.hello(0)
         log("[g2n_send] HELLO_OK app=%s max_data=%d" % (info.app, info.max_data))
 
         def on_line(text, throttled):
             if text.startswith("G2N-UDP go"):
-                kv = dict(w.split("=") for w in text.split()[2:] if "=" in w)
-                udp_burst(host, udp_port, int(kv["pass"]), int(kv["count"]), int(kv["size"]), int(kv["pps"]), log)
-                lines.append("u%s_pc_sent=%s" % (kv["pass"], kv["count"]))
+                try:
+                    kv = dict(w.split("=", 1) for w in text.split()[2:] if "=" in w)
+                    pass_no, count, size, pps = (int(kv[k]) for k in ("pass", "count", "size", "pps"))
+                except (KeyError, ValueError):
+                    raise ngtp.NgtpError("bad UDP go line from the Dreamcast: %r" % text)
+                if not (0 <= pass_no <= 0xFFFF and 0 <= count <= MAX_UDP_COUNT and 12 <= size <= MAX_UDP_SIZE
+                        and 0 <= pps <= MAX_UDP_PPS):
+                    raise ngtp.NgtpError("UDP go line out of range: %r" % text)
+                udp_burst(host, udp_port, pass_no, count, size, pps, log)
+                lines.append("u%d_pc_sent=%d" % (pass_no, count))
                 return
             lines.append(text)
             log("[g2n_send] DC: " + text)

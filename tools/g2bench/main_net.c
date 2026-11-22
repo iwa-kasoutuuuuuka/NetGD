@@ -354,9 +354,10 @@ static int run_udp(int ufd, unsigned n, unsigned count, unsigned size, unsigned 
             thd_pass();
             continue;
         }
-        tidle = t;
         uint8_t type; uint16_t pass; uint32_t seq;
-        if (g2n_udp_parse(pkt, (uint32_t)r, &type, &pass, &seq) != 0 || pass != n) continue;
+        if (g2n_udp_parse(pkt, (uint32_t)r, &type, &pass, &seq) != 0) continue;   /* stray traffic does not keep the pass alive */
+        tidle = t;
+        if (pass != n) continue;
         pkts_seen++;
         if (type == G2N_U_END) { ended = 1; break; }
         if (!tfirst) tfirst = t;
@@ -389,7 +390,7 @@ static void ip_str(char *out, size_t n)
                  net_default_dev->ip_addr[2], net_default_dev->ip_addr[3]);
 }
 
-static int g_net_rc, g_net_done;
+static volatile int g_net_rc, g_net_done, g_net_started;
 static void *netinit_thd(void *arg) { (void)arg; g_net_rc = net_init(0); g_net_done = 1; return NULL; }
 
 static int g_dcls;                         /* fs_dclsocket is up: shut it down at the end (sends DC00) */
@@ -428,7 +429,9 @@ static int bring_up(void)
     stage("net_init (no DHCP)");
     say("net_init ... (link up wait, <= %d s)", NET_INIT_MS / 1000);
     uint64_t t0 = timer_ms_gettime64();
+    g_net_started = 1;
     kthread_t *th = thd_create(0, netinit_thd, NULL);
+    if (!th) g_net_started = 0;
     while (th && !g_net_done && timer_ms_gettime64() - t0 < NET_INIT_MS) thd_sleep(100);
     if (!th || !g_net_done) { say("net_init STUCK after %d s (BBA / link?)", NET_INIT_MS / 1000); return -1; }
     say("net_init rc=%d in %u ms, default dev %s", g_net_rc, (unsigned)(timer_ms_gettime64() - t0),
@@ -473,6 +476,9 @@ static int bring_up(void)
 static void shutdown_net(void)
 {
     if (g_dcls) { fs_dclsocket_shutdown(); g_dcls = 0; }   /* DC00: dc-tool-ip ends, dc_auto sees the run finished */
+    /* net_init() may still be running in its thread (the STUCK path of bring_up): shutting the stack down under it
+     * is worse than leaving it, the program is about to end anyway. */
+    if (g_net_started && !g_net_done) { say("net_shutdown skipped: net_init thread still running"); return; }
     net_shutdown();
 }
 
