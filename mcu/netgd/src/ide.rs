@@ -778,7 +778,7 @@ pub async fn ide_task(
     // A boot mount that came up empty (GDEMU.CFG `image=` at an empty folder,
     // no folder 01) leaves the card the firmware's, like the empty-folder case
     // of a switch (D12): the button and `52 81` may step from here. Without
-    // this only `52 81` worked (R136). Nothing changes when the mount worked.
+    // this only `52 81` worked (R139). Nothing changes when the mount worked.
     EMPTY_SLOT.store(gdi_ref().is_none(), core::sync::atomic::Ordering::Relaxed);
 
     // Assert the mounted disc's format before serving anything. The FPGA's
@@ -1651,7 +1651,7 @@ async fn handle_packet(
     // below, but an expiring window raises the new medium's UNIT ATTENTION
     // here, before it is looked at.
     // The sense readers are the exception: they report the last CHECK's sense,
-    // so the window neither advances nor closes inside them (R136).
+    // so the window neither advances nor closes inside them (R139).
     let not_ready = if discimg::atapi::advances_swap_window(opcode) {
         drive_not_ready(dev, state)
     } else {
@@ -2627,7 +2627,7 @@ async fn handle_image_ctl(
 ///                either the drive goes empty (no medium) and the selection
 ///                stays as it was. A card that cannot be read during that
 ///                lookup is not "no folder": ILLEGAL REQUEST, the disc stays.
-///                (R136) A missing number past 999 is ILLEGAL
+///                (R139) A missing number past 999 is ILLEGAL
 ///                REQUEST and leaves the current media untouched (stock: not
 ///                probed). A folder with nothing to mount (no image, or one
 ///                that fails to parse) is accepted like stock does (D12):
@@ -2680,7 +2680,7 @@ fn stage_folder(n: Option<u16>, dir: Option<discimg::slot::Step>) -> bool {
                 Ok::<bool, ()>(found.is_some())
             });
             // A card read error is not "no such folder": refuse and keep the
-            // disc, as before R132 (R136).
+            // disc, as before R132 (R139).
             let Ok(target) = target else {
                 warn!("GDEMU mount: the card could not be read looking for {}", n);
                 return false;

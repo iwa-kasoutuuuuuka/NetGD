@@ -626,7 +626,7 @@ pub fn load_default(num_blocks: u32) -> Result<Gdi, GdiError> {
 /// Returns whether the card could be read: `false` for a volume, root or
 /// directory read that failed (`f` may then have seen only some of the
 /// folders). A caller that must tell "no such folder" from "could not look"
-/// checks it (R136).
+/// checks it (R139).
 fn for_each_slot<F: FnMut(u16, &embedded_sdmmc::DirEntry)>(num_blocks: u32, mut f: F) -> bool {
     let dev = HsmciBlockDevice::new();
     dev.set_num_blocks(num_blocks);
@@ -647,7 +647,7 @@ fn for_each_slot<F: FnMut(u16, &embedded_sdmmc::DirEntry)>(num_blocks: u32, mut 
 /// The root folder numbered `n`, under the name `load_by_name` takes.
 /// With several folders of the same number (`01` and `001`) the first on the
 /// card wins. `Err` = the card could not be read, which is not the same as
-/// `Ok(None)`, no such folder (R136).
+/// `Ok(None)`, no such folder (R139).
 pub fn folder_lookup(num_blocks: u32, n: u16) -> Result<Option<String<MAX_NAME_CHARS>>, ()> {
     let mut found: Option<String<MAX_NAME_CHARS>> = None;
     let read = for_each_slot(num_blocks, |num, entry| {

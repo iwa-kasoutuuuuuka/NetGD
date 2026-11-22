@@ -76,7 +76,7 @@ pub fn mount_target<E: FnMut(u16) -> bool>(n: u16, mut exists: E) -> Target {
 /// [`mount_target`] for a lookup that can fail (an SD read error): the first
 /// error is returned as it is and nothing further is asked. A failed lookup is
 /// not "no such folder" -- the caller refuses the switch and keeps the mounted
-/// disc, instead of falling back to 01 or emptying the drive (R136).
+/// disc, instead of falling back to 01 or emptying the drive (R139).
 pub fn mount_target_checked<Er, E: FnMut(u16) -> Result<bool, Er>>(
     n: u16,
     mut exists: E,

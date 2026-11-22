@@ -218,7 +218,7 @@ fn numbers_outside_the_fallback_range() {
     assert_eq!(target_on(0, &[1], &mut 0), Target::Refused);
 }
 
-/// R136: a card read error during the lookup is not "no such folder". It is
+/// R139: a card read error during the lookup is not "no such folder". It is
 /// passed up, so the caller refuses the switch and keeps the disc (before
 /// R128 a failed lookup refused; as `NoMedium` it unmounted the current disc
 /// on a transient SD error).
