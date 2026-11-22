@@ -2471,6 +2471,29 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 残り：io.asf と実際のシリコンの一致はロジアナでしか確かめられない、alta_osc の周波数（T ≥ 20 µs は 51 MHz 以下のときだけ）、`early_done` の方針、README §0 の人の作業（基板の外での給電の練習、ロックされていない純正ファームのバックアップ、PS ピン・MSEL1・LED の導通）。
 - 関連：R142、R143、R145、R158。
 
+### R163 NetGD に純正の DEVICE RESET と同じフォルダへの再切替を入れた（R159〜R161）・FPGA のスロット 32 / err_lo（Opus・Sonnet）
+
+- `feat/fpga-regs`（Sonnet、`db23bad6`・`dcc499a1`、未取り込み）：新しい MCU のスロット 32（lba_low = SECNR だけを書く。読むと上位バイトが 0xA5）で R150 の読み→書きの隙間を解消。ファームは起動後に一度だけ調べる（スロット 12 = 0xC0DE・スロット 32 の上位 0xA5・下位がスロット 6 と同じ、さらに書いて読み戻して一致したときだけ使う。結果は info! で 1 回記録）。古いビットストリームでは従来の読み→書き。ERROR のビット 0・1（`err_lo`）を保持してホストに見せる（PACKET の書き込みとリセットで消える）。シミュレーション（test.py 43・test_top.py 6 ほか）と AG16K の Supra ビルド（ロジック 14 %、48 MHz 系 Fmax 92 MHz、余裕 +3.2 ns）が通過。Fable のレビュー：古いビットストリームの未使用スロットは 0 を返し、7 ビットの番地は全部デコードされるのでスロット 0 に化けない。ただし A6 を初めて使うので、基板で A6 が切れているとスロット 32 がスロット 0 に化ける → 上の厳しい確認を追加。Cyclone II（v5.5）のビットストリームは Quartus が無いので作り直せない。
+- `fix/audio-cdi-format`（Sonnet、`755a6658`、未取り込み）：`fix/r155-stock` の正しい部分だけ（音声だけの CDI = 0x10）。予測の `--devreset` は NetGD が実際に出す値を書く。
+- `fix/r159-devreset`（Opus、`539627c8`、`fix/audio-cdi-format` に `feat/fpga-regs` を取り込み、未取り込み）：
+  - DEVICE RESET は窓の有無に関係なく「再検出」（`WindowKind::Redetect`）：SECNR はすぐ 0x00、detect_time 後に最終の値、status 0x00・ERROR 0x01・IRR 1 は次のコマンドまで、そのあと媒体があれば UA、CD-DA を止めてヘッドを戻す。書き込みセッション中はしない。
+  - 同じフォルダへの再切替（`52 82 n`・`52 81`）は何もしない。
+  - 予測に `--reswitch`・`--devreset-only`・`--old-bitstream` を追加。記録 15〜18 の DEVICE RESET・RS_・DR_ の行はすべて一致。
+  - 残りの差：ERROR に前の sense key が残る（純正）、ブートローダーの版、D10・D14、空フォルダの最初のサンプル、**読み込みのあとのヘッドの位置（純正は CD_READ の位置を REQ_STAT に返す、新しい差）**。
+  - 2E release-z は +492 B（116,640 B）。Fable のレビュー中。
+  - 実機で確かめること：起動時のリセット（BIOS・KOS）のあと detect_time だけ NOT READY と UA が出ても起動できるか。再検出中のコマンドへの応答（NetGD は 2/04/01）は純正で未測定。
+- 関連：R150、R155〜R162。
+
+### R164 純正の再検出中のコマンドへの応答（seq 20）・GDEMU.ini を戻したあとの確認（seq 19）・g2bench の最初の実行（Opus）
+
+- seq 19（`feat/gdprobe-seq17` の設定のまま、GDEMU.ini を 150 / 150 / 1 に戻したあと）：切替は 150 ms・300 ms、DEVICE RESET のあとは約 150 ms で最終の値。元に戻ったことを確認（記録はコミットしない）。
+- seq 20（`feat/gdprobe-seq20`、`addeb4f6`、`devreset_cmd=on`・10 / 50 / 100 ms）。記録：`docs/research/probe-records/stock_20261122_20_cmd-during-redetect.txt`（`abort=0`）。
+  - **DEVICE RESET の再検出中のコマンドには、純正も NOT READY 2/04/01** を返す（TUR・REQ_STAT とも CHECK、REQ_ERROR は `f0 00 02 … 04 01`）。SECNR は 0x00 のまま。コマンドのあとの ALTSTATUS は 0x50（コマンドが status を書き直すので、0x00 は次のコマンドまで）。
+  - detect_time（150 ms）が過ぎると、次の TUR が 6/28/00（UA）、その次が READY（リセットから約 170〜180 ms）。空フォルダは 2/3A/00 のまま READY にならない。
+  - **NetGD の `fix/r159-devreset` は同じ**（再検出中は 2/04/01）。BIOS・KOS の起動時のリセットで NetGD だけが違う答えをする心配は、このコマンドの面では無くなった（起動の実機試験はまだ）。
+- g2bench（`feat/g2bench`、`dce4d753`、Dreamcast + BBA だけで `/pc/` の読み込みを測る）の最初の実行：4 KiB の fread が **38 KB/s**（1 回約 105 ms、最大 165 ms）。16 KiB で dc-tool-ip が `error: 10055`（WSAENOBUFS）で終了し、以降は測れなかった。原因の調査（`12bc191a`）：dcload の read は 1 回ごとに LOADBIN・PARTBIN（1440 B、10 個ごとに 1.8 ms 休み）・`-f` なしなら 25 ms の待ち・DONEBIN・RETVAL の往復 3 回で、大きさに関係ない固定費が大きい（残り約 80 ms は不明）。10055 は dc-tool-ip の `send_cmd` が WSAENOBUFS を致命的とみなすため。g2bench は CPU の測定を先に、読み込みを 1・4・16・64 KiB の順に各 30 秒、結果を毎回書くように直した。次は通常と `-Fast` で比べる。
+- 関連：R159〜R163、`docs/research/g2-perf-plan.md`（`docs/g2-perf-plan`）。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
