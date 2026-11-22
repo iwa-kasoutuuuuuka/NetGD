@@ -1942,6 +1942,117 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：純正の値は確認済み（実機）。NetGD の動きはホストのテストと予測だけで、実機では未確認。SECNR の値と、キーが無いときの時間は推測。
 - 関連：R13、R18、R21、R119〜R125、`common/discimg/src/atapi.rs`・`slot.rs`、`common/gamecfg/src/ini.rs`、`mcu/netgd/src/ide.rs`・`gdi.rs`・`button.rs`、`tools/netgd-expect/README_ja.md`。
 
+### R127 R125・R126 のコミット番号の訂正と、2E のスタックの静的な見積もり（Opus）
+
+- **訂正**：R125・R126 のコミット `383a2ccb`・`805e98b4` は、main に入れる前に rebase したので、main では **`1e69ad2e`（R125）・`ad9f9720`（R126）**。内容は同じ。
+- 担当：Opus（サブエージェントが解析、メインが確認）。問いは、R126 で非同期の呼び出しが 1 段深くなった 2E（ATSAM3U2E）で、スタックが足りるか。
+- 方法：nightly の `-Z emit-stack-sizes` は使わず（何もインストールしていない）、DreamSDK の `arm-eabi-objdump -d -C` で逆アセンブルし、各関数のプロローグ（`push`・`stmdb`・`sub sp`）からフレームを、
+  `bl` と関数の先頭への `b.w` から呼び出しグラフを作って、4 つのタスクの poll・`SysTick`・`ID_PIOA`・`main` から最も深い経路を探した。動的な SP 操作は 0 件。
+  比較のため 43c5f4b4 も一時的な worktree で同じ条件でビルドした（削除済み）。スクリプトは scratchpad の `stack\stk.py`。
+- 結論：
+  - **確保されているスタック**（`link/sam3u2e.x`・`sam3u2e_resident.x`：`_stack_start = 0x20004000` から `__sheap` まで、ガード無し）：
+    release `sam3u2e` = 7,536 B（43c5f4b4 は 7,568 B）、release-z `sam3u2e,resident,sd-fast` = 7,128 B（同 7,168 B）。PLAN A-1 の「約 7.9 KB」は今のビルドには当てはまらない。
+  - **最も深い経路**：IDE タスクの poll（48）→ `sweep`（576）→ `handle_packet`（112）→ `load_media`（88）→ **`gdi::load_default`（1,208）→ `gdi::load_by_name`（3,280）** → `gdi::parse`（704）
+    → … → `fat::lookup`（784）→ `memcpy`、合計 7,168 B（release）。release-z では 6,768 B（`load_by_name` 3,496 B）。
+  - **R11・R21 の「約 5.1〜5.3 KB」は `load_by_name` から下だけを数えた値**で、呼び出し側の約 2 KB（poll から `load_media` まで約 0.8 KB、`load_default` 1.2 KB）が抜けていた。
+    同じ数え方では 43c5f4b4 → ad9f9720 で release +8 B、release-z −8 B。IDE の経路全体では release +16 B、release-z −8 B。**R125・R126 の影響は数十バイト**。
+  - 割り込みの優先度は設定されておらず（すべて 0）入れ子にならない。例外フレーム + 一番重いハンドラで最大 108 B と見積もった。
+  - **余裕**：release = 7,536 −（24 + 7,168 + 108）= **236 B**、release-z の IDE 経路 = **228 B**、release-z の起動時の main タスク = 420 B。
+  - async の状態はタスクの静的領域（`ide_task::POOL` 904 B、+8 B）に置かれ、スタックとは別。
+- 危険：マウントの経路があと約 230 B 増えると、静的な最悪値が確保量を超える。ガードが無いので、溢れると下の静的データを黙って壊す
+  （`__sheap` のすぐ下は `defmt_rtt::BUFFER` 1,024 B で、`DEFMT_LOG=off` では書かれないので実際にはクッションになっている可能性が高いが、偶然に頼っている）。
+- 改善案（コードは未変更）：(1) `load_default` は「マウントする名前を決めて返す」だけにして、呼び出し側が `load_by_name` を 1 回だけ呼ぶ（約 1.2 KB 減）。
+  (2) `load_by_name` の中の `VolumeManager` と 512 B のブロックキャッシュを static に移す（0.5〜1 KB 減）。
+  (3) `DEFMT_LOG=off` のとき defmt の RTT バッファを小さくする、`flip-link` を有効にして溢れたら HardFault にする、起動時にスタックを既知の値で埋めて最高水位を BBA などで読めるようにする。
+- 信頼度：フレームの値は高い（プロローグから正確に読める）。呼び出しグラフは同時に起きない組み合わせも含むので、多めに出る方向。間接呼び出し（waker の vtable、`walk_dyn` のクロージャ）は最大の経路を変えない。実機では未確認。
+- 関連：R11、R21、R89、R125、R126、`docs/PLAN.md` A-1、`mcu/netgd/src/gdi.rs`。
+
+### R128 純正は存在しない番号への切替でフォルダ 01 をマウントする（Opus）
+
+- 担当：Opus。問いは R126 で未確認だった、番号のフォルダそのものが無いときの純正の `52 82 n`。
+- 方法：試験用 SD（01〜09 だけ）のまま、gdprobe を `images=50,3`、`return_to=2` で実行。
+- 記録：`docs/research/probe-records/stock_20261122_09_missing-folder.txt`（`abort=0`）。
+- 結論：
+  - `52 82 50` は即座に完了（0x50）し、ほかの切替と同じく 2/3A/00 → 約 174 ms 2/04/01 → 約 304 ms 6/28/00 → 約 335 ms READY。
+  - マウントされたのは **フォルダ 01 の GDmenu**：GET_TOC = データトラック 2 本（FAD 150、FAD 12025）、REQ_SES_0 = `01 00 02 00 30 27`（セッション 2、lead-out FAD 12327）。
+    `common/discimg` の `inspect` で `01\GDmenu_v0.6.cdi` を読むと、トラック 2 が LBA 11875（FAD 12025）・302 セクタで、lead-out は FAD 12327。完全に一致。
+  - そのあとの `52 82 3` も普通に 03 をマウントした。
+  - **NetGD（R126）は、番号のフォルダが無いと切替を断って前のイメージを残すので、純正と違う**。
+  - SD の `GDEMU.ini` は `reset_goto = 1`。純正が「01」を選んだのか「reset_goto の番号」を選んだのかは、この試験では区別できない（R129 で切り分け）。
+- 信頼度：確認済み（実機）。
+- 関連：R13、R123（D12）、R126。
+
+### R129 純正の切替の時間は GDEMU.ini の値に従う。存在しない番号は reset_goto によらず 01（Opus）
+
+- 担当：Opus。問いは (1) R126 の推測「純正の 150 ms + 150 ms は GDEMU.ini の値」が正しいか、(2) R128 の「存在しない番号 → 01」が `reset_goto` によるものか。
+- 方法：試験用 SD の `GDEMU.ini` を `open_time = 150`・`detect_time = 150`・`reset_goto = 1` から `open_time = 600`・`detect_time = 300`・`reset_goto = 2` に変えた
+  （元の内容は `H:\NetGD_probe_sd\GDEMU.ini.orig` と scratchpad に控えた）。最初は `reset_goto = 3` にしたが、合成データの 03 は起動しないので、電源を入れてもメニューが出なかった（ユーザーの報告）。2 に直して実行。
+  gdprobe は `images=3,50`、`return_to=2`。
+- 記録：`docs/research/probe-records/stock_20261122_10_ini-600-300.txt`（`abort=0`）。
+- 結論：
+  - **切替の時間は INI に従う**：03・50・02 のどれも、2/3A/00 が約 608〜623 ms、2/04/01 から 6/28/00 までが約 300 ms、そこから約 30 ms で READY（03 = 932 ms、50 = 952 ms、02 = 956 ms）。
+    150 / 150 のとき（R119）の約 150 ms・約 150 ms・約 30 ms と同じ形で、`open_time` と `detect_time` がそのまま 2 つの段階の長さになっている。
+    **NetGD（R126）の「INI がキーを設定していればその値」は純正と同じ**。キーが無いときの純正の値はまだ未測定（R126 の 150 + 150 ms は推測のまま）。
+  - **存在しない番号は 01**：`reset_goto = 2` でも、`52 82 50` のあとマウントされたのは GDmenu（GET_TOC = FAD 150・12025、REQ_SES_0 = `01 00 02 00 30 27`）。
+    **純正は、番号のフォルダが無いとき `reset_goto` によらずフォルダ 01 をマウントする**。NetGD（R126）は断って前のイメージを残すので、直す（R132）。
+  - `reset_goto` は、電源投入時・リセット時に読み込むフォルダ。起動できないフォルダにすると、メニューが出なくなる（注意）。
+- 信頼度：確認済み（実機）。
+- 関連：R119、R126、R128。
+
+### R130 切替のあとのドライブの状態とヘッドの位置を純正に合わせた（D2・D4）（Opus）
+
+- 担当：Opus（サブエージェントが実装、メインがホストテストを再実行して確認）。worktree `H:\OpenGDEmu-d2d4`、ブランチ `stock/state-head`、コミット `02732bad`（main ad9f9720 から）。
+- 問い：純正の REQ_STAT・REQ_SES バイト 0・GET_SCD が示す状態と位置は、電源投入後と `52 82 n` の切替後でどう違い、NetGD をどう合わせるか（R123 の D2・D4）。
+- 純正：電源投入後（切替の前）は待機 02・トラック 1・FAD 150（`stock_20261121_02.txt`・`05`・`06` の img=0：`02 2f 01 01 01 00 00 96`）。
+  切替後は一時停止 01。位置は GDI がトラック 3 の先頭（03 は `01 8f 41 03 01 00 b0 5e`、GET_SCD_1 `00 15 00 0e 41 03 01 00 00 00 00 00 b0 5e`）、CDI がトラック 1・FAD 150（`01 2f 01 01 01 00 00 96`）。
+  GET_SCD のオーディオ状態はどちらも 0x15。REQ_SES_0 のバイト 0 も切替後は 01。
+- 結論（NetGD）：
+  - `common/discimg`：`idle_fad(tracks, is_cdi, switched)` を追加（切替後の GDI = トラック番号 3 以上の最初のトラックの開始 + 150、それ以外と電源投入後 = 150）。
+    `drive_status`・`req_stat_reply`・`head_position` が、CD-DA を始めていない状態の状態と位置を受け取るようにした（再生・一時停止・終了・エラーは従来どおり）。
+  - `ide.rs`：`IDLE_STATUS`（初期値は待機）と `SWITCHED` を追加。`mounted()`（`mount_named`・`load_media`・ボタン・0xE0・reset_goto・取り出し後の再マウントが通る）で一時停止・切替済みにする。
+    起動時のマウントは `mounted()` を通らないので待機のまま。DEVICE RESET の SECNR も同じ状態を使い、CD_SEEK の停止で待機に戻す。
+  - 電源投入時に GDI を起動した場合は待機・トラック 1・FAD 150 とした（純正の電源投入時の記録は CDI だけ。推測）。CD_READ では状態も位置も変えない（読み出しのあと切替もリセットも挟まずに取った REQ_STAT が記録に無い）。
+- テスト：純正のバイトを固定するテスト 3 件を追加。`common/discimg` 134 件・`test_expect.py` 11 件（1 件スキップ）がすべて通過（メインでも再実行）。
+- 比較（`stock_20261121_04_img3-7.txt`、`--only-common`）：200 → 187 行（img=3 の REQ_STAT・REQ_SES_0/1・GET_SCD_0/1、img=4・5 の REQ_STAT・REQ_SES_0〜2 が消えた）。
+- 大きさ（text + data、ad9f9720 → 02732bad）：4E +224、2E +228、2E `release-z` の `resident,sd-fast` +12（117,168 B、上限 122,368 B）。
+- 残った差：Dreamcast をリセットして BIOS がもう一度起動したあとの img=0（記録 03・07・08）は、純正が一時停止・トラック 2・FAD 0x05017A（lead-out − 2）を返す。再現の規則が分からず、モデルにしていない。
+  CD_SEEK の種類 4 では SECNR だけ一時停止にする（以前から）。
+- 信頼度：記録との一致はホストで確認済み。電源投入時の GDI の扱いは推測。実機では未確認。
+- 関連：R117、R119、R123、`common/discimg/src/atapi.rs`、`mcu/netgd/src/ide.rs`、`common/discimg/examples/expect.rs`。
+
+### R131 イメージのマウント経路のスタックを約 2 KB 減らした（R127 の改善案）（Opus）
+
+- 担当：Opus（サブエージェントが実装、メインが差分の範囲とホストテストを確認）。ブランチ `stock/state-head`、コミット `f590c961`（親 02732bad）。変更は `mcu/netgd/src/gdi.rs` だけ。
+- 問い：R127 で余裕が約 230 B しかなかった 2E の最も深い経路を、動作を変えずに減らせるか。
+- 結論：減らせた。原因は、インライン展開された `VolumeManager`（512 B のブロックキャッシュ込み、約 1 KB）が `load_default`・`load_by_name`・構文解析で重なっていたこと。
+  - R127 の案 1（呼び出し側が `load_by_name` を 1 回だけ呼ぶ）は、「候補ごとに失敗したら次へ」（選択中の名前 → `GDEMU.CFG` の `image=` → フォルダ 01）と合わないので不採用。
+  - `load_default`：候補名をインライン展開しない `default_name()`（`enum DefaultSource`）から、前の候補が失敗したときだけ順に取る。順序・フォールバック・警告は同じ。1,208 → 256 B。
+  - `load_by_name`：`resolve_name()`（`walk_to`・`remember`・`locate_image`、戻るときにカードを閉じて `ImageRef` を返す）と `load_image` に分け、どちらも `#[inline(never)]`。
+    3,280 → 336 B（代わりに `load_image` が 1,928 B、release-z 2,160 B だが、`resolve_name` とは重ならない）。`remember` が画像を探す前という順序とエラーの種類は同じ。
+  - static 化（R127 の案 2）は不要だったので使っていない（BSS も増えない）。
+- スタック（R127 と同じ静的解析、割り込み分 108 B を引いた余裕）：
+  release 2E は最悪経路 7,168 → 5,200 B、余裕 260 → **2,228 B**。release-z 2E は 6,768 → 4,800 B、余裕 252 → **2,220 B**。起動時のマウントは 7,016 → 5,048 / 6,576 → 4,608 B。
+- 大きさ（text + data）：4E −4、2E release +64、2E `release-z` の `resident,sd-fast` −20（117,148 B、上限 122,368 B）。
+- テスト：`common/discimg` 134 件と `test_expect.py` がすべて通過（メインでも discimg を再実行）。netgd の警告 0 件は変わらず。
+- 動作上の注意：`resolve_name` から戻るときにカードを閉じ、`load_image` が開き直す（読むだけなので書き込みは起きないはず）。ブロックキャッシュを引き継がないので、ルート付近の SD 読み出しが 1〜数ブロック増えるかもしれない。どちらも実機では未確認。
+- 信頼度：ホストのビルドの静的解析とホストテストで確認。実機は未確認。間接呼び出しの先は数えていない。
+- 関連：R11、R21、R127、`mcu/netgd/src/gdi.rs`（`load_default`・`default_name`・`load_by_name`・`resolve_name`・`load_image`）。
+
+### R132 存在しない番号への切替でフォルダ 01 をマウントするようにした（R128・R129 の反映）（Opus）
+
+- 担当：Opus（サブエージェントが実装、メインがホストテストを再実行して確認）。ブランチ `stock/state-head`、コミット `00e1ed5c`（親 f590c961）。
+- 結論：
+  - `discimg::slot::mount_target(n, exists)` を追加：n のフォルダがあればそれ、無くて 1〜999 なら 01、01 も無ければ「ディスクなし」、999 を超える欠番と 0 は従来どおり（0 = 既定に戻す、999 超 = 拒否）。
+  - `ide.rs` の `stage_folder` が使う。01 があれば通常の `mount_named` に渡すので、切替の窓・切替後の一時停止・IP.BIN の先読みはほかの切替と同じ。01 が選択中のフォルダになり、ボタンと `52 81` は 01 から進む。
+    01 にマウントできるイメージが無ければ D12 の「ディスクなし」。01 自体が無ければ「ディスクなし」にし、選択は切替の前のまま残す（ボタンが効かなくなるのを避ける NetGD の判断。純正は未調査）。
+  - `52 82 0`・`52 81`・0xE0・`52 00` は変更なし。
+- テスト：期待値を先に純正の動きに変更（`test_expect.py` の「欠番は断られる」を「欠番は 01 をマウント」に）。`common/discimg` 137 件（3 件追加）、`test_expect.py` 13 件（1 件スキップ）がすべて通過（メインでも再実行）。
+- 比較（`stock_20261122_09_missing-folder.txt`、`images=3,50`、`--only-common`）：img=50 の差 50 → 39 行。SW_CMD・SW_POLL・TOC・REQ_SES・REQ_STAT・GET_SCD が一致。
+  残りは CD_READ のバイト 1（純正は GDmenu の CDI に 0x24 を 5/64/00 で断り、0x10 で 2,352 B。D8〜D10）と GDEMU_VERSION（D15）で、以前からの差。
+- 大きさ（text + data、f590c961 → 00e1ed5c）：4E +204、2E +80、2E `release-z` の `resident,sd-fast` +28（117,176 B、上限 122,368 B まで残り 5,192 B）。警告の増加なし。
+- 未確認：01 が無いカード、999 を超える欠番の純正の動き（gdprobe の `images=` は 1〜999 だけ）。欠番のときはカードのルートを 2 回走査する。実機では未確認。
+- 関連：R126、R128、R129、`common/discimg/src/slot.rs`、`mcu/netgd/src/ide.rs`、`tools/netgd-expect/expect_sd.py`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -1990,3 +2101,5 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-22 | GDI の lead-out を最後のトラックの終わりにし、FAD 549300 への水増しをやめる。REQ_ERROR に ASC/ASCQ、REQ_STAT の繰り返し回数 0xF、IDENTIFY PACKET を純正の 80 バイトに | 純正 GDEMU 6.0 の記録（R119・R123・R124）。水増しの方が安全という前提には実測の裏付けが無かった（R125） | Opus |
 | 2026-11-22 | 切替のあとの NOT READY（D13）と CHECK のレジスタ（D5）を純正に合わせる。中身の無いフォルダへの切替（D12）は純正に合わせて「ディスクなし」にし、存在しない番号は今のまま断る。純正が拒む GDI の形（D11）は受け付けたまま | D13・D5 は純正のデータがそろった。D12 はメニューが純正の動きを前提にしているため。存在しない番号の純正の動きは未確認（R123） | ユーザー（Opus の推奨を承認） |
 | 2026-11-22 | 切替の窓は、GDEMU.INI がキーを設定していればその値、無ければ 150 + 150 ms | 純正の実測値（R119）。試験用 SD の INI が 150 / 150 だったので、純正は INI の値を使っている可能性が高い。キーが無いときの純正の値は未測定（R126） | Opus（実機での確認待ち） |
+| 2026-11-22 | 存在しない番号（1〜999）への `52 82` は 01 をマウントする。01 が無ければ「ディスクなし」で選択は前のまま。999 を超える欠番は拒否のまま | 純正は reset_goto によらず 01（R128・R129）。01 が無いときと 999 超は純正未調査（R132） | Opus（ユーザーの「純正に合わせる」方針） |
+| 2026-11-22 | マウント経路のスタック削減は、インライン展開をやめてフレームの重なりを無くす方法にする（static 化はしない） | 2 つのマウントが同時に起きないことを示す必要が無く、BSS も増えない。「呼び出し側で 1 回だけ呼ぶ」案は候補ごとのフォールバックと合わない（R131） | Opus |

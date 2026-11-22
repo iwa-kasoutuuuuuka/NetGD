@@ -4,7 +4,7 @@
 |----------|------|
 | [LOG.md](LOG.md) | **すべての調査・レビュー・検証・判断の時系列の記録**（まずここを見る） |
 | [stock-gdemu-flow.md](stock-gdemu-flow.md) | **純正 GDEMU の調査フロー**：写真 → プローブツール → BBA 経由の調査 → 比較 → 反映 |
-| [probe-records/](probe-records/) | プローブの記録ファイルの置き場 |
+| [probe-records/](probe-records/) | プローブの記録ファイルの置き場。純正 GDEMU 6.0 の記録（2026-11-21〜22、`stock_*`）は LOG R117〜R130 |
 | [user-tasks.html](user-tasks.html) | 実機作業ガイド（プローブ調査・導通確認・SWD プローブ準備の手順と記入表。Artifact と同じ内容） |
 | [web-prep-user-tasks.md](web-prep-user-tasks.md) | 実機作業（gdprobe の実行、導通確認、SWD プローブ準備）の事前 web 調査 |
 | [../../tools/gdprobe/](../../tools/gdprobe/) | プローブツール（KOS 2.3.0）。使い方は `README_ja.md` |
