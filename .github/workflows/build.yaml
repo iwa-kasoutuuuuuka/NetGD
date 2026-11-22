@@ -73,12 +73,26 @@ jobs:
           DEFMT_LOG: "off"
         run: cargo build --profile release-z --features sam3u2e,resident,sd-fast
 
+      # Size gate: fails (before the linker's own FLASH-overflow error would)
+      # when text+data exceeds the limit kept in tools/fwsize/check.py, and
+      # prints/records the margin. Standard-library Python, no cross binutils.
+      - name: Size gate (2E release-z)
+        run: >
+          python3 tools/fwsize/check.py
+          mcu/netgd/target/thumbv7m-none-eabi/release-z/netgd
+          --label "2E release-z" --gate-2e
+
       # The 2E image that is actually distributed (no resident layout).
       - name: Build netgd (2E)
         working-directory: mcu/netgd
         env:
           DEFMT_LOG: "off"
         run: cargo build --release --features sam3u2e
+
+      - name: Size (2E release, informational)
+        run: >
+          python3 tools/fwsize/check.py
+          mcu/netgd/target/thumbv7m-none-eabi/release/netgd --label "2E release"
 
       # GDEMU 6.0 pin-finder (fpga/pinfind). No bitstream in CI, so this only
       # checks that the feature compiles and links.
@@ -166,6 +180,10 @@ jobs:
           - tool: netgd-menu
             dir: .
             cmd: python tools/netgd-menu/test/run_tests.py
+          # Size-gate script (ELF parsing, limit logic). Standard library only.
+          - tool: fwsize
+            dir: .
+            cmd: python -m unittest discover -s tools/fwsize/tests -v
           # Pin-finder host tools (mklist.py, pins2asf.py). Standard library only.
           - tool: pinfind
             dir: .
