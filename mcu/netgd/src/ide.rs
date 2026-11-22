@@ -775,6 +775,11 @@ pub async fn ide_task(
     // answered TEST UNIT READY with "ready" and refused disk writes with
     // "eject first" over an empty drive (R89 A4).
     MEDIA_PRESENT.store(gdi_ref().is_some(), core::sync::atomic::Ordering::Relaxed);
+    // A boot mount that came up empty (GDEMU.CFG `image=` at an empty folder,
+    // no folder 01) leaves the card the firmware's, like the empty-folder case
+    // of a switch (D12): the button and `52 81` may step from here. Without
+    // this only `52 81` worked (R136). Nothing changes when the mount worked.
+    EMPTY_SLOT.store(gdi_ref().is_none(), core::sync::atomic::Ordering::Relaxed);
 
     // Assert the mounted disc's format before serving anything. The FPGA's
     // reset state machine loads a fixed GD-ROM SECNR, and until now nothing
