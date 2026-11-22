@@ -31,6 +31,15 @@
  *                          swap_devreset_ms value and issue ATA DEVICE RESET (0x08) that many ms after `52 82 n`
  *                          (R<ms>_SW_* lines); the register poll runs before and after the reset
  *   swap_devreset_ms=50,200   reset delays (up to 4 values, 0..5000)
+ *
+ * seq 17 probes (only with switch=on; both default off, independent of each other):
+ *   swap_reswitch=off      on = after each image's battery, `52 82 n` for the folder that is ALREADY mounted, then only
+ *                          register polling for swap_reswitch_wait_ms with NO DEVICE RESET, then the usual TUR /
+ *                          REQ_ERROR flow (RS_* lines; does a UNIT ATTENTION 6/28/00 come?)
+ *   swap_reswitch_wait_ms=1000   (100..10000)
+ *   devreset_only=off      on = after each image's battery, 500 ms idle, NO switch command, ATA DEVICE RESET, register
+ *                          poll for devreset_only_wait_ms, then the TUR / REQ_ERROR flow (DR_* lines)
+ *   devreset_only_wait_ms=1000   (100..10000)
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
@@ -64,6 +73,10 @@ typedef struct {
     int swap_devreset;    /* R148: extra switches with an ATA DEVICE RESET inside the window */
     int devreset_ms[GP_MAX_DEVRESET];
     int n_devreset;
+    int swap_reswitch;    /* seq 17: re-switch to the mounted folder, no DEVICE RESET */
+    uint32_t swap_reswitch_wait_ms;
+    int devreset_only;    /* seq 17: DEVICE RESET with no switch command */
+    uint32_t devreset_only_wait_ms;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 

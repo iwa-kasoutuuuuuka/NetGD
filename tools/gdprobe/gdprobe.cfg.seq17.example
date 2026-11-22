@@ -1,0 +1,34 @@
+# gdprobe run configuration for seq 17: does a UNIT ATTENTION come after (a) "52 82 n" for the folder that is
+# already mounted (no DEVICE RESET), (b) a DEVICE RESET with no switch command at all?
+# Copy to <host folder>/gdprobe.cfg. See README_ja.md, "seq 17 の実行計画".
+
+label=stock
+seq=17
+
+# 4 = Mode 2 Form 1 CDI, 3 = GDI, 7 = the empty folder (NO DISC). Back to the dcload-ip disc at the end.
+switch=on
+images=4,3,7
+return_to=2
+switch_timeout_ms=5000
+
+# the command-free register poll after each 52 82 n of the image loop (as in R148)
+swap_regpoll=on
+swap_regpoll_ms=1000
+swap_regpoll_interval_ms=2
+
+# the R148 resets inside the window: off this time
+swap_devreset=off
+
+# 1. after each image's battery: 52 82 n for the SAME folder, register poll only for 1 s, no reset; then TUR / REQ_ERROR
+swap_reswitch=on
+swap_reswitch_wait_ms=1000
+
+# 2. after each image's battery: 500 ms idle, ATA DEVICE RESET with no switch command, register poll 1 s; then TUR / REQ_ERROR
+devreset_only=on
+devreset_only_wait_ms=1000
+
+# information only: no per-image read battery
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off

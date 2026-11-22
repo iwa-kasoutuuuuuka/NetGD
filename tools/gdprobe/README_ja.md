@@ -117,6 +117,10 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 | `swap_regpoll_interval_ms` | 2 | 読む間隔（1〜50 ms）。CPU のタイマーで待つ（バスには触れない） |
 | `swap_devreset` | `off` | **R148**。`on` で、各イメージの試験一式のあと、同じイメージへ `swap_devreset_ms` の値ごとにもう一度切り替え、`52 82 n` からその ms 後に ATA DEVICE RESET を送る（行の名前に `R<ms>_` が付く）。リセットの前後もレジスタを観測する。`switch=on` のときだけ |
 | `swap_devreset_ms` | `50,200` | リセットの時刻（最大 4 個、0〜5000 ms）。既定は open 段階（50）と detect 段階（200）。観測は少なくとも「時刻 + 300 ms」まで続ける。1 つでも不正な値があれば行全体を無視（数える） |
+| `swap_reswitch` | `off` | **seq 17**。`on` で、各イメージの試験一式のあと、**いまマウントされている同じフォルダ**へもう一度 `52 82 n` を送り、`swap_reswitch_wait_ms` のあいだコマンドを送らずレジスタだけを読み（`RS_SW_REGPOLL`）、**DEVICE RESET は送らず**、そのあと通常の TUR / REQ_ERROR の流れ（`RS_SW_POLL`・`RS_SW_RESULT`・`RS_REQ_STAT`・`RS_REQ_ERROR`）。UNIT ATTENTION 6/28/00 が来たかは `RS_SW_RESULT` の `ua_28=0/1`。`switch=on` のときだけ |
+| `swap_reswitch_wait_ms` | 1000 | 上の観測時間（100〜10000）。`switch_timeout_ms` はこのあとから数える |
+| `devreset_only` | `off` | **seq 17**。`on` で、各イメージの試験一式のあと（`swap_reswitch` があればその後）、**切替コマンドを 1 つも送らず**、まず 500 ms 何も送らずに待ち（`DR_IDLE idle_ms=500`）、ATA DEVICE RESET を送ってシグネチャのレジスタを `DR_SW_DEVRESET`（`delay_ms=0`）に記録、`devreset_only_wait_ms` のあいだレジスタを読み（`DR_SW_REGPOLL`）、TUR / REQ_ERROR の流れ（`DR_SW_POLL`・`DR_SW_RESULT` の `ua_28`・`DR_REQ_STAT`・`DR_REQ_ERROR`）。DEVICE RESET の許可は `swap_devreset` と同じ許可リスト（`switch=on` かつ `swap_devreset=on` または `devreset_only=on`）。`switch=on` のときだけ |
+| `devreset_only_wait_ms` | 1000 | リセット後の観測時間（100〜10000） |
 
 ### 実行の流れ
 
@@ -136,6 +140,12 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
   `52 82 n` から指定の ms で DEVICE RESET を送り、BSY が下がるのを待って（上限 `timeout_ms`、最低 2 ms は見る）レジスタを `R50_SW_DEVRESET` に記録、
   観測を続け（`R50_SW_REGPOLL`）、TUR / REQ_ERROR で READY を待ち（`R50_SW_POLL`・`R50_SW_RESULT`）、最後に `R50_REQ_STAT`・`R50_REQ_ERROR` を 1 回ずつ。
   切替コマンドが `rc=ok` でなければ、リセットも観測もしない。
+- **`swap_reswitch=on`**（seq 17）：Record 15・16 は「同じフォルダへ切り替え直し → DEVICE RESET」だったので、どちらの効果か分からない。
+  これは**切り替え直しだけ**：2 の試験一式のあと、マウント済みの同じ n に `52 82 n`（`RS_SW_CMD`）、`swap_reswitch_wait_ms` のあいだコマンドなしでレジスタ観測
+  （`RS_SW_REGPOLL`・`RS_SW_REGPOLL_END`）、TUR / REQ_ERROR（`RS_SW_POLL`）で UNIT ATTENTION（6/28/00）が来るかを見る。切替コマンドが `rc=ok` でなければ観測もしない。
+- **`devreset_only=on`**（seq 17）：逆に**DEVICE RESET だけ**：切替コマンドなしで 500 ms 待ち（`DR_IDLE`）、DEVICE RESET（`DR_SW_DEVRESET`）、観測、TUR / REQ_ERROR。
+  `swap_reswitch` と `devreset_only` は独立（片方だけでも両方でもよい）。両方 `on` のときの順序は、イメージの試験一式 → `RS_*` → `DR_*`。
+  どちらも 3 回続けてタイムアウトしたら中止（`ABORT`）。読み出しだけ・時間制限つきで、新しく送るコマンドは無い（`52 82` と、リセットは既存の許可リスト）。
 - **データトラックの無いイメージ**（音声だけの CDI など）：TOC に有効なトラックがあってデータトラックが 1 つも無ければ、`NO_DATA_TRACK audio_fad=..` を書いて
   `IP_READ`・スループット・シークを飛ばし、`CDREAD_FLAGS` だけを最初の音声トラックで行う（REQ_SES(2) が値を返しても TOC を優先。存在しない IP.BIN を読みに行かない）。
   `ip_fad=` を指定すれば従来どおり読む（応答はそのまま記録。どの待ちにもタイムアウトがある）。
@@ -263,7 +273,7 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 | `hash.c/.h` | CRC-32（`zlib.crc32` と同じ） | あり |
 | `cfg.c/.h` | 設定ファイルの解析 | あり |
 | `compare.py` | 比較・イメージ照合 | あり（合成の記録と GDI） |
-| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` / `gdprobe.cfg.r137.example`（R137 の実行用）/ `gdprobe.cfg.r148.example`（R148 の実行用） | ビルド、dc_auto のプリセット、設定の雛形 | — |
+| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` / `gdprobe.cfg.r137.example`（R137 の実行用）/ `gdprobe.cfg.r148.example`（R148 の実行用）/ `gdprobe.cfg.seq17.example`・`gdprobe.cfg.seq18.example`（seq 17・18 の実行用） | ビルド、dc_auto のプリセット、設定の雛形 | — |
 | `tests/` | `sh tests/run_tests.sh`（gcc と python が要る。make は不要）。DreamSDK の `python` は環境変数を渡さないので、C の偽ドライブの記録を使う 2 件はスキップになる（Windows の `py tests/test_compare.py` なら通る） | — |
 
 ## ホストテストでできていないこと（実機で最初に確認すること）
@@ -363,3 +373,24 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 
 照合：`python compare.py --manifest <OUT>\NETGD-PROBE-MANIFEST.json host\gdprobe_stock_seq00015.txt` で `img=11` の `CDREAD_FLAGS`（`0x20`・`0x10` の PCM）を照合する
 （03〜05・10 は、それぞれのカードのマニフェストを別に渡す）。
+
+## seq 17 の実行計画（切り替え直しだけ／DEVICE RESET だけ、続けて detect_time = 400 の seq 18）
+
+**状態：用意しただけ。実機では未実行。** Record 15・16 は常に「同じフォルダへ切り替え直し → DEVICE RESET」だった。残る問い：
+
+| 問い | 記録のどこを見るか |
+|---|---|
+| 1. 切り替え直しだけ（リセットなし）で UNIT ATTENTION（6/28/00）が来るか。SECNR は `0x06` → `0x00` → `0xX1` と進むか | `RS_SW_REGPOLL` の `secnr` の並びと `t_ms`、`RS_SW_POLL` の `sense=`、`RS_SW_RESULT` の `ua_28` |
+| 2. 切り替えなしの DEVICE RESET だけで UNIT ATTENTION が来るか（6/29/00 か、6/28/00 か、来ないか）。SECNR は動くか | `DR_SW_DEVRESET`（シグネチャ・`secnr`）、`DR_SW_REGPOLL`、`DR_SW_POLL` の `sense=`、`DR_SW_RESULT` の `ua_28` |
+| 3.（seq 18）リセット後の約 150 ms は `detect_time` か | seq 18 の `DR_SW_REGPOLL` の変化時刻を seq 17 と比べる（150 ms のまま → `open_time`、400 ms 近く → `detect_time`） |
+
+準備と実行：
+
+1. `gdprobe.cfg.seq17.example` を `host\gdprobe.cfg` にコピー（`label=stock`、`seq=17`、`images=4,3,7`、`return_to=2`、`switch_timeout_ms=5000`、`swap_regpoll=on`、
+   `swap_devreset=off`、`swap_reswitch=on`、`devreset_only=on`、`cdread_flags_test=off`、`throughput=off`、`seek=off`、`identify=off`）。SD カードは R148 までと同じ（`02`・`03`・`04`・`07`）。
+2. `cd H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\dc_auto.ps1 -Preset <このフォルダ>\profiles\gdprobe.ps1` を 1 回。
+   所要は約 1 分（各イメージ：切替 1 秒 + 再切替 1 秒 + 待ち 0.5 秒 + リセット 1 秒 + TUR。空フォルダ 07 は各 5 秒の上限まで待つ）。
+3. 次に、SD カードの `GDEMU.ini` で `detect_time = 400`（`open_time` は 150 のまま）にして、`gdprobe.cfg.seq18.example`（`seq=18`、他は同じ）で同じ手順をもう 1 回。終わったら `detect_time` を元に戻す。
+
+安全：新しく送るコマンドは無い（`52 82 n` と ATA DEVICE RESET は R148 までと同じ許可リスト）。すべて読み取り専用・時間制限つき、3 回続けてタイムアウトしたら中止。
+固まったら Dreamcast の電源を入れ直す。照合は `compare.py` で seq 17 と seq 18（または NetGD の記録）を比べる（`t_ms`・`idle_ms` などの時間は差分にならず、`ua_28` と `sense` は差分になる）。

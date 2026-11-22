@@ -332,6 +332,8 @@ typedef struct {
     int regs_fail;           /* the register read reports a bus-lock failure */
     int frozen_clock;        /* spin_us does not advance the clock */
     int no_r148_ops;         /* an older transport: no regs / ata_reset / spin_us */
+    int mount_ua_asc;        /* ASC of the UNIT ATTENTION a 52 82 leaves (0 = 0x29) */
+    int ua_asc;
     int audio_only_folder;   /* this folder holds an audio-only image (2 audio tracks, no data track) */
 } fake;
 
@@ -372,6 +374,7 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         f->mounted = n;
         f->mount_at = f->now;
         f->ua = 1;
+        f->ua_asc = f->mount_ua_asc ? f->mount_ua_asc : 0x29;
         f->ready_at = f->now + 300000;          /* 300 ms to remount */
         f->not_ready_forever = (n == f->empty_folder);
         return r->rc;
@@ -379,7 +382,7 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     if (cdb[0] == 0x13) {
         len = 10; d[0] = 0xF0;
         if (f->not_ready_forever || f->now < f->ready_at) { d[2] = 2; d[8] = f->not_ready_forever ? 0x3A : 0x04; d[9] = f->not_ready_forever ? 0 : 1; }
-        else if (f->ua_sense) { d[2] = 6; d[8] = 0x29; f->ua_sense = 0; }
+        else if (f->ua_sense) { d[2] = 6; d[8] = (uint8_t)(f->ua_asc ? f->ua_asc : 0x29); f->ua_sense = 0; }
         else if (f->pend_sk) { d[2] = (uint8_t)f->pend_sk; d[8] = (uint8_t)f->pend_asc; d[9] = (uint8_t)f->pend_ascq; f->pend_sk = 0; }
         goto data;
     }
@@ -524,6 +527,7 @@ static int f_reset(void *ctx, uint32_t timeout_ms, gd_regs *after, uint32_t *us,
     *us = 2000; *bsy = 0;
     f->reset_flag = 1;
     f->ua = 1;                   /* reset: UNIT ATTENTION 6/29/00 for the next command */
+    f->ua_asc = 0x29;
     f_regs(ctx, after);
     return GD_OK;
 }
@@ -996,6 +1000,102 @@ static void test_runner_regpoll_safety(void)
     CHECK(find_line("img=3 probe=SW_RESULT n=3 rc=ok"));
 }
 
+/* seq 17: swap_reswitch (RS_) and devreset_only (DR_) */
+static void test_runner_seq17(void)
+{
+    static fake f;
+    gp_config c;
+    const char *p;
+    gp_config_defaults(&c);
+    CHECK(!c.swap_reswitch && c.swap_reswitch_wait_ms == 1000 && !c.devreset_only && c.devreset_only_wait_ms == 1000);
+    gp_config_parse(&c, "swap_reswitch=on\nswap_reswitch_wait_ms=5\ndevreset_only=yes\ndevreset_only_wait_ms=99999\n");
+    CHECK(c.swap_reswitch && c.swap_reswitch_wait_ms == 100 && c.devreset_only && c.devreset_only_wait_ms == 10000 && c.unknown_keys == 0);
+    gp_config_parse(&c, "swap_reswitch=maybe\n");
+    CHECK(c.swap_reswitch && c.unknown_keys == 1);
+
+    /* swap_reswitch only: same folder again, no reset, quiet window, UA 6/28/00 recorded */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.mount_ua_asc = 0x28;
+    f.quiet_us = 990000;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswap_reswitch=on\nthroughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(f.resets == 0 && f.n_mounts == 2 && f.mounts[0] == 3 && f.mounts[1] == 3);
+    CHECK(find_line("img=3 probe=RS_SW_CMD n=3 cdb=528203"));
+    CHECK(find_line("img=3 probe=RS_SW_REGPOLL_END t_ms=1001 "));
+    CHECK(strstr(find_line("img=3 probe=RS_SW_POLL"), "sense=6/28/00"));
+    CHECK(find_line("img=3 probe=RS_SW_RESULT n=3 rc=ok") && strstr(find_line("img=3 probe=RS_SW_RESULT"), "ua_28=1"));
+    CHECK(find_line("img=3 probe=RS_REQ_STAT") && find_line("img=3 probe=RS_REQ_ERROR"));
+    CHECK(!find_line("DEVRESET") && !find_line("probe=DR_"));
+    CHECK(find_line("probe=END abort=0"));
+
+    /* devreset_only only: no 52 82, 500 ms idle first, the reset, UA 6/29/00 -> ua_28=0 */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,7\nreturn_to=2\ndevreset_only=on\ndevreset_only_wait_ms=500\nthroughput=off\nseek=off\nswitch_timeout_ms=2000\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(f.resets == 2 && f.n_mounts == 3 && f.mounts[0] == 3 && f.mounts[1] == 7 && f.mounts[2] == 2);
+    p = find_line("img=3 probe=DR_IDLE idle_ms=500");
+    CHECK(p != NULL);
+    CHECK(find_line("img=3 probe=DR_SW_DEVRESET delay_ms=0 t_ms=0 rc=ok reset_us=2000") > p);
+    CHECK(!find_line("probe=DR_SW_CMD"));
+    CHECK(find_line("img=3 probe=DR_SW_REGPOLL_END t_ms=50"));
+    CHECK(strstr(find_line("img=3 probe=DR_SW_POLL"), "sense=6/29/00"));
+    CHECK(strstr(find_line("img=3 probe=DR_SW_RESULT n=3 rc=ok"), "ua_28=0"));
+    CHECK(find_line("img=3 probe=DR_REQ_STAT") && find_line("img=3 probe=DR_REQ_ERROR"));
+    CHECK(find_line("img=3 probe=DR_SW_RESULT") < find_line("img=7 probe=SW_CMD"));
+    CHECK(find_line("img=7 probe=DR_SW_DEVRESET"));
+    CHECK(!find_line("probe=RS_"));
+    CHECK(find_line("probe=END abort=0"));
+
+    /* nothing without switch=on; both together: re-switch first, then the reset */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\nswap_reswitch=on\ndevreset_only=on\n");
+    CHECK(run_fake(&f, &c) == 0 && f.n_mounts == 0 && f.resets == 0 && !find_line("probe=RS_") && !find_line("probe=DR_"));
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswap_reswitch=on\ndevreset_only=on\nthroughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.resets == 1 && f.n_mounts == 2);
+    CHECK(find_line("img=3 probe=RS_SW_RESULT") < find_line("img=3 probe=DR_IDLE"));
+
+    /* a reset that hangs: recorded as a timeout, the run still ends cleanly */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.reset_timeout = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,4,5\nreturn_to=0\ndevreset_only=on\nthroughput=off\nseek=off\n");
+    run_fake(&f, &c);
+    CHECK(f.resets >= 1 && f.resets <= 3 && find_line("probe=DR_SW_DEVRESET") && strstr(find_line("probe=DR_SW_DEVRESET"), "rc=timeout"));
+    CHECK(find_line("probe=END"));
+}
+
+/* The shipped seq 17 / 18 run configurations, end to end against the fake drive */
+static void test_seq17_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    int k;
+    for (k = 17; k <= 18; k++) {
+        FILE *in = fopen(k == 17 ? "../gdprobe.cfg.seq17.example" : "../gdprobe.cfg.seq18.example", "rb");
+        CHECK(in != NULL);
+        if (!in) return;
+        n = fread(text, 1, sizeof(text) - 1, in);
+        fclose(in);
+        text[n] = 0;
+        gp_config_defaults(&c);
+        gp_config_parse(&c, text);
+        CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == k);
+        CHECK(c.do_switch && c.n_images == 3 && c.images[0] == 4 && c.images[1] == 3 && c.images[2] == 7 && c.return_to == 2);
+        CHECK(c.switch_timeout_ms == 5000 && c.swap_regpoll && !c.swap_devreset && c.swap_reswitch && c.devreset_only);
+        CHECK(!c.do_cdread_flags && !c.do_throughput && !c.do_seek && !c.do_identify);
+        memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7; f.passive = 1;
+        CHECK(run_fake(&f, &c) == 0);
+        CHECK(f.sent_bad == 0 && f.resets == 3 && f.n_mounts == 3 + 3 + 1);
+        CHECK(count_of("probe=RS_SW_RESULT") == 3 && count_of("probe=DR_SW_DEVRESET") == 3 && count_of("probe=R50_") == 0);
+        CHECK(find_line("probe=END abort=0"));
+    }
+}
+
 static void test_runner_audio_only(void)
 {
     static fake f;
@@ -1084,6 +1184,8 @@ int main(void)
     test_runner_regpoll();
     test_runner_devreset();
     test_runner_regpoll_safety();
+    test_runner_seq17();
+    test_seq17_example_cfg();
     test_runner_audio_only();
     test_r148_example_cfg();
     printf("OK: %d checks passed\n", g_checks);

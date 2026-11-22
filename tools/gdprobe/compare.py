@@ -23,6 +23,10 @@ Record format (see README_ja.md): one line per probe,
     img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=51 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x06 bcl=0x14 bch=0xeb
         (R148: the command-free register poll after a switch and the DEVICE RESET variant. Matched in order
         like SW_POLL; the timing fields t_ms / sample / samples / reset_us are notes only, never differences.)
+    img=3 probe=RS_SW_CMD / RS_SW_REGPOLL / RS_SW_POLL / RS_SW_RESULT n=3 rc=ok t_ms=.. ua_28=0|1   (seq 17: re-switch to the
+    mounted folder, no reset)  and  DR_IDLE idle_ms=500 / DR_SW_DEVRESET delay_ms=0 ... / DR_SW_REGPOLL / DR_SW_POLL /
+    DR_SW_RESULT ... ua_28=0|1   (seq 17: DEVICE RESET with no switch command). Same matching and timing rules as R148;
+    ua_28 (UNIT ATTENTION 6/28/00 seen) is compared exactly.
 Lines starting with '#' are header/trailer comments and are ignored.
 
 Image assumptions (the `--image` check):
@@ -121,7 +125,7 @@ def to_int(s, default=None):
 FIELDS_EXACT = ('rc', 'status', 'err', 'irr', 'bytes')
 # fields of event lines that are timings (compared by ratio, never as exact differences)
 TIMING_FIELDS = ('us', 't_ms', 'poll', 'polls', 'changes', 'min_us', 'max_us', 'kib_s',
-                 'sample', 'samples', 'reset_us')   # sample(s) / reset_us: R148 SW_REGPOLL / SW_DEVRESET
+                 'sample', 'samples', 'reset_us', 'idle_ms')   # sample(s) / reset_us: R148 SW_REGPOLL / SW_DEVRESET
 NO_COMPARE = ('img', 'probe', '_line', 'cdb', 'data')
 # fields added later (cdbst = ALTSTATUS in the CDB phase, secnr = GD-ROM sector-number status register): compared
 # only when BOTH records have them, so older records still compare cleanly

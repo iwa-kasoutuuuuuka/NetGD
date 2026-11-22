@@ -44,7 +44,7 @@ typedef struct wl_ata_entry {
 #define WL_ATA_DEVRESET 2
 extern const wl_ata_entry wl_ata_table[];
 extern const int wl_ata_count;
-/* NULL = refuse. identify_enabled = config identify=on; devreset_enabled = switch=on AND swap_devreset=on. */
+/* NULL = refuse. identify_enabled = config identify=on; devreset_enabled = switch=on AND (swap_devreset=on OR devreset_only=on). */
 const wl_ata_entry *wl_ata_check(uint8_t command, int identify_enabled, int devreset_enabled);
 
 #endif
