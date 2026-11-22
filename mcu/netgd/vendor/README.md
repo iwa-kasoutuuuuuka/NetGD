@@ -5,9 +5,11 @@
 `embedded-sdmmc-0.9.0/` is the crates.io release of embedded-sdmmc 0.9.0
 (MIT OR Apache-2.0; `LICENSE-MIT`, `LICENSE-APACHE` and `NOTICE` are kept),
 used through `[patch.crates-io]` in `mcu/netgd/Cargo.toml`. It carries one
-change, `embedded-sdmmc-0.9.0-lfn-surrogate.patch`.
-The upstream `tests/` and `examples/` folders are left out because they hold
-about 750 KB of disk images and are not built when the crate is a dependency.
+change, `embedded-sdmmc-0.9.0-opengdemu.patch`.
+The upstream `tests/`, `examples/`, `.github/`, `.gitignore` and `.cargo-ok` are
+left out (the first two hold
+about 750 KB of disk images; none is built for a dependency). The manifest's
+`[[example]]`/`[[test]]` targets for them are removed by the patch.
 The history keeps the pristine copy and the fix as separate commits.
 
 ### Why

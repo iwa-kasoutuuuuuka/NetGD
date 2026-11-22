@@ -48,57 +48,8 @@ log = ["dep:log"]
 name = "embedded_sdmmc"
 path = "src/lib.rs"
 
-[[example]]
-name = "append_file"
-path = "examples/append_file.rs"
-
-[[example]]
-name = "big_dir"
-path = "examples/big_dir.rs"
-
-[[example]]
-name = "create_file"
-path = "examples/create_file.rs"
-
-[[example]]
-name = "delete_file"
-path = "examples/delete_file.rs"
-
-[[example]]
-name = "list_dir"
-path = "examples/list_dir.rs"
-
-[[example]]
-name = "read_file"
-path = "examples/read_file.rs"
-
-[[example]]
-name = "readme_test"
-path = "examples/readme_test.rs"
-
-[[example]]
-name = "shell"
-path = "examples/shell.rs"
-
-[[test]]
-name = "directories"
-path = "tests/directories.rs"
-
-[[test]]
-name = "open_files"
-path = "tests/open_files.rs"
-
-[[test]]
-name = "read_file"
-path = "tests/read_file.rs"
-
-[[test]]
-name = "volume"
-path = "tests/volume.rs"
-
-[[test]]
-name = "write_file"
-path = "tests/write_file.rs"
+# OpenGDEmu patch: the [[example]] and [[test]] targets are removed; their
+# files (examples/, tests/) are not vendored (../README.md).
 
 [dependencies.byteorder]
 version = "1"
