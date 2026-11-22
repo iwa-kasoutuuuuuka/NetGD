@@ -18,6 +18,7 @@
 | [ag16k-config.md](ag16k-config.md) | AG16K のコンフィグ方式（PS、ビット順、ローダーの変更設計） |
 | [ag16k-toolchain.md](ag16k-toolchain.md) | AG16K のビットストリームを作る道筋（Supra、オープンなツールの状況）（R69） |
 | [flash-budget-2e.md](flash-budget-2e.md) | 2E のフラッシュの使い道と削減案、埋め込みのビットストリームの上限（R81） |
+| [d10-d14-raw-sectors.md](d10-d14-raw-sectors.md) | 純正が 2,048 B 以外で返すセクタ（D10 の `0x10` 生セクタ 2,352 B、D14 の Form 2 の 2,324 B）の中身の再現と、ファームの変更点の見積もり |
 | [g3-read-path.md](g3-read-path.md) | SD 読み込み経路の調査と高速化の feature（R72・R75） |
 | [fable-debug-2026-11-20.md](fable-debug-2026-11-20.md) | Fable 3並列による全体のデバッグの結果（ファームの読み込み・自己更新・G2 の書き込み、R89） |
 | [supra-static-analysis.md](supra-static-analysis.md) | AGM Supra 2026.03（Windows）の静的解析：署名・API・文字列・ESET の走査、`synth_agm` が無いこと（R92） |
