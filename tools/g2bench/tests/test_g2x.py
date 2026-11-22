@@ -21,10 +21,11 @@ class FakeRx(threading.Thread):
     """the Dreamcast's g2x receiver loop (main_net.c run_xport) with impairments on its input and its ACKs"""
 
     def __init__(self, pass_no, total, need_crc=True, loss=0.0, ack_loss=0.0, dup=0.0, flip=0.0, burst=0, seed=1,
-                 stop_after_s=None, lose_final=False):
+                 stop_after_s=None, lose_final=False, pause=None):
         threading.Thread.__init__(self)
         self.daemon = True
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)   # a pause must not drop anything
         self.s.bind(("127.0.0.1", 0))
         self.s.settimeout(0.001)
         self.port = self.s.getsockname()[1]
@@ -34,6 +35,7 @@ class FakeRx(threading.Thread):
         self.loss, self.ack_loss, self.dup, self.flip, self.burst = loss, ack_loss, dup, flip, burst
         self.rnd = random.Random(seed)
         self.stop_after_s = stop_after_s
+        self.pause = pause                  # (after_s, for_s): stop reading and ACKing once (nothing is lost)
         self.lose_final = lose_final        # every ACK of the final burst is lost (stray replies get through)
         self.strays = 0
         self.status = None
@@ -59,8 +61,13 @@ class FakeRx(threading.Thread):
         self.t0 = time.perf_counter()
         peer, last = None, time.perf_counter()
         burst_left = 0
+        paused = False
         try:
             while not self.rx.complete():
+                if self.pause and not paused and peer and time.perf_counter() - self.t0 > self.pause[0]:
+                    paused = True
+                    time.sleep(self.pause[1])
+                    last = time.perf_counter()
                 try:
                     d, a = self.s.recvfrom(2048)
                 except socket.timeout:
@@ -228,11 +235,40 @@ class G2xTests(unittest.TestCase):
             self.assertTrue(e <= g <= e + 1000, (gaps, exp))     # 60, 120, 240, 480, then 500 ms
         self.assertEqual(tx.rto_fires, 8)
         self.assertEqual(tx.resent, 8)
-        # the resend of 0 got through: cum = 1, so 1..9 (sent before it) are lost and go out at once
+        # cum = 1: that ACK may be for the original 0 (Karn), so 1..9 are not inferred lost; the RTO is back
+        # at 30 ms and the next probe is 1
         tx.on_ack(gx.Ack(0, 1, 1, 10, 0, 0, 1), t + 5000)
         self.assertEqual(tx.rto, gx.RTO_US)
-        got = [tx.next(t + 5001 + i)[0] for i in range(9)]
-        self.assertEqual(got, list(range(1, 10)))
+        self.assertEqual(len(tx.rq), 0)
+        self.assertEqual(tx.next(t + 5001), (None, False))
+        self.assertEqual(tx.next(t + 5000 + gx.RTO_US + 1), (1, True))
+
+    def test_receiver_pause_no_mass_resend(self):
+        # the receiver stops for 120 ms (> RTO) with its socket buffer holding everything: only RTO probes
+        rx, r, data = self.go(600 * 1024, pps=3000, pause=(0.05, 0.12))
+        self.check_ok(rx, r, data)
+        self.assertEqual(rx.dropped, 0)
+        self.assertGreaterEqual(r["rto"], 1)
+        self.assertLessEqual(r["resent"], r["rto"] + 2)
+
+    def test_tx_karn_probe_ack(self):
+        # 64 in flight, no ACK for > RTO: probe of 0; then the ACK for the ORIGINAL 0..15 arrives
+        tx = gx.Tx(200, 2000)
+        t = 1000
+        for _ in range(64):
+            q, rs = tx.next(t)
+            tx.sent_one(q, rs, t)
+            t += 100
+        q, rs = tx.next(33000)
+        self.assertEqual((q, rs), (0, True))
+        tx.sent_one(q, rs, 33000)
+        tx.on_ack(gx.Ack(0, 1, 16, 80, 0, 0, 1), 33500)
+        self.assertEqual(len(tx.rq), 0)                          # 16..63 are still in the ring, not lost
+        self.assertEqual(tx.next(33501), (64, False))
+        # a real hole after that is still found: 16 lost, 17 sacked
+        tx.sent_one(64, False, 33501)
+        tx.on_ack(gx.Ack(0, 1, 16, 80, 1, 0, 2), 34000)
+        self.assertEqual(tx.next(34001), (16, True))
 
     def test_tx_sack_marks_hole_lost(self):
         tx = gx.Tx(20, 1000)

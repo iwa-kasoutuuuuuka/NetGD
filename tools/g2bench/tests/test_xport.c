@@ -106,6 +106,7 @@ typedef struct {
     uint64_t blackout_at, blackout_us; /* both directions dead for blackout_us from blackout_at (a stall) */
     int lose_final;                    /* every ACK of the receiver's final burst is lost (only replies to
                                           stray datagrams of the finished pass get through) */
+    uint64_t pause_at, pause_us;       /* the Dreamcast neither drains nor ACKs (the ring keeps the datagrams) */
 } sim_cfg;
 #define MAXFIRE 32
 typedef struct {
@@ -178,7 +179,9 @@ static void sim(const sim_cfg *c, sim_res *res)
             w_head = (w_head + 1) % QMAX; w_n--;
         }
         /* Dreamcast: drain one datagram per service time, ACK as the receiver says (main_net.c run_xport) */
-        if (r_n && now >= dc_busy_until && res->rx_done_us) {
+        if (c->pause_us && now >= c->pause_at && now < c->pause_at + c->pause_us) {
+            /* paused: nothing drained, nothing ACKed */
+        } else if (r_n && now >= dc_busy_until && res->rx_done_us) {
             /* the pass is over (the next one runs): a stray datagram of it gets the final ACK (DONE) again */
             r_bytes -= (unsigned)ring_q[r_head].t; r_head = (r_head + 1) % 64; r_n--;
             dc_busy_until = now + c->service_us;
@@ -249,7 +252,7 @@ static void test_sim(void)
 {
     const uint64_t T = 8ull << 20;            /* 8 MiB per case */
     printf("simulated link (8 MiB each; Dreamcast service 340 us = ~2,900 datagrams/s, 16 KiB ring):\n");
-    sim_cfg base = { 1200, 0, 0, 0, 0, 0, 0, 340, 16384, T, 1, 0, 0, 0 };
+    sim_cfg base = { 1200, 0, 0, 0, 0, 0, 0, 340, 16384, T, 1, 0, 0, 0, 0, 0 };
     run_case("1200 pps clean", base, 1500);
     sim_cfg c = base; c.pps = 2500;
     run_case("2500 pps clean", c, 3000);
@@ -281,6 +284,15 @@ static void test_sim(void)
     CHECK(g_last.fire_us[0] > c.blackout_at && g_last.fire_us[0] <= c.blackout_at + G2X_RTO_US + 2000);   /* RTO after the last ACK */
     CHECK(g_last.tx.rto_us == G2X_RTO_US);                 /* back to the base after progress */
     CHECK(g_last.tx.resent < G2X_WIN + 8);                 /* the stalled window once, plus the RTO probes */
+
+    /* the Dreamcast pauses 60 ms (nothing lost: a big ring keeps the datagrams). The RTO probe's ACK may be for
+       the original copy (Karn): it must not mark the rest of the window lost (no mass resend, about the probe) */
+    c = base; c.pps = 2000; c.total = 2u << 20; c.ring = 1u << 20; c.pause_at = 200000; c.pause_us = 60000;
+    run_case("60 ms receiver pause (Karn)", c, 500);
+    CHECK(g_last.ring_drops == 0 && g_last.rand_drops == 0);
+    CHECK(g_last.tx.rto_fires >= 1 && g_last.tx.rto_fires <= 2);
+    CHECK(g_last.tx.resent == g_last.tx.rto_fires);       /* the probes only */
+    CHECK(g_last.tx.loss_events == g_last.tx.rto_fires);  /* no rate cut from a spurious loss */
 
     /* every ACK of the receiver's final burst lost: the PC's RTO resend is a stray datagram of the finished
        pass, answered with DONE, so the PC ends about one RTO later (not after its 5 s idle limit) */

@@ -92,6 +92,8 @@ typedef struct {
     uint64_t last_progress_us;           /* last ACK with progress, or the last RTO */
     uint64_t acked_stamp;                /* newest transmission (stamp) known to have arrived */
     uint32_t rto_us;                     /* current RTO: doubles per RTO without progress */
+    int64_t probe;                       /* seq last resent by an RTO (until acknowledged), or -1: an ACK of it
+                                            may be for the earlier copy (Karn), so its stamp says nothing */
     double pps, pps_min, pps_max;        /* pacing rate; adaptive when pps_max > pps_min */
     uint64_t last_cut_us;
     uint32_t sent, resent, loss_events, rto_fires;

@@ -154,6 +154,7 @@ void g2x_tx_init(g2x_tx *t, uint32_t count, uint8_t *acked, uint64_t *stamp, uin
     t->limit = count < G2X_WIN ? count : G2X_WIN;
     t->pps = pps; t->pps_min = pps_min; t->pps_max = pps_max;
     t->rto_us = G2X_RTO_US;
+    t->probe = -1;
 }
 
 static void enqueue(g2x_tx *t, uint32_t s)
@@ -175,13 +176,18 @@ void g2x_tx_on_ack(g2x_tx *t, const g2x_ack *a, uint64_t now)
     uint64_t top = t->acked_stamp;
     uint32_t cum = a->cum > t->count ? t->count : a->cum;
     while (t->cum < cum) {
-        if (!t->acked[t->cum]) { t->acked[t->cum] = 1; progress = 1; if (t->stamp[t->cum] > top) top = t->stamp[t->cum]; }
+        if (!t->acked[t->cum]) {
+            t->acked[t->cum] = 1; progress = 1;
+            if ((int64_t)t->cum == t->probe) t->probe = -1;          /* Karn: not used for `top` */
+            else if (t->stamp[t->cum] > top) top = t->stamp[t->cum];
+        }
         t->cum++;
     }
     for (unsigned i = 0; i + 1 < G2X_WIN; i++) {
         uint32_t bit = i < 32 ? (a->sack_lo >> i) & 1u : (a->sack_hi >> (i - 32)) & 1u;
         uint32_t q = cum + 1 + i;
         if (!bit || q >= t->count) continue;
+        if ((int64_t)q == t->probe) { if (!t->acked[q]) { t->acked[q] = 1; progress = 1; } t->probe = -1; continue; }
         if (!t->acked[q]) { t->acked[q] = 1; progress = 1; }
         if (t->stamp[q] > top) top = t->stamp[q];
     }
@@ -190,8 +196,8 @@ void g2x_tx_on_ack(g2x_tx *t, const g2x_ack *a, uint64_t now)
     if (progress) { t->last_progress_us = now; t->rto_us = G2X_RTO_US; }
     t->acked_stamp = top;
     /* unacknowledged, and sent before a datagram that arrived = lost (the BBA ring is FIFO: nothing is
-       reordered). Covers the cumulative part too: when an RTO resend of the oldest gets through, whatever
-       was in flight before it is known lost and resent at once (no RTO per datagram). */
+       reordered), cumulative ACKs included. An ACK of the RTO probe is not used (Karn: it may be for the
+       first copy, and then the rest of the window is only delayed, not lost); later SACKs or RTOs find it. */
     int lost = 0;
     for (uint32_t q = t->cum; q < t->next_new; q++)
         if (!t->acked[q] && !t->queued[q] && t->stamp[q] && t->stamp[q] < top) { enqueue(t, q); lost = 1; }
@@ -209,11 +215,12 @@ int64_t g2x_tx_next(g2x_tx *t, uint64_t now, int *resend)
     }
     if (t->cum < t->next_new && t->last_progress_us && now - t->last_progress_us > t->rto_us) {
         /* nothing acknowledged for an RTO: resend only the oldest unacked (t->cum is never acked), and back
-           off (x2 up to G2X_RTO_MAX_US) until an ACK makes progress. The ACK for it tells what else is lost. */
+           off (x2 up to G2X_RTO_MAX_US) until an ACK makes progress. Its ACK does not feed the loss rule (t->probe). */
         t->last_progress_us = now;
         t->rto_us = t->rto_us * 2 > G2X_RTO_MAX_US ? G2X_RTO_MAX_US : t->rto_us * 2;
         t->rto_fires++;
         cut(t, now);
+        t->probe = t->cum;
         *resend = 1;
         return t->cum;
     }

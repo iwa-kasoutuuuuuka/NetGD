@@ -8,7 +8,8 @@ Dreamcast's UDP port, paced at a fixed or adaptive rate, and recovers losses fro
   so it is resent at once (no timer);
 * unacknowledged and sent before a datagram that was acknowledged (cumulatively or selectively) = lost too;
 * nothing acknowledged for RTO (30 ms): resend only the oldest unacknowledged datagram, and double the RTO
-  (up to 500 ms) per expiry without progress; the ACK for that resend tells what else was lost;
+  (up to 500 ms) per expiry without progress; an ACK of that probe does not feed the loss rule (Karn: it may be for the
+  first copy, the rest only delayed);
 * the pass ends as soon as everything is acknowledged (or on the Dreamcast's DONE / STOP; the Dreamcast
   answers a stray datagram of a finished pass with its final ACK again, so a lost DONE costs one RTO);
 * pacing: no catch-up burst after a window / credit stall; the wait between sends sleeps (select on the
@@ -109,6 +110,8 @@ class Tx(object):
         self.last_progress = 0
         self.acked_stamp = 0        # newest transmission known to have arrived
         self.rto = RTO_US           # doubles per RTO without progress, up to RTO_MAX_US
+        self.probe = -1             # seq last resent by an RTO until acknowledged: its ACK may be for the
+                                    # earlier copy (Karn), so its stamp does not feed the loss rule
         self.pps, self.pps_min, self.pps_max = float(pps), float(pps_min), float(pps_max)
         self.adaptive = pps_max > pps_min
         self.last_cut = 0
@@ -136,7 +139,9 @@ class Tx(object):
             if not acked[self.cum]:
                 acked[self.cum] = 1
                 progress = True
-                if stamp[self.cum] > top:
+                if self.cum == self.probe:
+                    self.probe = -1
+                elif stamp[self.cum] > top:
                     top = stamp[self.cum]
             self.cum += 1
         bits = a.sack_lo | (a.sack_hi << 32)
@@ -148,7 +153,9 @@ class Tx(object):
                     if not acked[q]:
                         acked[q] = 1
                         progress = True
-                    if stamp[q] > top:
+                    if q == self.probe:
+                        self.probe = -1
+                    elif stamp[q] > top:
                         top = stamp[q]
             bits >>= 1
             i += 1
@@ -184,6 +191,7 @@ class Tx(object):
             self.rto = min(self.rto * 2, RTO_MAX_US)
             self.rto_fires += 1
             self._cut(now)
+            self.probe = self.cum
             return self.cum, True
         if self.next_new < self.count and self.next_new < self.limit:
             return self.next_new, False
