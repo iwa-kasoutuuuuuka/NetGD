@@ -1,4 +1,4 @@
-# NetGD 計画（2026-11-20 立て直し、R136 まで反映）
+# NetGD 計画（2026-11-20 立て直し、R159 まで反映）
 
 NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。ドリームキャストの GD-ROM ドライブを
 置き換える基板（GDEMU 系）のファームウェアと FPGA コアを、オープンソースで作る。
@@ -13,6 +13,24 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 
 ## いまの状態（実測）
 
+**2026-11-22 時点（R146〜R159）**：
+- **取り込み**：R146 で 4 ブランチを main に入れた（`482f9198`）。R147 以降の修正・検証はブランチのままで、main（`1a2bce03`）には未取り込み。
+- **純正の規則**（記録から。詳細は `docs/research/stock-gdemu-flow.md`）：
+  - CHECK のあとの CDB フェーズの DRDY は直前のコマンドの最終 status に従う（R144 a の訂正、R147）。
+  - 切替中の SECNR は時間で進む（コマンドなし、R155）。音声だけの CDI のディスク形式は 1（R155）。
+  - 同じフォルダへの再切替では窓が開かない（R159）。DEVICE RESET は窓に関係なく検出をやり直す（約 150 ms、R159）。記録 15 の「窓の中」は誤りだった（R157）。
+  - ERROR レジスタは成功のあとも前の sense key を残す（R156・R159）。
+- **NetGD の対応状況**（未取り込み）：
+  - トラックごとのモード・種別検査・音声の 2,352 B・ディスク形式・切替中の SECNR は `feat/stock-rules`（`b664e29b`・`f0dccd36`、R148）。DEVICE RESET の部分は前提が違うため取り込まない（R157）。
+  - `fix/r155-stock`（`1bc2080a`、R156）は音声だけの CDI = 1 のみ採用可。DEVICE RESET の変更は seq 16（R159）の結果を待つ。
+  - 窓の挙動（同じフォルダへの再切替で窓を開く、DEVICE RESET で窓の値を書く）は、純正と違うまま（R157・R159）。
+  - 次の実機の回：同じフォルダへの再切替だけ、DEVICE RESET だけ、INI の `detect_time` を変えた回（R159）。
+- **ツール**：C のテストは `py -3` で通る（R149。`fix/ctests-windows`、`b54c43f0`。R146 の失敗は MSYS の python が原因）。gdprobe の記録 15（REGPOLL・DEVICE RESET）と 16（同じフォルダへの再切替・DEVICE RESET 600 / 2,000 ms）を取得（R155・R159）。
+- **FPGA**：スロット 6 の下位バイト書き込み（SECNR の読み→書きの隙間、R150）と、ERROR のビット 0（R157・R159、`feat/fpga-regs`）は次のビットストリーム待ち。未実装。
+- **サイズ（2E `release-z` の `resident,sd-fast`）**：名前のバイト化（`perf/name-bytes`、R153）で残り 6,240 B。`fix/r155-stock` の時点（R156）で残り 5,888 B（約 6 KB）。
+- **D14**：Form 2 のセクタを 2,324 B で返す `form2-sectors`（R151、既定オフ、未取り込み）。
+- **Supra**：この PC の WSL（Ubuntu 24.04.5）で Supra 2026.03.b0 が動き、AG16K のビルドを再現（R158）。仮ピンの `.rbf` のみ。基板には流さない。
+
 **2026-11-21〜22 の実機の結果（R115〜R124）**：
 - **基板**：6.0 の SWD は 7 ピンヘッダの 4 = SWDIO、5 = SWCLK、7 = GND（導通で確定、R116）。CHIPID とロックの有無は SWD のアダプタ待ち（手順は `tools/fwbackup/README_ja.md`）。
 - **純正の正解データ（P5.5）**：純正ファームの GDEMU 6.0 に gdprobe を 8 回実行し、dcload-ip の CDI、GD-ROM の GDI（03・08）、CDI（04・05）、拒否される GDI（06・09）、空フォルダ（07）の応答を記録した
@@ -20,7 +38,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - **NetGD への反映**：R118 で 8 件を純正に合わせた。R123 の再比較で残った差のうち、lead-out・ASC/ASCQ・REQ_STAT の繰り返し回数・IDENTIFY（R125）と、
   切替のあとの NOT READY の窓・CHECK のレジスタ・中身の無いフォルダへの切替（R126）も純正に合わせた（ホストテストと予測で確認、実機は未確認）。
   さらに切替後の状態とヘッド位置（R130）、存在しない番号は 01 をマウント（R132）も純正に合わせた。切替の時間は GDEMU.ini の値に従う（純正も同じ、R129）。キーの無いときは純正と同じ 500 + 250 ms（R135。R126 の 150 + 150 ms を訂正）。
-  残る差は D10（`0x10` の生セクタ 2,352 B）、D11（純正が拒む GDI の形、受け付けたまま）、D14（CDI の postgap のセクタ長）、D15（バージョン）。
+  残る差は D10（`0x10` の生セクタ 2,352 B。対応は `feat/stock-rules`、R148）、D11（純正が拒む GDI の形、受け付けたまま）、D14（CDI の postgap のセクタ長。対応は `feat/form2-sectors`、R151）、D15（バージョン）。
   CD_READ の種別検査（D8・D9）は純正に合わせて取り込んだ（R134、main のコミット `aba48c5c`、実機未確認）。
 - **スタック**：2E の最も深い経路（マウント）は R131 で約 2 KB 減らし、余裕は約 230 B → 約 2.2 KB（静的な見積もり、R127・R131）。
 - **スタックの実測**：機能 `stack-hw`（既定はオフ）を付けると、リセット以降の最高水位を 0xE0 のサブコマンド 9 で読める。netgd-menu の情報画面（X）と netgd-recv の `NGD:STACK` 行に出る（R133）。ブランチ `feat/stack-highwater` にあり、main にはまだ入れていない。
@@ -71,7 +89,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - **ATAPI 応答の疑い D-2〜D-5**：純正 GDEMU 6.0 の最初の記録（CDI、R117）で決まった分を修正（D-2、D-3 の CDI、D-5 の一部。下の節）。GD-ROM（GDI）に関わる分は GD-ROM の記録を取るまで変えない。
 
 **ツール**（一行ずつ）：
-- `tools/gdprobe`：純正 GDEMU と NetGD に読み取り系コマンドだけを送る KOS 製プローブ。PC 側の `compare.py` で比較（R19、R22、R31）。純正での記録はまだ取っていない。
+- `tools/gdprobe`：純正 GDEMU と NetGD に読み取り系コマンドだけを送る KOS 製プローブ。PC 側の `compare.py` で比較（R19、R22、R31）。純正での記録は R117〜R124 で 8 回取得し、R155・R159 で記録 15・16（レジスタのポーリング・DEVICE RESET・同じフォルダへの再切替）を追加。
 - `tools/mksdcard`：調査用 SD（`03`〜`06`）を決定的に生成（R28）。
 - `tools/netgd-expect`：NetGD が純正と同じ形式で返すはずの記録を出す。純正の記録と `compare.py --only-common` で比べる（R55）。
 - `tools/fwbackup`：SWD で 6.0 の純正フラッシュを読む（`check` / `dump` / `inspect`。probe-rs 0.32.0 のみ）（R33、R40、R43）。実機では未実行。
@@ -84,7 +102,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - 純正ファームの 6.0 での調査（P5.5）と導通確認は済み（R115〜R124）。NetGD を書き込んだ実機の検証はまだ（G1〜G3 とも P6 待ち）。
 - GDEMU 6.0 は MCU が ATSAM3U2E、FPGA が AGM AG16KDDF256（型番末尾に「M」なし、外付けフラッシュなし）。MCU から FPGA をパッシブシリアルで起動する方式がほぼ確実（R6、R41、R49）。PS のタイミングは公開されていない（R49）。
 - SWD には Raspberry Pi Pico（Debug Probe）を使う。ESP32 は不可（R42）。6.0 のヘッダは穴だけでピンが無いので、はんだ付けが要る（R44）。SAM3U2E の CHIPID の期待値は `0x281A0761`（R24）。
-- オーナーの作業：純正 GDEMU での gdprobe 試験（**済**、R117〜R124）、SWD の導通確認（**済**、R115・R116。UART・ERASE パッド・PA23/24/25・PB1/2 は未）、SWD で CHIPID を読み、ロックが無ければ `fwbackup dump`（**待ち**、アダプタの入手後。R29、R43）。
+- オーナーの作業：純正 GDEMU での gdprobe 試験（**済**、R117〜R124・R155・R159）、SWD の導通確認（**済**、R115・R116。UART・ERASE パッド・PA23/24/25・PB1/2 は未）、SWD で CHIPID を読み、ロックが無ければ `fwbackup dump`（**待ち**、アダプタの入手後。R29、R43）。
 
 **次の山場は実機**：SWD で CHIPID を読みバックアップ → NetGD を書き込み → G2 のファームと `netgd-recv` の実機試験、gdprobe で純正の記録と比較（差分テスト）。G1 は分岐 A の確認（PA23/24/25・PB1/2 の導通）と PS のタイミング。
 
@@ -97,7 +115,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - 2E のフラッシュの削減案 2（`opt-level="z"`、約 −7.5 KB）は、オプトインのプロファイル `release-z`・`release-z-hot-s` として用意済み（R98）。既定にするかは実機で速度を比べてから（`docs/research/flash-budget-2e.md` §7）。
 - NetGD 専用メニュー `tools/netgd-menu`：設計（R97）、手順 1〜8（R101）、手順 9 の UDP 探索と手順 11 の箱絵（R108）、レビュー（R104）の指摘の修正（R109）。手順 10（ファーム更新）と 12（実機の数字で決めるもの）が残る。KOS の層は CI でコンパイルを確かめるだけで、実機は未確認。
 - v5.5 用の `OpenGDEMU.rbf` は、CI（`.github/workflows/fpga.yaml`、上流の公開の Quartus のイメージ）で作れる（R103）。リポジトリの rbf は R105 のもの（番号つき ack と Status）。2E の `resident,sd-fast` は `release-z` でしか入らないので、CI もそれで確かめる（R111）。
-- AG16K：Supra での手順は `fpga/agm/`（R106）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作ってファームに埋め込める（埋め込んでも約 10 KB 余る）。PS で流す時間は約 1.2〜1.7 秒と見積もった（実機で測る）。
+- AG16K：Supra での手順は `fpga/agm/`（R106。WSL 上での再現は R158）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作ってファームに埋め込める（埋め込んでも約 10 KB 余る）。PS で流す時間は約 1.2〜1.7 秒と見積もった（実機で測る）。
 - `embedded_sdmmc` を自前の FAT に置き換える（−4〜−7 KB の見積もり、作業は大きい）。ビットストリームを埋め込むことになった場合に検討。
 - それ以外の大きな課題はすべて実機・純正の記録が要る（下の P5.5・P6）。
 
@@ -135,7 +153,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - **G1-1 調査** — 済（上記）。6.0 基板の MCU / FPGA / 水晶 / ヘッダ配置を公開情報から洗い出し、v5.5 との差分を表にする。
 - **G1-2 実物確認（ユーザー）** — 部品の写真による確認は済（R6、R41）。SWD は済（7 ピンヘッダの 4 = SWDIO・5 = SWCLK・7 = GND、R115・R116）。UART・ERASE パッドの位置、PA23/24/25・PB1/2 が FPGA の方へ伸びているかは未（細いプローブが要る）。
 - **G1-3 移植** — 進行中。ボード差分を Cargo feature（`board-v55` / `board-v60`）で切り替え、FPGA ローダーは `common/psload` に切り出し済み（R57、ホストのみ）。FIFO のブロック RAM 対応は実装済み（R39）。
-  AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。**R99：Supra 2026.03（Linux 版、ネットワークなし）でビルドできた**。M9K 14 個、ロジック 13 %、LZMA 後 37,727 B。手順は `docs/research/ag16k-supra-build.md`（inout の後処理 `fixio.py` が必須、PLL は `alta_pllve`）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作れる。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。ピン探し（設計 2-4 の方法 2）の準備中。公開資料にはボール表・BSDL・PS のタイミングが無いが、Supra に `alta_osc` というプリミティブがあり、クロック源に使える可能性がある（周波数は不明、R136）。
+  AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。**R99：Supra 2026.03（Linux 版、ネットワークなし）でビルドできた**。M9K 14 個、ロジック 13 %、LZMA 後 37,727 B。手順は `docs/research/ag16k-supra-build.md`（inout の後処理 `fixio.py` が必須、PLL は `alta_pllve`）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作れる。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。ピン探し（設計 2-4 の方法 2）の準備中（Supra の環境は R158 で動いた。`pinfind` の初回の Supra ビルドは未実施）。公開資料にはボール表・BSDL・PS のタイミングが無いが、Supra に `alta_osc` というプリミティブがあり、クロック源に使える可能性がある（周波数は不明、R136）。
 - **G1-4 実機起動** — 未。P5 の手順で書き込み → UART ログ → IDE バス動作確認。
 
 ### G2：BBA 経由の SD 書き込み
@@ -179,7 +197,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - 配線不要。純正ファームを壊さないよう、読み取り系コマンドだけを送る。
 - 状態：**済**（2026-11-21〜22、R117〜R124）。gdprobe は G1 バスの保護を開ける処理を足して動いた（R117）。試験用 SD は `tools/mksdcard`（`--set variants` で 08・09 も）。
   分かったこと：D-1〜D-5 の答え、`0x52` の切替の SENSE の並びと時間、空フォルダの扱い、純正が受け付ける GDI の形（低密度領域はトラック 1・2 だけ、高密度領域はトラック 3 から。R121・R122）、
-  IDENTIFY PACKET は 80 バイトの GD-ROM 形式（R124）、本家の速さ。残り：存在しない番号への切替、CD 音声の再生まわり（許可リストに無い）。
+  IDENTIFY PACKET は 80 バイトの GD-ROM 形式（R124）、本家の速さ。残り：CD 音声の再生まわり（許可リストに無い）。同じフォルダへの再切替と窓の外の DEVICE RESET は R159 で確認済み。
   KOS 部分の初回ビルドと `switch=off` の 1 回目で確かめる（R31）。
 
 ### P6：実機検証ループ（ユーザー + Opus）
