@@ -103,7 +103,7 @@ jobs:
         run: cargo build --release --no-default-features --features pinfind
 
   host-tests:
-    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, stackmark, pinfind, fwupdater)
+    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, stackmark, pinfind, sdmmc-robustness, fwupdater)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -118,6 +118,9 @@ jobs:
           - crate: common/fatmap
           - crate: common/stackmark
           - crate: common/pinfind
+          # Crafted-card tests of the vendored embedded-sdmmc 0.9.0 fixes
+          # (mcu/netgd/vendor/README.md): the patched copy against crates.io.
+          - crate: tools/sdmmc-robustness
           # .cargo/config.toml defaults to thumbv7m-none-eabi, so the host
           # target has to be named explicitly.
           - crate: mcu/fwupdater
