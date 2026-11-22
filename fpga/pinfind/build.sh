@@ -214,6 +214,7 @@ cp "$RBF" "$OUT/pinfind_ag16k.rbf"
     tr -d '\r' <"$GEN/params.txt"
     echo "rbf_bytes $CKN"
     echo "rbf_cksum $CK"
+    echo "rbf_sha256 $(sha256sum "$RBF" | cut -d' ' -f1)"
 } >"$OUT/pinfind_ag16k.params"
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 {

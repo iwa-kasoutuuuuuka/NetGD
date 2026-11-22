@@ -236,6 +236,11 @@ pub fn main<S: PsSource>(
     make_source: impl FnMut() -> S,
 ) -> ! {
     fpga.set_nconfig(false);
+    if params::STAGE0 {
+        info!("PF STAGE 0 (no outputs driven) bitstream sha256={} ({} bytes raw)", params::RBF_SHA256, raw_len);
+    } else {
+        info!("PF STAGE 1-3 (DRIVES balls; NOT stage 0) bitstream sha256={} ({} bytes raw)", params::RBF_SHA256, raw_len);
+    }
     info!(
         "PF pin-finder: stage0={} toggle_dclk={} ball_clock={} loops={} frames={} prescale={} drive={}",
         params::STAGE0,

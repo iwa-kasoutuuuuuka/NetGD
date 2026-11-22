@@ -198,8 +198,10 @@ fn pinfind_params(out_dir: &Path, present: bool) {
 ",
                 "pub const N_DRIVE: u32 = {};
 ",
+                "pub const RBF_SHA256: &str = {:?};
+",
             ),
-            PARAMS_PINFIND, stage0, toggle, ball_clock, loops, num("frames"), num("prescale"), num("n_drive")
+            PARAMS_PINFIND, stage0, toggle, ball_clock, loops, num("frames"), num("prescale"), num("n_drive"), get("rbf_sha256")
         ),
     )
     .expect("write pinfind_params.rs");
