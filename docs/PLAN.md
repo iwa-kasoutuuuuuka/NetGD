@@ -13,22 +13,21 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 
 ## いまの状態（実測）
 
-**2026-11-22 時点（R146〜R159）**：
-- **取り込み**：R146 で 4 ブランチを main に入れた（`482f9198`）。R147 以降の修正・検証はブランチのままで、main（`1a2bce03`）には未取り込み。
+**2026-11-22 時点（R146〜R160）**：
+- **main に取り込み済み**（main `449209f1`）：`feat/stock-rules`（`b664e29b`・`f0dccd36`、R148）、`fix/secnr-reset`（R150）、`fix/ctests-windows`（R149）、`feat/form2-sectors`（R151、既定オフ）、`docs/stock-audit`・`feat/expect-cdbst-secnr`（R152）、`perf/name-bytes`（R153）、`feat/gdprobe-r148`（R154）。R146 の 4 ブランチも取り込み済み（`482f9198`）。
+- **未取り込み（ブランチ）**：`fix/audio-cdi-format`（`755a6658`、音声だけの CDI = 形式 1。`fix/r155-stock` を置き換える。`fix/r155-stock` は取り込まない）、`feat/fpga-regs`（`db23bad6`・`dcc499a1`、スロット 32 の SECNR 下位バイト書き込みと ERROR の err_lo ビット 0〜1。Supra の AG16K ビルドは収まり 92 MHz）、`fix/r159-devreset`（作業中。同じフォルダへの再切替と DEVICE RESET、R159・R160）、`feat/gdprobe-seq17`（`6c548f3b`）、`feat/pinfind-supra`（作業中）、`tools/ci-local`（別セッション）。
 - **純正の規則**（記録から。詳細は `docs/research/stock-gdemu-flow.md`）：
   - CHECK のあとの CDB フェーズの DRDY は直前のコマンドの最終 status に従う（R144 a の訂正、R147）。
   - 切替中の SECNR は時間で進む（コマンドなし、R155）。音声だけの CDI のディスク形式は 1（R155）。
-  - 同じフォルダへの再切替では窓が開かない（R159）。DEVICE RESET は窓に関係なく検出をやり直す（約 150 ms、R159）。記録 15 の「窓の中」は誤りだった（R157）。
+  - 同じフォルダへの再切替は何もしない（窓なし・UA なし・位置も変わらない、R160）。DEVICE RESET は SECNR 0x00 のあと約 150 ms で最終の値に戻り、UA を出し、ヘッドをトラック 1 / FAD 150 に戻す（R160）。記録 15・16 の UA は DEVICE RESET から来ていた（R160）。記録 15 の「窓の中」は誤りだった（R157）。
   - ERROR レジスタは成功のあとも前の sense key を残す（R156・R159）。
-- **NetGD の対応状況**（未取り込み）：
-  - トラックごとのモード・種別検査・音声の 2,352 B・ディスク形式・切替中の SECNR は `feat/stock-rules`（`b664e29b`・`f0dccd36`、R148）。DEVICE RESET の部分は前提が違うため取り込まない（R157）。
-  - `fix/r155-stock`（`1bc2080a`、R156）は音声だけの CDI = 1 のみ採用可。DEVICE RESET の変更は seq 16（R159）の結果を待つ。
-  - 窓の挙動（同じフォルダへの再切替で窓を開く、DEVICE RESET で窓の値を書く）は、純正と違うまま（R157・R159）。
-  - 次の実機の回：同じフォルダへの再切替だけ、DEVICE RESET だけ、INI の `detect_time` を変えた回（R159）。
-- **ツール**：C のテストは `py -3` で通る（R149。`fix/ctests-windows`、`b54c43f0`。R146 の失敗は MSYS の python が原因）。gdprobe の記録 15（REGPOLL・DEVICE RESET）と 16（同じフォルダへの再切替・DEVICE RESET 600 / 2,000 ms）を取得（R155・R159）。
-- **FPGA**：スロット 6 の下位バイト書き込み（SECNR の読み→書きの隙間、R150）と、ERROR のビット 0（R157・R159、`feat/fpga-regs`）は次のビットストリーム待ち。未実装。
-- **サイズ（2E `release-z` の `resident,sd-fast`）**：名前のバイト化（`perf/name-bytes`、R153）で残り 6,240 B。`fix/r155-stock` の時点（R156）で残り 5,888 B（約 6 KB）。
-- **D14**：Form 2 のセクタを 2,324 B で返す `form2-sectors`（R151、既定オフ、未取り込み）。
+- **NetGD の対応状況**：
+  - DEVICE RESET の部分（窓の中だけ検出をやり直す変更）は前提が違うため取り込まない（R157）。DEVICE RESET と同じフォルダへの再切替の対応は `fix/r159-devreset` で作業中（R160 の結果に合わせる）。
+  - 窓の挙動（同じフォルダへの再切替で窓を開く、DEVICE RESET で窓の値を書く）は、main ではまだ純正と違う（R157・R159）。
+  - 残りの確認：150 ms が `detect_time` と同じか（seq 18、`detect_time = 400`、R160）。
+- **ツール**：C のテストは `py -3` で通る（R149。main に取り込み済み。R146 の失敗は MSYS の python が原因）。gdprobe の記録 15（REGPOLL・DEVICE RESET）・16（同じフォルダへの再切替・DEVICE RESET 600 / 2,000 ms）・17（同じフォルダへの再切替だけ・DEVICE RESET だけ、R160）を取得（R155・R159・R160）。
+- **FPGA**：スロット 32 の SECNR 下位バイト書き込み（R150 の隙間の対策）と、ERROR のビット 0〜1（R157・R159）は `feat/fpga-regs` にあり未取り込み。
+- **サイズ（2E `release-z` の `resident,sd-fast`）**：名前のバイト化（`perf/name-bytes`、R153）で残り 6,240 B（main）。`fix/r155-stock` の時点（R156）で残り 5,888 B。
 - **Supra**：この PC の WSL（Ubuntu 24.04.5）で Supra 2026.03.b0 が動き、AG16K のビルドを再現（R158）。仮ピンの `.rbf` のみ。基板には流さない。
 
 **2026-11-21〜22 の実機の結果（R115〜R124）**：
@@ -38,7 +37,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - **NetGD への反映**：R118 で 8 件を純正に合わせた。R123 の再比較で残った差のうち、lead-out・ASC/ASCQ・REQ_STAT の繰り返し回数・IDENTIFY（R125）と、
   切替のあとの NOT READY の窓・CHECK のレジスタ・中身の無いフォルダへの切替（R126）も純正に合わせた（ホストテストと予測で確認、実機は未確認）。
   さらに切替後の状態とヘッド位置（R130）、存在しない番号は 01 をマウント（R132）も純正に合わせた。切替の時間は GDEMU.ini の値に従う（純正も同じ、R129）。キーの無いときは純正と同じ 500 + 250 ms（R135。R126 の 150 + 150 ms を訂正）。
-  残る差は D10（`0x10` の生セクタ 2,352 B。対応は `feat/stock-rules`、R148）、D11（純正が拒む GDI の形、受け付けたまま）、D14（CDI の postgap のセクタ長。対応は `feat/form2-sectors`、R151）、D15（バージョン）。
+  残る差は D10（`0x10` の生セクタ 2,352 B。main に取り込み済み、R148）、D11（純正が拒む GDI の形、受け付けたまま）、D14（CDI の postgap のセクタ長。`feat/form2-sectors` は main に取り込み済み・既定オフ、R151）、D15（バージョン）。
   CD_READ の種別検査（D8・D9）は純正に合わせて取り込んだ（R134、main のコミット `aba48c5c`、実機未確認）。
 - **スタック**：2E の最も深い経路（マウント）は R131 で約 2 KB 減らし、余裕は約 230 B → 約 2.2 KB（静的な見積もり、R127・R131）。
 - **スタックの実測**：機能 `stack-hw`（既定はオフ）を付けると、リセット以降の最高水位を 0xE0 のサブコマンド 9 で読める。netgd-menu の情報画面（X）と netgd-recv の `NGD:STACK` 行に出る（R133）。ブランチ `feat/stack-highwater` にあり、main にはまだ入れていない。
