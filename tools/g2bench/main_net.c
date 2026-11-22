@@ -15,8 +15,13 @@
  * Never touches the GD-ROM drive: INIT_CDROM is off, no G1 / ATA / cdrom call.
  *
  * Passes (TCP): want size / WANTs in flight / receive buffer / checksums on or off. Then UDP bursts (what a
- * custom UDP transfer could count on). Results are sent to the PC as LINE frames (key=value); g2n_send.py
- * writes them to host\g2net_NNN.txt. See README_ja.md. */
+ * custom UDP transfer could count on), then g2x passes: the custom UDP transfer itself (g2x_core.h,
+ * docs/research/g2-transport.md). Results are sent to the PC as LINE frames (key=value); g2n_send.py
+ * writes them to host\g2net_NNN.txt. See README_ja.md.
+ *
+ * Built with G2N_TCPFIX=1 (make net-tcpfix -> g2netbench_tcpfix.elf), KOS's net_tcp.c is replaced by a patched
+ * copy linked into the ELF (tools/kos-patches/net_tcp-rx-fix.patch; DreamSDK is not modified), and the passes
+ * are the TCP ones that the stock stack cannot do (64 KiB frames, two WANTs in flight). */
 #include <kos.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +39,7 @@
 #include <dc/fs_dclsocket.h>
 #include "g2b_core.h"
 #include "g2n_core.h"
+#include "g2x_core.h"
 #include "../netgd-recv/src/crc32.h"
 
 KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
@@ -213,16 +219,41 @@ static uint64_t drain(int idle_ms)
 
 /* ---- one TCP pass ---- */
 typedef struct { uint32_t want, depth, rcvbuf; int ck; } pass_cfg;
+#ifndef G2N_TCPFIX
+#define G2N_TCPFIX 0
+#endif
+#ifndef G2N_XPORT
+#define G2N_XPORT (!G2N_TCPFIX)  /* the g2x passes (custom UDP transfer) */
+#endif
+#ifndef G2N_TCP_ALL
+#define G2N_TCP_ALL 0            /* 1: also the stock-stack passes that stall (R178: 32-64 KiB frames, 4-6 KB/s) */
+#endif
 static const pass_cfg PASSES[] = {   /* the biggest frames come last */
+#if G2N_TCPFIX
+    { 16384, 1, 0, 1 },       /* the R178 baseline, now with the patched stack */
+    { 16384, 1, 0, 0 },
+    { 65536, 1, 0, 1 },       /* frame > window: stalled without the window-update ACK */
+    { 65536, 2, 0, 1 },       /* one WANT read ahead: the stream never stops */
+    { 65536, 2, 0, 0 },
+    { 32768, 2, 0, 1 },
+#else
     { 16384, 1, 0, 1 },
     { 16384, 1, 0, 0 },       /* no checksums: the network alone */
+#if G2N_TCP_ALL
     { 32768, 1, 0, 1 },
     { 49152, 1, 0, 1 },
     { 65536, 1, 0, 1 },       /* netgd-recv's plan (menu-app.md D6) */
     { 65536, 1, 0, 0 },
     { 65536, 2, 0, 1 },       /* one WANT read ahead */
     { 65536, 2, 0, 0 },
+#endif
+#endif
 };
+
+#if G2N_TCPFIX
+/* defined by the patched net_tcp.c (build-fix/net_tcp_fix.c): proves it is the one linked in */
+extern volatile uint32_t net_tcp_fix_ooo_dropped, net_tcp_fix_trimmed, net_tcp_fix_wnd_updates;
+#endif
 
 static volatile unsigned g_pass_no;
 static char g_text[2048];
@@ -263,6 +294,9 @@ static int run_pass(unsigned n, const pass_cfg *c)
     kvp(pfx, "rcvbuf", got_rb);
     g_pass_no = n;
     uint64_t rx0 = g_rx_total;
+#if G2N_TCPFIX
+    uint32_t ooo0 = net_tcp_fix_ooo_dropped, trim0 = net_tcp_fix_trimmed, wu0 = net_tcp_fix_wnd_updates;
+#endif
 
     g2n_pass ps;
     g2n_pass_init(&ps, (uint16_t)n, PASS_BYTES, c->want, c->depth);
@@ -329,6 +363,11 @@ out:;
     kvp(pfx, "conn_dead", (uint64_t)g_conn_dead); kvp(pfx, "conn_errno", (uint64_t)(g_dead_errno < 0 ? 0 : g_dead_errno));
     kvp(pfx, "conn_eof", (uint64_t)g_dead_eof);
     kvh(pfx, "crc", crc); kvh(pfx, "fnv", fnv);
+#if G2N_TCPFIX
+    kvp(pfx, "tcp_ooo_dropped", net_tcp_fix_ooo_dropped - ooo0);
+    kvp(pfx, "tcp_trimmed", net_tcp_fix_trimmed - trim0);
+    kvp(pfx, "tcp_wnd_updates", net_tcp_fix_wnd_updates - wu0);
+#endif
     send_kv(g_text);
     return good ? 0 : -1;
 }
@@ -375,6 +414,132 @@ static int run_udp(int ufd, unsigned n, unsigned count, unsigned size, unsigned 
     return 0;
 }
 
+#if G2N_XPORT
+/* ---- g2x: the custom UDP transfer (g2x_core.h). The PC streams 1,400-byte datagrams, paced; we deliver them in
+   order into the sink and answer with cumulative + selective ACKs. ck: 0 = nothing checked here (the UDP checksum
+   only), 1 = CRC-32 per datagram, 2 = per datagram + the file CRC-32 / FNV-1a of netgd-recv ---- */
+typedef struct { unsigned pps, pps_min, pps_max; int ck; } xpass_cfg;
+static const xpass_cfg XPASSES[] = {
+    { 1200, 0, 0, 1 },           /* the rate R178 got through without loss */
+    { 2000, 0, 0, 1 },
+    { 1500, 800, 4000, 1 },      /* adaptive: +3 pps per ACK with progress, x0.85 per loss event */
+    { 1500, 800, 4000, 0 },      /* the network alone */
+    { 1500, 800, 4000, 2 },      /* what netgd-recv would compute */
+    { 2500, 0, 0, 1 },           /* R178 lost 17 % at this rate: the recovery has to work */
+};
+static uint8_t g_xslots[G2X_WIN][G2X_PAYLOAD] __attribute__((aligned(32)));
+
+typedef struct { int ck; uint32_t crc, fnv; uint64_t ck_us, copy_us, bytes; } xsink_t;
+static void xsink(void *ctx, uint32_t seq, const uint8_t *data, uint16_t len)
+{
+    xsink_t *x = ctx;
+    uint64_t t = now_us();
+    size_t o = (size_t)(((uint64_t)seq * G2X_PAYLOAD) % (sizeof g_sink - G2X_PAYLOAD));
+    memcpy(g_sink + o, data, len);                     /* stands for the hand-off to the SD writer */
+    uint64_t t2 = now_us();
+    x->copy_us += t2 - t;
+    if (x->ck >= 2) { x->crc = ng_crc32(x->crc, data, len); x->fnv = ng_fnv1a(x->fnv, data, len); x->ck_us += now_us() - t2; }
+    x->bytes += len;
+    g_rx_total += len;
+}
+
+/* the final ACK (DONE, or STOP after the time limit) of the last finished pass: a stray datagram of that pass
+   means the PC missed every copy of it, so it gets it again (else the PC would wait for its idle limit) */
+static struct { int valid; uint16_t pass; uint8_t ack[G2X_ACK_LEN]; } g_xlast;
+static uint8_t g_xack[G2X_ACK_LEN];                    /* the last ACK sent */
+static uint8_t g_xpkt[2048] __attribute__((aligned(32)));
+
+static void x_ack(int ufd, g2x_rx *rx, const struct sockaddr_in *to, uint8_t flags)
+{
+    g2x_ack a;
+    g2x_rx_make_ack(rx, &a, flags, now_us());
+    g2x_ack_build(g_xack, &a);
+    sendto(ufd, g_xack, sizeof g_xack, 0, (const struct sockaddr *)to, sizeof *to);
+}
+
+/* 1 when p is a DATA datagram of the finished pass (answered with its final ACK) */
+static int x_stray(int ufd, const uint8_t *p, ssize_t n, const struct sockaddr_in *from)
+{
+    if (!g_xlast.valid || n < 8 || memcmp(p, "G2X1", 4) != 0 || p[4] != G2X_T_DATA ||
+        (uint16_t)(p[6] | (p[7] << 8)) != g_xlast.pass) return 0;
+    sendto(ufd, g_xlast.ack, sizeof g_xlast.ack, 0, (const struct sockaddr *)from, sizeof *from);
+    return 1;
+}
+
+/* after the last pass (no next pass answers its strays): until no stray for quiet_ms (> the PC's 500 ms RTO cap) */
+static void x_linger(int ufd, unsigned quiet_ms, unsigned max_ms)
+{
+    if (!g_xlast.valid) return;
+    uint64_t t0 = now_us(), tq = t0;
+    while (now_us() - tq < quiet_ms * 1000ull && now_us() - t0 < max_ms * 1000ull) {
+        struct sockaddr_in f; socklen_t fl = sizeof f;
+        ssize_t r = recvfrom(ufd, g_xpkt, sizeof g_xpkt, 0, (struct sockaddr *)&f, &fl);
+        if (r >= 0) { if (x_stray(ufd, g_xpkt, r, &f)) tq = now_us(); continue; }
+        thd_sleep(1);
+    }
+}
+
+static int run_xport(int ufd, unsigned n, const xpass_cfg *c)
+{
+    char pfx[16], line[128];
+    snprintf(pfx, sizeof pfx, "x%u", n);
+    uint8_t *pkt = g_xpkt;
+    static g2x_rx rx;
+    xsink_t xs; memset(&xs, 0, sizeof xs); xs.ck = c->ck; xs.fnv = NG_FNV_INIT;
+    g2x_rx_init(&rx, (uint16_t)n, PASS_BYTES, g_xslots, xsink, &xs);
+    rx.need_crc = c->ck >= 1;
+    {   /* whatever is still queued from earlier passes (strays of the previous one are answered) */
+        struct sockaddr_in f; socklen_t fl = sizeof f;
+        ssize_t r;
+        while ((r = recvfrom(ufd, pkt, sizeof g_xpkt, 0, (struct sockaddr *)&f, &fl)) >= 0) { x_stray(ufd, pkt, r, &f); fl = sizeof f; }
+    }
+    snprintf(line, sizeof line, "G2X go pass=%u bytes=%lu pps=%u min=%u max=%u crc=%d win=%u limit_s=%u", n,
+             (unsigned long)PASS_BYTES, c->pps, c->pps_min, c->pps_max, c->ck >= 1, G2X_WIN, (unsigned)(PASS_LIMIT_US / 1000000ull));
+    send_line(line);
+    struct sockaddr_in peer; memset(&peer, 0, sizeof peer);
+    int have_peer = 0;
+    const char *status = "done";
+    uint64_t tfirst = 0, tlast = now_us();
+    while (!g2x_rx_complete(&rx)) {
+        struct sockaddr_in from; socklen_t fl = sizeof from;
+        ssize_t r = recvfrom(ufd, pkt, sizeof g_xpkt, 0, (struct sockaddr *)&from, &fl);
+        uint64_t t = now_us();
+        if (r >= 0) {
+            int w = g2x_rx_input(&rx, pkt, (size_t)r, t);
+            if (w < 0) { x_stray(ufd, pkt, r, &from); continue; }   /* not ours: the previous pass, old UDP bursts */
+            if (!have_peer) { peer = from; have_peer = 1; tfirst = t; stage_f("x%u streaming (%s)", n, "g2x"); }
+            tlast = t;
+            if (w == 1) x_ack(ufd, &rx, &peer, 0);
+            continue;                                  /* empty the queue before anything else */
+        }
+        if (have_peer && g2x_rx_poll(&rx, t)) x_ack(ufd, &rx, &peer, 0);
+        if (have_peer && t - tfirst > PASS_LIMIT_US) { status = "time_limit"; break; }
+        if (t - tlast > (have_peer ? 3000000ull : 15000000ull)) { status = have_peer ? "idle" : "no_data"; break; }
+        thd_pass();
+    }
+    uint64_t tend = now_us();
+    if (have_peer) {                                   /* the end: the PC stops on DONE / STOP */
+        for (int i = 0; i < 5; i++) { x_ack(ufd, &rx, &peer, strcmp(status, "done") ? G2X_A_STOP : 0); thd_sleep(3); }
+        memcpy(g_xlast.ack, g_xack, sizeof g_xack);    /* strays of this pass get it again (x_stray) */
+        g_xlast.pass = (uint16_t)n; g_xlast.valid = 1;
+    }
+    uint64_t bytes = xs.bytes, span = tfirst && tend > tfirst ? tend - tfirst : 0;
+    int good = !strcmp(status, "done") || !strcmp(status, "time_limit");
+    say("x%u %s: %lu KB, %lu KB/s, dgrams %u bad %u dups %u gaps %u acks %u", n, status, (unsigned long)(bytes / 1024),
+        (unsigned long)g2b_kbps(bytes, span), (unsigned)rx.dgrams, (unsigned)rx.bad, (unsigned)rx.dups, (unsigned)rx.gaps, (unsigned)rx.acks);
+    g2b_kv_init(&g_kv, g_text, sizeof g_text);
+    kvp(pfx, "pps", c->pps); kvp(pfx, "pps_min", c->pps_min); kvp(pfx, "pps_max", c->pps_max); kvp(pfx, "ck", (uint64_t)c->ck);
+    kvp(pfx, "status_ok", (uint64_t)good); kvs(pfx, "status", status);
+    kvp(pfx, "bytes", bytes); kvp(pfx, "us", span); kvp(pfx, "kbps", g2b_kbps(bytes, span));
+    kvp(pfx, "dgrams", rx.dgrams); kvp(pfx, "delivered", rx.cum); kvp(pfx, "dups", rx.dups); kvp(pfx, "bad", rx.bad);
+    kvp(pfx, "gaps", rx.gaps); kvp(pfx, "beyond", rx.beyond); kvp(pfx, "acks", rx.acks);
+    kvp(pfx, "copy_us", xs.copy_us); kvp(pfx, "file_ck_us", xs.ck_us);
+    kvh(pfx, "crc", xs.crc); kvh(pfx, "fnv", xs.fnv);
+    send_kv(g_text);
+    return good ? 0 : -1;
+}
+
+#endif /* G2N_XPORT */
 /* ---- main ---- */
 extern void eth_init(void);                /* KOS hardware.c: registers the drivers (only INIT_NET calls it) */
 extern uint32_t _fs_dclsocket_get_ip(void);
@@ -561,6 +726,13 @@ int main(int argc, char **argv)
     g2b_kv_u64(&g_kv, "pass_bytes", PASS_BYTES);
     g2b_kv_u64(&g_kv, "pass_limit_s", PASS_LIMIT_US / 1000000ull);
     g2b_kv_u64(&g_kv, "passes", sizeof PASSES / sizeof PASSES[0]);
+    g2b_kv_u64(&g_kv, "tcpfix", G2N_TCPFIX);
+#if G2N_XPORT
+    g2b_kv_u64(&g_kv, "xpasses", sizeof XPASSES / sizeof XPASSES[0]);
+#else
+    g2b_kv_u64(&g_kv, "xpasses", 0);
+#endif
+    g2b_kv_u64(&g_kv, "listen_rcvbuf", G2N_LISTEN_RCVBUF);
     send_kv(g_text);
 
     int failed = 0, nfail = 0;
@@ -581,7 +753,7 @@ int main(int argc, char **argv)
             send_line("note=connection kept after a failed pass");
         }
     }
-    if (!failed) {
+    if (!failed && !G2N_TCPFIX) {
         static const unsigned pps[] = { 0, 2500, 1200 };
         for (unsigned i = 0; i < sizeof pps / sizeof pps[0]; i++) {
             char nm[32];
@@ -589,6 +761,16 @@ int main(int argc, char **argv)
             stage(nm);
             run_udp(ufd, i + 1, 4000, 1400, pps[i]);
         }
+#if G2N_XPORT
+        for (unsigned i = 0; i < sizeof XPASSES / sizeof XPASSES[0]; i++) {
+            char nm[32];
+            snprintf(nm, sizeof nm, "g2x pass %u", i + 1);
+            stage(nm);
+            if (run_xport(ufd, i + 1, &XPASSES[i]) != 0) nfail++;
+        }
+        stage("g2x linger");
+        x_linger(ufd, 700, 3000);                      /* the last pass's strays */
+#endif
     }
     snprintf(g_text, sizeof g_text, "passes_failed=%d", nfail);
     send_line(g_text);
