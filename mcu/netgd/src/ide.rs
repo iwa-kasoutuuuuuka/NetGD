@@ -1960,13 +1960,6 @@ async fn handle_packet(
 
     let opcode = packet[0];
     info!("{}: ATAPI opcode 0x{:02x} packet={:?}", label, opcode, packet);
-    info!(
-        "{}: ATAPI 0x{:02x}  [{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
-        label, opcode,
-        packet[0], packet[1], packet[2], packet[3],
-        packet[4], packet[5], packet[6], packet[7],
-        packet[8], packet[9], packet[10], packet[11],
-    );
 
     // Not ready (swap window, no medium): what the command gets is decided
     // below, but an expiring window raises the new medium's UNIT ATTENTION
@@ -2261,14 +2254,8 @@ fn small_reply(
                 // (first/last/leadout) so we can compare against a known
                 // reference at the bench.
                 info!(
-                    "{} GET_TOC area={} hd={:02x}{:02x}{:02x}{:02x} {:02x}{:02x}{:02x}{:02x} t3={:02x}{:02x}{:02x}{:02x} f={:02x}{:02x}{:02x}{:02x} l={:02x}{:02x}{:02x}{:02x} lo={:02x}{:02x}{:02x}{:02x}",
-                    label, area,
-                    toc[0], toc[1], toc[2], toc[3],
-                    toc[4], toc[5], toc[6], toc[7],
-                    toc[8], toc[9], toc[10], toc[11],
-                    toc[396], toc[397], toc[398], toc[399],
-                    toc[400], toc[401], toc[402], toc[403],
-                    toc[404], toc[405], toc[406], toc[407],
+                    "{} GET_TOC area={} hd={=[u8]:02x} tail={=[u8]:02x}",
+                    label, area, &toc[..12], &toc[396..408]
                 );
                 let n = core::cmp::min(alloc, toc.len());
                 Some(n & !1) // host expects 16-bit-aligned PIO; trim odd trailing byte
@@ -2287,18 +2274,18 @@ fn small_reply(
             // the disc's range get CHECK CONDITION, ILLEGAL REQUEST (stock:
             // status 0x11, error 0x50, D5/D6; this was ABRT with no key).
             let session = packet[2];
-            match build_req_ses_reply(gdi_ref(), session) {
+            let reply = build_req_ses_reply(gdi_ref(), session);
+            // One log line for both outcomes: an empty reply = out of range.
+            info!(
+                "{}: REQ_SES({}) -> {=[u8]:02x}", label, session,
+                reply.as_ref().map_or(&[][..], |r| &r[..])
+            );
+            match reply {
                 Some(reply) => {
-                    info!(
-                        "{}: REQ_SES({}) -> {=[u8]:02x}", label, session, reply.as_slice()
-                    );
                     buf[..reply.len()].copy_from_slice(&reply);
                     Some(core::cmp::min(packet[4] as usize, reply.len()))
                 }
                 None => {
-                    info!(
-                        "{}: REQ_SES({}) out of range", label, session
-                    );
                     finish_illegal(dev, state);
                     None
                 }
