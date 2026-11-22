@@ -6,6 +6,8 @@ use embassy_executor::{Spawner, Executor};
 use embassy_time::{Duration, Timer};
 // use gpio::{Level, Output};
 use defmt_rtt as _;
+// The pin-finder has its own panic handler (nCONFIG low first): src/pinfind.rs.
+#[cfg(not(feature = "pinfind"))]
 use panic_probe as _;
 
 use embassy_atsam3::{config::Config, gpio::{Output, Level}, smc, UserPeripherals};
@@ -35,6 +37,9 @@ static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 
 #[exception]
 unsafe fn DefaultHandler(irqn: i16) {
+    // Pin-finder: the FPGA off before anything else (LOG R143 item 4).
+    #[cfg(feature = "pinfind")]
+    pinfind::fpga_off();
     cortex_m::asm::bkpt();
     defmt::panic!("Unhandled exception (IRQn = {})", irqn);
 }
@@ -109,6 +114,11 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
         p.nstatus,
         p.done,
     );
+    // Pin-finder build: the whole run, then halt. Never returns, so nothing
+    // below runs: no LED output (PB18), no retries, no IDE side.
+    #[cfg(feature = "pinfind")]
+    pinfind_main(&mut fpga);
+
     // Only set up on the failure path below; `main_task` needs it later in
     // any case.
     let mut led_pin = Some(p.led);
@@ -179,11 +189,6 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
         stats.attempts,
         stats.early_done
     );
-
-    // Pin-finder build: listen for ball numbers instead of starting the IDE
-    // side. Never returns.
-    #[cfg(feature = "pinfind")]
-    pinfind::run(&mut fpga);
 
     // Cyclone II runs internal init after CONF_DONE rises before user
     // logic is live. Without this slack, the post-load probe floats and
@@ -405,4 +410,15 @@ fn log_entry(parent: &str, entry: &embedded_sdmmc::DirEntry) {
         entry.size,
         entry.attributes.is_directory()
     );
+}
+
+/// `pinfind`: hand the PS pins and the embedded bitstream to the pin-finder
+/// (src/pinfind.rs). Never returns. LOG R143 items 3 and 4.
+#[cfg(feature = "pinfind")]
+fn pinfind_main(fpga: &mut cyclone::McuPins) -> ! {
+    pinfind::main(fpga, BITSTREAM_PRESENT, BITSTREAM_RAW_LEN, || {
+        let scratch = lzma::Scratch::from_buf(ide::loader_scratch())
+            .expect("CD_READ_BUF too small for the LZMA scratch");
+        cyclone::LzSource(lzma::Decoder::new(&BITSTREAM_LZMA, BITSTREAM_RAW_LEN, scratch))
+    })
 }

@@ -64,10 +64,12 @@ board-v60 = ["sam3u2e", "lazy-extents"]
 # bitstream (fpga/pinfind/output/pinfind_ag16k.rbf, embedded like the
 # board-v60 one and optional the same way), turns every MCU line except the
 # five PS lines into an input with pull-up, and reports over RTT which FPGA
-# ball arrives on which MCU pin. No SD, no IDE. Keep the logging on:
+# ball arrives on which MCU pin. No SD, no IDE, no LED, and `init` sets up no
+# SMC / UART / PCK0 / HSMCI pins (embassy-atsam3 `no-board-io`). Keep the
+# logging on:
 #   cargo build --release --no-default-features --features pinfind
 # Off by default; the other builds do not change. Not run on hardware.
-pinfind = ["board-v60", "dep:pinfind"]
+pinfind = ["board-v60", "dep:pinfind", "embassy-atsam3/no-board-io"]
 
 # Read a track file that is too fragmented for the shared extent pool
 # through a small on-demand window over its cluster chain (fat.rs, `lazy_*`),

@@ -36,6 +36,11 @@ sam3u2e = []
 # and, if it must rebuild PLLA, first moves MCK off it. Set by netgd's
 # own `resident` feature.
 resident = []
+# `init` leaves every pin alone: no SMC bus, DMAC, HSMCI, UART or PCK0 set up
+# (only clocks, flash wait states, the watchdog off and the PIO clocks on).
+# For netgd's `pinfind` feature, which must not drive any line it does not
+# have to (LOG R143 item 10). Set by netgd's own `pinfind` feature.
+no-board-io = []
 rt = ["atsam3u4e-pac/rt"]
 # Adds defmt::Format impls for the peripheral singletons (see lib.rs).
 defmt = []
