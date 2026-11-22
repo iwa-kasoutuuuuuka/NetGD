@@ -71,6 +71,10 @@ fn main() {
 
     // `census` never configures the FPGA: embed nothing, whatever is there.
     let census = std::env::var_os("CARGO_FEATURE_CENSUS").is_some();
+    println!("cargo:rerun-if-env-changed=DEFMT_LOG");
+    if census && std::env::var("DEFMT_LOG").as_deref() == Ok("off") {
+        println!("cargo:warning=census: DEFMT_LOG=off drops every log line, and the census's only output is its RTT log; build without it");
+    }
     let raw = match std::fs::read(rbf) {
         _ if census => None,
         Ok(raw) => Some(raw),

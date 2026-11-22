@@ -34,6 +34,13 @@
 //! PC pass end
 //! ```
 //!
+//! "Passive" is about the pins. Besides PIO, this firmware (with the chip
+//! init it runs after) also writes PMC (peripheral clocks, the main crystal
+//! oscillator start-up and the MCK switch to it), EFC (flash wait states for
+//! the faster MCK), WDT and SysTick, and starts the 12 MHz XIN/XOUT
+//! oscillator: a missing or different crystal stalls it silently, with no
+//! RTT output (`docs/research/gdemu60-bringup.md` §2-1 N18, §3-1).
+//!
 //! Safety: the only PIO registers written are ODR, IDR, MDDR, IFDR, PER
 //! (input, plain) and PUER / PUDR (the pull-up). Never OER, SODR, CODR, PDR,
 //! ABSR, MDER. `init` sets up no SMC / UART / PCK0 / HSMCI pins
