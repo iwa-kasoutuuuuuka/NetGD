@@ -54,6 +54,7 @@ python tools/netgd-expect/expect_sd.py E:\sdcard_out --images 3,4,5,6,7 --return
 | `--sw-only` | `SW_*` だけ（`return_to` 用） |
 | `--ip-fad N`、`--cdread-flags 0x24` | gdprobe の同名の設定（既定 自動判定 / `0x24`） |
 | `--raw-sectors` | feature `raw-sectors` 入りのファームを予測する（`CDREAD_FLAGS` の `0x10` が 2,352 B、D10） |
+| `--form2-sectors` | feature `form2-sectors` 入りのファームを予測する（CDI の postgap（Form 2）を `0x20` で読むと 2,324 B、D14） |
 | `--no-flags-test`、`--no-throughput`、`--tp-batches N`、`--tp-sectors N`、`--no-seek`、`--seek-n N`、`--seek-span N`、`--no-reads` | 設定の `cdread_flags_test` / `throughput` / `tp_batches` / `tp_sectors` / `seek` / `seek_n` / `seek_span` に対応（既定は gdprobe と同じ） |
 
 `expect_sd.py OUTDIR`：`OUTDIR` の数字のフォルダを `03` 以降を昇順に（`--images` で変更）処理する。`disc.gdi` / `*.gdi` / `*.cdi` があればマウント、無ければ

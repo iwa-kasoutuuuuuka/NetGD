@@ -82,6 +82,21 @@ CDI のデータトラックの後ろの postgap 2 セクタは Mode 2 **Form 2*
 ファームに入れるときは、`mksdcard` の `raw_mode1` / `raw_xa_form1` と同じ組み立てを `discimg` の純粋関数にして、ファームと予測の両方から使う
 （`--manifest` の照合がそのままテストになる）。
 
+### 3.2 D14 の実装（feature `form2-sectors`、既定オフ）
+
+ブランチ `feat/form2-sectors`（`feat/stock-rules` から）。実機では未確認。
+
+- 対象：CD_READ のバイト 1 が `0x20`（データ・種別を問わない。`0x21` も）で、格納 2,336 B の Mode 2 トラック（CDI のデータ）を読み、
+  **要求のセクタがすべて Form 2**（サブヘッダの submode = バイト 2 の bit 5）のとき、1 セクタ 2,324 B（格納 `[8:2332]`）を返す。
+- 判定のため、要求が 1 回のステージングに収まり（2,336 B のマップ済みトラックで 5 セクタ以下）、トラックがマップ済みのときだけ、
+  先に格納セクタを読んでサブヘッダを見る（`form2_request`）。すべて Form 2 でなければ、その読みを通常の 2,048 B のキャッシュにするので、二度読みにはならない。
+- 2,048 B のまま（純正の答えが記録に無いため）：Form 1 と Form 2 が混ざる読み、`0x28`、6 セクタ以上、マップされていないトラック、GDI の 2,352 B の Mode 2 トラック。
+- `discimg::atapi`：`FORM2_SECTOR_BYTES`・`FORM2_DATA_OFFSET`・`stored_is_form2`・`cd_read_may_be_form2`・`all_form2`・`compact_in_place`（先頭の端数 0〜511 B × 1〜5 セクタで照合するテスト）。
+  `ide.rs`：`FORM2_OUT`（1 要求の間）と `out_sector_bytes()` の 2,324。`fill_cd_read_buf_raw` からブロック読みを `read_stored_sectors` に分けた。
+- 予測：`expect --form2-sectors` で記録 05 の差が 8 → 4（`SEEK_01` と `HASH ssz=2324 crc=d0912a98` の差が消える）。
+- 実機で確かめること：gdprobe（`label=netgd`、`images=4,5`、`cdread_flags=0x20`）の `SEEK_01` が `bytes=2324`・`crc=d0912a98`。
+  転送長 2,324 は 32 B の倍数ではない（G1 DMA の区切り。gdprobe のシークは 1 セクタの PIO）。
+
 ## 関連
 
 LOG R118（D10 を保留）、R123（D10・D14 の発見）、R134（D8・D9 の採用）。`tools/mksdcard/mksdcard.py`（`raw_mode1`・`raw_xa_form1`・`FORM2_GAP`・`sector_for`）、

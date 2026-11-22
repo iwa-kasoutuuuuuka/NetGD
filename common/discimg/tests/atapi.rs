@@ -1065,3 +1065,82 @@ fn sense_read_clears_ua_only_when_reported() {
     assert!(!sense_read_clears_ua(0));
     assert!(!sense_read_clears_ua(SENSE_NOT_READY));
 }
+
+/// mkdcdisc's postgap sector (`tools/mksdcard` FORM2_GAP): Mode 2 Form 2,
+/// submode 0x20, zero data, a Form 2 EDC at the end.
+fn form2_gap() -> Vec<u8> {
+    let mut g = vec![0u8; 2336];
+    g[..8].copy_from_slice(&[0, 0, 0x20, 0, 0, 0, 0x20, 0]);
+    g[2332..].copy_from_slice(&[0x3F, 0x13, 0xB0, 0xBE]);
+    g
+}
+
+#[test]
+fn form2_reads_follow_the_stock_records() {
+    use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    // D14: stock answers 0x20 on a CDI postgap sector (Form 2) with the
+    // 2,324 bytes after the subheader, up to the Form 2 EDC (record 05,
+    // HASH ssz=2324 crc=d0912a98 = FORM2_GAP[8:2332]).
+    assert_eq!(FORM2_SECTOR_BYTES, 2324);
+    assert_eq!(FORM2_DATA_OFFSET, 8);
+    let g = form2_gap();
+    assert!(stored_is_form2(&g));
+    let mut f1 = vec![0u8; 2336];
+    f1[..8].copy_from_slice(&[0, 0, 0x08, 0, 0, 0, 0x08, 0]);
+    assert!(!stored_is_form2(&f1), "Form 1 data");
+    assert!(!stored_is_form2(&[0u8; 2]), "too short");
+
+    // Only data select 0x2 with no expected type, on a Mode 2 track stored
+    // 2,336 bytes a sector (a CDI's data). 0x28 (Form 1 expected), raw
+    // reads, Mode 1 and GDI tracks are not probed and keep their answers.
+    assert!(cd_read_may_be_form2(0x20, TRACK_MODE2, 2336));
+    assert!(cd_read_may_be_form2(0x21, TRACK_MODE2, 2336));
+    for f in [0x24u8, 0x28, 0x10, 0x30, 0x00] {
+        assert!(!cd_read_may_be_form2(f, TRACK_MODE2, 2336), "{:#x}", f);
+    }
+    assert!(!cd_read_may_be_form2(0x20, TRACK_MODE1, 2336));
+    assert!(!cd_read_may_be_form2(0x20, TRACK_MODE2, 2352));
+    assert!(!cd_read_may_be_form2(0x20, TRACK_MODE2, 2048));
+    assert!(!cd_read_may_be_form2(0x20, TRACK_AUDIO, 2352));
+}
+
+#[test]
+fn form2_compaction_matches_a_copy_for_every_alignment() {
+    const BUF: usize = 14 * 1024;
+    let gap = form2_gap();
+    for count in 1..=5usize {
+        for head in [0usize, 1, 8, 15, 16, 17, 100, 255, 256, 400, 510, 511] {
+            if head + count * 2336 > BUF {
+                continue;
+            }
+            for mixed in [false, true] {
+                let mut buf = vec![0xEEu8; BUF];
+                let stored: Vec<Vec<u8>> = (0..count)
+                    .map(|s| {
+                        let mut v = gap.clone();
+                        for (i, b) in v[8..2332].iter_mut().enumerate() {
+                            *b = (i as u32 * 29 + s as u32 * 5 + head as u32) as u8;
+                        }
+                        if mixed && s == count - 1 {
+                            v[2] = 0x08;
+                            v[6] = 0x08;
+                        }
+                        v
+                    })
+                    .collect();
+                for (s, st) in stored.iter().enumerate() {
+                    buf[head + s * 2336..head + (s + 1) * 2336].copy_from_slice(st);
+                }
+                assert_eq!(all_form2(&buf, head, count), !mixed, "count {} head {} mixed {}", count, head, mixed);
+                if mixed {
+                    continue;
+                }
+                let n = compact_in_place(&mut buf, head, 2336, count, FORM2_DATA_OFFSET, FORM2_SECTOR_BYTES);
+                assert_eq!(n, count * 2324);
+                for (s, st) in stored.iter().enumerate() {
+                    assert_eq!(&buf[s * 2324..(s + 1) * 2324], &st[8..2332], "count {} head {} s {}", count, head, s);
+                }
+            }
+        }
+    }
+}
