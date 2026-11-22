@@ -306,15 +306,15 @@ class ExpectTest(unittest.TestCase):
             self.assertEqual(get(img, 'DR_SW_RESULT')[0]['ua_28'], '1' if medium else '0')
         self.assertEqual(get(3, 'DR_REQ_STAT')[0]['data'], '018f41030100b05e0000')
 
-    def test_regpoll_first_sample_is_the_old_byte(self):
-        # NetGD completes 52 82 before it writes the window's 0x06 (gdemu_mount_staged: finish_ok, then
-        # show_window_open), into an image and into the empty folder alike: sample 1 is the old SECNR byte. Stock
-        # agrees for images (records 15-18 img=3/4/11); into the empty folder 07 stock shows 0x06 already at sample 1.
+    def test_regpoll_first_sample_old_byte_only_for_an_image(self):
+        # Into an image NetGD completes 52 82 before it writes the window's 0x06 (gdemu_mount_staged: finish_ok, then
+        # show_window_open): sample 1 is the old SECNR byte. Into the empty folder it writes 0x06 before completing:
+        # sample 1 is 0x06. Both as stock in records 15-18 (img=3/4/11 old byte first, the empty folder 07 0x06 first).
         text = expect_sd.predict(self.card, images=[4, 3, 7], return_to=0, regpoll=True)
         _, entries = compare.parse_record(text)
         get = lambda img: [e['secnr'] for e in entries if e['img'] == img and e['probe'] == 'SW_REGPOLL']
         self.assertEqual(get(3), ['0x21', '0x06', '0x00', '0x81'])
-        self.assertEqual(get(7), ['0x81', '0x06', '0x00', '0x07'])
+        self.assertEqual(get(7), ['0x06', '0x00', '0x07'])
 
     def test_devreset_cmd_as_netgd_answers(self):
         # gdprobe seq 20 devreset_cmd (record 20): DEVICE RESET, then TUR / REQ_STAT / REQ_ERROR 10 / 50 / 100 ms
