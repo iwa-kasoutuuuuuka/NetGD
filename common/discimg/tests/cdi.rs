@@ -442,6 +442,12 @@ fn track_mode_comes_from_the_descriptor() {
     assert_eq!(modes(&build(4_000_000, &layout(1))), vec![TRACK_AUDIO, TRACK_MODE2]);
     // A 2,336-byte track the descriptor calls Mode 1 is taken at its word.
     assert_eq!(modes(&build_modes(4_000_000, &layout(1), &[0, 1]))[1], TRACK_MODE1);
-    // The control nibble decides audio vs data, whatever the mode field says.
-    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[1, 1]))[0], TRACK_AUDIO);
+    // A descriptor mode of 1 or 2 wins over an audio control nibble (Flycast
+    // decides by the mode; such a track used to read as data, and still does).
+    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[1, 1]))[0], TRACK_MODE1);
+    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[2, 1]))[0], TRACK_MODE2);
+    // ... and the control nibble itself is kept for the TOC.
+    assert_eq!(parse_slice(&build_modes(4_000_000, &layout(2), &[1, 1])).unwrap().1[0].ctrl, 0);
+    // Descriptor mode 0 with an audio control nibble: audio.
+    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[0, 1]))[0], TRACK_AUDIO);
 }

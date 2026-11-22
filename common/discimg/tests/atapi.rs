@@ -889,6 +889,32 @@ fn audio_tracks_read_whole_pcm_sectors() {
 }
 
 #[test]
+fn audio_not_stored_whole_is_refused() {
+    use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    assert!(!cd_read_unservable(TRACK_AUDIO, 2352));
+    assert!(cd_read_unservable(TRACK_AUDIO, 2048));
+    assert!(cd_read_unservable(TRACK_AUDIO, 2336));
+    for m in [TRACK_MODE1, TRACK_MODE2] {
+        for ssz in [2048u32, 2336, 2352] {
+            assert!(!cd_read_unservable(m, ssz));
+        }
+    }
+}
+
+#[test]
+fn ctrl_and_mode_pack_into_one_byte() {
+    use discimg::{pack_ctrl_mode, packed_ctrl, packed_mode, TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    for ctrl in 0u8..16 {
+        for m in [TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2] {
+            let p = pack_ctrl_mode(ctrl, m);
+            assert_eq!((packed_ctrl(p), packed_mode(p)), (ctrl, m));
+        }
+    }
+    // Only the control nibble is kept (every reader masks or shifts it anyway).
+    assert_eq!(packed_ctrl(pack_ctrl_mode(0x14, TRACK_MODE2)), 4);
+}
+
+#[test]
 fn disc_format_follows_the_track_modes() {
     use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
     let mk = |modes: &[u8]| -> Vec<TrackDesc> {

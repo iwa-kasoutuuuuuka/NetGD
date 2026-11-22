@@ -51,7 +51,11 @@ const MAX_GDI_BYTES: usize = 12 * 1024;
 pub struct Track {
     pub number: u8,
     pub start_lba: u32,
-    pub ctrl: u8,
+    /// Control nibble (bits 0..3) and sector mode (bits 4..5,
+    /// `discimg::pack_ctrl_mode`). Read with [`Track::ctrl`] and
+    /// [`Track::mode`]. One byte for both keeps the struct at 32 bytes (99
+    /// tracks: a separate mode byte would cost 396 B of RAM, R144).
+    ctrl_mode: u8,
     pub sector_size: u16,
     /// Length in sectors. Derived from the track file's size on disk
     /// (`file_size / sector_size`). Used to compute the lead-out FAD
@@ -73,17 +77,13 @@ pub struct Track {
     /// the pool, read through `fat::lazy_locate`). Use `is_mapped`.
     pub ext_start: u16,
     pub ext_len: u16,
-    /// Bits 0..6: CDI 1-based session number (`discimg::TrackDesc::session`,
-    /// counts only sessions with tracks, so at most 99), for REQ_SES(n); 0 for
-    /// a GDI. Bit 7 ([`MODE2_BIT`]): the track is Mode 2. Read them with
-    /// [`Track::session`] and [`Track::mode`]. One byte for both keeps the
-    /// struct at 32 bytes (99 tracks: a separate mode byte would cost 396 B
-    /// of RAM, R144).
-    session_mode: u8,
+    /// CDI: 1-based session number (`discimg::TrackDesc::session`), for
+    /// REQ_SES(n); 0 for a GDI. Fits in the struct's tail padding.
+    pub session: u8,
 }
 
-/// [`Track::session_mode`]: the track's sector mode is Mode 2.
-const MODE2_BIT: u8 = 0x80;
+// 99 of these live in RAM (`TRACKS`): keep the packing honest.
+const _: () = assert!(core::mem::size_of::<Track>() == 32);
 
 /// Block-run map of every mapped track file, filled by `load_image`.
 static mut EXTENTS: Vec<crate::fat::Extent, { crate::fat::MAX_EXTENTS }> = Vec::new();
@@ -149,23 +149,16 @@ impl Track {
         }
     }
 
-    /// CDI session number (1-based), 0 for a GDI.
-    pub fn session(&self) -> u8 {
-        self.session_mode & !MODE2_BIT
+    /// Control nibble (ADR/CTRL's CTRL: bit 2 = data).
+    pub fn ctrl(&self) -> u8 {
+        discimg::packed_ctrl(self.ctrl_mode)
     }
 
     /// Sector mode (`discimg::TRACK_AUDIO` / `TRACK_MODE1` / `TRACK_MODE2`,
-    /// `discimg::TrackDesc::mode`): CD_READ's sector-type check and the disc
-    /// format follow it (R144). Audio vs data is the control nibble, as
-    /// `discimg::track_mode` decides it.
+    /// `discimg::TrackDesc::mode`, as `discimg::track_mode` decided it):
+    /// CD_READ's sector-type check and the disc format follow it (R144).
     pub fn mode(&self) -> u8 {
-        if self.ctrl & 0x04 == 0 {
-            discimg::TRACK_AUDIO
-        } else if self.session_mode & MODE2_BIT != 0 {
-            discimg::TRACK_MODE2
-        } else {
-            discimg::TRACK_MODE1
-        }
+        discimg::packed_mode(self.ctrl_mode)
     }
 
     /// Byte offset of the 2048-byte user data within one stored sector.
@@ -183,7 +176,7 @@ impl Track {
     #[allow(dead_code)]
     pub fn is_data(&self) -> bool {
         // Ctrl bit 2 set → data track (CD-ROM Mode 1/2). Audio = bit 2 = 0.
-        (self.ctrl & 0x04) != 0
+        (self.ctrl() & 0x04) != 0
     }
 }
 
@@ -1263,7 +1256,7 @@ fn parse(data: &[u8], path: &ImagePath, work: &mut [u8]) -> Result<Gdi, GdiError
     info!("gdi: parsed {} tracks, HDA starts at LBA {}", tracks.len(), gdi.boot_area_lba);
     for t in tracks.iter() {
         info!("  track {} lba={} ctrl=0x{:02x} sec={} file={}",
-            t.number, t.start_lba, t.ctrl, t.sector_size, show_sfn(&t.filename));
+            t.number, t.start_lba, t.ctrl(), t.sector_size, show_sfn(&t.filename));
     }
     Ok(gdi)
 }
@@ -1375,15 +1368,14 @@ impl discimg::TrackSink for PoolSink<'_> {
             .push(Track {
                 number: t.number,
                 start_lba: t.start_lba,
-                ctrl: t.ctrl,
+                ctrl_mode: discimg::pack_ctrl_mode(t.ctrl, t.mode),
                 sector_size: t.sector_size,
                 sector_count: t.sector_count,
                 filename,
                 file_offset: t.file_offset,
                 ext_start: 0,
                 ext_len: 0,
-                session_mode: (t.session & !MODE2_BIT)
-                    | if t.mode == discimg::TRACK_MODE2 { MODE2_BIT } else { 0 },
+                session: t.session,
             })
             .map_err(|_| if is_cdi { GdiError::BadCdi } else { GdiError::TooManyTracks })?;
         if is_cdi {
@@ -1399,9 +1391,9 @@ impl discimg::TrackSink for PoolSink<'_> {
 impl discimg::TrackInfo for Track {
     fn number(&self) -> u8 { self.number }
     fn start_lba(&self) -> u32 { self.start_lba }
-    fn ctrl(&self) -> u8 { self.ctrl }
+    fn ctrl(&self) -> u8 { Track::ctrl(self) }
     fn sector_count(&self) -> u32 { self.sector_count }
-    fn session(&self) -> u8 { Track::session(self) }
+    fn session(&self) -> u8 { self.session }
     fn mode(&self) -> u8 { Track::mode(self) }
 }
 

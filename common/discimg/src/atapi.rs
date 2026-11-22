@@ -375,12 +375,24 @@ pub fn cd_read_type_mismatch(flags: u8, track_mode: u8) -> bool {
 /// sector. A data track only for data select `0x1_` ([`cd_read_wants_raw`],
 /// D10) and only when `raw_data` (the firmware's `raw-sectors` feature), from
 /// a sector stored raw or as 2,336 bytes ([`raw_from_stored`]).
+///
+/// An audio track stored any other way cannot be sent as stock sends it:
+/// [`cd_read_unservable`] refuses that read first.
 pub fn cd_read_raw_out(flags: u8, track_mode: u8, sector_size: u32, raw_data: bool) -> bool {
     if track_mode == TRACK_AUDIO {
         sector_size == RAW_SECTOR_BYTES as u32
     } else {
         raw_data && cd_read_wants_raw(flags) && raw_from_stored(sector_size)
     }
+}
+
+/// Can a CD_READ of a track with this mode and stored sector size not be
+/// answered at all? An audio track not stored 2,352 bytes per sector (a GDI
+/// line or CDI read mode that claims 2,048 or 2,336 for audio) has no whole
+/// PCM sector to send, and a 2,048-byte cut from it would be neither the
+/// audio nor anything stock sends: the firmware answers ILLEGAL REQUEST.
+pub fn cd_read_unservable(track_mode: u8, sector_size: u32) -> bool {
+    track_mode == TRACK_AUDIO && sector_size != RAW_SECTOR_BYTES as u32
 }
 
 /// Does CD_READ byte 1 ask for the whole 2,352-byte sector (data select

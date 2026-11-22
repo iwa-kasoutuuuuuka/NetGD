@@ -40,6 +40,7 @@ use core::ptr::{read_volatile, write_volatile};
 use defmt::{info, warn};
 use embassy_atsam3::smc;
 use embassy_futures::yield_now;
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
 // ----- Per-device 7-bit register window (matches FPGA hw/ide_device.py). ---
@@ -538,8 +539,9 @@ impl IdeDevice {
         // only load one fixed value, so a MIL-CD's CD-ROM XA format has to
         // be (re)asserted from here.
         // Status = REQ_STAT's idle status (standby until the first image
-        // switch, pause after one, D2).
-        self.write(REG_LBA_LOW_MID, 0x1400 | secnr(idle_status()) as u16);
+        // switch, pause after one, D2); inside a swap window the window's
+        // byte, and with no medium NO DISC 0x07 (`rest_secnr`).
+        self.write(REG_LBA_LOW_MID, 0x1400 | rest_secnr() as u16);
         // LBA_HIGH=0xEB low byte (LBA_LOW_PREV in high byte we leave alone).
         let high_lowp = self.read(REG_LBA_HIGH_LOWP);
         self.write(REG_LBA_HIGH_LOWP, (high_lowp & 0xFF00) | 0x00EB);
@@ -785,8 +787,9 @@ pub async fn ide_task(
     // reset state machine loads a fixed GD-ROM SECNR, and until now nothing
     // but the CDDA paths ever wrote the register -- so a MIL-CD was served
     // to a host that had been told it was looking at a GD-ROM.
-    primary.set_secnr(secnr(GD_STANDBY));
-    info!("disc format: SECNR=0x{:02x}", secnr(GD_STANDBY));
+    // Nothing mounted: NO DISC, format 0 (0x07, as stock's empty folder).
+    primary.set_secnr(rest_secnr());
+    info!("disc format: SECNR=0x{:02x}", rest_secnr());
 
     let mut primary_state = DeviceState::new();
     let mut secondary_state = DeviceState::new();
@@ -801,8 +804,28 @@ pub async fn ide_task(
     loop {
         // The FPGA's command line, or a button press: the button signals
         // the same waker rather than having this loop poll, so an idle bus
-        // stays idle and a swap still lands immediately.
-        let _ = embassy_atsam3::gpio::pioa_wait_irq().await;
+        // stays idle and a swap still lands immediately. While a swap window
+        // still has a phase to go, also wake at its end: stock moves SECNR
+        // by time (0x06, 0x00 at open_time, 0xX1 / 0x07 at open + detect,
+        // R144) whether or not the host sends anything.
+        let woke = match swap_window_deadline() {
+            Some(at) => matches!(
+                select(embassy_atsam3::gpio::pioa_wait_irq(), Timer::at(at)).await,
+                Either::First(_)
+            ),
+            None => {
+                let _ = embassy_atsam3::gpio::pioa_wait_irq().await;
+                true
+            }
+        };
+        if !woke {
+            // Only SECNR. Closing the window and its UNIT ATTENTION stay with
+            // the next command (`drive_not_ready`), which writes the same byte.
+            if let Some(v) = window_secnr() {
+                primary.set_secnr(v);
+            }
+            continue;
+        }
         service_hard_reset(&primary, &mut primary_state).await;
         // Until neither has a command waiting: MCU_IRQn is the OR of the two
         // latches and the interrupt is its falling edge, so a command that
@@ -934,8 +957,12 @@ async fn sweep(
                 dev.clear_reset_seen();
                 crate::cdda::stop();
                 // The FPGA reloaded its fixed GD-ROM signature; put the
-                // mounted disc's real format back before answering anything.
-                dev.reassert_disc_format();
+                // mounted disc's real format back before answering anything
+                // -- or, inside a swap window, the window's byte (R144).
+                match window_secnr() {
+                    Some(v) => dev.set_secnr(v),
+                    None => dev.reassert_disc_format(),
+                }
                 info!("{}: disc format re-asserted after reset: SECNR low nibble kept, fmt={:#04x}",
                       label, disc_format());
             }
@@ -1450,6 +1477,46 @@ fn cancel_swap_window(state: &mut DeviceState) {
     }
 }
 
+/// Milliseconds since the window opened.
+fn window_elapsed_ms(sw: &SwapWindow) -> u32 {
+    (Instant::now() - sw.at).as_millis().min(u32::MAX as u64) as u32
+}
+
+/// SECNR for the open swap window's current phase (`None`: no window).
+/// No side effects: the window is not closed and no UNIT ATTENTION raised.
+fn window_secnr() -> Option<u8> {
+    let sw = unsafe { (*core::ptr::addr_of!(SWAP_WINDOW)).as_ref() }?;
+    let phase = discimg::atapi::swap_phase(window_elapsed_ms(sw), sw.open_ms, sw.detect_ms);
+    Some(discimg::atapi::swap_secnr(phase, media_present(), mounted_disc_format()))
+}
+
+/// SECNR at rest (start-up, DEVICE RESET): the window's byte inside one;
+/// with no medium NO DISC 0x07, format 0 (stock's empty folder, R144);
+/// else the disc's format and the idle status.
+fn rest_secnr() -> u8 {
+    if let Some(v) = window_secnr() {
+        return v;
+    }
+    if !media_present() {
+        return discimg::atapi::DRIVE_NODISC;
+    }
+    secnr(idle_status())
+}
+
+/// When the open swap window next changes phase, if it has a phase left.
+fn swap_window_deadline() -> Option<Instant> {
+    let sw = unsafe { (*core::ptr::addr_of!(SWAP_WINDOW)).as_ref() }?;
+    let e = window_elapsed_ms(sw);
+    let open_end = sw.at + embassy_time::Duration::from_millis(sw.open_ms as u64);
+    if e < sw.open_ms {
+        Some(open_end)
+    } else if e - sw.open_ms < sw.detect_ms {
+        Some(open_end + embassy_time::Duration::from_millis(sw.detect_ms as u64))
+    } else {
+        None
+    }
+}
+
 /// Whether the drive can serve the command about to run: `None` = ready,
 /// else the ASC/ASCQ of its NOT READY (2/3A/00 no medium, 2/04/01 becoming
 /// ready). Ends an expired window: with an image, the UNIT ATTENTION for the
@@ -1457,8 +1524,8 @@ fn cancel_swap_window(state: &mut DeviceState) {
 /// the switch); without one the drive stays "no medium". SECNR's status
 /// nibble follows the phase (open, busy, then paused or no disc), written
 /// here, before the command's completion, since nothing runs between
-/// commands to time it: from the switch (`mounted`: open, `0x06`) until the
-/// next command it keeps the value it had.
+/// commands to time it: from the switch (`mounted`: open, `0x06`); between
+/// commands `ide_task` also rewrites it at each phase boundary.
 fn drive_not_ready(dev: &IdeDevice, state: &mut DeviceState) -> Option<(u8, u8)> {
     use discimg::atapi::SwapPhase;
     let w = unsafe { &mut *core::ptr::addr_of_mut!(SWAP_WINDOW) };
@@ -1466,8 +1533,7 @@ fn drive_not_ready(dev: &IdeDevice, state: &mut DeviceState) -> Option<(u8, u8)>
     let Some(sw) = w else {
         return if medium { None } else { Some(discimg::atapi::ASC_NO_MEDIUM) };
     };
-    let elapsed = (Instant::now() - sw.at).as_millis().min(u32::MAX as u64) as u32;
-    let phase = discimg::atapi::swap_phase(elapsed, sw.open_ms, sw.detect_ms);
+    let phase = discimg::atapi::swap_phase(window_elapsed_ms(sw), sw.open_ms, sw.detect_ms);
     // Format nibble 0 through the window, the disc's once it is over (R144).
     dev.set_secnr(discimg::atapi::swap_secnr(phase, medium, mounted_disc_format()));
     if phase == SwapPhase::Done {
@@ -1603,8 +1669,11 @@ fn idle_status() -> u8 {
 /// which says `CD-ROM1/1` in its media field, and the BIOS refuses to boot
 /// across that contradiction: it reads IP.BIN, the ISO9660 PVD and the root
 /// directory, then abandons the boot without ever reading the `1ST_READ.BIN`
-/// the directory just pointed it at. Nothing mounted: 0 (stock's empty
-/// folder shows SECNR `0x07`, R144).
+/// the directory just pointed it at. No image parsed (`GDI = None`: an
+/// empty folder, a failed mount, a card with nothing to boot): 0 (stock's
+/// empty folder shows SECNR `0x07`, R144). After EJECT or a write session's
+/// begin the parsed image is kept, so this still gives its format there;
+/// callers that care about "no medium" check `media_present` (`rest_secnr`).
 fn mounted_disc_format() -> u8 {
     match gdi_ref() {
         Some(g) => discimg::atapi::disc_format(g.tracks(), g.is_cdi),
@@ -2056,6 +2125,12 @@ async fn handle_cd_read(
         if discimg::atapi::cd_read_type_mismatch(packet[1], t.mode()) {
             warn!("{}: CD_READ type {=u8:#x} does not fit the track", label, packet[1]);
             finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, discimg::atapi::ASC_ILLEGAL_MODE);
+            return;
+        }
+        // Audio not stored as whole 2,352-byte sectors: nothing right to send.
+        if discimg::atapi::cd_read_unservable(t.mode(), t.sector_size as u32) {
+            warn!("{}: CD_READ of an audio track stored {} B a sector", label, t.sector_size);
+            finish_illegal(dev, state);
             return;
         }
     }

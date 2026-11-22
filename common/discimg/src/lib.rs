@@ -71,23 +71,40 @@ pub const TRACK_MODE2: u8 = 2;
 /// audio / 1 Mode 1 / 2 Mode 2; `None` for a GDI, which has no such field) and
 /// its stored sector size.
 ///
-/// The control nibble decides audio vs data, as everywhere else here. A data
-/// track the descriptor calls Mode 1 or Mode 2 is that; otherwise (a GDI, or a
-/// CDI descriptor with an unknown mode) a 2,336-byte track is Mode 2 (that
-/// size only exists for Mode 2), and the rest default by format: a GDI's data
-/// is Mode 1 (every GD-ROM's is), a CDI's Mode 2 (what mkdcdisc writes and
-/// what NetGD assumed before R144).
+/// A track the descriptor calls Mode 1 or Mode 2 is that, whatever its control
+/// nibble says (Flycast's CDI reader decides audio by the descriptor mode
+/// alone; a data track mislabelled audio in `ctrl` used to read, and still
+/// does). Otherwise the control nibble decides: audio, or data whose mode
+/// defaults -- a 2,336-byte track is Mode 2 (that size only exists for Mode
+/// 2), a GDI's data is Mode 1 (every GD-ROM's is), a CDI's Mode 2 (what
+/// mkdcdisc writes and what NetGD assumed before R144). The control nibble
+/// itself is left as it is for the TOC and Q channel.
 pub fn track_mode(ctrl: u8, desc_mode: Option<u32>, sector_size: u16) -> u8 {
-    if ctrl & 0x04 == 0 {
-        return TRACK_AUDIO;
-    }
     match desc_mode {
         Some(1) => TRACK_MODE1,
         Some(2) => TRACK_MODE2,
+        _ if ctrl & 0x04 == 0 => TRACK_AUDIO,
         _ if sector_size == 2336 => TRACK_MODE2,
         None => TRACK_MODE1,
         Some(_) => TRACK_MODE2,
     }
+}
+
+/// Pack a track's control nibble (low 4 bits of `ctrl`) and its mode (a
+/// `TRACK_*` value) into one byte: ctrl in bits 0..3, mode in bits 4..5. The
+/// firmware keeps its 99-entry track table at 32 bytes a track this way.
+pub const fn pack_ctrl_mode(ctrl: u8, mode: u8) -> u8 {
+    (ctrl & 0x0F) | ((mode & 0x03) << 4)
+}
+
+/// Control nibble of a [`pack_ctrl_mode`] byte.
+pub const fn packed_ctrl(packed: u8) -> u8 {
+    packed & 0x0F
+}
+
+/// Mode (`TRACK_*`) of a [`pack_ctrl_mode`] byte.
+pub const fn packed_mode(packed: u8) -> u8 {
+    (packed >> 4) & 0x03
 }
 
 /// What the reply builders need to know about a track.

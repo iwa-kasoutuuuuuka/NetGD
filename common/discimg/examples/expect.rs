@@ -439,6 +439,10 @@ fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>)
         if atapi::cd_read_type_mismatch(flags, t.mode) {
             return (Res::illegal(), None);
         }
+        // An audio track not stored 2,352 bytes a sector: ILLEGAL REQUEST.
+        if atapi::cd_read_unservable(t.mode, t.sector_size as u32) {
+            return (Res::illegal(), None);
+        }
         // An audio track sends its 2,352-byte PCM sectors as stored (R144),
         // in every build (`cd_read_raw_out` with raw_data = false).
         if atapi::cd_read_raw_out(flags, t.mode, t.sector_size as u32, false) {
