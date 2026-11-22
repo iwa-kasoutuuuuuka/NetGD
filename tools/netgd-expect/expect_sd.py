@@ -91,6 +91,20 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
              '# predicted by tools/netgd-expect (NetGD firmware logic); img=0 (boot disc) is not predicted; timings are "-"\n']
     mounted = None      # the image file currently mounted, None = unknown (the boot disc) or no medium
     last_img = 0
+    state = []          # --prev-check / --prev-secnr for the next section (cdbst= / secnr=)
+
+    def run(args):
+        nonlocal state
+        out = ex.run(args + state)
+        keep, state = [], []
+        for line in out.splitlines(True):
+            if line.startswith('# expect-state '):
+                for kv in line.split()[2:]:
+                    k, v = kv.split('=', 1)
+                    state += ['--prev-check' if k == 'last_check' else '--prev-secnr', v]
+            else:
+                keep.append(line)
+        return ''.join(keep)
 
     def switch_args(n, extra):
         nonlocal mounted
@@ -110,10 +124,10 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
         return args
 
     for n in images:
-        parts.append(ex.run(switch_args(n, [])))
+        parts.append(run(switch_args(n, [])))
         last_img = n
     if return_to > 0:
-        parts.append(ex.run(switch_args(return_to, ['--sw-only'])))
+        parts.append(run(switch_args(return_to, ['--sw-only'])))
         last_img = return_to
     parts.append('img=%d probe=END abort=0\n' % last_img)
     return ''.join(parts)

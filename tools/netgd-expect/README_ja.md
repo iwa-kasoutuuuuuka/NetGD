@@ -19,6 +19,8 @@
 | `52 00` | `00 00 00 00 00 00 20 05`（バージョン 5.20.0） |
 | CD_READ | CDB のバイト 1 の種別を検査（D8・D9、純正どおり）：データトラックで CDI に Mode 1（`0x24`）、GDI に Mode 2 Form 1（`0x28`）なら CHECK（`status=0x11 err=0x50`、`sense=5/64/00`）。それ以外は常に 1 セクタ 2048 バイト（`ssz=2048`、`0x10` でも 2352 にならない）。データは `file_offset + (LBA − 開始 LBA) × セクタ長 + 16`（2352）/ `+ 8`（2336）の 2048 バイト。要求がトラックの残りを越えると ILLEGAL REQUEST（`err=0x50`、`sense=5/00/00`） |
 | `52 82 n`（n が空フォルダ） | 純正どおり受け付ける（`status=0x50`、D12）。同じ窓のあと `2/3a/00` のまま（`SW_RESULT rc=timeout`）。そのあとの `img=7` は「ディスクなし」の試験：TUR・REQ_STAT・GET_TOC・REQ_SES_0・GET_SCD は `0x11/0x20`、REQ_SES_1〜3 は `0x11/0x50`、REQ_MODE・REQ_ERROR・`52 00` は通常どおり、読み出しなし |
+| `cdbst=`（CDB フェーズの ALTSTATUS） | 直前のコマンドの最終 status が CHECK（0x11）なら `0x18`、それ以外は `0x58`（R147。NetGD の FPGA は MCU が最後に書いた status の DRDY を保つので同じ）。gdprobe が記録しないコマンドも数える：`CDREAD_FLAGS` の CHECK のあとの REQ_ERROR、切替のポーリング（TUR、CHECK なら続けて REQ_ERROR） |
+| `secnr=`（GD-ROM の SECNR、完了時） | 試験の間は「ディスク形式 ｜ 一時停止 0x01」（電源投入直後は待機 0x02）、ディスクなしは `0x07`。切替の窓では `0x06` → `0x00` → 窓のあと「形式 ｜ 0x01」か `0x07`（R144 b、`atapi::swap_secnr`）。`SW_CMD` は切替前のディスクの値。最初の切替の前（電源投入時のディスク）は分からないので書かない |
 | `52 82 n`（n のフォルダが無い） | ILLEGAL REQUEST（`status=0x11 err=0x50`）。メディアは変わらない（純正は未調査。NetGD の方針） |
 
 予測できない項目は `-` で書く：`us=`、`t_ms=`、`poll=`、`polls=`、`changes=`、`min_us=`、`max_us=`、`kib_s=`。`compare.py` は `-` を数値として読めないので、
@@ -55,6 +57,7 @@ python tools/netgd-expect/expect_sd.py E:\sdcard_out --images 3,4,5,6,7 --return
 | `--ip-fad N`、`--cdread-flags 0x24` | gdprobe の同名の設定（既定 自動判定 / `0x24`） |
 | `--raw-sectors` | feature `raw-sectors` 入りのファームを予測する（`CDREAD_FLAGS` の `0x10` が 2,352 B、D10） |
 | `--form2-sectors` | feature `form2-sectors` 入りのファームを予測する（CDI の postgap（Form 2）を `0x20` で読むと 2,324 B、D14） |
+| `--prev-check 0/1`、`--prev-secnr 0xNN` | 前の区間の終わりの状態（直前が CHECK だったか、SECNR）。`expect_sd.py` が、各区間の出力の最後の `# expect-state ...` 行から次の区間に渡す（その行は記録から消す） |
 | `--no-flags-test`、`--no-throughput`、`--tp-batches N`、`--tp-sectors N`、`--no-seek`、`--seek-n N`、`--seek-span N`、`--no-reads` | 設定の `cdread_flags_test` / `throughput` / `tp_batches` / `tp_sectors` / `seek` / `seek_n` / `seek_span` に対応（既定は gdprobe と同じ） |
 
 `expect_sd.py OUTDIR`：`OUTDIR` の数字のフォルダを `03` 以降を昇順に（`--images` で変更）処理する。`disc.gdi` / `*.gdi` / `*.cdi` があればマウント、無ければ
