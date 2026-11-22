@@ -25,7 +25,7 @@ int gp_toc_parse(const uint8_t toc[408], gp_toc_area *a)
     return a->valid;
 }
 
-typedef struct { uint32_t num, ctl, fad; } trk;
+typedef gp_track trk;
 
 /* both areas' tracks in FAD order, without the duplicates a CD's copied area 1 adds */
 static int merge(const gp_toc_area area[2], trk *out)
@@ -127,4 +127,20 @@ uint32_t gp_bsearch_next(uint32_t lo, uint32_t hi)
     if (hi <= lo + 1)
         return 0;
     return lo + (hi - lo) / 2;
+}
+
+int gp_toc_tracks(const gp_toc_area area[2], gp_track *out)
+{
+    return merge(area, out);
+}
+
+int gp_offset_fads(uint32_t start, const int *offs, int n, uint32_t *out)
+{
+    int i, m = 0;
+    for (i = 0; i < n; i++) {
+        long f = (long)start + offs[i];
+        if (f >= 0 && f < 0x00F00000L)
+            out[m++] = (uint32_t)f;
+    }
+    return m;
 }

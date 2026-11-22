@@ -71,6 +71,18 @@
  *   gap_leadout=0,1,100    LO cases: offsets from the lead-out FAD (up to 4 values, 0..10000)
  *   gap_low=0,100          LOW cases: FADs below 150 (up to 4 values, 0..149)
  *   gap_count0=on          CNT0 case: CD_READ with count 0 (the whitelist allows 1..64, so this prints GP_CNT0_SKIP)
+ *
+ * seq 23 (default off; seq 22 cfgs are unchanged):
+ *   gap_crc=off            on = every GP_ read line also gets crc= (CRC-32 of the returned bytes), scrc= (per sector,
+ *                          multi-sector reads) and stored= (only when the buffer held less than bytes=)
+ *   pregap_probe=off       on = pregap / boundary reads (runs the GP_ queries without gap_probe too): PGL_<f> at FADs
+ *                          below 150, PG<trk>_M<o>/_P<o> at each later track's start + offset (GP_PGB lists them), and
+ *                          reads that cross a boundary: XPRE<trk> (start - 10), XGAP<trk> (start - 158), XEND (data end of
+ *                          track 1 found by a search below the pregap, GP_DSCAN_R / GP_DSCAN, or gap_track_end), XLD (GD-ROM
+ *                          LD lead-out), XLO (lead-out); those start pregap_cross/2 before the edge
+ *   pregap_low=0,1,100,149 PGL FADs (up to 4, 0..149)
+ *   pregap_offs=-156,-151,-150,-149,-100,-2,-1,0   offsets from each track start (up to 8, -300..300)
+ *   pregap_cross=16        sector count of the crossing reads (2..16; the whitelist allows 1..64, the buffer 16 raw)
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
@@ -80,6 +92,7 @@
 #define GP_MAX_DEVRESET 4
 #define GP_MAX_HEADCNT 6
 #define GP_MAX_GAPLIST 4
+#define GP_MAX_PGOFFS 8
 
 typedef struct {
     char label[32];
@@ -130,6 +143,13 @@ typedef struct {
     int gap_low[GP_MAX_GAPLIST];
     int n_gap_low;
     int gap_count0;
+    int gap_crc;          /* seq 23 */
+    int pregap_probe;
+    int pregap_low[GP_MAX_GAPLIST];
+    int n_pregap_low;
+    int pregap_offs[GP_MAX_PGOFFS];
+    int n_pregap_offs;
+    int pregap_cross;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 

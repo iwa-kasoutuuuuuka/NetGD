@@ -40,6 +40,13 @@ typedef struct {
 
 void gp_gap_plan_make(const gp_toc_area area[2], gp_gap_plan *p);
 
+/* seq 23: both areas' tracks in FAD order without a CD's duplicated area 1; out needs 198 entries. Returns the count. */
+typedef struct { uint32_t num, ctl, fad; } gp_track;
+int gp_toc_tracks(const gp_toc_area area[2], gp_track *out);
+
+/* seq 23: the FADs start + offs[i] that are >= 0, in order; out needs n entries. Returns the count. */
+int gp_offset_fads(uint32_t start, const int *offs, int n, uint32_t *out);
+
 /* One step of the search for the last readable sector in [lo, hi] (lo known readable, hi known unreadable):
  * returns the FAD to try next, or 0 when hi == lo + 1 (done: lo is the last readable one). */
 uint32_t gp_bsearch_next(uint32_t lo, uint32_t hi);

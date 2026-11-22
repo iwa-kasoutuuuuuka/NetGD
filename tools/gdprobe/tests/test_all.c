@@ -347,12 +347,19 @@ typedef struct {
      *              15854, area 1 a copy of area 0; gdi_folder = GDI like image 3: track 1 data 150 (readable
      *              150..755), track 2 audio 906, LD lead-out 1506, track 3 at 45150, HD lead-out 65150 */
     int cdi_folder, gdi_folder;
+    /* seq 23: stock's readable range per track is [start - 150, data end) (LOG R174): pregaps read like the track */
+    int pregap_model;
 } fake;
 
 static int f_edge(const fake *f) { return f->mounted && (f->mounted == f->cdi_folder || f->mounted == f->gdi_folder); }
 /* sector size at fad on an edge image, 0 = not readable (5/21/00) */
 static uint32_t f_edge_ssz(const fake *f, uint32_t fad)
 {
+    if (f->pregap_model) {
+        if (f->mounted == f->cdi_folder)
+            return fad <= 451 ? 2352 : (fad >= 11702 && fad < 15854) ? 2048 : 0;
+        return fad <= 755 ? 2048 : (fad >= 756 && fad < 1506) ? 2352 : (fad >= 45000 && fad < 65150) ? 2048 : 0;
+    }
     if (f->mounted == f->cdi_folder)
         return (fad >= 150 && fad <= 451) ? 2352 : (fad >= 11852 && fad < 15854) ? 2048 : 0;
     return (fad >= 150 && fad <= 755) ? 2048 : (fad >= 906 && fad < 1506) ? 2352 : (fad >= 45150 && fad < 65150) ? 2048 : 0;
@@ -505,7 +512,7 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
                 return r->rc;
             }
             if (f->head_model) f->head = fad + cnt;
-            for (s = 0; s < cnt * z && s < cap; s++) buf[s] = (uint8_t)(fad + s);
+            for (s = 0; s < cnt * z && s < cap; s++) buf[s] = (uint8_t)((fad + s / z) * 7u + s % z);   /* depends only on the sector FAD */
             r->total = cnt * z; r->stored = r->total < cap ? r->total : cap;
             return r->rc;
         }
@@ -1690,6 +1697,142 @@ static void test_seq22_example_cfg(void)
     CHECK(f.now < 180ull * 1000000u);
 }
 
+/* seq 23: pregap reads, crossing reads, CRCs */
+static uint32_t edge_sector_crc(uint32_t fad, uint32_t z)
+{
+    static uint8_t b[2352];
+    uint32_t i;
+    for (i = 0; i < z; i++) b[i] = (uint8_t)(fad * 7u + i);
+    return crc32_calc(b, z);
+}
+
+static void test_runner_seq23(void)
+{
+    static fake f;
+    gp_config c;
+    gp_track t[198];
+    gp_toc_area a[2];
+    uint8_t t0[408];
+    uint32_t fa[8];
+    char want[300];
+    const char *l;
+    static const int offs[8] = { -156, -151, -150, -149, -100, -2, -1, 0 };
+
+    /* pure helpers */
+    CHECK(gp_offset_fads(906, offs, 8, fa) == 8 && fa[0] == 750 && fa[1] == 755 && fa[2] == 756 && fa[4] == 806 && fa[7] == 906);
+    CHECK(gp_offset_fads(100, offs, 8, fa) == 4 && fa[0] == 0 && fa[1] == 98 && fa[3] == 100);
+    {
+        static const uint8_t ctl[2] = { 0x01, 0x41 };
+        static const uint32_t fad[2] = { 150, 11852 };
+        static const int tno[2] = { 1, 2 };
+        mk_toc(t0, ctl, fad, tno, 2, 0x41, 15854);
+    }
+    gp_toc_parse(t0, &a[0]); gp_toc_parse(t0, &a[1]);
+    CHECK(gp_toc_tracks(a, t) == 2 && t[1].num == 2 && t[1].fad == 11852 && t[1].ctl == 0x41);
+
+    /* cfg */
+    gp_config_defaults(&c);
+    CHECK(!c.gap_crc && !c.pregap_probe && c.pregap_cross == 16 && c.n_pregap_low == 4 && c.pregap_low[3] == 149);
+    CHECK(c.n_pregap_offs == 8 && c.pregap_offs[0] == -156 && c.pregap_offs[7] == 0);
+    gp_config_parse(&c, "gap_crc=on\npregap_probe=on\npregap_cross=99\npregap_low=5\npregap_offs=-300,300\n");
+    CHECK(c.gap_crc && c.pregap_probe && c.pregap_cross == 16 && c.n_pregap_low == 1 && c.n_pregap_offs == 2 && c.unknown_keys == 0);
+    gp_config_parse(&c, "pregap_offs=-301\npregap_offs=1,2,3,4,5,6,7,8,9\npregap_low=150\npregap_cross=1\n");
+    CHECK(c.n_pregap_offs == 2 && c.n_pregap_low == 1 && c.pregap_cross == 2 && c.unknown_keys == 3);
+
+    /* CDI 4 + GDI 3 with stock's pregap rule; only the seq 23 cases, with CRCs */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.cdi_folder = 4; f.gdi_folder = 3;
+    f.pregap_model = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4,3\nreturn_to=2\npregap_probe=on\ngap_crc=on\nthroughput=off\nseek=off\n"
+                        "cdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0 && find_line("probe=END abort=0"));
+    CHECK(count_of("probe=GP_START ") == 2 && !find_line("GP_TRK_") && !find_line("GP_LO_") && !find_line("GP_CNT0"));
+    CHECK(find_line("img=4 probe=GP_PG_START cross=16 tracks=1/150/0x01,2/11852/0x41 leadout=15854 ld_leadout=0"));
+    snprintf(want, sizeof(want), "img=4 probe=GP_PGL_100 flags=0x20 fad=100 count=1 ssz=2352 sense=none crc=%08lx cdb=",
+             (unsigned long)edge_sector_crc(100, 2352));
+    CHECK(find_line(want));
+    CHECK(find_line("img=4 probe=GP_PGL_0 ") && find_line("img=4 probe=GP_PGL_1 ") && find_line("img=4 probe=GP_PGL_149 "));
+    CHECK(strstr(line_of("img=4 probe=GP_PGL_149_POS "), "pos=150 ctl=0x41 d_start=+1"));
+    CHECK(find_line("img=4 probe=GP_PGB trk=2 start=11852 prev=1/150 fads=11696,11701,11702,11703,11752,11850,11851,11852"));
+    CHECK(find_line("img=4 probe=GP_PG2_M156 flags=0x20 fad=11696 count=1 ssz=- sense=5/21/00 crc=- cdb="));
+    CHECK(find_line("img=4 probe=GP_PG2_M151 flags=0x20 fad=11701 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=4 probe=GP_PG2_M150 flags=0x20 fad=11702 count=1 ssz=2048 sense=none crc="));
+    CHECK(find_line("img=4 probe=GP_PG2_M100 flags=0x20 fad=11752") && find_line("img=4 probe=GP_PG2_P0 flags=0x20 fad=11852"));
+    l = line_of("img=4 probe=GP_XPRE1 ");
+    CHECK(strstr(l, "flags=0x20 fad=140 count=16 ssz=2352 sense=none crc=") && strstr(l, " bytes=37632"));
+    snprintf(want, sizeof(want), " scrc=%08lx,%08lx,", (unsigned long)edge_sector_crc(140, 2352), (unsigned long)edge_sector_crc(141, 2352));
+    CHECK(strstr(l, want) && !strstr(l, "stored="));
+    CHECK(strstr(line_of("img=4 probe=GP_XPRE1_POS "), "pos=156 ctl=0x41 d_start=+16 d_end=+0"));
+    CHECK(find_line("img=4 probe=GP_XPRE2 flags=0x20 fad=11842 count=16 ssz=2048 sense=none crc="));
+    CHECK(find_line("img=4 probe=GP_XGAP2 flags=0x20 fad=11694 count=16 ssz=- sense=5/21/00 crc=- cdb="));
+    CHECK(find_line("img=4 probe=GP_DSCAN_R n=2 flags=0x20 fad=11701 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=4 probe=GP_DSCAN a_fad=150 b_fad=11852 hi=11701 last_ok=451 gap_lo=452 src=scan reads="));
+    CHECK(find_line("img=4 probe=GP_XEND flags=0x20 fad=444 count=16 ssz=- sense=5/21/00"));
+    CHECK(!find_line("img=4 probe=GP_XLD") && find_line("img=4 probe=GP_XLO flags=0x20 fad=15846 count=16 ssz=- sense=5/21/00"));
+    /* GDI */
+    CHECK(find_line("img=3 probe=GP_PG_START cross=16 tracks=1/150/0x41,2/906/0x01,3/45150/0x41 leadout=65150 ld_leadout=1506"));
+    CHECK(find_line("img=3 probe=GP_PGB trk=2 start=906 prev=1/150 fads=750,755,756,757,806,904,905,906"));
+    CHECK(find_line("img=3 probe=GP_PGB trk=3 start=45150 prev=2/906 fads=44994,44999,45000,45001,45050,45148,45149,45150"));
+    CHECK(find_line("img=3 probe=GP_PG2_M150 flags=0x20 fad=756 count=1 ssz=2352"));
+    CHECK(find_line("img=3 probe=GP_PG3_M151 flags=0x20 fad=44999 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=3 probe=GP_PG3_M150 flags=0x20 fad=45000 count=1 ssz=2048 sense=none crc="));
+    CHECK(find_line("img=3 probe=GP_XPRE3 flags=0x20 fad=45140 count=16 ssz=2048 sense=none crc="));
+    CHECK(find_line("img=3 probe=GP_XPRE2 flags=0x20 fad=896 count=16 ssz=2352"));
+    CHECK(find_line("img=3 probe=GP_XGAP3 flags=0x20 fad=44992 count=16 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=3 probe=GP_XPRE1 flags=0x20 fad=140 count=16 ssz=2048"));
+    CHECK(find_line("img=3 probe=GP_XEND_SKIP a_fad=150 b_fad=906 hi=755 src=scan reads=2 reason=no_gap"));
+    CHECK(find_line("img=3 probe=GP_XLD flags=0x20 fad=1498 count=16 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=3 probe=GP_XLO flags=0x20 fad=65142 count=16"));
+
+    /* gap_track_end from the cfg; crc off: no crc= fields */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1; f.cdi_folder = 4; f.pregap_model = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4\npregap_probe=on\ngap_track_end=452\npregap_cross=8\npregap_low=0\npregap_offs=-1\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0 && !find_line("count=1 ssz=2352 sense=none crc=") && !find_line("sense=5/21/00 crc="));
+    CHECK(!find_line("GP_DSCAN_R") && find_line("img=4 probe=GP_DSCAN a_fad=150 b_fad=11852 hi=11701 last_ok=451 gap_lo=452 src=cfg reads=0"));
+    CHECK(find_line("img=4 probe=GP_XEND flags=0x20 fad=448 count=8") && find_line("img=4 probe=GP_PGB trk=2 start=11852 prev=1/150 fads=11851"));
+    CHECK(count_of("probe=GP_PGL_") == 2 && find_line("img=4 probe=GP_XLO flags=0x20 fad=15850 count=8"));
+
+    /* both seq 22 and seq 23 with crc: the seq 22 read lines get crc= too */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1; f.cdi_folder = 4; f.pregap_model = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4\ngap_probe=on\npregap_probe=on\ngap_crc=on\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(strstr(line_of("img=4 probe=GP_LO_REF "), " crc=") && strstr(line_of("img=4 probe=GP_SCAN_R n=1 "), " crc="));
+    CHECK(find_line("img=4 probe=GP_TRK_SKIP a_fad=150 b_fad=11852 src=scan reads=2 reason=no_gap"));   /* as in record 22 */
+    CHECK(find_line("img=4 probe=GP_CNT0_SKIP") < find_line("img=4 probe=GP_PG_START"));
+}
+
+static void test_seq23_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    FILE *in = fopen("../gdprobe.cfg.seq23.example", "rb");
+    CHECK(in != NULL);
+    if (!in) return;
+    n = fread(text, 1, sizeof(text) - 1, in);
+    fclose(in);
+    text[n] = 0;
+    CHECK(n < 2048);   /* main.c reads at most cfgbuf - 1 bytes */
+    gp_config_defaults(&c);
+    gp_config_parse(&c, text);
+    CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == 23);
+    CHECK(c.do_switch && c.n_images == 3 && c.images[0] == 4 && c.images[1] == 3 && c.images[2] == 10 && c.return_to == 2);
+    CHECK(c.gap_probe && c.gap_crc && c.pregap_probe && c.pregap_cross == 16 && c.n_pregap_low == 4 && c.n_pregap_offs == 8);
+    CHECK(!c.head_probe && !c.swap_regpoll && !c.swap_devreset && !c.swap_reswitch && !c.devreset_only && !c.devreset_cmd);
+    CHECK(!c.do_cdread_flags && !c.do_throughput && !c.do_seek && !c.do_identify && c.cdread_flags == 0x20);
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.cdi_folder = 4; f.gdi_folder = 3;
+    f.pregap_model = 1;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 0 && f.n_mounts == 3 + 1 && find_line("probe=END abort=0"));
+    CHECK(count_of("probe=GP_PG_START ") == 3 && count_of("probe=GP_XPRE1 ") == 3 && count_of("probe=GP_XLO ") == 3);
+    CHECK(count_of("probe=GP_CNT0_SKIP ") == 3 && find_line("img=3 probe=GP_XPRE3 flags=0x20 fad=45140 count=16"));
+    CHECK(f.now < 240ull * 1000000u);
+}
+
 int main(void)
 {
     g_rec = malloc(8u << 20);
@@ -1721,6 +1864,8 @@ int main(void)
     test_toc_plan();
     test_runner_seq22();
     test_seq22_example_cfg();
+    test_runner_seq23();
+    test_seq23_example_cfg();
     printf("OK: %d checks passed\n", g_checks);
     return 0;
 }

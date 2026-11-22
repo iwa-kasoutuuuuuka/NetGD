@@ -48,6 +48,14 @@ void gp_config_defaults(gp_config *c)
     c->gap_low[1] = 100;
     c->n_gap_low = 2;
     c->gap_count0 = 1;
+    {
+        static const int lo[4] = { 0, 1, 100, 149 }, of[8] = { -156, -151, -150, -149, -100, -2, -1, 0 };
+        memcpy(c->pregap_low, lo, sizeof(lo));
+        c->n_pregap_low = 4;
+        memcpy(c->pregap_offs, of, sizeof(of));
+        c->n_pregap_offs = 8;
+    }
+    c->pregap_cross = 16;
 }
 
 static int parse_bool(const char *v, int *out)
@@ -182,6 +190,11 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "gap_leadout")) { ok = parse_list(c->gap_leadout, &c->n_gap_leadout, v, GP_MAX_GAPLIST, 0, 10000);
     } else if (!strcmp(k, "gap_low")) { ok = parse_list(c->gap_low, &c->n_gap_low, v, GP_MAX_GAPLIST, 0, 149);
     } else if (!strcmp(k, "gap_count0")) { if (parse_bool(v, &b)) c->gap_count0 = b; else ok = 0;
+    } else if (!strcmp(k, "gap_crc")) { if (parse_bool(v, &b)) c->gap_crc = b; else ok = 0;
+    } else if (!strcmp(k, "pregap_probe")) { if (parse_bool(v, &b)) c->pregap_probe = b; else ok = 0;
+    } else if (!strcmp(k, "pregap_low")) { ok = parse_list(c->pregap_low, &c->n_pregap_low, v, GP_MAX_GAPLIST, 0, 149);
+    } else if (!strcmp(k, "pregap_offs")) { ok = parse_list(c->pregap_offs, &c->n_pregap_offs, v, GP_MAX_PGOFFS, -300, 300);
+    } else if (!strcmp(k, "pregap_cross")) { n = parse_num(v, &ok); if (ok) c->pregap_cross = clampi(n, 2, 16);
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

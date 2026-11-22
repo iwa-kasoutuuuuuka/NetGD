@@ -153,6 +153,14 @@ int main(int argc, char **argv)
     for (i = 0; i < cfg.n_gap_low && n < sizeof(h) - 8; i++)
         n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.gap_low[i]);
     header(h);
+    n = (size_t)snprintf(h, sizeof(h), "config gap_crc=%d pregap_probe=%d pregap_cross=%d pregap_low=", cfg.gap_crc,
+                         cfg.pregap_probe, cfg.pregap_cross);
+    for (i = 0; i < cfg.n_pregap_low && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.pregap_low[i]);
+    n += (size_t)snprintf(h + n, sizeof(h) - n, " pregap_offs=");
+    for (i = 0; i < cfg.n_pregap_offs && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.pregap_offs[i]);
+    header(h);
     sink_sync(NULL);
 
     /* Without cdrom_init the G1 bus protection may still be closed: every

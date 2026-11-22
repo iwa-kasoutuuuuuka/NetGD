@@ -897,6 +897,7 @@ typedef struct {
     uint32_t late_ms;    /* head_late_ms / gap_late_ms */
     int scd;             /* head_scd / gap_scd */
     int ext;             /* seq 22: also ctl (REQ_STAT byte 2), scd_ctl, scd_rel (GET_SCD bytes 4, 7..9) */
+    int crc;             /* seq 23: crc= (CRC-32 of the returned bytes) and scrc= (per sector) on read lines */
 } hp_state;
 
 static void hp_note_abort(runner *r, hp_state *s)
@@ -1008,11 +1009,29 @@ static int hp_read_line(runner *r, hp_state *s, const char *nm, const char *pre,
     uint8_t c[12];
     gd_result res;
     rec_probe p;
-    char ex[160], sn[24], ssz[16];
+    char ex[400], sn[24], ssz[16], cr[220];
+    size_t cn = 0;
     if (r->abort)
         return GD_REFUSED;
     cdb_read(c, flags, fad, count);
     send_cmd(r, c, BUFSZ, read_timeout(r), &res);
+    cr[0] = 0;
+    if (s->crc) {   /* before REQ_ERROR reuses r->buf */
+        uint32_t got = res.stored < res.total ? res.stored : res.total;
+        if (got)
+            cn += (size_t)snprintf(cr + cn, sizeof(cr) - cn, " crc=%08lx", (unsigned long)crc32_calc(r->buf, got));
+        else
+            cn += (size_t)snprintf(cr + cn, sizeof(cr) - cn, " crc=-");
+        if (res.stored < res.total)
+            cn += (size_t)snprintf(cr + cn, sizeof(cr) - cn, " stored=%lu", (unsigned long)res.stored);
+        if (count > 1 && got && got == res.total && got % count == 0) {
+            uint32_t k, z = got / count;
+            cn += (size_t)snprintf(cr + cn, sizeof(cr) - cn, " scrc=");
+            for (k = 0; k < count && cn < sizeof(cr) - 10; k++)
+                cn += (size_t)snprintf(cr + cn, sizeof(cr) - cn, "%s%08lx", k ? "," : "",
+                                       (unsigned long)crc32_calc(r->buf + k * z, z));
+        }
+    }
     strcpy(ssz, "-");
     strcpy(sn, "none");
     if (res.rc == GD_OK && res.total && count && res.total % count == 0)
@@ -1025,8 +1044,8 @@ static int hp_read_line(runner *r, hp_state *s, const char *nm, const char *pre,
         if (sr.rc == GD_OK && sr.stored >= 10)
             snprintf(sn, sizeof(sn), "%d/%02x/%02x", r->buf[2] & 0x0F, r->buf[8], r->buf[9]);
     }
-    snprintf(ex, sizeof(ex), "%s%sflags=0x%02x fad=%lu count=%lu ssz=%s sense=%s", pre ? pre : "", pre ? " " : "",
-             flags, (unsigned long)fad, (unsigned long)count, ssz, sn);
+    snprintf(ex, sizeof(ex), "%s%sflags=0x%02x fad=%lu count=%lu ssz=%s sense=%s%s", pre ? pre : "", pre ? " " : "",
+             flags, (unsigned long)fad, (unsigned long)count, ssz, sn, cr);
     p.img = r->img; p.name = nm; p.extra = ex; p.cdb = c; p.res = &res; p.data = NULL;
     out_line(r, rec_probe_line(r->line, sizeof(r->line), &p), 0);
     hp_note_abort(r, s);
@@ -1147,21 +1166,22 @@ static void gp_skip(runner *r, const char *label, const char *fmt, ...)
 
 /* (1) the last readable sector of track A before track B: 1-sector reads (GP_SCAN_R lines), binary search.
  * Returns the first gap FAD (= last readable + 1), or 0 with *why set (no gap, unreadable start, abort). */
-static uint32_t gp_find_gap(runner *r, hp_state *s, const gp_gap_plan *p, int *reads, const char **why)
+static uint32_t gp_find_gap(runner *r, hp_state *s, const char *nm, uint32_t lo, uint32_t hi, int *reads,
+                            const char **why)
 {
     uint8_t fl = r->cfg->gap_flags;
-    uint32_t lo = p->a_fad, hi = p->b_fad - 1, t;
+    uint32_t t;
     char pre[24];
     int rc;
     *reads = 0;
     snprintf(pre, sizeof(pre), "n=%d", ++*reads);
-    rc = hp_read_line(r, s, "GP_SCAN_R", pre, fl, lo, 1);
+    rc = hp_read_line(r, s, nm, pre, fl, lo, 1);
     if (rc != GD_OK) {
         *why = r->abort ? "abort" : "track_start_unreadable";
         return 0;
     }
     snprintf(pre, sizeof(pre), "n=%d", ++*reads);
-    rc = hp_read_line(r, s, "GP_SCAN_R", pre, fl, hi, 1);
+    rc = hp_read_line(r, s, nm, pre, fl, hi, 1);
     if (rc == GD_OK) {
         *why = "no_gap";
         return 0;
@@ -1172,7 +1192,7 @@ static uint32_t gp_find_gap(runner *r, hp_state *s, const gp_gap_plan *p, int *r
     }
     while ((t = gp_bsearch_next(lo, hi)) != 0 && *reads < 48) {
         snprintf(pre, sizeof(pre), "n=%d", ++*reads);
-        rc = hp_read_line(r, s, "GP_SCAN_R", pre, fl, t, 1);
+        rc = hp_read_line(r, s, nm, pre, fl, t, 1);
         if (rc == GD_OK)
             lo = t;
         else if (rc == GD_CHECK)
@@ -1199,34 +1219,15 @@ static uint32_t gp_find_gap(runner *r, hp_state *s, const gp_gap_plan *p, int *r
  *   CNT0    (5) count 0 at the reference FAD: the whitelist allows 1..64, so normally GP_CNT0_SKIP (nothing sent);
  *           if it ever passes: CNT0_REF (reference + 8), then CNT0
  * Every read is 1 sector with gap_flags; after each one, REQ_STAT / GET_SCD(1) / late REQ_STAT (GP_<case>_POS). */
-static void gap_probe(runner *r)
+/* the seq 22 groups (gap_probe=on) */
+static void gap_cases22(runner *r, hp_state *sp, const gp_gap_plan *pp)
 {
     hp_state s;
-    gp_gap_plan p;
+    gp_gap_plan p = *pp;
     uint8_t fl = r->cfg->gap_flags;
     char f[300], lb[24];
     int i;
-
-    memset(&s, 0, sizeof(s));
-    s.pfx = "GP";
-    s.late_ms = r->cfg->gap_late_ms;
-    s.scd = r->cfg->gap_scd;
-    s.ext = 1;
-    if (r->abort)
-        return;
-    say(r, "TOC edge probe...");
-    gp_gap_plan_make(r->toc, &p);
-    snprintf(f, sizeof(f), "toc0=%d/%lu toc1=%d/%lu trk_a=%lu/%lu/0x%02lx trk_b=%lu/%lu/0x%02lx leadout=%lu last=%lu/%lu "
-             "ld_leadout=%lu hd=%lu/%lu ref=%lu trk=%s lo=%s hdg=%s",
-             r->toc[0].n, (unsigned long)r->toc[0].leadout, r->toc[1].n, (unsigned long)r->toc[1].leadout,
-             (unsigned long)p.a_num, (unsigned long)p.a_fad, (unsigned long)p.a_ctl,
-             (unsigned long)p.b_num, (unsigned long)p.b_fad, (unsigned long)p.b_ctl,
-             (unsigned long)p.leadout, (unsigned long)p.last_num, (unsigned long)p.last_fad,
-             (unsigned long)p.ld_leadout, (unsigned long)p.hd_num, (unsigned long)p.hd_fad, (unsigned long)p.ref_fad,
-             p.trk_ok ? "ok" : p.trk_why, p.lo_ok ? "ok" : p.lo_why, p.hd_ok ? "ok" : p.hd_why);
-    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_START", f), 0);
-    hp_pos(r, &s, "BASE", 0, 0, 0, NULL);
-
+    s = *sp;
     /* (1) */
     if (!p.trk_ok) {
         gp_skip(r, "TRK", "reason=%s", p.trk_why);
@@ -1242,7 +1243,7 @@ static void gap_probe(runner *r)
                 g = 0;
             }
         } else {
-            g = gp_find_gap(r, &s, &p, &reads, &why);
+            g = gp_find_gap(r, &s, "GP_SCAN_R", p.a_fad, p.b_fad - 1, &reads, &why);
         }
         if (!g) {
             if (!r->abort)
@@ -1318,6 +1319,146 @@ static void gap_probe(runner *r)
             hp_read(r, &s, "CNT0", fl, p.ref_fad, 0);
         }
     }
+    *sp = s;
+}
+
+/* seq 23 (pregap_probe=on): what the drive returns in the pregaps and across boundaries (FADs from the TOC):
+ *   GP_PG_START                 the merged track list
+ *   PGL_<f>                     1 sector at each pregap_low FAD (track 1 pregap, below 150)
+ *   GP_PGB, PG<t>_M<o> / _P<o>  for each track t after the first: 1 sector at start + o for o in pregap_offs
+ *   XPRE<t>                     pregap_cross sectors from start - 10 (pregap into the track body; t = 1: FAD 140)
+ *   XGAP<t>                     pregap_cross sectors from start - 158 (before the pregap into it), tracks after the first
+ *   GP_DSCAN_R / GP_DSCAN, XEND track 1's data end below track 2's pregap (search, or gap_track_end), then
+ *                               pregap_cross sectors from data end - cross/2 (data into the gap)
+ *   XLD / XLO                   pregap_cross sectors from LD lead-out - cross/2 (GD-ROM) / lead-out - cross/2
+ * Each read: sense, bytes, crc (gap_crc), then GP_<case>_POS. */
+static void pregap_cases(runner *r, hp_state *s, const gp_gap_plan *p)
+{
+    static gp_track t[198];
+    uint8_t fl = r->cfg->gap_flags;
+    uint32_t fads[GP_MAX_PGOFFS], cross = (uint32_t)r->cfg->pregap_cross, half = cross / 2;
+    char f[600], lb[32];
+    size_t n = 0;
+    int nt, i, j, m;
+
+    if (r->abort)
+        return;
+    nt = gp_toc_tracks(r->toc, t);
+    n += (size_t)snprintf(f + n, sizeof(f) - n, "cross=%lu tracks=", (unsigned long)cross);
+    for (i = 0; i < nt && n < sizeof(f) - 40; i++)
+        n += (size_t)snprintf(f + n, sizeof(f) - n, "%s%lu/%lu/0x%02lx", i ? "," : "", (unsigned long)t[i].num,
+                              (unsigned long)t[i].fad, (unsigned long)t[i].ctl);
+    if (!nt)
+        n += (size_t)snprintf(f + n, sizeof(f) - n, "-");
+    snprintf(f + n, sizeof(f) - n, " leadout=%lu ld_leadout=%lu", (unsigned long)p->leadout, (unsigned long)p->ld_leadout);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_PG_START", f), 0);
+    if (!nt) {
+        gp_skip(r, "PG", "reason=no_toc");
+        return;
+    }
+
+    /* (1) single sectors */
+    for (i = 0; i < r->cfg->n_pregap_low && !r->abort; i++) {
+        snprintf(lb, sizeof(lb), "PGL_%d", r->cfg->pregap_low[i]);
+        hp_read(r, s, lb, fl, (uint32_t)r->cfg->pregap_low[i], 1);
+    }
+    for (i = 1; i < nt && !r->abort; i++) {
+        m = gp_offset_fads(t[i].fad, r->cfg->pregap_offs, r->cfg->n_pregap_offs, fads);
+        n = (size_t)snprintf(f, sizeof(f), "trk=%lu start=%lu prev=%lu/%lu fads=", (unsigned long)t[i].num,
+                             (unsigned long)t[i].fad, (unsigned long)t[i - 1].num, (unsigned long)t[i - 1].fad);
+        for (j = 0; j < m && n < sizeof(f) - 12; j++)
+            n += (size_t)snprintf(f + n, sizeof(f) - n, "%s%lu", j ? "," : "", (unsigned long)fads[j]);
+        out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_PGB", f), 0);
+        for (j = 0; j < r->cfg->n_pregap_offs && !r->abort; j++) {
+            int o = r->cfg->pregap_offs[j];
+            long fa = (long)t[i].fad + o;
+            if (fa < 0)
+                continue;
+            snprintf(lb, sizeof(lb), "PG%lu_%c%d", (unsigned long)t[i].num, o < 0 ? 'M' : 'P', o < 0 ? -o : o);
+            hp_read(r, s, lb, fl, (uint32_t)fa, 1);
+        }
+    }
+
+    /* (2) crossing reads */
+    for (i = 0; i < nt && !r->abort; i++) {
+        if (t[i].fad >= 10) {
+            snprintf(lb, sizeof(lb), "XPRE%lu", (unsigned long)t[i].num);
+            hp_read(r, s, lb, fl, t[i].fad - 10, cross);
+        }
+        if (i && t[i].fad >= 158) {
+            snprintf(lb, sizeof(lb), "XGAP%lu", (unsigned long)t[i].num);
+            hp_read(r, s, lb, fl, t[i].fad - 158, cross);
+        }
+    }
+    if (!p->trk_ok) {
+        gp_skip(r, "XEND", "reason=%s", p->trk_why);
+    } else if (!r->abort) {
+        uint32_t g = 0, hi = p->b_fad > 151 ? p->b_fad - 151 : 0;
+        int reads = 0;
+        const char *why = "-", *src = "scan";
+        if (r->cfg->gap_track_end) {
+            src = "cfg";
+            g = r->cfg->gap_track_end;
+            if (g <= p->a_fad || g >= p->b_fad) {
+                why = "gap_track_end_outside";
+                g = 0;
+            }
+        } else if (hi <= p->a_fad) {
+            why = "short_track";
+        } else {
+            g = gp_find_gap(r, s, "GP_DSCAN_R", p->a_fad, hi, &reads, &why);
+        }
+        if (!g) {
+            if (!r->abort)
+                gp_skip(r, "XEND", "a_fad=%lu b_fad=%lu hi=%lu src=%s reads=%d reason=%s", (unsigned long)p->a_fad,
+                        (unsigned long)p->b_fad, (unsigned long)hi, src, reads, why);
+        } else {
+            snprintf(f, sizeof(f), "a_fad=%lu b_fad=%lu hi=%lu last_ok=%lu gap_lo=%lu src=%s reads=%d", (unsigned long)p->a_fad,
+                     (unsigned long)p->b_fad, (unsigned long)hi, (unsigned long)(g - 1), (unsigned long)g, src, reads);
+            out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_DSCAN", f), 0);
+            hp_read(r, s, "XEND", fl, g > half ? g - half : 0, cross);
+        }
+    }
+    if (p->hd_ok)
+        hp_read(r, s, "XLD", fl, p->ld_leadout - half, cross);
+    if (p->lo_ok)
+        hp_read(r, s, "XLO", fl, p->leadout - half, cross);
+    else
+        gp_skip(r, "XLO", "reason=%s", p->lo_why);
+}
+
+static void gap_probe(runner *r)
+{
+    hp_state s;
+    gp_gap_plan p;
+    char f[300];
+
+    memset(&s, 0, sizeof(s));
+    s.pfx = "GP";
+    s.late_ms = r->cfg->gap_late_ms;
+    s.scd = r->cfg->gap_scd;
+    s.ext = 1;
+    s.crc = r->cfg->gap_crc;
+    if (r->abort)
+        return;
+    say(r, "TOC edge probe...");
+    gp_gap_plan_make(r->toc, &p);
+    snprintf(f, sizeof(f), "toc0=%d/%lu toc1=%d/%lu trk_a=%lu/%lu/0x%02lx trk_b=%lu/%lu/0x%02lx leadout=%lu last=%lu/%lu "
+             "ld_leadout=%lu hd=%lu/%lu ref=%lu trk=%s lo=%s hdg=%s",
+             r->toc[0].n, (unsigned long)r->toc[0].leadout, r->toc[1].n, (unsigned long)r->toc[1].leadout,
+             (unsigned long)p.a_num, (unsigned long)p.a_fad, (unsigned long)p.a_ctl,
+             (unsigned long)p.b_num, (unsigned long)p.b_fad, (unsigned long)p.b_ctl,
+             (unsigned long)p.leadout, (unsigned long)p.last_num, (unsigned long)p.last_fad,
+             (unsigned long)p.ld_leadout, (unsigned long)p.hd_num, (unsigned long)p.hd_fad, (unsigned long)p.ref_fad,
+             p.trk_ok ? "ok" : p.trk_why, p.lo_ok ? "ok" : p.lo_why, p.hd_ok ? "ok" : p.hd_why);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_START", f), 0);
+    hp_pos(r, &s, "BASE", 0, 0, 0, NULL);
+
+    if (r->cfg->gap_probe)
+        gap_cases22(r, &s, &p);
+    /* seq 23 */
+    if (r->cfg->pregap_probe)
+        pregap_cases(r, &s, &p);
     sync_out(r);
 }
 
@@ -1358,7 +1499,7 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
                 if (cfg->head_probe)
                     head_probe(r);
                 /* seq 22: reads at the TOC's edges */
-                if (cfg->gap_probe && !r->abort)
+                if ((cfg->gap_probe || cfg->pregap_probe) && !r->abort)
                     gap_probe(r);
             }
             /* R148: the same image again, once per delay, with a DEVICE RESET inside the window */
@@ -1381,7 +1522,7 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
         if (battery(r, 1) && !r->abort) {
             if (cfg->head_probe)
                 head_probe(r);
-            if (cfg->gap_probe && !r->abort)
+            if ((cfg->gap_probe || cfg->pregap_probe) && !r->abort)
                 gap_probe(r);
         }
     }
