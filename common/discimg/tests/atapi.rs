@@ -779,6 +779,50 @@ fn swap_window_sense_and_drive_status() {
     assert_eq!((DRIVE_BUSY, DRIVE_OPEN, DRIVE_NODISC), (0x00, 0x06, 0x07));
 }
 
+#[test]
+fn device_reset_re_detects_like_the_stock_records() {
+    // R155 / R159 / seq 17: every DEVICE RESET, with or without a window:
+    // status 0x00, error 0x01, IRR 1 until the next command.
+    assert_eq!((DEVICE_RESET_STATUS, DEVICE_RESET_ERROR, DEVICE_RESET_IRR), (0x00, 0x01, 0x01));
+    // The re-detect lasts detect_time (seq 17: 150 -> ~150 ms; seq 18:
+    // 400 -> ~401 ms), with no open phase.
+    assert_eq!(device_reset_redetect_ms(150), 150);
+    assert_eq!(device_reset_redetect_ms(400), 400);
+    assert_eq!(device_reset_window(400), (0, 400));
+    assert_eq!(swap_phase(399, 0, 400), SwapPhase::Detect);
+    assert_eq!(swap_phase(400, 0, 400), SwapPhase::Done);
+    // No open phase: 0x00 at once (never 0x06), the final byte at the end.
+    let (o, d) = device_reset_window(150);
+    let k = WindowKind::Redetect;
+    let at = |t| window_secnr(k, swap_phase(t, o, d), true, DISC_FORMAT_CDROM_XA, DRIVE_PAUSE);
+    assert_eq!(at(0), 0x00);
+    assert_eq!(at(149), 0x00);
+    assert_eq!(at(150), 0x21); // record 16: 601 -> 752 ms, 0x00 -> 0x21
+    assert_eq!(window_secnr(k, SwapPhase::Done, true, DISC_FORMAT_GDROM, DRIVE_PAUSE), 0x81);
+    assert_eq!(window_secnr(k, SwapPhase::Done, false, 0, DRIVE_PAUSE), 0x07);
+    // The byte at rest keeps the idle status (standby before any switch).
+    assert_eq!(window_secnr(k, SwapPhase::Done, true, DISC_FORMAT_CDROM_XA, 0x02), 0x22);
+    // A switch's window is unchanged: open 0x06, busy 0x00, then paused.
+    let s = WindowKind::Switch;
+    assert_eq!(window_secnr(s, SwapPhase::Open, true, DISC_FORMAT_GDROM, 0x02), 0x06);
+    assert_eq!(window_secnr(s, SwapPhase::Detect, true, DISC_FORMAT_GDROM, 0x02), 0x00);
+    assert_eq!(window_secnr(s, SwapPhase::Done, true, DISC_FORMAT_GDROM, 0x02), 0x81);
+    // NOT READY inside the re-detect is "becoming ready" (stock not probed).
+    assert_eq!(not_ready_asc(swap_phase(0, o, d)), ASC_BECOMING_READY);
+}
+
+#[test]
+fn same_folder_re_switch_is_a_no_op_only_for_the_mounted_folder() {
+    // seq 17 RS_: 52 82 n for the folder already mounted, image or empty.
+    assert!(same_folder_reswitch(Some(4), Some(4), true));
+    assert!(same_folder_reswitch(Some(7), Some(7), true));
+    // Another folder, nothing remembered, or ejected / write session: a mount.
+    assert!(!same_folder_reswitch(Some(3), Some(4), true));
+    assert!(!same_folder_reswitch(Some(4), None, true));
+    assert!(!same_folder_reswitch(None, None, true));
+    assert!(!same_folder_reswitch(Some(4), Some(4), false));
+}
+
 fn cdb(b: &[u8]) -> [u8; 12] {
     let mut c = [0u8; 12];
     c[..b.len()].copy_from_slice(b);

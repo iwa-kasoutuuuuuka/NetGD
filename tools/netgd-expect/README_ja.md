@@ -57,7 +57,9 @@ python tools/netgd-expect/expect_sd.py E:\sdcard_out --images 3,4,5,6,7 --return
 | `--ip-fad N`、`--cdread-flags 0x24` | gdprobe の同名の設定（既定 自動判定 / `0x24`） |
 | `--raw-sectors` | feature `raw-sectors` 入りのファームを予測する（`CDREAD_FLAGS` の `0x10` が 2,352 B、D10） |
 | `--form2-sectors` | feature `form2-sectors` 入りのファームを予測する（CDI の postgap（Form 2）を `0x20` で読むと 2,324 B、D14） |
-| `--regpoll`、`--devreset MS`、`--window O,D` | gdprobe の `swap_regpoll`・`swap_devreset`（R154）。切替のあとのコマンドなしのレジスタ読み（`SW_REGPOLL`）、`MS` ms 後の DEVICE RESET（行に `R<MS>_` を付け、`SW_DEVRESET` と最後の `REQ_STAT`・`REQ_ERROR`）。窓の長さは `--window`（既定 150,150、試験用 SD の INI）。`expect_sd.py` では `--regpoll` と `--devreset 50,200` で、各イメージの試験のあとに同じフォルダへの DEVICE RESET つきの切替を足す（`return_to` には付けない） |
+| `--regpoll`、`--devreset MS`、`--window O,D` | gdprobe の `swap_regpoll`・`swap_devreset`（R154）。切替のあとのコマンドなしのレジスタ読み（`SW_REGPOLL`）、`MS` ms 後の DEVICE RESET（行に `R<MS>_` を付け、`SW_DEVRESET` と最後の `REQ_STAT`・`REQ_ERROR`）。窓の長さは `--window`（既定 150,150、試験用 SD の INI）。`expect_sd.py` では `--regpoll` と `--devreset 50,200` で、各イメージの試験のあとに同じフォルダへの DEVICE RESET つきの切替を足す（`return_to` には付けない）。NetGD（R159）はこの同じフォルダへの再切替を何もしない扱いにし、DEVICE RESET で検出をやり直す（SECNR はすぐ 0x00、detect_time 後に最終の値、ALTSTATUS 0x00・ERROR 0x01、そのあと UA） |
+| `--reswitch`、`--devreset-only` | gdprobe seq 17 の `swap_reswitch`・`devreset_only`。同じフォルダへの再切替だけ（`RS_`、窓も UA もなし）と、切替なしの DEVICE RESET だけ（`DR_`、500 ms 待ってからリセット、媒体があれば UA）。`expect_sd.py` にも同じ名前で渡す（各イメージの試験と `R<MS>_` のあと） |
+| `--old-bitstream` | エラーレジスタのビット 0・1 を持たない古いビットストリーム。DEVICE RESET のあとの ERROR を 0x01 ではなく 0x00 と予測する（既定は新しいビットストリーム、`feat/fpga-regs`）。`expect_sd.py` はそのまま expect に渡す |
 | `--prev-check 0/1`、`--prev-secnr 0xNN` | 前の区間の終わりの状態（直前が CHECK だったか、SECNR）。`expect_sd.py` が、各区間の出力の最後の `# expect-state ...` 行から次の区間に渡す（その行は記録から消す） |
 | `--no-flags-test`、`--no-throughput`、`--tp-batches N`、`--tp-sectors N`、`--no-seek`、`--seek-n N`、`--seek-span N`、`--no-reads` | 設定の `cdread_flags_test` / `throughput` / `tp_batches` / `tp_sectors` / `seek` / `seek_n` / `seek_span` に対応（既定は gdprobe と同じ） |
 
