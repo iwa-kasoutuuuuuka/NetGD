@@ -1873,6 +1873,10 @@ const NO_HEAD: u32 = u32::MAX;
 
 fn set_last_read_fad(fad: Option<u32>) {
     LAST_READ_FAD.store(fad.unwrap_or(NO_HEAD), core::sync::atomic::Ordering::Relaxed);
+    if fad.is_none() {
+        // Back to the park position: no track reported since.
+        HEAD_TNO.store(0, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn last_read_fad() -> Option<u32> {
@@ -2377,12 +2381,15 @@ async fn handle_cd_read(
     // The sector type the host expects (byte 1, bits 3..1) must fit the
     // track's mode, as on stock: Mode 2 Form 1 on a Mode 1 track, Mode 1 on a
     // Mode 2 track, either on an audio track is CHECK 5/64/00 (D8, D9, R144).
-    // A request wholly inside a track's pregap (the 150 sectors before its
-    // index 1, on no track's sectors) is served as that track's, zero-filled
-    // (stock seq 22 reads FAD 0 / 100, 905, 11851, 45149; a CDI stores its
-    // pregaps as zeros, a GDI does not store them).
-    let pregap = discimg::atapi::pregap_track(gdi.tracks(), starting_fad, count);
-    let track = if pregap.is_some() { pregap } else { gdi.track_for_lba(lba) };
+    // A request that starts in a track's pregap (the 150 sectors before its
+    // index 1, on no track's sectors) is served as that track's: zero
+    // sectors, then the track's own if it runs on (stock seq 22/23: CRCs of
+    // zeros; a CDI stores its pregaps as zeros, a GDI does not store them).
+    let pregap = discimg::atapi::pregap_read(gdi.tracks(), starting_fad, count);
+    let track = match pregap {
+        Some((t, _)) => Some(t),
+        None => gdi.track_for_lba(lba),
+    };
     // The head goes to the start of every request with a sector, whatever
     // follows (stock seq 17/21/22: refused 5/64/00 for its type, 5/21/00 from
     // a gap or the lead-out, REQ_STAT shows the start FAD), and on by the
@@ -2399,7 +2406,7 @@ async fn handle_cd_read(
             return;
         }
         // Audio not stored as whole 2,352-byte sectors: nothing right to send.
-        if pregap.is_none() && discimg::atapi::cd_read_unservable(t.mode(), t.sector_size as u32) {
+        if discimg::atapi::cd_read_unservable(t.mode(), t.sector_size as u32) {
             warn!("{}: CD_READ of an audio track stored {} B a sector", label, t.sector_size);
             finish_illegal(dev, state);
             return;
@@ -2417,8 +2424,7 @@ async fn handle_cd_read(
         // holds 2,048-byte payloads: drop it either way so neither layout is
         // mistaken for the other.
         let raw = track.map_or(false, |t| {
-            let stored = if pregap.is_some() { 2352 } else { t.sector_size as u32 };
-            discimg::atapi::cd_read_raw_out(packet[1], t.mode(), stored, RAW_DATA)
+            discimg::atapi::cd_read_raw_out(packet[1], t.mode(), t.sector_size as u32, RAW_DATA)
         });
         if raw {
             invalidate_cd_read_cache();
@@ -2450,7 +2456,7 @@ async fn handle_cd_read(
     let available = track_sectors.saturating_sub(lba.saturating_sub(
         track.map(|t| t.start_lba).unwrap_or(0),
     ));
-    // A pregap request is checked by `pregap_track` already. Never take a
+    // A pregap request is checked by `pregap_read` already. Never take a
     // start below FAD 150 for LBA 0.
     if total == 0 || (pregap.is_none() && (count > available || starting_fad < 150)) {
         warn!(
@@ -2459,8 +2465,10 @@ async fn handle_cd_read(
         );
         clear_out_layout();
         // A start no track holds, nor its pregap: LBA out of range, 5/21/00
-        // (stock seq 21/22); past the end from inside a track, or from a
-        // pregap into the track (stock unmeasured): ASC 0.
+        // (stock seq 21/22). Past the end of the track's sectors: ASC 0 --
+        // stock (seq 23 `GP_XEND`, CDI 04 FAD 444 x 16 over track 1's end at
+        // 451) sends the 8 sectors there are and then never completes (BSY,
+        // the drive stops answering); NetGD refuses it before any data.
         let asc = if discimg::atapi::cd_read_start_outside(gdi.tracks(), starting_fad) {
             discimg::atapi::ASC_LBA_OUT_OF_RANGE
         } else {
@@ -2472,8 +2480,21 @@ async fn handle_cd_read(
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
     unsafe { STREAM_OK = false };
     set_stream_delivered(0);
-    unsafe { PREGAP_OUT = pregap.is_some() };
-    if stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await {
+    // A pregap read streams from the track's first LBA (`stage_sectors_for`
+    // sizes the chunks by that track); `stage_chunk` counts its sectors from
+    // there and zero-fills the first `PREGAP_ZEROS`.
+    let stream_lba = match pregap {
+        Some((t, zeros)) => {
+            unsafe {
+                PREGAP_OUT = true;
+                PREGAP_ZEROS = zeros;
+                PREGAP_BASE = t.start_lba;
+            }
+            t.start_lba
+        }
+        None => lba,
+    };
+    if stream_from_sd(dev, gdi, stream_lba, count as u32, total, dma, byte_limit).await {
         // The card failed under the read: MEDIUM ERROR for the REQUEST SENSE
         // that follows the error status the stream posted.
         state.pending_sense_key = 0x03;
@@ -2604,10 +2625,13 @@ const RAW_DATA: bool = cfg!(feature = "raw-sectors");
 /// by `handle_cd_read` for one request, like [`RAW_OUT`].
 static mut FORM2_OUT: bool = false;
 
-/// The CD_READ in flight lies in a track's pregap: `stage_chunk` stages zero
-/// sectors instead of reading the card. Set by `handle_cd_read` for one
-/// request (`discimg::atapi::pregap_track`).
+/// The CD_READ in flight starts in a track's pregap: `stage_chunk` stages
+/// `PREGAP_ZEROS` zero sectors, then the track's from `PREGAP_BASE` (its
+/// first LBA). Set by `handle_cd_read` for one request
+/// (`discimg::atapi::pregap_read`).
 static mut PREGAP_OUT: bool = false;
+static mut PREGAP_ZEROS: u32 = 0;
+static mut PREGAP_BASE: u32 = 0;
 
 /// Back to 2,048-byte payloads once a request is over.
 fn clear_out_layout() {
@@ -2890,12 +2914,7 @@ fn fnv1a(mut h: u32, data: &[u8]) -> u32 {
 /// BIOS's first CD_READ start pushing with no SD latency in front of it.
 async fn stage_chunk(gdi: &'static crate::gdi::Gdi, lba: u32, count: u32) -> bool {
     if unsafe { PREGAP_OUT } {
-        // A pregap: zero sectors in the layout being sent (`handle_cd_read`).
-        invalidate_cd_read_cache();
-        let n = (count as usize * out_sector_bytes()).min(CD_READ_BUF_BYTES);
-        let buf = unsafe { &mut *core::ptr::addr_of_mut!(CD_READ_BUF) };
-        buf[..n].fill(0);
-        return true;
+        return stage_pregap_chunk(gdi, lba, count).await;
     }
     let want = (count as usize) * 2048;
     // The cache only ever holds 2,048-byte payloads.
@@ -2905,6 +2924,33 @@ async fn stage_chunk(gdi: &'static crate::gdi::Gdi, lba: u32, count: u32) -> boo
         return true;
     }
     fill_cd_read_buf_from_sd(gdi, lba, count).await.is_ok()
+}
+
+/// `stage_chunk` for a pregap read (`PREGAP_OUT`): sector `i` of the request
+/// (`lba` - `PREGAP_BASE` + k) is a zero sector while `i < PREGAP_ZEROS`,
+/// else the track's sector `i - PREGAP_ZEROS` from `PREGAP_BASE`. The data
+/// part is staged at the front, then moved behind the zeros; the buffer is
+/// never left as a cache entry.
+async fn stage_pregap_chunk(gdi: &'static crate::gdi::Gdi, lba: u32, count: u32) -> bool {
+    let (zeros, base) = unsafe { (PREGAP_ZEROS, PREGAP_BASE) };
+    let first = lba - base;
+    let z = zeros.saturating_sub(first).min(count);
+    let sec = out_sector_bytes();
+    if z < count {
+        let data_lba = base + (first + z - zeros);
+        if fill_cd_read_buf_from_sd(gdi, data_lba, count - z).await.is_err() {
+            return false;
+        }
+    }
+    invalidate_cd_read_cache();
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CD_READ_BUF) };
+    let zb = z as usize * sec;
+    let n = (count as usize * sec).min(CD_READ_BUF_BYTES);
+    if zb < n {
+        buf.copy_within(0..n - zb, zb);
+    }
+    buf[..zb.min(n)].fill(0);
+    true
 }
 
 /// Pre-fill CD_READ_BUF with the first 7 sectors of HDA at MCU boot.
@@ -4722,9 +4768,27 @@ fn mounted_tracks() -> &'static [crate::gdi::Track] {
 fn build_req_stat_reply() -> [u8; 10] {
     let s = crate::cdda::snapshot();
     let state = audio_state(s.status);
-    let tracks = mounted_tracks();
-    let (fad, track) = discimg::atapi::head_position(tracks, state, s.fad, idle_fad());
+    let (fad, track) = head_now(state, s.fad);
     discimg::atapi::req_stat_reply(state, idle_status(), disc_format(), s.repeat, fad, track)
+}
+
+/// The track number the last REQ_STAT / GET_SCD reported from on a track
+/// (0 = none since the mount, DEVICE RESET or hard reset): off every track
+/// stock keeps reporting it (`discimg::atapi::head_position`, seq 23).
+static HEAD_TNO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Where REQ_STAT / GET_SCD put the head, and the track they report.
+#[inline(never)]
+fn head_now(state: discimg::atapi::AudioState, cdda_fad: u32) -> (u32, Option<&'static crate::gdi::Track>) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let (fad, track) =
+        discimg::atapi::head_position(mounted_tracks(), state, cdda_fad, idle_fad(), HEAD_TNO.load(Relaxed));
+    if let Some(t) = track {
+        if discimg::atapi::head_on(t, fad) {
+            HEAD_TNO.store(t.number, Relaxed);
+        }
+    }
+    (fad, track)
 }
 
 /// Idle head position (D4): FAD 150 until the first switch, then the
@@ -4781,7 +4845,7 @@ fn build_req_ses_reply(_gdi: Option<&'static crate::gdi::Gdi>, session: u8) -> O
 fn build_get_scd_reply(format: u8, r: &mut [u8; 100]) -> usize {
     let s = crate::cdda::snapshot();
     let state = audio_state(s.status);
-    let (fad, track) = discimg::atapi::head_position(mounted_tracks(), state, s.fad, idle_fad());
+    let (fad, track) = head_now(state, s.fad);
     discimg::atapi::get_scd_reply(format, state, fad, track, r)
 }
 

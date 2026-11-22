@@ -171,19 +171,46 @@ pub fn build_toc<T: TrackInfo>(
 /// sector CDDA is playing or paused at (`cdda_fad`), or `idle_fad` when no
 /// CD-DA has been started ([`idle_fad`]: FAD 150 after power-on, the park
 /// position after an image switch, D4).
+///
+/// `last_tno` is the track number the previous REQ_STAT / GET_SCD reported
+/// from on a track ([`head_on`]; 0 = none since the mount). Off every track
+/// and pregap stock keeps reporting that number (seq 23 CDI 04: after FAD
+/// 150 in track 1, the gap FADs 11696 / 11701 before track 2's pregap say
+/// track 1; after 11858 in track 2, 11694 says track 2; seq 22 GDI 03: 1506
+/// right after a read of 1505 in track 2 says track 3, the number the query
+/// before it gave -- a read does not set it, a query does), with CTRL 4
+/// ([`head_on`] false; seq 23 `ctl=0x41` there although track 1 is audio).
+/// With none, [`head_track`]'s next / last track. The caller stores the
+/// number back when [`head_on`] holds.
 #[inline(never)] // shared by REQ_STAT and GET_SCD; inlined twice it costs ~100 bytes
 pub fn head_position<T: TrackInfo>(
     tracks: &[T],
     state: AudioState,
     cdda_fad: u32,
     idle_fad: u32,
+    last_tno: u8,
 ) -> (u32, Option<&T>) {
     let fad = match state {
         AudioState::Standby => idle_fad,
         _ => cdda_fad,
     };
     let track = head_track(tracks, fad);
+    let track = match track {
+        Some(t) if !head_on(t, fad) && last_tno != 0 => {
+            tracks.iter().find(|u| u.number() == last_tno).or(track)
+        }
+        _ => track,
+    };
     (fad, track)
+}
+
+/// Whether a head at `fad` is on `track`'s sectors or its pregap
+/// ([`PREGAP_SECTORS`] before it): REQ_STAT / GET_SCD then report the
+/// track's own CTRL, index and relative position ([`head_index_rel`]); off
+/// it CTRL 4, index 1 and [`SCD_REL_OUTSIDE`] (stock seq 21-23).
+pub fn head_on<T: TrackInfo>(track: &T, fad: u32) -> bool {
+    let start = track.start_lba().wrapping_add(150);
+    (fad >= start && fad - start < track.sector_count()) || (fad < start && start - fad <= PREGAP_SECTORS)
 }
 
 /// Sectors before each track's index 1 that stock GDEMU 6.0 counts as its
@@ -294,28 +321,34 @@ pub fn read_head_start(start_fad: u32, count: u32) -> Option<u32> {
     (count != 0).then_some(start_fad)
 }
 
-/// The track whose pregap ([`PREGAP_SECTORS`] before its index 1) holds all
-/// `count` sectors from `start_fad`, none of them on a track's sectors:
-/// stock GDEMU 6.0 reads them as that track's (seq 22, `gap_flags` 0x20:
-/// FAD 0 / 100 -> 2,352 B on a CDI's audio track 1, 2,048 B on GDI 03's
-/// data track 1; 905 -> 2,352 B, GDI audio track 2; 45149 -> 2,048 B, GDI
-/// track 3; 11851 -> 2,324 B on CDI 04's Mode 2 track 2, 2,048 B on CDI
-/// 10's Mode 1 one). Their bytes are not recorded; a CDI stores its pregaps
-/// as zeros (Form 2 subheaders on 04), a GDI does not store them: NetGD
-/// sends zeros. `None` for a count of 0 or a request that leaves the pregap
-/// (stock unmeasured).
-pub fn pregap_track<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Option<&T> {
+/// A CD_READ that starts in a track's pregap ([`PREGAP_SECTORS`] before its
+/// index 1, on no track's sectors) and ends in that pregap or on the
+/// track's sectors: `(track, zeros)`, the first `zeros` sectors being the
+/// pregap's. Stock GDEMU 6.0 serves it as that track's: the pregap sectors
+/// are zeros (seq 23 `scrc=` / `crc=` on CDI 04: FAD 0 / 1 / 100 / 149 ->
+/// CRC be97ce3f = 2,352 zero bytes; 11702..11851 -> d0912a98 = 2,324 zero
+/// bytes, the pregap of the Mode 2 track as Form 2 -- the same as the CDI
+/// file's stored pregaps), then the track's own sectors (`GP_XPRE1`: FAD
+/// 140, 16 sectors = 10 zero + track 1's first 6, crc 053616bb;
+/// `GP_XPRE2`: 11842 = 10 x 2,324 zero + 6 x 2,048 of track 2, 35,528 B).
+/// A GDI does not store its pregaps; stock's bytes there are not recorded
+/// (the seq 23 run stopped before GDI 03): NetGD sends zeros too. `None` for
+/// a count of 0, a start no pregap holds (seq 23 `GP_XGAP2`, 11694 x 16
+/// from the gap into the pregap: 5/21/00) or a request past the track's end.
+pub fn pregap_read<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Option<(&T, u32)> {
     let t = tracks.iter().find(|t| t.start_lba().wrapping_add(150) > start_fad)?;
     let start = t.start_lba().wrapping_add(150);
     let end = start_fad.checked_add(count)?;
-    if count == 0 || end > start || start - start_fad > PREGAP_SECTORS {
+    if count == 0 || start - start_fad > PREGAP_SECTORS || end > start.wrapping_add(t.sector_count()) {
         return None;
     }
+    // No other track's sectors in the pregap part.
+    let zeros_end = end.min(start);
     let on_a_track = tracks.iter().any(|u| {
         let s = u.start_lba().wrapping_add(150);
-        s < end && start_fad < s.wrapping_add(u.sector_count())
+        s < zeros_end && start_fad < s.wrapping_add(u.sector_count())
     });
-    (!on_a_track).then_some(t)
+    (!on_a_track).then_some((t, zeros_end - start_fad))
 }
 
 /// Whether stock GDEMU 6.0 would refuse a CD_READ from `start_fad` as LBA
@@ -424,7 +457,7 @@ pub fn req_stat_reply<T: TrackInfo>(
     let status = drive_status(state, idle);
     let repeat = if state == AudioState::Playing { repeat } else { 0x0F };
     let (ctrl_adr, tno, index) = track
-        .map(|t| ((t.ctrl() << 4) | 1, t.number(), head_index_rel(t, fad).0))
+        .map(|t| (if head_on(t, fad) { (t.ctrl() << 4) | 1 } else { 0x41 }, t.number(), head_index_rel(t, fad).0))
         .unwrap_or((0x41, 1, 1));
     [
         status,
@@ -1009,7 +1042,8 @@ pub fn get_scd_reply<T: TrackInfo>(
     q[2] = 0x01; // index 1
     match track {
         Some(t) => {
-            q[0] = (t.ctrl() << 4) | 1; // CTRL, ADR=1 (Q-mode 1)
+            // CTRL, ADR=1 (Q-mode 1); CTRL 4 off the track (stock seq 23).
+            q[0] = if head_on(t, fad) { (t.ctrl() << 4) | 1 } else { 0x41 };
             q[1] = bcd(t.number() as u32);
             // Index 0 and a countdown in the pregap, stock's constant off
             // the track (`head_index_rel`, seq 22).

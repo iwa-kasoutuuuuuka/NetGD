@@ -430,6 +430,31 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual((hi['fad'], hi['rc'], hi['ssz']), (str(int(hdg['hd_fad']) - 1), 'ok', '2048'))
         self.assertEqual(get(3, 'GP_HDG_HI_POS')[0]['scd_rel'], '0')
 
+    def test_pregap_probe_as_netgd_answers(self):
+        # gdprobe seq 23 (gap_crc=1 pregap_probe=1), stock_20261122_23_pregap-crc.txt: pregap sectors are zeros
+        # (CRC be97ce3f = 2,352 zero bytes), a read from the pregap runs on into the track, a read from the gap into
+        # the pregap is 5/21/00, and off every track REQ_STAT keeps the last track number with CTRL 4.
+        text = expect_sd.predict(self.card, images=[4], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--gap-crc', '--pregap-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda probe: [e for e in ents if e['img'] == 4 and e['probe'] == probe][0]
+        self.assertNotIn('GP_TRK_SKIP', [e['probe'] for e in ents])    # gap_probe off: seq 23 cases only
+        for f in (0, 1, 100, 149):
+            r = get('GP_PGL_%d' % f)
+            self.assertEqual((r['rc'], r['ssz'], r['crc']), ('ok', '2352', 'be97ce3f'))
+        x = get('GP_XPRE1')
+        self.assertEqual((x['rc'], x['bytes']), ('ok', str(16 * 2352)))
+        self.assertEqual(x['scrc'].split(',')[:10], ['be97ce3f'] * 10)
+        self.assertEqual(get('GP_XPRE1_POS')['pos'], '156')
+        g = get('GP_XGAP2')
+        self.assertEqual((g['rc'], g['sense']), ('check', '5/21/00'))
+        for case in ('PG2_M156', 'PG2_M151'):
+            pos = get('GP_%s_POS' % case)
+            self.assertEqual((pos['trk'], pos['ctl'], pos['scd_rel']), ('1', '0x41', '513660'))
+        self.assertEqual(get('GP_XGAP2_POS')['trk'], '2')
+        self.assertEqual(get('GP_PG2_M150_POS')['idx'], '0')
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '

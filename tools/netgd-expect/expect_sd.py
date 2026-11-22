@@ -113,7 +113,7 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
     # ERROR in the register polls / where the last CD_READ left the head). Before the first section: ERROR 0x50,
     # what the img=0 battery leaves (its REQ_SES_3 on the boot disc is ILLEGAL REQUEST in every record).
     state = ['--prev-err', '0x50']
-    keys = {'last_check': '--prev-check', 'secnr': '--prev-secnr', 'err': '--prev-err', 'head': '--prev-head'}
+    keys = {'last_check': '--prev-check', 'secnr': '--prev-secnr', 'err': '--prev-err', 'head': '--prev-head', 'tno': '--prev-tno'}
 
     def run(args):
         nonlocal state

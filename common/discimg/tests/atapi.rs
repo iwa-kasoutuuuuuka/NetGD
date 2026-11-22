@@ -217,30 +217,30 @@ fn req_ses_no_sda_track() {
 #[test]
 fn head_position_idle_is_fad_150_in_track_1() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Standby, 12345, 150);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 12345, 150, 0);
     assert_eq!(fad, 150);
     assert_eq!(tr.unwrap().number, 1);
     // Playing at FAD 1000 -> LBA 850 -> track 2 (starts at 450).
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150, 0);
     assert_eq!((fad, tr.unwrap().number), (1000, 2));
     // Before the first track (FAD < 150 saturates to LBA 0), and past the end.
-    let (_, tr) = head_position(&g, AudioState::Paused, 10, 150);
+    let (_, tr) = head_position(&g, AudioState::Paused, 10, 150, 0);
     assert_eq!(tr.unwrap().number, 1);
-    let (_, tr) = head_position(&g, AudioState::Paused, 600_000, 150);
+    let (_, tr) = head_position(&g, AudioState::Paused, 600_000, 150, 0);
     assert_eq!(tr.unwrap().number, 3);
     // No tracks.
-    assert!(head_position(&[] as &[TrackDesc], AudioState::Playing, 5, 150).1.is_none());
+    assert!(head_position(&[] as &[TrackDesc], AudioState::Playing, 5, 150, 0).1.is_none());
 }
 
 #[test]
 fn req_stat() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Standby, 777, 150);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 777, 150, 0);
     assert_eq!(
         req_stat_reply(AudioState::Standby, DRIVE_STANDBY, DISC_FORMAT_GDROM, 0, fad, tr),
         [0x02, 0x8F, 0x41, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
     );
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150, 0);
     assert_eq!(
         req_stat_reply(AudioState::Playing, DRIVE_STANDBY, DISC_FORMAT_CDROM_XA, 3, fad, tr),
         [0x03, 0x23, 0x01, 0x02, 0x01, 0x00, 0x03, 0xE8, 0x00, 0x00]
@@ -278,7 +278,7 @@ fn req_stat() {
 #[test]
 fn get_scd_format_1_is_14_bytes() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150, 0);
     let mut r = [0xEEu8; 100];
     assert_eq!(get_scd_reply(1, AudioState::Playing, fad, tr, &mut r), 14);
     // Q: ctrl/adr 01, track 02, index 01, rel FAD 400 (1000-600) = 0x000190, 00,
@@ -294,7 +294,7 @@ fn get_scd_format_1_is_14_bytes() {
 #[test]
 fn get_scd_idle_and_trackless() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Standby, 0, 150);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, 150, 0);
     let mut r = [0u8; 100];
     assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
     // Track 1, data; relative 0; absolute FAD 150 = 0x000096.
@@ -341,7 +341,7 @@ fn the_independent_crc_matches_the_standard_check_value() {
 #[test]
 fn get_scd_format_0_is_100_bytes_with_bit_expanded_q_and_inverted_crc() {
     let g = gd3();
-    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150);
+    let (fad, tr) = head_position(&g, AudioState::Playing, 1000, 150, 0);
     let mut r = [0u8; 100];
     assert_eq!(get_scd_reply(0, AudioState::Playing, fad, tr, &mut r), 100);
     assert_eq!(&r[..4], &[0x00, 0x11, 0x00, 100]);
@@ -443,7 +443,7 @@ fn sweep_matches_the_original_code() {
             // original's open-ended lookup: pinned in
             // the_head_in_a_gap_reports_the_next_track and the seq 22 test.
             let snap = Snapshot { status: os, repeat, fad };
-            let (hf, ht) = head_position(&new, ns, fad, 150);
+            let (hf, ht) = head_position(&new, ns, fad, 150, 0);
             let lba = hf.saturating_sub(150);
             if hf < 150 || !track_for_lba(&new, lba).map_or(false, |t| lba - t.start_lba < t.sector_count) {
                 continue;
@@ -566,7 +566,7 @@ fn the_stock_record_of_the_dcload_cdi() {
     let c = dcload_cdi();
     let boot = cdi_boot_area_lba(&c, 2);
     assert_eq!(boot, 11702);
-    let (fad, tr) = head_position(&c, AudioState::Standby, 0, 150);
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, 150, 0);
 
     // REQ_STAT: 02 2f 01 01 01 00 00 96 00 00. The low nibble of byte 1 (F) is
     // the repeat field, F whenever nothing plays (D3), whatever count the
@@ -669,7 +669,7 @@ fn idle_status_and_head_after_power_on_and_after_a_switch() {
     assert_eq!(idle_fad(&dcload_cdi(), true, false), 150);
     assert_eq!(idle_fad(&[t(1, 0, 4, 600), t(2, 756, 0, 600)], false, true), 150);
     // The idle position only applies while no CD-DA was started.
-    assert_eq!(head_position(&g, AudioState::Paused, 1000, 45150).0, 1000);
+    assert_eq!(head_position(&g, AudioState::Paused, 1000, 45150, 0).0, 1000);
 }
 
 #[test]
@@ -677,7 +677,7 @@ fn the_stock_record_of_gdi_03_after_a_switch() {
     // stock_20261121_04_img3-7.txt img=3 (and 03/06/08): paused, track 3, FAD 45150.
     let g = stock_gdi03();
     let boot = gdi_boot_area_lba(&g);
-    let (fad, tr) = head_position(&g, AudioState::Standby, 0, idle_fad(&g, false, true));
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, idle_fad(&g, false, true), 0);
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_GDROM, 0, fad, tr);
     assert_eq!(&stat[..], &hex("018f41030100b05e0000")[..]);
     let st = drive_status(AudioState::Standby, DRIVE_PAUSE);
@@ -697,7 +697,7 @@ fn the_stock_record_of_a_cdi_after_a_switch() {
     // img=4/5 (CDI 04/05): paused, track 1, FAD 150. The dcload CDI's tables.
     let c = dcload_cdi();
     let boot = cdi_boot_area_lba(&c, 2);
-    let (fad, tr) = head_position(&c, AudioState::Standby, 0, idle_fad(&c, true, true));
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, idle_fad(&c, true, true), 0);
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
     assert_eq!(&stat[..], &hex("012f0101010000960000")[..]);
     let st = drive_status(AudioState::Standby, DRIVE_PAUSE);
@@ -716,7 +716,7 @@ fn the_stock_record_of_the_head_after_cd_read() {
     // the head is past the 7th sector (45157), still paused, track 3.
     let g = stock_gdi03();
     let last = Some(read_end_fad(45150, 7));
-    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, last));
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, last), 0);
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_GDROM, 0, fad, tr);
     assert_eq!(&stat[..], &hex("018f41030100b0650000")[..]);
     // CDI 04 (same track layout as the dcload CDI): Mode 1 asked of the Mode 2
@@ -724,17 +724,17 @@ fn the_stock_record_of_the_head_after_cd_read() {
     let c = dcload_cdi();
     let last = read_head_start(0x2E4C, 7);
     assert_eq!(last, Some(0x2E4C));
-    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, last));
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, last), 0);
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
     assert_eq!(&stat[..], &hex("012f410201002e4c0000")[..]);
     // img=0 after a Dreamcast reset (remount, then the BIOS boots dcload): the
     // last read ended at lead-out - 2.
-    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, Some(0x05017A)));
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, Some(0x05017A)), 0);
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
     assert_eq!(&stat[..], &hex("012f41020105017a0000")[..]);
     // GET_SCD follows the same head.
     let mut r = [0u8; 100];
-    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, Some(45157)));
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, Some(45157)), 0);
     assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
     assert_eq!(&r[..14], &hex("0015000e4103010000070000b065")[..]);
     // No read since the mount (None), and before any switch (cold power-on:
@@ -744,7 +744,7 @@ fn the_stock_record_of_the_head_after_cd_read() {
     assert_eq!(rest_fad(&c, true, false, Some(0x05017A)), 150);
     assert_eq!(rest_fad(&g, false, false, Some(45157)), 150);
     // CD-DA keeps its own position.
-    assert_eq!(head_position(&g, AudioState::Paused, 1000, rest_fad(&g, false, true, Some(45157))).0, 1000);
+    assert_eq!(head_position(&g, AudioState::Paused, 1000, rest_fad(&g, false, true, Some(45157)), 0).0, 1000);
 }
 
 #[test]
@@ -801,7 +801,7 @@ fn pregap_reads_are_served_as_the_next_tracks() {
     // Seq 22: 0 / 100 (track 1), 905 (audio track 2), 45149 (track 3) read
     // on stock; CDI 04 / 10: 11851 (track 2), 0 / 100 (audio track 1).
     let g = stock_gdi03();
-    let num = |fad, n| pregap_track(&g, fad, n).map(|t| t.number);
+    let num = |fad, n| pregap_read(&g, fad, n).map(|t| t.0.number);
     assert_eq!(num(0, 1), Some(1));
     assert_eq!(num(100, 1), Some(1));
     assert_eq!(num(0, 150), Some(1));
@@ -810,17 +810,28 @@ fn pregap_reads_are_served_as_the_next_tracks() {
     assert_eq!(num(905, 1), Some(2));
     assert_eq!(num(45000, 150), Some(3));
     assert_eq!(num(45149, 1), Some(3));
-    // Not a pregap: on a track, a gap, the lead-out, leaving the pregap,
-    // count 0.
-    for (fad, n) in [(150u32, 1u32), (749, 1), (750, 1), (755, 1), (1506, 1), (44999, 1), (45150, 1), (65150, 1),
-                     (149, 2), (905, 2), (45149, 2), (100, 0)] {
+    // On into the track (seq 23 XPRE: 10 pregap + 6 track sectors).
+    assert_eq!(pregap_read(&g, 140, 16).map(|(t, z)| (t.number, z)), Some((1, 10)));
+    assert_eq!(pregap_read(&g, 45140, 16).map(|(t, z)| (t.number, z)), Some((3, 10)));
+    assert_eq!(pregap_read(&g, 45000, 20150).map(|(t, z)| (t.number, z)), Some((3, 150)));
+    // Not from a pregap: on a track, a gap (also into the pregap, XGAP), the
+    // lead-out, past the track's end, count 0.
+    for (fad, n) in [(150u32, 1u32), (749, 1), (750, 1), (755, 1), (750, 16), (1506, 1), (44999, 1), (44992, 16),
+                     (45150, 1), (65150, 1), (45000, 20151), (100, 0)] {
         assert_eq!(num(fad, n), None, "fad {} count {}", fad, n);
     }
     let c = seq21_cdi(true);
-    assert_eq!(pregap_track(&c, 11851, 1).map(|t| t.number), Some(2));
-    assert_eq!(pregap_track(&c, 11702, 150).map(|t| t.number), Some(2));
-    assert_eq!(pregap_track(&c, 11701, 1).map(|t| t.number), None); // the gap
-    assert_eq!(pregap_track(&c, 0, 1).map(|t| t.number), Some(1));
+    assert_eq!(pregap_read(&c, 11851, 1).map(|(t, z)| (t.number, z)), Some((2, 1)));
+    assert_eq!(pregap_read(&c, 11702, 150).map(|(t, z)| (t.number, z)), Some((2, 150)));
+    assert_eq!(pregap_read(&c, 11842, 16).map(|(t, z)| (t.number, z)), Some((2, 10))); // GP_XPRE2
+    assert!(pregap_read(&c, 11701, 1).is_none()); // the gap
+    assert!(pregap_read(&c, 11694, 16).is_none()); // GP_XGAP2: 5/21/00
+    assert!(cd_read_start_outside(&c, 11694));
+    assert_eq!(pregap_read(&c, 0, 1).map(|(t, z)| (t.number, z)), Some((1, 1)));
+    // From track 1's data past its end (GP_XEND, 444 x 16): not a pregap read;
+    // NetGD refuses it before the transfer (stock sends 8 sectors and hangs).
+    assert!(pregap_read(&c, 444, 16).is_none());
+    assert!(!cd_read_start_outside(&c, 444));
     // 0x20 asks for any type: no mismatch on the pregap's track.
     assert!(!cd_read_type_mismatch(0x20, c[1].mode));
 }
@@ -868,7 +879,7 @@ fn seq21_cdi(mode2: bool) -> Vec<TrackDesc> {
 
 /// REQ_STAT and GET_SCD format 1 at the rest head `last` (paused, switched).
 fn seq21_pos(tracks: &[TrackDesc], is_cdi: bool, fmt: u8, last: Option<u32>) -> ([u8; 10], [u8; 14]) {
-    let (fad, tr) = head_position(tracks, AudioState::Standby, 0, rest_fad(tracks, is_cdi, true, last));
+    let (fad, tr) = head_position(tracks, AudioState::Standby, 0, rest_fad(tracks, is_cdi, true, last), 0);
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, fmt, 0, fad, tr);
     let mut r = [0u8; 100];
     assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
@@ -993,6 +1004,63 @@ fn the_stock_record_of_seq_22_gap_leadout_low() {
         let (st, _) = seq21_pos(&c, true, fmt, Some(15853));
         assert_eq!(st[..], hex(&format!("01{}410201003ded0000", b1))[..]); // GP_LO_REF_POS
     }
+}
+
+#[test]
+fn the_stock_record_of_seq_23_pregap_and_sticky_track() {
+    // stock_20261122_23_pregap-crc.txt (CDI 04). Off every track and pregap
+    // REQ_STAT keeps the number of the last track it reported from, with
+    // CTRL 4; a read does not change it, a query does.
+    let c = seq21_cdi(true);
+    let mut tno = 0u8;
+    let mut q = |last: u32| {
+        let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, Some(last)), tno);
+        if let Some(t) = tr {
+            if head_on(t, fad) {
+                tno = t.number;
+            }
+        }
+        let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
+        let mut r = [0u8; 100];
+        get_scd_reply(1, AudioState::Standby, fad, tr, &mut r);
+        let mut scd = [0u8; 14];
+        scd.copy_from_slice(&r[..14]);
+        (stat, scd)
+    };
+    // GP_PGL_149_POS (track 1, index 1), then GP_PG2_M156 / M151 refused
+    // 5/21/00 in the gap: track 1, CTRL 4, the outside constant.
+    assert_eq!(q(150).0[..], hex("012f0101010000960000")[..]);
+    let (st, sc) = q(11696);
+    assert_eq!(st[..], hex("012f410101002db00000")[..]);
+    assert_eq!(sc[..], hex("0015000e41010107d67c00002db0")[..]);
+    assert_eq!(q(11701).0[..], hex("012f410101002db50000")[..]);
+    // GP_PG2_M150 (read OK, head 11703): track 2's pregap, index 0, 149.
+    let (st, sc) = q(11703);
+    assert_eq!(st[..], hex("012f410200002db70000")[..]);
+    assert_eq!(sc[4..10], hex("410200000095")[..]);
+    assert_eq!(q(11852).0[..], hex("012f410201002e4c0000")[..]); // GP_PG2_M1_POS
+    // GP_XPRE1_POS (16 from 140 -> 156, track 1), GP_XPRE2_POS (11858),
+    // then GP_XGAP2 (11694, refused): track 2 kept.
+    assert_eq!(q(156).0[..], hex("012f01010100009c0000")[..]);
+    assert_eq!(q(11858).0[..], hex("012f410201002e520000")[..]);
+    let (st, sc) = q(11694);
+    assert_eq!(st[..], hex("012f410201002dae0000")[..]);
+    assert_eq!(sc[..], hex("0015000e41020107d67c00002dae")[..]);
+    // The pregap sectors are zeros: CRC-32 of 2,352 / 2,324 zero bytes are
+    // the record's be97ce3f / d0912a98 (crc32 in discimg's tests: zlib's).
+    assert_eq!(crc32(&[0u8; 2352]), 0xbe97ce3f);
+    assert_eq!(crc32(&[0u8; 2324]), 0xd0912a98);
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut c = 0xFFFF_FFFFu32;
+    for &b in data {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+        }
+    }
+    !c
 }
 
 fn fad3(b: &[u8]) -> u32 {
@@ -1308,7 +1376,7 @@ fn disc_format_follows_the_track_modes() {
     // R155's REQ_STAT of the audio-only CDI after a switch, byte for byte.
     let tracks = mk(&[TRACK_AUDIO, TRACK_AUDIO]);
     let fad = idle_fad(&tracks, true, true);
-    let (fad, tr) = head_position(&tracks, AudioState::Standby, 0, fad);
+    let (fad, tr) = head_position(&tracks, AudioState::Standby, 0, fad, 0);
     assert_eq!(
         req_stat_reply(AudioState::Standby, DRIVE_PAUSE, disc_format(&tracks, true), 0, fad, tr),
         [0x01, 0x1f, 0x01, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
@@ -1317,7 +1385,7 @@ fn disc_format_follows_the_track_modes() {
     // R144's REQ_STAT of the Mode 1 CDI after a switch, byte for byte.
     let tracks = mk(&[TRACK_AUDIO, TRACK_MODE1]);
     let fad = idle_fad(&tracks, true, true);
-    let (fad, tr) = head_position(&tracks, AudioState::Standby, 0, fad);
+    let (fad, tr) = head_position(&tracks, AudioState::Standby, 0, fad, 0);
     let fmt = disc_format(&tracks, true);
     assert_eq!(
         req_stat_reply(AudioState::Standby, DRIVE_PAUSE, fmt, 0, fad, tr),
