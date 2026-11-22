@@ -1079,6 +1079,9 @@ async fn handle(
             // later (`ide_task`'s timer, which writes SECNR only), then the
             // UNIT ATTENTION. Not while the host holds the card for a write
             // session: no medium there, and nothing to detect.
+            // After a host EJECT (no medium, not the empty slot) this still
+            // runs: the drive answers 2/04/01 for detect_time and then
+            // 2/3A/00 again (stock has no eject to compare with).
             if !write_session_active() {
                 start_device_reset_redetect(state);
             }
@@ -1380,6 +1383,9 @@ fn mounted(state: &mut DeviceState, ok: bool) {
     }
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
+    // Whatever was mounted by name before is gone; `mount_named` records its
+    // own attempt after this.
+    unsafe { LAST_MOUNT = None };
     open_swap_window(state);
     // The window starts now: SECNR shows the tray open, format nibble 0
     // (stock `0x06`, R144), until `drive_not_ready` moves it on. The format
@@ -1450,23 +1456,57 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
     invalidate_cd_read_cache();
 
-    let ok = match crate::gdi::load_by_name(disk_sectors(), name) {
+    let (ok, outcome) = match crate::gdi::load_by_name(disk_sectors(), name) {
         Ok(g) => {
             mount_gdi(g);
             if let Some(g) = gdi_ref() {
                 prefetch_ip_bin(g).await;
             }
-            true
+            (true, discimg::atapi::MountOutcome::Mounted)
         }
         Err(e) => {
             warn!("{}: mount '{}' failed: {:?}", label, name, e);
             unsafe { GDI = None };
-            false
+            // Only "the folder has nothing to mount" (`NoGdiFile`, after the
+            // walk into it) is stock's empty folder; no such folder
+            // (`NoImageDir`), a parse or card error stays retryable.
+            let outcome = if matches!(e, crate::gdi::GdiError::NoGdiFile) {
+                discimg::atapi::MountOutcome::NoImage
+            } else {
+                discimg::atapi::MountOutcome::Failed
+            };
+            (false, outcome)
         }
     };
     mounted(state, ok);
+    record_mount_attempt(name, outcome);
     info!("{}: mounted '{}' ({})", label, name, ok);
     ok
+}
+
+/// The last mount by folder name (`mount_named`): the name it was asked for
+/// and how it ended. `None` after any other mount (`mounted` clears it).
+/// Only `ide_task` touches it. What `gdemu_mount_staged` asks before
+/// treating `52 82 n` as a same-folder re-switch
+/// (`discimg::atapi::same_folder_reswitch`): `gdi::mounted_number` is the
+/// last folder walked to, which a failure before that walk (no such folder,
+/// a card error) leaves pointing at the previous one.
+static mut LAST_MOUNT: Option<discimg::atapi::MountOutcome> = None;
+static mut LAST_MOUNT_NAME: heapless::String<{ gamecfg::MAX_NEXT }> = heapless::String::new();
+
+fn record_mount_attempt(name: &str, outcome: discimg::atapi::MountOutcome) {
+    // SAFETY: `ide_task` only; `name` may be MOUNT_NAME, a different static.
+    let n = unsafe { &mut *core::ptr::addr_of_mut!(LAST_MOUNT_NAME) };
+    n.clear();
+    // A name too long to keep is recorded as a failure: never a no-op.
+    let fits = n.push_str(name).is_ok();
+    unsafe { LAST_MOUNT = Some(if fits { outcome } else { discimg::atapi::MountOutcome::Failed }) };
+}
+
+/// The last mount by name, for `discimg::atapi::same_folder_reswitch`.
+fn last_mount() -> Option<(&'static str, discimg::atapi::MountOutcome)> {
+    let outcome = unsafe { LAST_MOUNT }?;
+    Some((unsafe { &*core::ptr::addr_of!(LAST_MOUNT_NAME) }.as_str(), outcome))
 }
 
 async fn swap_media(state: &mut DeviceState, label: &'static str) -> bool {
@@ -3087,12 +3127,12 @@ async fn gdemu_mount_staged(dev: &IdeDevice, state: &mut DeviceState, label: &'s
     // The folder already mounted (an image, or the empty folder's no medium):
     // stock does nothing at all (R159, seq 17 `RS_`) -- no window, SECNR and
     // ALTSTATUS flat, no UNIT ATTENTION, REQ_STAT's state and head kept --
-    // so nothing is reloaded, CD-DA is not stopped and the cache stays.
-    // `mounted_number` is the remembered selection, which an empty folder
-    // also sets (`gdi::resolve_name`).
-    let settled = media_present() || EMPTY_SLOT.load(core::sync::atomic::Ordering::Relaxed);
-    let target = discimg::slot::number_of(name.as_bytes());
-    if discimg::atapi::same_folder_reswitch(target, crate::gdi::mounted_number(), settled) {
+    // so nothing is reloaded, CD-DA is not stopped and the cache stays. Only
+    // when the last mount attempt was this very folder name and it mounted
+    // (or found the folder empty) and the drive still holds that; after a
+    // failed attempt, an eject or a write session it mounts again.
+    let empty_slot = EMPTY_SLOT.load(core::sync::atomic::Ordering::Relaxed);
+    if discimg::atapi::same_folder_reswitch(name.as_str(), last_mount(), media_present(), empty_slot) {
         info!("{}: GDEMU re-switch to the mounted folder '{}': nothing to do", label, name.as_str());
         clear_mount_name();
         finish_ok(dev);

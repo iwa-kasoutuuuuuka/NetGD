@@ -671,15 +671,37 @@ pub fn window_secnr(kind: WindowKind, phase: SwapPhase, medium: bool, disc_forma
     }
 }
 
-/// Whether `52 82` / `52 81` to folder `target` is a same-folder re-switch:
-/// the folder is the one `mounted` (both by number) and the drive holds it --
-/// an image (`settled` = medium present) or the empty folder's no medium
-/// (`settled` = the empty-slot state), not an eject or a write session.
-/// Stock GDEMU 6.0 treats it as a no-op (R159; seq 17 `RS_`): no window,
-/// SECNR and ALTSTATUS flat, no UNIT ATTENTION (`ua_28=0`, the next TUR is
-/// READY), REQ_STAT's state and head position unchanged.
-pub fn same_folder_reswitch(target: Option<u16>, mounted: Option<u16>, settled: bool) -> bool {
-    settled && target.is_some() && target == mounted
+/// How the last mount attempt by folder name ended (for [`same_folder_reswitch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountOutcome {
+    /// An image mounted.
+    Mounted,
+    /// The folder exists and has nothing to mount: stock accepts it and
+    /// reports no medium (D12).
+    NoImage,
+    /// Anything else: no such folder, a parse error, a card read error. The
+    /// next `52 82 n` must try again.
+    Failed,
+}
+
+/// Whether `52 82` / `52 81` to the folder `staged` is a same-folder
+/// re-switch, which stock GDEMU 6.0 treats as a no-op (R159; seq 17 `RS_`:
+/// no window, SECNR and ALTSTATUS flat, no UNIT ATTENTION -- `ua_28=0`, the
+/// next TUR is READY --, REQ_STAT's state and head position unchanged).
+///
+/// `last` is the last mount attempt's folder name and outcome (`None` once
+/// any other mount -- the default, a hard-reset remount -- has run). Only
+/// the same folder, compared by name (so `04` and `0004` stay different
+/// folders), and only while the drive still holds what that attempt left:
+/// the image (`medium`) after [`MountOutcome::Mounted`], the empty folder's
+/// no medium (`empty_slot`) after [`MountOutcome::NoImage`]. A failed attempt,
+/// an eject or a write session never makes one: the host can retry.
+pub fn same_folder_reswitch(staged: &str, last: Option<(&str, MountOutcome)>, medium: bool, empty_slot: bool) -> bool {
+    match last {
+        Some((name, MountOutcome::Mounted)) => medium && !staged.is_empty() && name == staged,
+        Some((name, MountOutcome::NoImage)) => !medium && empty_slot && !staged.is_empty() && name == staged,
+        _ => false,
+    }
 }
 
 /// SECNR to put back after a host bus reset (or when a swap window is cut

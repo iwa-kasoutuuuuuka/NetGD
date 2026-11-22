@@ -813,14 +813,35 @@ fn device_reset_re_detects_like_the_stock_records() {
 
 #[test]
 fn same_folder_re_switch_is_a_no_op_only_for_the_mounted_folder() {
+    use MountOutcome::*;
     // seq 17 RS_: 52 82 n for the folder already mounted, image or empty.
-    assert!(same_folder_reswitch(Some(4), Some(4), true));
-    assert!(same_folder_reswitch(Some(7), Some(7), true));
-    // Another folder, nothing remembered, or ejected / write session: a mount.
-    assert!(!same_folder_reswitch(Some(3), Some(4), true));
-    assert!(!same_folder_reswitch(Some(4), None, true));
-    assert!(!same_folder_reswitch(None, None, true));
-    assert!(!same_folder_reswitch(Some(4), Some(4), false));
+    assert!(same_folder_reswitch("04", Some(("04", Mounted)), true, false));
+    assert!(same_folder_reswitch("07", Some(("07", NoImage)), false, true));
+    // Another folder, or the same number spelled as another folder name.
+    assert!(!same_folder_reswitch("03", Some(("04", Mounted)), true, false));
+    assert!(!same_folder_reswitch("0004", Some(("04", Mounted)), true, false));
+    // Nothing remembered (a default / hard-reset mount ran since), or an
+    // empty staged name (no folder n and no 01).
+    assert!(!same_folder_reswitch("04", None, true, false));
+    assert!(!same_folder_reswitch("", Some(("", Mounted)), true, false));
+    // Ejected or in a write session after the mount: no medium, no empty slot.
+    assert!(!same_folder_reswitch("04", Some(("04", Mounted)), false, false));
+    assert!(!same_folder_reswitch("07", Some(("07", NoImage)), false, false));
+}
+
+#[test]
+fn re_switch_after_a_failed_mount_mounts_again() {
+    use MountOutcome::*;
+    // 04 mounted, then `52 82 9` with no folder 9 and no 01: the attempt at
+    // "" failed, the drive is empty (empty slot), the old selection may still
+    // say 04. `52 82 4` must mount again.
+    assert!(!same_folder_reswitch("04", Some(("", Failed)), false, true));
+    // The previous mount of the same folder errored (parse error, card read
+    // error): the host's retry mounts again.
+    assert!(!same_folder_reswitch("04", Some(("04", Failed)), false, true));
+    assert!(!same_folder_reswitch("04", Some(("04", Failed)), false, false));
+    // An empty folder's record does not cover a medium that appeared since.
+    assert!(!same_folder_reswitch("07", Some(("07", NoImage)), true, false));
 }
 
 fn cdb(b: &[u8]) -> [u8; 12] {
