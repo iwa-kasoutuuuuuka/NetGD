@@ -221,6 +221,11 @@ class IDEDevice(Elaboratable):
         # we don't currently model (always read 0).
         abrt = Signal()
         sense_key = Signal(4)
+        # ERROR bits 0 and 1, which the MCU can set but the FPGA never does
+        # (a stock drive shows ERROR 0x01 after DEVICE RESET). Stored like
+        # the sense key and cleared with it. Old firmware writes them as 0,
+        # so a bitstream with these bits behaves as before for it.
+        err_lo = Signal(2)
         # Device Control bits.
         hob = Signal()
         srst = Signal()
@@ -644,6 +649,7 @@ class IDEDevice(Elaboratable):
                         sector_count[:8].eq(0x01),
                         abrt.eq(0),
                         sense_key.eq(0),
+                        err_lo.eq(0),
                     ]
             # Reset both FIFOs on every new IDE command — a fresh command
             # always starts a fresh transfer, and stale bytes from a
@@ -717,8 +723,8 @@ class IDEDevice(Elaboratable):
         with m.Elif(decode.data):
             m.d.comb += ide_out.eq(read_fifo.r_data)
         with m.Elif(decode.error):
-            # ERROR layout: [_, _, ABRT, _, sk0, sk1, sk2, sk3]
-            m.d.comb += ide_out[:8].eq(Cat(C(0, 2), abrt, C(0, 1), sense_key))
+            # ERROR layout: [b0, b1, ABRT, _, sk0, sk1, sk2, sk3]
+            m.d.comb += ide_out[:8].eq(Cat(err_lo, abrt, C(0, 1), sense_key))
         with m.Elif(decode.sector_count):
             m.d.comb += ide_out[:8].eq(Mux(hob, sector_count[8:], sector_count[:8]))
         with m.Elif(decode.lba_low):
@@ -883,7 +889,9 @@ class IDEDevice(Elaboratable):
         #   22-23 LVL_AT_READ, LVL_READ_COUNT (debug)
         #   24-28 host access counters and their snapshots at the last Command
         #   29-31 CDDA control, level, push (primary device only)
-        # Slots 32..127 are unmapped (read 0).
+        #   32    LBA_LOW alone: byte-lane write for SECNR, reads 0xA5xx (the
+        #         high byte doubles as the presence probe)
+        # Slots 33..127 are unmapped (read 0).
         # The SMC read is a pure combinational cone: MCU_ADDR -> decode -> a
         # 22-way mux -> the data pins, with nothing registered and no timing
         # constraint on any of it (56 unconstrained input ports). Its budget is
@@ -1085,15 +1093,19 @@ class IDEDevice(Elaboratable):
                 with m.If(wmcu):
                     m.d.sync += device.eq(self.mcu_data_in[:8])
             with m.Case(3):
-                # Mirrors the IDE-side ERROR register: bit 2 = ABRT,
-                # bits 4..7 = sense key. MCU writes a full ERROR-register
-                # byte; the FPGA captures the bits we model.
+                # Mirrors the IDE-side ERROR register: bits 0-1 (MCU-owned,
+                # 0 from old firmware), bit 2 = ABRT, bits 4..7 = sense key.
+                # MCU writes a full ERROR-register byte; the FPGA captures
+                # the bits we model. A bitstream from before err_lo ignored
+                # bits 0-1 and read them back as 0.
                 m.d.comb += [
+                    mcu_out[:2].eq(err_lo),
                     mcu_out[2].eq(abrt),
                     mcu_out[4:8].eq(sense_key),
                 ]
                 with m.If(wmcu):
                     m.d.sync += [
+                        err_lo.eq(self.mcu_data_in[:2]),
                         abrt.eq(self.mcu_data_in[2]),
                         sense_key.eq(self.mcu_data_in[4:8]),
                     ]
@@ -1128,6 +1140,22 @@ class IDEDevice(Elaboratable):
                         lba_low.eq(self.mcu_data_in[:8]),
                         lba_mid.eq(self.mcu_data_in[8:]),
                     ]
+            with m.Case(32):
+                # LBA_LOW alone (SECNR on the packet device). Slot 6 stores
+                # lba_low and lba_mid together from one word, and lba_mid is
+                # where the host writes BYTE COUNT LOW, so a firmware
+                # read-modify-write of slot 6 can lose a host write landing
+                # between its read and its write. This slot writes the low
+                # byte only. It reads lba_low in the low byte and 0xA5 in the
+                # high byte: a bitstream without it reads slot 32 as 0, which
+                # is how the firmware tells (old bitstream: use slot 6 as
+                # before; old firmware never touches slot 32).
+                m.d.comb += [
+                    mcu_out[:8].eq(lba_low),
+                    mcu_out[8:].eq(0xA5),
+                ]
+                with m.If(wmcu):
+                    m.d.sync += lba_low.eq(self.mcu_data_in[:8])
             with m.Case(7):
                 m.d.comb += [
                     mcu_out[:8].eq(lba_high),
@@ -1340,6 +1368,7 @@ class IDEDevice(Elaboratable):
                 err.eq(0),
                 abrt.eq(0),
                 sense_key.eq(0),
+                err_lo.eq(0),
                 command_pend.eq(0),
                 reset_seen.eq(1),
                 # Whatever transfer was in progress is over: no DMA, no

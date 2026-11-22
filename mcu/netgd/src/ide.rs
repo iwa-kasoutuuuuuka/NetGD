@@ -53,6 +53,9 @@ const REG_ERROR: usize = 3;
 const REG_CMD_FEAT: usize = 4;
 const REG_SECTOR_COUNT: usize = 5;
 const REG_LBA_LOW_MID: usize = 6;
+/// LBA_LOW alone (bitstreams with the byte-lane write; see `set_secnr`).
+/// Reads 0xA5 in the high byte, 0 on a bitstream without the slot.
+const REG_LBA_LOW8: usize = 32;
 const REG_LBA_HIGH_LOWP: usize = 7;
 const REG_LBA_MIDP_HIGHP: usize = 8;
 const REG_DATA_FIFO: usize = 9;
@@ -123,7 +126,10 @@ const STATUS_DSC: u8 = 0x10;
 const STATUS_DRQ: u8 = 0x08;
 const STATUS_ERR: u8 = 0x01;
 
-// Error register bits (we only model ABRT for now).
+// Error register bits. ABRT (bit 2) and the sense key (bits 4-7) are what the
+// firmware sets today. A bitstream from the ERROR bit 0/1 change also keeps
+// bits 0-1 of a write (stock's ERROR 0x01 after DEVICE RESET); an older one
+// reads them back as 0 and drops them.
 const ERR_ABRT: u8 = 0x04;
 /// ATAPI Error register for a CD_READ the card failed under: sense key 3
 /// (MEDIUM ERROR) in the high nibble, as stock writes every CHECK (D5; this
@@ -561,8 +567,25 @@ impl IdeDevice {
     /// idle (`ide_task`'s swap-window timer, `cdda`'s end of play) can meet
     /// one. The pair runs with interrupts off so the gap is two back-to-back
     /// bus cycles rather than whatever an interrupt in between costs; closing
-    /// it needs a low-byte-only MCU write in the FPGA, as slot 5 has.
+    /// it takes the low-byte-only write described below.
+    ///
+    /// A bitstream with slot 32 (`REG_LBA_LOW8`, LBA_LOW alone) gets exactly
+    /// that: one write, no read, nothing of lba_mid touched. Whether it has
+    /// it is asked once (slot 32 reads 0xA5 in the high byte there and 0
+    /// before) and remembered; without it the read-modify-write above stays.
     pub fn set_secnr(&self, v: u8) {
+        use core::sync::atomic::Ordering::Relaxed;
+        // 0 = not asked yet, 1 = slot 32 present, 2 = absent.
+        static LOW8: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+        let mut have = LOW8.load(Relaxed);
+        if have == 0 {
+            have = if (self.read(REG_LBA_LOW8) >> 8) == 0xA5 { 1 } else { 2 };
+            LOW8.store(have, Relaxed);
+        }
+        if have == 1 {
+            self.write(REG_LBA_LOW8, v as u16);
+            return;
+        }
         critical_section::with(|_| {
             let low_mid = self.read(REG_LBA_LOW_MID) & 0xFF00;
             self.write(REG_LBA_LOW_MID, low_mid | v as u16);
