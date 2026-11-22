@@ -93,8 +93,12 @@ pub fn parse_fat32(sec: &[u8; 512], base: u32) -> Result<Geometry, BpbError> {
     }
     // The whole volume must end inside the 32-bit block space, so that no
     // block number computed from it wraps (release builds do not check).
+    // The end is exclusive: a volume whose last block is 0xFFFFFFFF ends at
+    // exactly 2^32 and still fits.
     let data_lba = base.checked_add(meta).ok_or(BpbError::BadBpb)?;
-    data_lba.checked_add(clusters * blocks_per_cluster).ok_or(BpbError::BadBpb)?;
+    if data_lba as u64 + clusters as u64 * blocks_per_cluster as u64 > 1u64 << 32 {
+        return Err(BpbError::BadBpb);
+    }
     Ok(Geometry {
         fat_lba: base + reserved,
         sectors_per_fat: spf32,

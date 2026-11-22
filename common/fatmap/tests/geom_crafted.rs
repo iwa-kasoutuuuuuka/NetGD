@@ -43,10 +43,13 @@ fn volume_past_lba_space_is_refused() {
     let s = bpb(1, 32, 1, 0x0040_0000, 0x2000_0000, 2);
     assert!(parse_fat32(&s, 0).is_ok());
     assert_eq!(parse_fat32(&s, 0xF000_0000), Err(BpbError::BadBpb));
-    // Up to the last block is fine.
-    let s = bpb(1, 32, 1, 1000, 32 + 1000 + 100_000, 2);
-    assert!(parse_fat32(&s, u32::MAX - (32 + 1000 + 100_000)).is_ok());
-    assert_eq!(parse_fat32(&s, u32::MAX - (32 + 1000 + 100_000) + 1), Err(BpbError::BadBpb));
+    // A volume may use every block up to and including 0xFFFFFFFF: its
+    // exclusive end is then exactly 2^32. One block further does not fit.
+    let total = 32 + 1000 + 100_000;
+    let s = bpb(1, 32, 1, 1000, total, 2);
+    assert!(parse_fat32(&s, u32::MAX - total).is_ok()); // last block 0xFFFFFFFE
+    assert!(parse_fat32(&s, u32::MAX - total + 1).is_ok()); // last block 0xFFFFFFFF
+    assert_eq!(parse_fat32(&s, u32::MAX - total + 2), Err(BpbError::BadBpb));
 }
 
 /// A BPB claiming more clusters than FAT32's 28-bit numbers allow (a huge
