@@ -48,6 +48,10 @@ extern int sim_trace;               /* print "FW <12 hex bytes>" for every packe
 extern int sim_mount_in_session;    /* mount-type commands seen while a write session was open */
 extern int sim_tur_calls;           /* TEST UNIT READY packets seen */
 extern uint32_t sim_fw_version;     /* 52 00 reply (boot and firmware word) */
+extern int sim_stock;               /* a stock GDEMU 6.0 (record 08): 52 00 answers 5.20.5 / 2.5.0, anything else ILLEGAL */
+extern int sim_e0_packets;          /* 0xE0 packets seen */
+extern int sim_ua_on_e0;            /* the next 0xE0 packet gets a UNIT ATTENTION */
+extern uint32_t sim_probe_limit_max;
 
 /* platform (plat_host.c) */
 extern char sim_pc_root[260];       /* what "/pc" maps to */

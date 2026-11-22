@@ -391,14 +391,20 @@ Dreamcast → PC：
 
 - `HELLO` 以外の要求には、0 本以上の `LINE`、（`PUT` のときは `WANT`／`DATA` の往復）、最後に必ず 1 本の `DONE`。
 - `HELLO` の前の要求、`WANT` を待っていないときの `DATA`、番号・オフセットの合わない `DATA` は `ERROR ESTATE` で切断。
-- `DATA` のデータ長は `WANT` の長さ以下。短いのはファイルの末尾だけ。0 は末尾。
+- `DATA` のデータ長は `WANT` の長さ以下。短いのはファイルの末尾だけ。0 は末尾。**短い `DATA` の後に、同じファイルの未回答の `WANT` へデータ長 1 以上の `DATA` が来たら `ERROR ESTATE` で切断**（ずれた位置に書かないため。受信コアには 1 バイトも渡さない）。0 長の `DATA` は受け付ける。
+- `DATA` は `WANT` を出した順に返す。先頭の未回答の `WANT` とファイル番号・オフセットが合わない（順番違いを含む）、または長さが `WANT` を超える `DATA` は `ERROR ESTATE`。長さの欄が上限（65536 + 16）を超えるフレームは `ERROR EPROTO`。
 - **セッションは最初の `STATFS`／`LIST`／`PUT`／`DELETE`／`VERIFY` で開く**（`ng_session_open`。`NGD:MOUNT`・`NGD:HELLO` の行が `LINE` で流れる）。開けなければ `DONE` 失敗（`EFW`・`EFS`・`EIO`）。
 - force（`PUT`・`DELETE` のフラグ bit0）は `CONFIRM` 画面で許可されたときだけ `ng_cfg.force = 1`。その操作が終わったら 0 に戻す。拒否なら force なしで実行する（保護フォルダなら `EPROTECTED`）。
-- `ng_sink_t.poll` が 1 を返す条件：B が押された、または直前の `DATA` のフラグ bit0。受信コアは次の安全な点で止まり `NG_E_STOP`（チェックポイントは残る）。
+- `ng_sink_t.poll` が 1 を返す条件：B が押された、または直前の `DATA` のフラグ bit0（このフラグはその要求の間だけ有効。次の要求の頭で消す）。受信コアは次の安全な点で止まり `NG_E_STOP`（チェックポイントは残る）。
 - LAN が切れた・`DATA` が来ない：`ng_src_t.read` が負を返す → 受信コアは `ESRC` で終わる（チェックポイントは残る）→ 接続を閉じて `RECV_IDLE`。セッションは開いたまま（5 分で自動的に閉じる）。
 - スレッドは 1 本。`RECV_BUSY` の間、画面の更新と B の読み取りは `ng_sink_t.ui`（とフレームの送受信の前後）から行う。
 
-`ng_src_t` の実装（`ngtp_srv.c`）：`open(idx, off)` は位置を覚えるだけ。`read(buf, n)` は `WANT{idx, off, n}` を送り、`DATA` を受け、番号とオフセットを確かめ、データを `buf` に写して `off` を進める。`close` は何もしない。
+`ng_src_t` の実装（`ngtp_srv.c`、2026-11-23 改訂。`tools/netgd-t2` と共用）：
+
+- **窓**：`ngtp_srv_set_window(want, depth)`。`WANT` は `open(idx, off)` の位置から `want` バイトずつの決まった区切り（マニフェストのファイル長を越えない）で、未回答の `WANT` は最大 `depth` 本（1〜4）。`read` は未回答が `depth` 本になるまで `WANT` を足してから先頭の `DATA` を待つので、`depth` 2 では受信コアが SD に書く間に PC が次の塊を送れる。メニューの既定は 65536 × 1（従来どおり）、`netgd-t2` は素の KOS の TCP で 16384 × 1、直した `net_tcp.c`（`tools/kos-patches`）で 65536 × 2（R178、`docs/research/g2-transport.md` §3）。
+- `read(buf, n)` に入りきらない `DATA` の残りは取っておき、次の `read` で渡す（`want` と受信コアの読み出しの大きさが合わなくてよい）。
+- **読み捨て**：`open`（ファイルが変わる・再開）、`close`、`PUT` の `DONE` の前に、未回答の `WANT` の `DATA` を受けて捨てる。`DONE` の後に `DATA` が流れてこない。
+- 短い `DATA` = そのファイルの終わり（以後 `WANT` を出さない。`read` は 0 を返し、受信コアが `ESRC` にする）。
 
 ### 8.4 PC 側（`tools/netgd-send` に足す）
 

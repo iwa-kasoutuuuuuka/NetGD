@@ -165,8 +165,9 @@ if want tools; then
         if command -v gcc >/dev/null 2>&1; then
             step tools-netgd-recv . "CI=true $PYNATIVE tools/netgd-recv/test/run_tests.py"
             step tools-netgd-menu . "$PYNATIVE tools/netgd-menu/test/run_tests.py"
+            step tools-netgd-t2 . "$PYNATIVE tools/netgd-t2/test/run_tests.py"
         else
-            skip tools-netgd-recv "gcc missing"; skip tools-netgd-menu "gcc missing"
+            skip tools-netgd-recv "gcc missing"; skip tools-netgd-menu "gcc missing"; skip tools-netgd-t2 "gcc missing"
         fi
         step tools-pinfind . "$PYPLAIN -m unittest discover -s tools/pinfind/tests -v"
         # The flash size gate script (in the CI tools matrix).

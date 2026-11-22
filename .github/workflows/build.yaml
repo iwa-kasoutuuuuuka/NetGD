@@ -192,6 +192,10 @@ jobs:
           - tool: netgd-menu
             dir: .
             cmd: python tools/netgd-menu/test/run_tests.py
+          # Needs gcc.  The standalone T2 receiver (NGTP server + receive core) against netgd-send over 127.0.0.1.
+          - tool: netgd-t2
+            dir: .
+            cmd: python tools/netgd-t2/test/run_tests.py
           # Size-gate script (ELF parsing, limit logic). Standard library only.
           - tool: fwsize
             dir: .

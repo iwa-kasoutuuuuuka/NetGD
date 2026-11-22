@@ -4,6 +4,7 @@
    is kept alive through the hooks.  Nothing here has run on a Dreamcast. */
 #ifndef NGTP_SRV_H
 #define NGTP_SRV_H
+#include <stddef.h>
 #include <stdint.h>
 #include "recv_core.h"
 #include "fwctl.h"
@@ -20,7 +21,21 @@ typedef struct {
     uint32_t (*millis)(void *ctx);
     /* Before the first operation opens the write session (the UI drops its read-only mount). */
     void (*before_session)(void *ctx);
+    /* The write gate (may be NULL = allowed): asked before every attempt to open the write session.  0 = refuse: the
+       operation ends with NGD:ERROR session code=EFW msg=<why> and DONE EFW, and nothing is sent to the drive by this
+       module (ng_session_open is not called).  The standalone T2 receiver uses it to write only to a drive that identified
+       as NetGD; the menu has checked the firmware at start-up and leaves it NULL. */
+    int (*may_write)(void *ctx, char *why, size_t whyn);
 } ngtp_hooks_t;
+
+/* The data window (menu-app.md 8.3 WANT): the largest WANT and how many WANTs may be outstanding at once.
+   Stock KOS 2.3 TCP: 16 KiB x 1 (R178: frames bigger than the receive window stall, a wider window corrupts the stream).
+   With the patched net_tcp.c linked in (tools/kos-patches, docs/research/g2-transport.md 3): 64 KiB x 2. */
+#define NGTP_WANT_STOCK   16384u
+#define NGTP_DEPTH_STOCK  1
+#define NGTP_WANT_TCPFIX  65536u
+#define NGTP_DEPTH_TCPFIX 2
+#define NGTP_DEPTH_MAX    4
 
 typedef struct {
     ngtp_hooks_t hk;
@@ -34,10 +49,18 @@ typedef struct {
     int broken;                     /* the connection failed during an operation */
     uint32_t last_frame_ms;         /* when the last request arrived / was answered */
     char client[32];
+    uint32_t want_max;              /* the largest WANT (1 .. NGTP_MAX_DATA); ngtp_srv_set_window */
+    int depth;                      /* WANTs outstanding at most (1 .. NGTP_DEPTH_MAX) */
+    uint32_t wants, data_frames;    /* counters for the screen / tests */
     /* private */
     uint32_t seq;                   /* sequence of the request being served */
     int src_idx;
-    uint64_t src_off;
+    uint64_t src_size;              /* manifest size of the file being read */
+    uint64_t issue_off;             /* next offset to ask for */
+    int src_eof;                    /* a short or empty DATA ended the file early */
+    int nq, qh;                     /* outstanding WANTs: count and head index (ring of NGTP_DEPTH_MAX) */
+    struct { uint64_t off; uint32_t len; } q[NGTP_DEPTH_MAX];
+    uint32_t held_len, held_pos;    /* DATA bytes received but not yet handed to the core */
     int abort_asked;                /* the PC set the abort flag on a DATA frame */
 } ngtp_srv_t;
 
@@ -47,6 +70,9 @@ typedef struct {
 
 void ngtp_srv_init(ngtp_srv_t *s, const ngtp_hooks_t *hk, const ng_fwinfo_t *fw, uint16_t code);
 void ngtp_srv_new_code(ngtp_srv_t *s, uint16_t code);
+/* WANT size and depth (clamped to 1..NGTP_MAX_DATA, 1..NGTP_DEPTH_MAX).  ngtp_srv_init sets NGTP_MAX_DATA x 1 (the menu's
+   behaviour so far: one WANT per read of the receive core). */
+void ngtp_srv_set_window(ngtp_srv_t *s, uint32_t want_max, int depth);
 /* Accept a client and handle at most one request.  Returns NGTP_EV_* bits. */
 int ngtp_srv_service(ngtp_srv_t *s);
 void ngtp_srv_drop(ngtp_srv_t *s);                              /* close the client (the session stays as it is) */

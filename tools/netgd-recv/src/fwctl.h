@@ -71,4 +71,18 @@ int fw_mount_named(const char *name, uint8_t *sense);       /* E0 05 chunks, the
 int fw_mount_default(uint8_t *sense);                       /* E0 02 FF */
 int fw_test_unit_ready(uint8_t *sense);                     /* 00: 0 = READY; never repeated on UNIT ATTENTION */
 
+/* ---- identification that is safe on a STOCK GDEMU (netgd-t2's write gate) ----
+   1. 52 00 GDEMU_VERSION with the CDB gdprobe sent to the stock GDEMU 6.0 (52 00 00 .. 00, R-record 08: it answered
+      8 bytes 00 00 05 02 00 05 20 05 = bootloader 2.5.0, firmware 5.20.5).  Repeated once on UNIT ATTENTION.
+   2. Only when the firmware word is NetGD's (FW_NETGD_GDEMU_WORD: NetGD reports GDEMU 5.20.0, mcu/netgd/src/ide.rs
+      GDEMU_COMPAT_VERSION): E0 03 VERSION, once, NOT repeated on UNIT ATTENTION, must answer "OGDM".
+   Every packet is limited to FW_PROBE_LIMIT_MS (fw_xfer_limit_ms).  IDENTIFY PACKET and REQ_MODE cannot tell the
+   two apart: NetGD answers them with the stock bytes on purpose.  A stock firmware that reported exactly 5.20.0
+   would get the one E0 03 (none known: the record is 5.20.5). */
+#define FW_NETGD_GDEMU_WORD 0x05200000u
+#define FW_PROBE_LIMIT_MS   3000u
+enum { FW_PROBE_NETGD = 0, FW_PROBE_NOANSWER = -1, FW_PROBE_OTHER = -2, FW_PROBE_NOTOGDM = -3 };
+/* out: the VERSION reply (FW_PROBE_NETGD only).  boot / fwv (may be NULL): the 52 00 words when they were read. */
+int fw_probe_netgd(ng_fwinfo_t *out, uint32_t *boot, uint32_t *fwv);
+
 #endif
