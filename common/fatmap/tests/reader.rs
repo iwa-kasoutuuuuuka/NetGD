@@ -368,7 +368,9 @@ fn surrogates_match_sdmmc() {
     }
     // `embedded_sdmmc` panics ("Vec was full?!") when a lone surrogate opens
     // a piece that follows a full one: its 13-char buffer gets 14 chars.
-    assert_eq!(panics, [6, 8]);
+    // Only those two may panic; an `embedded_sdmmc` patched for it must
+    // list them as we do (checked above), so either version passes.
+    assert!(panics.iter().all(|i| [6, 8].contains(i)), "panics: {panics:?}");
     // A lone surrogate as the name's first unit.
     let first = |u: u16| {
         let c = build(FAT32, vec![Item::File { long: Some([vec![u], a(4)].concat()), short: sfn("X", ""), nt: 0, data: vec![] }]);

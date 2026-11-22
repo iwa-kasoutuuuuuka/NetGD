@@ -14,6 +14,11 @@
 //! * only FAT 0 is read (BPB 0x28 is ignored), as both current readers do.
 //! * a chain that leaves the volume, hits a free / reserved / bad entry, or
 //!   (for directories) loops, is an error and never a block number.
+//! * stricter than `fat::probe` (see `tests/crafted.rs`): zero reserved
+//!   sectors, and a volume that ends past block 2^32 - 1, are refused; the
+//!   FAT32 cluster count is capped at 0x0FFFFFF5, so cluster numbers with
+//!   the top four bits set are outside the volume; a directory chain longer
+//!   than 65536 entries is an error.
 //!
 //! Every call takes the device and a [`Block`] buffer from the caller: no
 //! statics, no allocation, one 512-byte buffer for everything.
@@ -95,6 +100,19 @@ fn signed(s: &[u8; 512]) -> bool {
     s[510] == 0x55 && s[511] == 0xAA
 }
 
+/// Most clusters a FAT32 volume can have (Microsoft's FAT specification):
+/// valid cluster numbers are `2..=0x0FFF_FFF6`.
+const MAX_CLUSTERS32: u32 = 0x0FFF_FFF5;
+
+/// First data block of a volume at `base` with `meta` blocks before its
+/// `data` blocks of clusters, if the whole volume ends inside the 32-bit
+/// block space; so no block number computed from it later overflows.
+fn in_lba_space(base: u32, meta: u32, data: u32) -> Result<u32, Error> {
+    let data_lba = base.checked_add(meta).ok_or(Error::NoVolume)?;
+    data_lba.checked_add(data).ok_or(Error::NoVolume)?;
+    Ok(data_lba)
+}
+
 /// A mounted volume; everything in 512-byte blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Volume {
@@ -143,7 +161,8 @@ impl Volume {
         let spf16 = rd16(s, 0x16);
         let spf32 = rd32(s, 0x24);
         let root_cluster = rd32(s, 0x2C);
-        if num_fats == 0 {
+        // No FAT, or FAT 0 on top of the boot sector: not a volume.
+        if num_fats == 0 || reserved == 0 {
             return Err(Error::NoVolume);
         }
         #[cfg(feature = "fat16")]
@@ -159,10 +178,11 @@ impl Volume {
             if !(4085..65525).contains(&clusters) {
                 return Err(Error::NoVolume);
             }
+            let data_lba = in_lba_space(base, meta, clusters * spc)?;
             return Ok(Volume {
                 fat_lba: base + reserved,
                 sectors_per_fat: spf16,
-                data_lba: base + meta,
+                data_lba,
                 blocks_per_cluster: spc,
                 root_cluster: 0,
                 clusters,
@@ -182,14 +202,21 @@ impl Volume {
         if total <= meta {
             return Err(Error::NoVolume);
         }
-        let clusters = ((total - meta) / spc).min(spf32.saturating_mul(128).saturating_sub(2));
-        if root_cluster - 2 >= clusters {
+        // Also no more than FAT32's 28-bit cluster numbers allow, so that a
+        // cluster number with any of the top four bits set (a root, a
+        // directory entry) is outside the volume instead of an alias, and
+        // the bad-cluster mark 0x0FFFFFF7 is never a link.
+        let clusters = ((total - meta) / spc)
+            .min(spf32.saturating_mul(128).saturating_sub(2))
+            .min(MAX_CLUSTERS32);
+        if root_cluster < 2 || root_cluster - 2 >= clusters {
             return Err(Error::NoVolume);
         }
+        let data_lba = in_lba_space(base, meta, clusters * spc)?;
         Ok(Volume {
             fat_lba: base + reserved,
             sectors_per_fat: spf32,
-            data_lba: base + meta,
+            data_lba,
             blocks_per_cluster: spc,
             root_cluster,
             clusters,

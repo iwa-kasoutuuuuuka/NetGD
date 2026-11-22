@@ -32,6 +32,9 @@ use crate::vol::{rd16, rd32, Block, BlockRead, Error, Volume};
 /// Code-unit offsets of the 13 characters inside an LFN piece.
 const CHAR_OFFSETS: [u8; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 
+/// Blocks of the largest directory FAT allows: 65536 entries of 32 bytes.
+const DIR_MAX_BLOCKS: u32 = 65536 * 32 / 512;
+
 /// One directory entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirEntry {
@@ -165,13 +168,18 @@ pub fn walk(
     let fixed = dir == 0 && vol.is_fat16();
     let mut cluster = if dir == 0 { vol.root() } else { dir };
     let mut hops = 0u32;
+    // A directory holds at most 65536 entries (2 MiB, 4096 blocks; the FAT
+    // specification's limit, which Windows and Linux keep). A longer chain
+    // loops or is damaged. Bounding it by the volume's cluster count
+    // instead would let a loop run for hours on a large card, and nothing
+    // resets the firmware while it waits.
+    let max_hops = DIR_MAX_BLOCKS.div_ceil(vol.blocks_per_cluster()).min(vol.clusters());
     loop {
         let (lba, blocks) = if fixed {
             vol.fixed_root()
         } else {
-            // A directory has at most `clusters` clusters; more is a loop.
             hops += 1;
-            if hops > vol.clusters() {
+            if hops > max_hops {
                 return Err(Error::BadChain);
             }
             (vol.cluster_lba(cluster).ok_or(Error::BadChain)?, vol.blocks_per_cluster())
