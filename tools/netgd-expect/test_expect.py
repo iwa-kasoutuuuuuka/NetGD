@@ -397,6 +397,39 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(get(3, 'HD_AUD1_POS')[0]['trk'], '2')
         self.assertEqual(get(3, 'HD_AUD1')[0]['ssz'], '2352')
 
+    def test_gap_probe_as_netgd_answers(self):
+        # gdprobe seq 22 (gap_probe=1), stock_20261122_22_gap-leadout-low.txt: the lead-out + 0 / 1 / 100 and the
+        # GDI's gap between the areas are refused 5/21/00 with the head there (last / next track, GET_SCD relative
+        # 513660); pregaps (FAD 0 / 100, the sector before a track) read as zeros, index 0 below 150.
+        text = expect_sd.predict(self.card, images=[4, 3], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--gap-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda img, probe: [e for e in ents if e['img'] == img and e['probe'] == probe]
+        for img in (4, 3):
+            st = get(img, 'GP_START')[0]
+            lo = int(st['leadout'])
+            self.assertEqual(get(img, 'GP_TRK_SKIP')[0]['reason'], 'no_gap')
+            for off in (0, 1, 100):
+                r, pos = get(img, 'GP_LO_%d' % off)[0], get(img, 'GP_LO_%d_POS' % off)[0]
+                self.assertEqual((r['rc'], r['sense']), ('check', '5/21/00'))
+                self.assertEqual((pos['pos'], pos['scd_rel'], pos['idx']), (str(lo + off), '513660', '1'))
+            for f in (0, 100):
+                r, pos = get(img, 'GP_LOW_%d' % f)[0], get(img, 'GP_LOW_%d_POS' % f)[0]
+                self.assertEqual(r['rc'], 'ok')
+                self.assertEqual((pos['pos'], pos['trk'], pos['idx'], pos['scd_rel']),
+                                 (str(f + 1), '1', '0', str(149 - f)))
+            self.assertEqual(get(img, 'GP_CNT0_SKIP')[0]['reason'], 'whitelist_count_1_64')
+        self.assertEqual(get(4, 'GP_HDG_SKIP')[0]['reason'], 'no_hd_area')
+        hdg = get(3, 'GP_HDG')[0]
+        for case in ('HDG_L0', 'HDG_MID', 'HDG_MID2'):
+            r, pos = get(3, 'GP_' + case)[0], get(3, 'GP_%s_POS' % case)[0]
+            self.assertEqual((r['sense'], pos['trk'], pos['ctl'], pos['scd_rel']), ('5/21/00', '3', '0x41', '513660'))
+            self.assertEqual(pos['pos'], r['fad'])
+        hi = get(3, 'GP_HDG_HI')[0]
+        self.assertEqual((hi['fad'], hi['rc'], hi['ssz']), (str(int(hdg['hd_fad']) - 1), 'ok', '2048'))
+        self.assertEqual(get(3, 'GP_HDG_HI_POS')[0]['scd_rel'], '0')
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '

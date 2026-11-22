@@ -10,6 +10,8 @@
 //!                                   [--window OPEN,DETECT]
 //!                                   [--head-probe] [--head-flags 0x20] [--head-counts 1,2,7,16]
 //!                                   [--head-late-ms 300] [--head-idle-ms 2000] [--no-head-scd]
+//!                                   [--gap-probe] [--gap-flags 0x20] [--gap-late-ms 300] [--no-gap-scd]
+//!                                   [--gap-track-end N] [--gap-leadout 0,1,100] [--gap-low 0,100] [--no-gap-count0]
 //!
 //! What it does: loads the image the way `mcu/netgd` does (the same `discimg` parsers, the same
 //! boot-area / session rules, GDI track sizes from the files) and answers each probe of tools/gdprobe
@@ -35,7 +37,10 @@
 //! `--head-probe` adds gdprobe seq 21's head-position cases after the battery (`head_probe` in probes.c: `HD_START`,
 //! then `HD_<case>` / `HD_<case>_POS` lines): REQ_STAT, GET_SCD format 1 and the late REQ_STAT at the head where
 //! NetGD's CD_READ left it (`atapi::read_head_start` / `read_end_fad`, `atapi::head_position`). Time is not
-//! simulated: the late REQ_STAT and the one after `IDLE` equal the first.
+//! simulated: the late REQ_STAT and the one after `IDLE` equal the first. `--gap-probe` adds seq 22's reads at the
+//! TOC's edges (`gap_probe`: `GP_START`, the `GP_SCAN_R` binary search for the end of track 1, the lead-out, the GDI's
+//! gap between the areas, FADs below 150, `GP_CNT0_SKIP`) the same way, with the extra `ctl=` / `scd_ctl=` /
+//! `scd_rel=` fields.
 
 use discimg::atapi::{self, AudioState};
 use discimg::{cdi, gdemu, gdi, TrackDesc, VecSink};
@@ -115,6 +120,15 @@ struct Opts {
     head_late_ms: u32,
     head_idle_ms: u32,
     head_scd: bool,
+    /// gdprobe seq 22 `gap_probe=1`: reads at the TOC's edges after the battery (and head_probe).
+    gap_probe: bool,
+    gap_flags: u8,
+    gap_late_ms: u32,
+    gap_scd: bool,
+    gap_track_end: u32,
+    gap_leadout: Vec<u32>,
+    gap_low: Vec<u32>,
+    gap_count0: bool,
 }
 
 fn usage() -> ! {
@@ -127,7 +141,9 @@ fn usage() -> ! {
                        [--regpoll] [--devreset MS] [--reswitch] [--devreset-only] [--devreset-cmd MS]
                        [--old-bitstream] [--window OPEN,DETECT]
                        [--head-probe] [--head-flags 0x20] [--head-counts 1,2,7,16]
-                       [--head-late-ms 300] [--head-idle-ms 2000] [--no-head-scd]"
+                       [--head-late-ms 300] [--head-idle-ms 2000] [--no-head-scd]
+                       [--gap-probe] [--gap-flags 0x20] [--gap-late-ms 300] [--no-gap-scd] [--gap-track-end N]
+                       [--gap-leadout 0,1,100] [--gap-low 0,100] [--no-gap-count0]"
     );
     std::process::exit(2)
 }
@@ -181,6 +197,14 @@ fn parse_args() -> Opts {
         head_late_ms: 300,
         head_idle_ms: 2000,
         head_scd: true,
+        gap_probe: false,
+        gap_flags: 0x20,
+        gap_late_ms: 300,
+        gap_scd: true,
+        gap_track_end: 0,
+        gap_leadout: vec![0, 1, 100],
+        gap_low: vec![0, 100],
+        gap_count0: true,
     };
     let mut a = std::env::args().skip(1);
     while let Some(k) = a.next() {
@@ -226,6 +250,14 @@ fn parse_args() -> Opts {
             "--head-late-ms" => o.head_late_ms = num(&val()),
             "--head-idle-ms" => o.head_idle_ms = num(&val()),
             "--no-head-scd" => o.head_scd = false,
+            "--gap-probe" => o.gap_probe = true,
+            "--gap-flags" => o.gap_flags = (num(&val()) & 0xFE) as u8,
+            "--gap-late-ms" => o.gap_late_ms = num(&val()),
+            "--no-gap-scd" => o.gap_scd = false,
+            "--gap-track-end" => o.gap_track_end = num(&val()),
+            "--gap-leadout" => o.gap_leadout = val().split(',').map(|x| num(x.trim())).collect(),
+            "--gap-low" => o.gap_low = val().split(',').map(|x| num(x.trim())).collect(),
+            "--no-gap-count0" => o.gap_count0 = false,
             "--window" => {
                 let v = val();
                 let (a, b) = v.split_once(',').unwrap_or_else(|| usage());
@@ -513,11 +545,11 @@ impl Out {
         }
     }
 
-    /// A CD_READ of `count` from `fad` (ide.rs `handle_cd_read`): a start inside a track moves the head there
-    /// (`atapi::read_head_start`, also when the read is then refused for its type), past the last sector when the
-    /// read went through (`atapi::read_end_fad`; gdprobe reads it all). A start outside any track leaves it.
-    fn note_read(&mut self, tracks: &[TrackDesc], ok: bool, fad: u32, count: u32) {
-        if let Some(start) = atapi::read_head_start(tracks, fad, count) {
+    /// A CD_READ of `count` from `fad` (ide.rs `handle_cd_read`): any read with a sector moves the head to its start
+    /// (`atapi::read_head_start`, refused or not), past the last sector when the read went through
+    /// (`atapi::read_end_fad`; gdprobe reads it all).
+    fn note_read(&mut self, _tracks: &[TrackDesc], ok: bool, fad: u32, count: u32) {
+        if let Some(start) = atapi::read_head_start(fad, count) {
             self.head = Some(if ok { atapi::read_end_fad(fad, count) } else { start });
         }
     }
@@ -597,6 +629,19 @@ fn cut(data: &[u8], alloc: usize) -> Res {
 
 /// What the runner prints for the CD_READ at `fad` (`handle_cd_read`).
 fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>) {
+    // Wholly inside a track's pregap (`atapi::pregap_track`): zero sectors of that track, 2,352 B for an audio
+    // track, else 2,048 B (also with --form2-sectors). Else never a start below FAD 150.
+    if let Some(t) = atapi::pregap_track(&d.tracks, fad, count) {
+        if atapi::cd_read_type_mismatch(flags, t.mode) {
+            return (Res::illegal(), None);
+        }
+        let ssz = if atapi::cd_read_raw_out(flags, t.mode, 2352, false) { atapi::RAW_SECTOR_BYTES } else { 2048 };
+        let data = vec![0u8; ssz * count as usize];
+        return (Res::ok_big(data.len(), &data[..data.len().min(REC_DATA_MAX)]), Some(data));
+    }
+    if fad < FAD_OFFSET {
+        return (Res::illegal(), None);
+    }
     // handle_cd_read: the expected sector type is checked first, by the
     // track's mode (D8, D9, R144).
     let lba = fad.saturating_sub(FAD_OFFSET);
@@ -897,7 +942,8 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) -> HeadT
 /// (`atapi::cd_read_start_outside`), else 5/00/00 (past the track's end, an audio track not stored as whole sectors).
 fn refusal_sense(d: &Disc, flags: u8, fad: u32) -> &'static str {
     let lba = fad.saturating_sub(FAD_OFFSET);
-    if atapi::track_for_lba(&d.tracks, lba).map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode)) {
+    let t = atapi::pregap_track(&d.tracks, fad, 1).or_else(|| atapi::track_for_lba(&d.tracks, lba));
+    if t.map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode)) {
         "5/64/00"
     } else if atapi::cd_read_start_outside(&d.tracks, fad) {
         "5/21/00"
@@ -906,17 +952,22 @@ fn refusal_sense(d: &Disc, flags: u8, fad: u32) -> &'static str {
     }
 }
 
-/// gdprobe seq 21 `head_probe` (probes.c), after the battery, as NetGD answers it.
+/// gdprobe seq 21 `head_probe` / seq 22 `gap_probe` (probes.c `hp_state`), after the battery, as NetGD answers it.
 struct HeadProbe<'a> {
-    opt: &'a Opts,
     d: &'a Disc,
-    /// `pos` of the previous `HD_*_POS` line (`moved=`).
+    /// Line prefix (`HD` / `GP`).
+    pfx: &'static str,
+    /// Seq 22's extra fields (`ctl=`, `scd_ctl=`, `scd_rel=`).
+    ext: bool,
+    late_ms: u32,
+    scd: bool,
+    /// `pos` of the previous `*_POS` line (`moved=`).
     prev: Option<u32>,
 }
 
 impl HeadProbe<'_> {
-    /// `hp_pos`: REQ_STAT, GET_SCD(1) (`head_scd`), the late REQ_STAT (`head_late_ms`), one line. The head is where
-    /// the last CD_READ since the mount left it, else the park position (`atapi::rest_fad`); nothing plays.
+    /// `hp_pos`: REQ_STAT, GET_SCD(1) (`scd`), the late REQ_STAT (`late_ms`), one line. The head is where the last
+    /// CD_READ since the mount left it, else the park position (`atapi::rest_fad`); nothing plays.
     fn pos(&mut self, o: &mut Out, label: &str, read: Option<(u32, u32)>, pre: &str) {
         let d = self.d;
         let fad = atapi::rest_fad(&d.tracks, d.is_cdi, true, o.head);
@@ -936,6 +987,9 @@ impl HeadProbe<'_> {
             let _ = write!(f, "{} ", pre);
         }
         let _ = write!(f, "stat_rc=ok st={} trk={} idx={} pos={}", st(stat[0]), stat[3], stat[4], pos);
+        if self.ext {
+            let _ = write!(f, " ctl=0x{:02x}", stat[2]);
+        }
         if let Some((rf, rc)) = read {
             let _ = write!(f, " d_start={:+} d_end={:+}", pos as i64 - rf as i64, pos as i64 - (rf + rc) as i64);
         }
@@ -946,25 +1000,29 @@ impl HeadProbe<'_> {
             None => f.push_str(" moved=-"),
         }
         let mut scd = [0u8; 100];
-        if self.opt.head_scd {
+        if self.scd {
             atapi::get_scd_reply(1, AudioState::Standby, fad, track, &mut scd);
             let _ = write!(f, " scd_rc=ok scd_trk={} scd_idx={} scd_pos={}", scd[5], scd[6], fad3(&scd[11..14]));
+            if self.ext {
+                let _ = write!(f, " scd_ctl=0x{:02x} scd_rel={}", scd[4], fad3(&scd[7..10]));
+            }
         }
-        if self.opt.head_late_ms != 0 {
+        if self.late_ms != 0 {
             let _ = write!(f, " late_rc=ok late_st={} late_pos={}", st(stat[0]), pos);
         }
         let _ = write!(f, " stat={}", hex(&stat));
-        if self.opt.head_scd {
+        if self.scd {
             let _ = write!(f, " scd={}", hex(&scd[..14]));
         }
         self.prev = Some(pos);
-        o.event(&format!("HD_{}_POS", label), &f);
+        o.event(&format!("{}_{}_POS", self.pfx, label), &f);
         // The queries all succeed: the next logged command follows a good status.
         o.last_check = false;
     }
 
-    /// `hp_read`: the CD_READ (a CHECK is followed by an unlogged REQ_ERROR), its line, then `pos`.
-    fn read(&mut self, o: &mut Out, label: &str, flags: u8, fad: u32, count: u32) {
+    /// `hp_read_line`: the CD_READ (a CHECK is followed by an unlogged REQ_ERROR) and its line `name`, `pre` first
+    /// among the fields. Returns whether it read.
+    fn read_line(&mut self, o: &mut Out, name: &str, pre: &str, flags: u8, fad: u32, count: u32) -> bool {
         let d = self.d;
         let c = cdb_read(flags, fad, count);
         let (r, data) = read_res(d, flags, fad, count);
@@ -973,19 +1031,30 @@ impl HeadProbe<'_> {
             _ if r.ok => ("-".to_string(), "none"),
             _ => ("-".to_string(), refusal_sense(d, flags, fad)),
         };
-        let ex = format!("flags=0x{:02x} fad={} count={} ssz={} sense={}", flags, fad, count, ssz, sense);
-        o.probe(&format!("HD_{}", label), Some(&ex), Some(&c), &r, false);
+        let mut ex = String::new();
+        if !pre.is_empty() {
+            let _ = write!(ex, "{} ", pre);
+        }
+        let _ = write!(ex, "flags=0x{:02x} fad={} count={} ssz={} sense={}", flags, fad, count, ssz, sense);
+        o.probe(name, Some(&ex), Some(&c), &r, false);
         o.note_read(&d.tracks, r.ok, fad, count);
         if !r.ok {
             o.last_check = false;
             o.packet_done(true, 0);
         }
+        r.ok
+    }
+
+    /// `hp_read`: the read's line, then `pos`.
+    fn read(&mut self, o: &mut Out, label: &str, flags: u8, fad: u32, count: u32) {
+        let name = format!("{}_{}", self.pfx, label);
+        self.read_line(o, &name, "", flags, fad, count);
         self.pos(o, label, Some((fad, count)), "");
     }
 
     /// `hp_cmd`: TUR / GET_TOC / REQ_SES, its line, then `pos`.
     fn cmd(&mut self, o: &mut Out, label: &str, c: &[u8; 12], r: &Res) {
-        o.probe(&format!("HD_{}", label), None, Some(c), r, false);
+        o.probe(&format!("{}_{}", self.pfx, label), None, Some(c), r, false);
         self.pos(o, label, None, "");
     }
 }
@@ -1002,7 +1071,7 @@ fn head_probe(opt: &Opts, d: &Disc, o: &mut Out, ht: HeadToc) {
             dd, e, a, ae, data_ok as u8, aud_ok as u8
         ),
     );
-    let mut hp = HeadProbe { opt, d, prev: None };
+    let mut hp = HeadProbe { d, pfx: "HD", ext: false, late_ms: opt.head_late_ms, scd: opt.head_scd, prev: None };
     hp.pos(o, "BASE", None, "");
     if data_ok {
         let len = e - dd;
@@ -1036,6 +1105,275 @@ fn head_probe(opt: &Opts, d: &Disc, o: &mut Out, ht: HeadToc) {
     }
     if opt.head_idle_ms != 0 {
         hp.pos(o, "IDLE", None, &format!("idle_ms={}", opt.head_idle_ms));
+    }
+}
+
+/// toc.c `gp_toc_parse`: one GET_TOC area's valid entries (number, CTRL/ADR byte, FAD) and lead-out (0 = none).
+struct TocArea {
+    trk: Vec<(u32, u32, u32)>,
+    leadout: u32,
+}
+
+impl TocArea {
+    fn parse(toc: &[u8; 408]) -> TocArea {
+        let mut trk = Vec::new();
+        for t in 0..99 {
+            let e = &toc[4 * t..4 * t + 4];
+            let f = fad3(&e[1..4]);
+            if e[0] == 0xFF || f < 150 || f >= 0x00F0_0000 {
+                continue;
+            }
+            trk.push((t as u32 + 1, e[0] as u32, f));
+        }
+        let lo = fad3(&toc[405..408]);
+        let leadout = if toc[404] != 0xFF && lo != 0 && lo < 0x00F0_0000 { lo } else { 0 };
+        TocArea { trk, leadout }
+    }
+    fn valid(&self) -> bool {
+        !self.trk.is_empty()
+    }
+}
+
+/// toc.c `gp_gap_plan_make`.
+#[derive(Default)]
+struct GapPlan {
+    trk_ok: bool,
+    trk_why: &'static str,
+    a: (u32, u32, u32),
+    b: (u32, u32, u32),
+    leadout: u32,
+    last: (u32, u32),
+    lo_ok: bool,
+    lo_why: &'static str,
+    hd_ok: bool,
+    hd_why: &'static str,
+    ld_leadout: u32,
+    hd: (u32, u32),
+    ref_fad: u32,
+}
+
+fn gap_plan(area: &[TocArea; 2]) -> GapPlan {
+    let mut p = GapPlan { trk_why: "-", lo_why: "-", hd_why: "-", ..Default::default() };
+    // Both areas' tracks in FAD order, without the duplicates a CD's copied area 1 adds.
+    let mut t: Vec<(u32, u32, u32)> = Vec::new();
+    for a in area.iter().filter(|a| a.valid()) {
+        for &e in &a.trk {
+            if t.iter().any(|x| x.2 == e.2) {
+                continue;
+            }
+            let at = t.iter().position(|x| x.2 > e.2).unwrap_or(t.len());
+            t.insert(at, e);
+        }
+    }
+    let n = t.len();
+    if n < 1 {
+        p.trk_why = "no_toc";
+    } else if n < 2 {
+        p.trk_why = "one_track";
+    } else if t[1].2 < t[0].2 + 2 {
+        p.trk_why = "no_room";
+    } else {
+        p.trk_ok = true;
+        p.a = t[0];
+        p.b = t[1];
+    }
+    for a in area.iter().filter(|a| a.valid()) {
+        p.leadout = p.leadout.max(a.leadout);
+    }
+    for e in &t {
+        if e.2 < p.leadout && e.2 >= p.last.1 {
+            p.last = (e.0, e.2);
+        }
+    }
+    if p.leadout == 0 {
+        p.lo_why = "no_leadout";
+    } else if p.last.1 == 0 || p.leadout < p.last.1 + 2 {
+        p.lo_why = "no_track_before_leadout";
+    } else {
+        p.lo_ok = true;
+    }
+    if !area[0].valid() || !area[1].valid() {
+        p.hd_why = "no_hd_area";
+    } else if area[0].leadout == 0 {
+        p.hd_why = "no_ld_leadout";
+    } else {
+        let mut h = (0u32, 0u32);
+        for e in &area[1].trk {
+            if e.2 > area[0].leadout && (h.1 == 0 || e.2 < h.1) {
+                h = (e.0, e.2);
+            }
+        }
+        if h.1 == 0 {
+            p.hd_why = "no_hd_area";
+        } else if h.1 < area[0].leadout + 2 {
+            p.hd_why = "no_gap";
+        } else {
+            p.hd_ok = true;
+            p.ld_leadout = area[0].leadout;
+            p.hd = h;
+        }
+    }
+    // Reference: the first data track + 16 (inside it), else the first track's.
+    let i = t.iter().position(|e| e.1 & 0x40 != 0).unwrap_or(0);
+    if n > 0 {
+        let end = if i + 1 < n { t[i + 1].2 } else { p.leadout };
+        p.ref_fad = if end > t[i].2 + 17 { t[i].2 + 16 } else { t[i].2 };
+    }
+    p
+}
+
+/// toc.c `gp_bsearch_next`.
+fn bsearch_next(lo: u32, hi: u32) -> u32 {
+    if hi <= lo + 1 {
+        0
+    } else {
+        lo + (hi - lo) / 2
+    }
+}
+
+/// gdprobe seq 22 `gap_probe` (probes.c), after the battery and head_probe, as NetGD answers it.
+fn gap_probe(opt: &Opts, d: &Disc, o: &mut Out) {
+    let fl = opt.gap_flags;
+    let mut areas = [[0u8; 408]; 2];
+    for (s, toc) in areas.iter_mut().enumerate() {
+        atapi::build_toc(&d.tracks, d.is_cdi, d.boot_area_lba, s as u8, toc);
+    }
+    let area = [TocArea::parse(&areas[0]), TocArea::parse(&areas[1])];
+    let p = gap_plan(&area);
+    let why = |ok: bool, w: &'static str| if ok { "ok" } else { w };
+    o.event(
+        "GP_START",
+        &format!(
+            "toc0={}/{} toc1={}/{} trk_a={}/{}/0x{:02x} trk_b={}/{}/0x{:02x} leadout={} last={}/{} ld_leadout={} hd={}/{} ref={} trk={} lo={} hdg={}",
+            area[0].trk.len(), area[0].leadout, area[1].trk.len(), area[1].leadout,
+            p.a.0, p.a.2, p.a.1, p.b.0, p.b.2, p.b.1, p.leadout, p.last.0, p.last.1,
+            p.ld_leadout, p.hd.0, p.hd.1, p.ref_fad,
+            why(p.trk_ok, p.trk_why), why(p.lo_ok, p.lo_why), why(p.hd_ok, p.hd_why)
+        ),
+    );
+    let mut hp = HeadProbe { d, pfx: "GP", ext: true, late_ms: opt.gap_late_ms, scd: opt.gap_scd, prev: None };
+    hp.pos(o, "BASE", None, "");
+
+    // (1) the gap after track 1
+    if !p.trk_ok {
+        o.event("GP_TRK_SKIP", &format!("reason={}", p.trk_why));
+    } else {
+        let (a_fad, b_fad) = (p.a.2, p.b.2);
+        let mut reads = 0;
+        let mut why = "-";
+        let src;
+        let g = if opt.gap_track_end != 0 {
+            src = "cfg";
+            let g = opt.gap_track_end;
+            if g <= a_fad || g >= b_fad {
+                why = "gap_track_end_outside";
+                0
+            } else {
+                g
+            }
+        } else {
+            src = "scan";
+            // gp_find_gap
+            let (mut lo, mut hi) = (a_fad, b_fad - 1);
+            let scan = |o: &mut Out, hp: &mut HeadProbe, reads: &mut i32, fad: u32| {
+                *reads += 1;
+                hp.read_line(o, "GP_SCAN_R", &format!("n={}", reads), fl, fad, 1)
+            };
+            if !scan(o, &mut hp, &mut reads, lo) {
+                why = "track_start_unreadable";
+                0
+            } else if scan(o, &mut hp, &mut reads, hi) {
+                why = "no_gap";
+                0
+            } else {
+                loop {
+                    let t = bsearch_next(lo, hi);
+                    if t == 0 || reads >= 48 {
+                        break;
+                    }
+                    if scan(o, &mut hp, &mut reads, t) {
+                        lo = t;
+                    } else {
+                        hi = t;
+                    }
+                }
+                if bsearch_next(lo, hi) != 0 {
+                    why = "scan_too_long";
+                    0
+                } else {
+                    lo + 1
+                }
+            }
+        };
+        if g == 0 {
+            o.event("GP_TRK_SKIP", &format!("a_fad={} b_fad={} src={} reads={} reason={}", a_fad, b_fad, src, reads, why));
+        } else {
+            let gh = b_fad - 1;
+            let mid = g + (gh - g) / 2;
+            let t1 = if a_fad + 50 < g { a_fad + 50 } else { a_fad };
+            o.event(
+                "GP_SCAN",
+                &format!(
+                    "a_fad={} b_fad={} last_ok={} gap_lo={} gap_hi={} gap_len={} gap_mid={} src={} reads={}",
+                    a_fad, b_fad, g - 1, g, gh, gh - g + 1, mid, src, reads
+                ),
+            );
+            hp.read(o, "TRK_T1", fl, t1, 1);
+            hp.read(o, "TRK_GAPMID", fl, mid, 1);
+            hp.read(o, "TRK_T1END", fl, g - 1, 1);
+            hp.read(o, "TRK_GAPLO", fl, g, 1);
+            hp.read(o, "TRK_T2", fl, b_fad + 16, 1);
+            hp.read(o, "TRK_GAPHI", fl, gh, 1);
+            hp.read(o, "TRK_T2B", fl, b_fad + 32, 1);
+            hp.read(o, "TRK_GAPMID2", fl, mid, 1);
+        }
+    }
+
+    // (2) the lead-out
+    if !p.lo_ok {
+        o.event("GP_LO_SKIP", &format!("leadout={} reason={}", p.leadout, p.lo_why));
+    } else {
+        hp.read(o, "LO_REF", fl, p.leadout - 2, 1);
+        for &off in &opt.gap_leadout {
+            hp.read(o, &format!("LO_{}", off), fl, p.leadout + off, 1);
+        }
+    }
+
+    // (3) a GD-ROM's gap between the areas
+    if !p.hd_ok {
+        o.event("GP_HDG_SKIP", &format!("reason={}", p.hd_why));
+    } else {
+        let mid = p.ld_leadout + (p.hd.1 - p.ld_leadout) / 2;
+        o.event(
+            "GP_HDG",
+            &format!("ld_leadout={} hd_fad={} gap_lo={} gap_hi={} gap_mid={}", p.ld_leadout, p.hd.1, p.ld_leadout, p.hd.1 - 1, mid),
+        );
+        hp.read(o, "HDG_REF", fl, p.ld_leadout - 1, 1);
+        hp.read(o, "HDG_L0", fl, p.ld_leadout, 1);
+        hp.read(o, "HDG_MID", fl, mid, 1);
+        hp.read(o, "HDG_HI", fl, p.hd.1 - 1, 1);
+        hp.read(o, "HDG_HD", fl, p.hd.1 + 16, 1);
+        hp.read(o, "HDG_MID2", fl, mid, 1);
+    }
+
+    // (4) below 150
+    if p.ref_fad == 0 {
+        o.event("GP_LOW_SKIP", "reason=no_toc");
+    } else if !opt.gap_low.is_empty() {
+        hp.read(o, "LOW_REF", fl, p.ref_fad, 1);
+        for &f in &opt.gap_low {
+            hp.read(o, &format!("LOW_{}", f), fl, f, 1);
+        }
+    }
+
+    // (5) count 0: gdprobe's whitelist allows 1..64, nothing is sent.
+    if opt.gap_count0 {
+        if p.ref_fad == 0 {
+            o.event("GP_CNT0_SKIP", "reason=no_toc");
+        } else {
+            let c = cdb_read(fl, p.ref_fad, 0);
+            o.event("GP_CNT0_SKIP", &format!("fad={} cdb={} reason=whitelist_count_1_64", p.ref_fad, hex(&c)));
+        }
     }
 }
 
@@ -1504,6 +1842,9 @@ fn main() {
                 let ht = battery(&opt, d, &mut o, ua, opt.switch);
                 if opt.head_probe {
                     head_probe(&opt, d, &mut o, ht);
+                }
+                if opt.gap_probe {
+                    gap_probe(&opt, d, &mut o);
                 }
             }
             None => battery_no_medium(&mut o),
