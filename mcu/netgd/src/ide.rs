@@ -2434,11 +2434,15 @@ async fn handle_cd_read(
     // Feature `form2-sectors` (D14): a `0x20` read of a CDI's Form 2 sectors
     // (the postgap) sends their 2,324 data bytes each, as stock does.
     #[cfg(feature = "form2-sectors")]
-    if let (Some(t), None) = (track, pregap) {
-        if !raw_out()
-            && discimg::atapi::cd_read_may_be_form2(packet[1], t.mode(), t.sector_size as u32)
-            && form2_request(gdi, t, lba, count)
-        {
+    if let Some(t) = track {
+        // A CDI Mode 2 track's pregap, wholly: Form 2 zero sectors (stock
+        // seq 23/24 CDI 04: 2,324 zero bytes each). A read on into the track
+        // mixes 2,324 and 2,048 on stock (`GP_XPRE2`), not modelled: 2,048.
+        let form2 = match pregap {
+            Some((_, zeros)) => zeros == count,
+            None => form2_request(gdi, t, lba, count),
+        };
+        if !raw_out() && discimg::atapi::cd_read_may_be_form2(packet[1], t.mode(), t.sector_size as u32) && form2 {
             unsafe { FORM2_OUT = true };
         }
     }

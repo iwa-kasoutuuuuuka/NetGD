@@ -455,6 +455,35 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(get('GP_XGAP2_POS')['trk'], '2')
         self.assertEqual(get('GP_PG2_M150_POS')['idx'], '0')
 
+    def test_ctl_probe_and_risky_cross_off_as_netgd_answers(self):
+        # gdprobe seq 24 (risky_cross=off ctl_probe=1), stock_20261122_24_pregap-ctl.txt: off every track REQ_STAT
+        # reports CTRL 4 whatever the next track / lead-out entry / track read last; reads from data past its end
+        # are skipped, an XGAP<t> whose first sector reads too.
+        text = expect_sd.predict(self.card, images=[3, 4], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--gap-probe', '--gap-crc', '--pregap-probe',
+                                              '--risky-cross', 'off', '--ctl-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda img, probe: [e for e in ents if e['img'] == img and e['probe'] == probe]
+        for img in (3, 4):
+            self.assertEqual(get(img, 'GP_RISKY_SKIP')[0]['reason'], 'risky_cross_off')
+            self.assertFalse(get(img, 'GP_XEND') or get(img, 'GP_XLO'))
+            verdicts = get(img, 'GP_CTL')
+            self.assertTrue(verdicts)
+            for v in verdicts:
+                if v['off_rc'] == 'check':
+                    self.assertEqual((v['ctl'], v['scd_ctl'], v['scd_rel']), ('0x41', '0x41', '513660'))
+                    self.assertIn('const41', v['match'])
+        # XGAP<t>: skipped after its 1-sector check when that reads, else sent (from the gap: 5/21/00).
+        for img in (3, 4):
+            for chk in [e for e in ents if e['img'] == img and e['probe'].endswith('_CHK')]:
+                name = chk['probe'][:-4]
+                if chk['rc'] == 'ok':
+                    self.assertEqual(get(img, name + '_SKIP')[0]['reason'], 'starts_on_data_risky_cross_off')
+                else:
+                    self.assertEqual(get(img, name)[0]['sense'], '5/21/00')
+        self.assertIn('HDG', [r['region'] for r in get(3, 'GP_CTL_REGION')])
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '

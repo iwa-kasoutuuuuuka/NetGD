@@ -1052,6 +1052,51 @@ fn the_stock_record_of_seq_23_pregap_and_sticky_track() {
     assert_eq!(crc32(&[0u8; 2324]), 0xd0912a98);
 }
 
+#[test]
+fn the_stock_record_of_seq_24_pregap_ctl() {
+    // stock_20261122_24_pregap-ctl.txt. GDI 03: the pregaps 0..149, 756..905
+    // and 45000..45149 read (zeros: 2,048 B crc f1e8ba9e, 2,352 B be97ce3f),
+    // 750 / 755 (after track 1's sectors) and 44994 / 44999 are 5/21/00.
+    let g = stock_gdi03();
+    for (fad, trk) in [(0u32, 1u8), (149, 1), (756, 2), (905, 2), (45000, 3), (45149, 3)] {
+        assert_eq!(pregap_read(&g, fad, 1).map(|(t, z)| (t.number, z)), Some((trk, 1)), "fad {}", fad);
+    }
+    for fad in [750u32, 755, 44994, 44999] {
+        assert!(cd_read_start_outside(&g, fad), "fad {}", fad);
+    }
+    assert_eq!(crc32(&[0u8; 2048]), 0xf1e8ba9e);
+    // GP_XPRE2 / XPRE3: 10 pregap + 6 track sectors; GP_XGAP3 (44992 x 16,
+    // from the gap into the pregap): 5/21/00.
+    assert_eq!(pregap_read(&g, 896, 16).map(|(t, z)| (t.number, z)), Some((2, 10)));
+    assert_eq!(pregap_read(&g, 45140, 16).map(|(t, z)| (t.number, z)), Some((3, 10)));
+    assert!(pregap_read(&g, 44992, 16).is_none() && cd_read_start_outside(&g, 44992));
+
+    // Off-track CTRL is the constant 4, not the next track's / the lead-out
+    // entry's / the last one read: CDI 11 (two audio tracks, lead-out entry
+    // CTRL 0) at lead-out + 1 = 1005 says CTRL 4 (GP_CTL region=LO
+    // match=const41), keeping the track number of the query before.
+    let mut a = t(1, 0, 0, 302);
+    a.session = 1;
+    let mut b = t(2, 452, 0, 402);
+    b.session = 1;
+    let c11 = vec![a, b];
+    let rep = |last: u32, tno: u8| {
+        let (fad, tr) = head_position(&c11, AudioState::Standby, 0, rest_fad(&c11, true, true, Some(last)), tno);
+        req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM, 0, fad, tr)
+    };
+    assert_eq!(rep(1005, 2)[..], hex("011f4102010003ed0000")[..]);
+    assert_eq!(rep(1005, 1)[..4], hex("011f4101")[..]);
+    // 452 (after reading 451, the last sector of track 1) is track 2's
+    // pregap: CTRL 0, index 0, relative 150 (GP_CTL region=GAP off_track=0).
+    let (fad, tr) = head_position(&c11, AudioState::Standby, 0, 452, 1);
+    assert_eq!(tr.map(|t| t.number), Some(2));
+    assert_eq!(req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM, 0, fad, tr)[..5], hex("011f010200")[..]);
+    assert_eq!(head_index_rel(tr.unwrap(), fad), (0, 150));
+    // GDI 03 GP_CTLR_GAP_OFF: 755 after a query in audio track 2 -> track 2, CTRL 4.
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, 755, 2);
+    assert_eq!(req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_GDROM, 0, fad, tr)[..], hex("018f4102010002f30000")[..]);
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut c = 0xFFFF_FFFFu32;
     for &b in data {
