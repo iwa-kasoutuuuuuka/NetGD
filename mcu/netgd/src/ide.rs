@@ -39,7 +39,6 @@ use core::ptr::{read_volatile, write_volatile};
 
 use defmt::{info, warn};
 use embassy_atsam3::smc;
-use embassy_futures::yield_now;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
@@ -371,6 +370,22 @@ impl IdeDevice {
         self.post_status(status as u16 | 0x0100);
     }
 
+    /// `set_error`, then `set_status_intrq`: one call for the many sites
+    /// that post both.
+    #[inline(never)]
+    fn error_status_intrq(&self, err: u8, status: u8) {
+        self.set_error(err);
+        self.set_status_intrq(status);
+    }
+
+    /// `error_status_intrq`, then `ack_command`: a command finished in one
+    /// go (no data phase, or its data staged already).
+    #[inline(never)]
+    fn finish_cmd(&self, err: u8, status: u8) {
+        self.error_status_intrq(err, status);
+        self.ack_command();
+    }
+
     /// Post a command's *completion* (error + status + INTRQ) -- unless the
     /// host has already written its next command, in which case the
     /// completion is dropped and `false` returned. Once a new command is
@@ -419,8 +434,7 @@ impl IdeDevice {
                   self.read(REG_STATUS) & 0xFF, self.read(REG_READ_FIFO_LEVEL));
             return false;
         }
-        self.set_error(error);
-        self.set_status_intrq(status);
+        self.error_status_intrq(error, status);
         true
     }
 
@@ -1099,17 +1113,13 @@ async fn handle(
             // ATA NOP. Real-world drives just succeed; the BIOS issues
             // it as a kind of "are you alive" probe. Returning ABRT
             // makes the BIOS retry forever.
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
-            dev.ack_command();
+            dev.finish_cmd(0, STATUS_IDLE);
         }
         // The secondary only: every write command finishes its CMD25 and the
         // card's busy wait before it completes, so there is nothing to flush.
         // Mirrors NOP. The primary keeps ABRTing these, as before.
         CMD_FLUSH_CACHE | CMD_FLUSH_CACHE_EXT if role == Role::Disk => {
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
-            dev.ack_command();
+            dev.finish_cmd(0, STATUS_IDLE);
         }
         // DEVICE RESET and PACKET belong to the packet device. The disk ABRTs
         // them below, as ATA has a non-packet device do: it used to load the
@@ -1141,32 +1151,24 @@ async fn handle(
             // nothing between commands writes either (R159). Error bit 0
             // needs the bitstream's MCU-writable ERROR bits 0-1; an older one
             // shows 0x00.
-            dev.set_error(discimg::atapi::DEVICE_RESET_ERROR);
-            dev.set_status_intrq(discimg::atapi::DEVICE_RESET_STATUS);
-            dev.ack_command();
+            dev.finish_cmd(discimg::atapi::DEVICE_RESET_ERROR, discimg::atapi::DEVICE_RESET_STATUS);
         }
         CMD_SET_FEATURES => {
             // We don't actually honor any feature bits yet — just ack so
             // the host's PIO-mode set / etc. can proceed.
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
-            dev.ack_command();
+            dev.finish_cmd(0, STATUS_IDLE);
         }
         CMD_IDENTIFY => match role {
             // ATA spec: a packet device shall ABRT IDENTIFY DEVICE so the
             // host falls back to IDENTIFY PACKET DEVICE.
             Role::Packet => {
-                dev.set_error(ERR_ABRT);
-                dev.set_status_intrq(STATUS_IDLE_ERR);
-                dev.ack_command();
+                dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
             }
             // A disk answers it -- this is how DreamShell / KOS discover an
             // IDE hard disk on the G1 bus.
             Role::Disk => {
                 stage_identify_disk(dev);
-                dev.set_error(0);
-                dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
-                dev.ack_command();
+                dev.finish_cmd(0, STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
                 // A PIO data-in command is not finished when the data is
                 // staged -- DRQ has to drop once the host has taken it all,
                 // or a host that polls for "DRQ clear, BSY clear" before
@@ -1181,9 +1183,7 @@ async fn handle(
             Role::Packet => {
                 stage_identify_packet(dev);
                 dev.set_atapi_byte_count(discimg::atapi::IDENTIFY_PACKET_REPLY.len() as u16);
-                dev.set_error(0);
-                dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
-                dev.ack_command();
+                dev.finish_cmd(0, STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
                 // Drop DRQ once the host has the 80 bytes (stock: status
                 // 0x50 and interrupt reason 0x03 after them), as the disk
                 // IDENTIFY does: a host that reads while DRQ is up (gdprobe)
@@ -1192,9 +1192,7 @@ async fn handle(
             }
             // Mirror image: a non-packet device ABRTs the packet IDENTIFY.
             Role::Disk => {
-                dev.set_error(ERR_ABRT);
-                dev.set_status_intrq(STATUS_IDLE_ERR);
-                dev.ack_command();
+                dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
             }
         },
         CMD_WRITE_SECTORS | CMD_WRITE_DMA | CMD_WRITE_SECTORS_EXT | CMD_WRITE_DMA_EXT
@@ -1221,9 +1219,7 @@ async fn handle(
         }
         other => {
             warn!("{}: unhandled cmd 0x{:02x}", label, other);
-            dev.set_error(ERR_ABRT);
-            dev.set_status_intrq(STATUS_IDLE_ERR);
-            dev.ack_command();
+            dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         }
     }
 }
@@ -1976,8 +1972,7 @@ async fn handle_packet(
                 return;
             }
             warn!("{}: timeout waiting for ATAPI packet", label);
-            dev.set_error(ERR_ABRT);
-            dev.set_status_intrq(STATUS_IDLE_ERR);
+            dev.error_status_intrq(ERR_ABRT, STATUS_IDLE_ERR);
             return;
         }
     };
@@ -3045,8 +3040,7 @@ async fn stage_pregap_chunk(gdi: &'static crate::gdi::Gdi, lba: u32, count: u32)
 /// Complete a no-data command successfully.
 fn finish_ok(dev: &IdeDevice) {
     dev.set_irr(0x03);
-    dev.set_error(0);
-    dev.set_status_intrq(STATUS_IDLE);
+    dev.error_status_intrq(0, STATUS_IDLE);
 }
 
 /// Complete a packet command with CHECK CONDITION the way stock GDEMU 6.0
@@ -3057,8 +3051,7 @@ fn finish_check(dev: &IdeDevice, state: &mut DeviceState, key: u8, asc: (u8, u8)
     state.pending_sense_key = key;
     state.pending_asc = asc;
     dev.set_irr(0x03);
-    dev.set_error(discimg::atapi::check_error(key));
-    dev.set_status_intrq(STATUS_CHECK);
+    dev.error_status_intrq(discimg::atapi::check_error(key), STATUS_CHECK);
 }
 
 /// Complete a packet command with CHECK CONDITION / ILLEGAL REQUEST (5/00/00;
@@ -3561,8 +3554,7 @@ async fn stream_from_sd(
     if !staged {
         warn!("stream_from_sd: SD read failed");
         dev.set_irr(0x03);
-        dev.set_error(ERR_MEDIUM);
-        dev.set_status_intrq(STATUS_CHECK);
+        dev.error_status_intrq(ERR_MEDIUM, STATUS_CHECK);
         return true;
     }
 
@@ -3914,7 +3906,7 @@ async fn stream_pio_from_sd(
         }
         // The host owes us exactly `block` bytes of reads; the FPGA shows BSY
         // from the last pop until we re-arm DRQ above or complete below.
-        if let Err(why) = wait_host(dev, || dev.read_fifo_level() == 0, 10_000).await {
+        if let Err(why) = wait_host(dev, &mut || dev.read_fifo_level() == 0, 10_000).await {
             if why == Stall::Timeout {
                 warn!("  host left block {} undrained (lvl={}, {} of {} bytes sent)",
                       blocks, dev.read_fifo_level(), sent, total_bytes);
@@ -3997,7 +3989,7 @@ async fn push_buf_to_fifo(dev: &IdeDevice, data: &[u8]) -> usize {
         // MIL-CD's 1ST_READ.BIN as it pulls, at 2.16 s -- and when the host
         // has genuinely gone the extra five seconds buy nothing but a job
         // that takes longer to fail.
-        if let Err(why) = wait_host(dev, || room() > 0, 5_000).await {
+        if let Err(why) = wait_host(dev, &mut || room() > 0, 5_000).await {
             if why == Stall::Timeout {
                 warn!("push_buf_to_fifo: FIFO never drained after {} bytes", i);
             }
@@ -4036,8 +4028,7 @@ async fn stream_pattern(dev: &IdeDevice, byte_count: usize) {
     // it has room. The primary FIFO is 4096 words = 8 KB, so a single 2 KB
     // sector we fit it all up-front.
     dev.set_atapi_byte_count(byte_count.min(0xFFFF) as u16);
-    dev.set_error(0);
-    dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
+    dev.error_status_intrq(0, STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
 
     let mut byte_idx: usize = 0;
     let mut waited = 0u32;
@@ -4083,7 +4074,7 @@ const SECONDARY_FIFO_DEPTH_WORDS: u16 = 1024;
 
 async fn recv_packet(dev: &IdeDevice) -> Result<[u8; PACKET_LEN_BYTES], ()> {
     // Wait for the host to write all 6 words. Yield-only: a sleep here is
-    // a 1 ms tick (see `poll_until`), which was most of a PACKET command's
+    // a 1 ms tick (see `WaitHost`), which was most of a PACKET command's
     // latency. A real drive has no CDB timeout; Sega Rally 2's WinCE
     // driver polls at ~50 ms and took >100 ms to get round to the CDB of
     // its first PIO read, which the old 100 ms cap turned into ABRT. Only
@@ -4095,7 +4086,7 @@ async fn recv_packet(dev: &IdeDevice) -> Result<[u8; PACKET_LEN_BYTES], ()> {
     let mut last_st = dev.read(REG_HOST_STATUS_RDS);
     let mut marks: [(u32, u16); 8] = [(u32::MAX, 0); 8];
     let mut n_marks = 0usize;
-    let r = wait_host(dev, || {
+    let r = wait_host(dev, &mut || {
         let st = dev.read(REG_HOST_STATUS_RDS);
         if st != last_st {
             last_st = st;
@@ -4136,10 +4127,9 @@ async fn recv_data_out(dev: &IdeDevice, len: usize) -> heapless::Vec<u8, 64> {
     dev.set_atapi_byte_count(len as u16);
     // Interrupt Reason: data-out phase (I/O=0, C/D=0).
     dev.set_irr(0x00);
-    dev.set_error(0);
-    dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
+    dev.error_status_intrq(0, STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
 
-    if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= words as u16, 10_000).await {
+    if let Err(why) = wait_host(dev, &mut || dev.write_fifo_level() >= words as u16, 10_000).await {
         if why == Stall::Timeout {
             warn!("recv_data_out: host never wrote {} words", words);
         }
@@ -4199,7 +4189,7 @@ async fn send_data_in(dev: &IdeDevice, data: &[u8]) {
     let mut last_st = pre_st;
     let mut last_change_us: u32 = 0;
     let mut first_status_us: u32 = u32::MAX;
-    let r = wait_host(dev, || {
+    let r = wait_host(dev, &mut || {
         let st = dev.read(REG_HOST_STATUS_RDS);
         if st != last_st {
             last_st = st;
@@ -4264,9 +4254,7 @@ async fn handle_disk_read(
         // CHS addressing. Nothing we serve is CHS-shaped and every host we
         // care about uses LBA, so refuse rather than silently mis-address.
         warn!("{}: disk read in CHS mode, refusing", label);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
     // The card is addressed in 32-bit blocks, so a 48-bit LBA above that is
@@ -4275,9 +4263,7 @@ async fn handle_disk_read(
     // corruption much later.
     let Ok(lba) = u32::try_from(snap.lba(ext)) else {
         warn!("{}: disk read at LBA {} beyond 32-bit block addressing", label, snap.lba(ext));
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     };
     let count = snap.count(ext);
@@ -4285,9 +4271,7 @@ async fn handle_disk_read(
     let total = disk_sectors();
     if total == 0 || lba.saturating_add(count) > total {
         warn!("{}: disk read {} sectors at LBA {} past end ({})", label, count, lba, total);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
     info!("{}: disk read LBA={} count={} dma={}", label, lba, count, dma);
@@ -4314,9 +4298,7 @@ async fn handle_disk_read(
     let mut run = count.min(CHUNK);
     if !fetch_run(lba, run, &mut buf[..run as usize * 512], MULTI_MIN) {
         warn!("{}: SD read failed at block {}", label, lba);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
     let mut fetched = run; // sectors read from SD into buf
@@ -4364,7 +4346,7 @@ async fn handle_disk_read(
             // push_buf_to_fifo blocks on room, so the host is paced by
             // accident -- but a host that waits for the per-sector interrupt
             // would hang forever, and ATA says it is entitled to.
-            if let Err(why) = wait_host(dev, || dev.read_fifo_level() == 0, 10_000).await {
+            if let Err(why) = wait_host(dev, &mut || dev.read_fifo_level() == 0, 10_000).await {
                 if why == Stall::Timeout {
                     warn!("{}: host stopped draining disk read at sector {}", label, sent);
                 }
@@ -4394,7 +4376,7 @@ async fn handle_disk_read(
     // so there is nothing to preserve here.
     // A command to either device ends the wait: the data is all delivered,
     // and FatFs in particular reads what it needs and leaves the rest.
-    if wait_host(dev, || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
+    if wait_host(dev, &mut || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
         == Err(Stall::Timeout)
     {
         warn!("{}: host left {} words in the read FIFO (dma={}, bus={:#04x}, strobes={})",
@@ -4429,7 +4411,8 @@ async fn handle_disk_read(
 /// under an in-flight transfer. Requiring the eject makes the host state its
 /// intent first, and is why START STOP UNIT exists here at all. Refusing with
 /// ABRT is a normal, recoverable answer -- the host learns to eject first.
-/// Poll `cond` until true, spinning on a yield rather than sleeping.
+/// The poll behind [`wait_host`]: `cond` until true, spinning on a yield
+/// rather than sleeping.
 ///
 /// The time driver runs off the SAM3U's 32.768 kHz RTT with a /32 prescaler,
 /// so ~1 ms is the finest sleep available and `Duration::from_micros(100)` is
@@ -4440,17 +4423,61 @@ async fn handle_disk_read(
 /// keep count of the timeout; a host that takes longer than those 400 spins
 /// to deliver a sector -- a PIO write of 256 words does -- paid the tick on
 /// every sector, and 64-sector writes still cost 0.8 ms/sector. The timeout
-/// is now measured, not counted, so nothing here ever sleeps. Returns false
-/// if it gave up.
-async fn poll_until(mut cond: impl FnMut() -> bool, timeout_ms: u32) -> bool {
-    let start = Instant::now();
-    while !cond() {
-        if (Instant::now() - start).as_millis() >= timeout_ms as u64 {
-            return false;
+/// is now measured, not counted, so nothing here ever sleeps.
+///
+/// One poll is one round: `cond` (and the exits) checked, then the
+/// timeout; a yield (wake at once, `Pending`) when neither ends the wait. Kept
+/// as a hand-written future with one non-inlined `poll` shared by every
+/// caller: as an `async fn` taking a closure it was copied into each caller's
+/// state machine, about 300 bytes a site.
+struct WaitHost<'a> {
+    dev: &'a IdeDevice,
+    peer: IdeDevice,
+    cond: &'a mut dyn FnMut() -> bool,
+    timeout_ms: u32,
+    /// Taken on the first poll, where the `async fn` took it.
+    start: Option<Instant>,
+}
+
+impl core::future::Future for WaitHost<'_> {
+    type Output = Result<(), Stall>;
+
+    #[inline(never)]
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let s = self.get_mut();
+        let dev = s.dev;
+        let start = *s.start.get_or_insert_with(Instant::now);
+        let mut peer_cmd = false;
+        let mut reset = false;
+        let done = (s.cond)()
+            || { reset = dev.reset_seen(); reset }
+            || dev.aborted()
+            || { peer_cmd = s.peer.command_pending(); peer_cmd };
+        if !done && (Instant::now() - start).as_millis() < s.timeout_ms as u64 {
+            // `yield_now`: run again on the executor's next pass.
+            cx.waker().wake_by_ref();
+            return core::task::Poll::Pending;
         }
-        yield_now().await;
+        core::task::Poll::Ready(if reset {
+            // The FPGA already dropped the transfer (FIFOs, DMA mode, status);
+            // the flag stays set for the command loop to log and clear.
+            warn!("{}: host reset the bus mid-transfer, abandoning this command",
+                  if dev.is_primary() { "primary" } else { "secondary" });
+            Err(Stall::Reset)
+        } else if dev.aborted() {
+            info!("{}: host wrote a new command mid-transfer, abandoning this one",
+                  if dev.is_primary() { "primary" } else { "secondary" });
+            Err(Stall::OwnCommand)
+        } else if peer_cmd {
+            warn!("{}: host issued a command to the other device mid-transfer, abandoning this one",
+                  if dev.is_primary() { "primary" } else { "secondary" });
+            Err(Stall::PeerCommand)
+        } else if done {
+            Ok(())
+        } else {
+            Err(Stall::Timeout)
+        })
     }
-    true
 }
 
 /// Why a host-paced wait gave up.
@@ -4466,7 +4493,7 @@ enum Stall {
     OwnCommand,
 }
 
-/// `poll_until` for the waits where the host owes us something -- draining a
+/// A poll for the waits where the host owes us something -- draining a
 /// FIFO, filling one -- with one extra exit: the host issuing a command to
 /// the other device. ATA's non-overlapped protocol forbids that until this
 /// command has completed, and no Dreamcast host does it (KOS serialises the
@@ -4485,38 +4512,8 @@ enum Stall {
 /// one. The caller must then post nothing (see `IdeDevice::aborted`); the
 /// command stays latched and the sweep serves it next. Every caller runs
 /// after its own `ack_command`, or the command being served would count.
-async fn wait_host(dev: &IdeDevice, mut cond: impl FnMut() -> bool, timeout_ms: u32)
-    -> Result<(), Stall>
-{
-    let peer = dev.peer();
-    let mut peer_cmd = false;
-    let mut reset = false;
-    let done = poll_until(
-        || cond()
-            || { reset = dev.reset_seen(); reset }
-            || dev.aborted()
-            || { peer_cmd = peer.command_pending(); peer_cmd },
-        timeout_ms,
-    ).await;
-    if reset {
-        // The FPGA already dropped the transfer (FIFOs, DMA mode, status);
-        // the flag stays set for the command loop to log and clear.
-        warn!("{}: host reset the bus mid-transfer, abandoning this command",
-              if dev.is_primary() { "primary" } else { "secondary" });
-        Err(Stall::Reset)
-    } else if dev.aborted() {
-        info!("{}: host wrote a new command mid-transfer, abandoning this one",
-              if dev.is_primary() { "primary" } else { "secondary" });
-        Err(Stall::OwnCommand)
-    } else if peer_cmd {
-        warn!("{}: host issued a command to the other device mid-transfer, abandoning this one",
-              if dev.is_primary() { "primary" } else { "secondary" });
-        Err(Stall::PeerCommand)
-    } else if done {
-        Ok(())
-    } else {
-        Err(Stall::Timeout)
-    }
+fn wait_host<'a>(dev: &'a IdeDevice, cond: &'a mut dyn FnMut() -> bool, timeout_ms: u32) -> WaitHost<'a> {
+    WaitHost { dev, peer: dev.peer(), cond, timeout_ms, start: None }
 }
 
 /// The two firmware-update steps that normal firmware handles; everything
@@ -4526,9 +4523,7 @@ fn handle_fw_command(dev: &IdeDevice, label: &'static str, snap: &CommandSnapsho
 
     if write_session_active() {
         warn!("{}: firmware update refused during a write session", label);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
 
@@ -4549,11 +4544,9 @@ fn handle_fw_command(dev: &IdeDevice, label: &'static str, snap: &CommandSnapsho
     }
 
     if crate::fwupdate::handle(snap.features, key, label) {
-        dev.set_error(0);
-        dev.set_status_intrq(STATUS_IDLE);
+        dev.error_status_intrq(0, STATUS_IDLE);
     } else {
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
+        dev.error_status_intrq(ERR_ABRT, STATUS_IDLE_ERR);
     }
     dev.ack_command();
 }
@@ -4572,9 +4565,7 @@ async fn handle_disk_write(
     if media_present() {
         warn!("{}: disk write refused -- eject the GD-ROM first", label);
         wsession().write_refused(req_lba, count);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
     // The host is using the card: from here the empty drive is an eject, and
@@ -4583,9 +4574,7 @@ async fn handle_disk_write(
     if snap.device & 0x40 == 0 {
         warn!("{}: disk write in CHS mode, refusing", label);
         wsession().write_refused(req_lba, count);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
     // The card is addressed in 32-bit blocks, so a 48-bit LBA above that is
@@ -4595,9 +4584,7 @@ async fn handle_disk_write(
     let Ok(lba) = u32::try_from(snap.lba(ext)) else {
         warn!("{}: disk write at LBA {} beyond 32-bit block addressing", label, snap.lba(ext));
         wsession().write_refused(req_lba, count);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     };
 
@@ -4605,18 +4592,14 @@ async fn handle_disk_write(
     if total == 0 || lba.saturating_add(count) > total {
         warn!("{}: disk write {} sectors at LBA {} past end ({})", label, count, lba, total);
         wsession().write_refused(lba, count);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
     // F7 (inside a write session, below the first partition) and F8 (the
     // checksum restarts here).
     if !wsession().write_begin(lba, count) {
         warn!("{}: disk write {} sectors at LBA {} refused -- below the first partition", label, count, lba);
-        dev.set_error(ERR_ABRT);
-        dev.set_status_intrq(STATUS_IDLE_ERR);
-        dev.ack_command();
+        dev.finish_cmd(ERR_ABRT, STATUS_IDLE_ERR);
         return;
     }
     info!("{}: disk write LBA={} count={} dma={}", label, lba, count, dma);
@@ -4697,7 +4680,7 @@ async fn handle_disk_write(
                 dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
             }
 
-            if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
+            if let Err(why) = wait_host(dev, &mut || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
                 if why == Stall::Timeout {
                     // Sample what the FPGA holds while the host is polling. If
                     // this shows 0x58 while the DC reads 0xd8 off the bus, the
@@ -4790,7 +4773,7 @@ async fn handle_disk_write(
 /// IDENTIFY DEVICE need the same ending without the packet-protocol byte
 /// count / interrupt-reason bookkeeping.
 async fn finish_pio_in(dev: &IdeDevice, packet: bool) {
-    if wait_host(dev, || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
+    if wait_host(dev, &mut || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
         == Err(Stall::Timeout)
     {
         warn!("finish_pio_in: host never drained FIFO, abandoning");
