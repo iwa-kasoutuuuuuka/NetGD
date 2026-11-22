@@ -336,7 +336,18 @@ typedef struct {
     int mount_ua_asc;        /* ASC of the UNIT ATTENTION a 52 82 leaves (0 = 0x29) */
     int ua_asc;
     int audio_only_folder;   /* this folder holds an audio-only image (2 audio tracks, no data track) */
+    /* seq 21 head model: REQ_STAT / GET_SCD(1) report `head`; a multi-sector read leaves it at its end, a 1-sector
+     * read does not move it, a CHECK read leaves it at the start (one possible stock rule, to test the record) */
+    int head_model;
+    uint32_t head;
+    int head_cmds[256];      /* commands seen per opcode */
 } fake;
+
+static int f_trk(const fake *f, uint32_t fad)
+{
+    if (f->mounted == f->audio_only_folder) return fad >= 752 ? 2 : 1;
+    return fad >= (f->toc_fad ? f->toc_fad : 45150) ? 3 : 1;
+}
 
 /* The raw 2352-byte Mode 1 sector the fake returns for flags 0x10: sync, header, mode 1, user data, zeroed EDC/ECC */
 static void raw_sector(uint32_t fad, uint8_t out[2352])
@@ -357,6 +368,7 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     uint32_t len = 0, i;
     memset(r, 0, sizeof(*r));
     f->cmds++;
+    f->head_cmds[cdb[0]]++;
     if (!wl_check_cfg(cdb, f->sw_enabled, f->cdflags)) f->sent_bad++;
     if (f->quiet_us && f->n_mounts && !(cdb[0] == 0x52 && cdb[1] == 0x82) && f->now - f->mount_at < f->quiet_us)
         f->quiet_violations++;
@@ -374,6 +386,7 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         f->mounts[f->n_mounts++] = n;
         f->mounted = n;
         f->mount_at = f->now;
+        f->head = 150;
         f->ua = 1;
         f->ua_asc = f->mount_ua_asc ? f->mount_ua_asc : 0x29;
         f->ready_at = f->now + 300000;          /* 300 ms to remount */
@@ -397,7 +410,13 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     }
     switch (cdb[0]) {
     case 0x00: break;
-    case 0x10: len = 10; d[0] = 2; d[2] = 0x41; break;
+    case 0x10:
+        len = 10; d[0] = 2; d[2] = 0x41;
+        if (f->head_model) {
+            d[0] = 1; d[1] = 0x8f; d[3] = (uint8_t)f_trk(f, f->head); d[4] = 1;
+            d[5] = (uint8_t)(f->head >> 16); d[6] = (uint8_t)(f->head >> 8); d[7] = (uint8_t)f->head;
+        }
+        break;
     case 0x11: len = cdb[4]; if (cdb[2] == 18) memcpy(d, "Rev 6.42", 8); break;
     case 0x14:
         len = 408;
@@ -427,7 +446,13 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         len = 6; d[0] = 1; d[2] = (uint8_t)(cdb[2] + 1);
         { uint32_t fad = cdb[2] == 2 ? 45150 : 150; d[3] = (uint8_t)(fad >> 16); d[4] = (uint8_t)(fad >> 8); d[5] = (uint8_t)fad; }
         break;
-    case 0x40: len = cdb[1] ? 14 : 100; d[1] = 0x15; break;
+    case 0x40:
+        len = cdb[1] ? 14 : 100; d[1] = 0x15;
+        if (f->head_model && cdb[1] == 1) {
+            d[3] = 14; d[4] = 0x41; d[5] = (uint8_t)f_trk(f, f->head); d[6] = 1;
+            d[11] = (uint8_t)(f->head >> 16); d[12] = (uint8_t)(f->head >> 8); d[13] = (uint8_t)f->head;
+        }
+        break;
     case 0x52: len = 8; d[6] = 0x20; d[7] = 0x05; break;
     case 0x30: {
         uint32_t fad = ((uint32_t)cdb[2] << 16) | ((uint32_t)cdb[3] << 8) | cdb[4];
@@ -441,8 +466,10 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
             if (cdb[1] & 0x0E) {
                 r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50;
                 f->pend_sk = 5; f->pend_asc = 0x64; f->pend_ascq = 0;
+                if (f->head_model) f->head = fad;
                 return r->rc;
             }
+            if (f->head_model && cnt > 1) f->head = fad + cnt;
             for (s = 0; s < cnt * 2352 && s < cap; s++) buf[s] = (uint8_t)(fad + s);
             r->total = cnt * 2352; r->stored = r->total < cap ? r->total : cap;
             return r->rc;
@@ -451,8 +478,10 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
             (cdb[1] != 0x24 && f->cd_no_flags)) {
             r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50;
             f->pend_sk = 5; f->pend_asc = (cdb[1] == 0x28) ? 0x64 : 0x24; f->pend_ascq = 0;
+            if (f->head_model) f->head = fad;
             return r->rc;
         }
+        if (f->head_model && cnt > 1) f->head = fad + cnt;
         for (s = 0; s < cnt; s++) {
             uint8_t raw[2352];
             if (ssz == 2352) raw_sector(fad + s, raw);
@@ -1274,6 +1303,132 @@ static void test_r148_example_cfg(void)
     CHECK(f.now < 120ull * 1000000u);        /* about a minute and a half of drive time in the fake */
 }
 
+/* seq 21: the head-position cases */
+static const char *line_of(const char *needle)
+{
+    static char buf[REC_LINE_MAX];
+    const char *p = find_line(needle), *e;
+    if (!p) return "";
+    e = strchr(p, '\n');
+    memcpy(buf, p, (size_t)(e - p)); buf[e - p] = 0;
+    return buf;
+}
+
+static void test_runner_seq21(void)
+{
+    static fake f;
+    gp_config c;
+    const char *l;
+    char want[200];
+    uint32_t d = 45150, e = 550174, len = e - d;   /* the fake TOC lead-out 0x08651e */
+    gp_config_defaults(&c);
+    CHECK(!c.head_probe && c.head_flags == 0x20 && c.n_head_counts == 4 && c.head_counts[3] == 16);
+    CHECK(c.head_late_ms == 300 && c.head_idle_ms == 2000 && c.head_scd == 1);
+    gp_config_parse(&c, "head_probe=on\nhead_flags=0x29\nhead_counts=1, 3\nhead_late_ms=99999\nhead_idle_ms=0\nhead_scd=off\n");
+    CHECK(c.head_probe && c.head_flags == 0x28 && c.n_head_counts == 2 && c.head_counts[1] == 3 && c.head_late_ms == 5000);
+    CHECK(c.head_idle_ms == 0 && !c.head_scd && c.unknown_keys == 0);
+    gp_config_parse(&c, "head_counts=1,17\nhead_counts=1,2,3,4,5,6,7\nhead_counts=0\nhead_probe=maybe\n");
+    CHECK(c.n_head_counts == 2 && c.unknown_keys == 4);
+
+    /* GDI-like image 3 + audio-only 11, with the head model and a type-checking drive */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.cd_typecheck = 1;
+    f.audio_only_folder = 11;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,11\nreturn_to=2\nhead_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(f.head_cmds[0x20] == 0 && f.head_cmds[0x21] == 0 && f.head_cmds[0x22] == 0 && f.head_cmds[0x12] == 0);
+    CHECK(find_line("img=3 probe=HD_START data_fad=45150 data_end=550174 audio_fad=0 audio_end=0 data_cases=1 audio_cases=0"));
+    l = line_of("img=3 probe=HD_BASE_POS ");
+    CHECK(strstr(l, "stat_rc=ok st=pause trk=3 idx=1 pos=45157 moved=- scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=45157"));
+    CHECK(strstr(l, "late_rc=ok late_st=pause late_pos=45157 stat=018f41030100b0650000 scd=0015000e410301"));
+    snprintf(want, sizeof(want), "img=3 probe=HD_R1 flags=0x20 fad=%lu count=1 ssz=2048 sense=none cdb=3020", (unsigned long)(d + len / 16));
+    CHECK(find_line(want));
+    CHECK(strstr(line_of("img=3 probe=HD_R1_POS "), "pos=45157 d_start=") && strstr(line_of("img=3 probe=HD_R1_POS "), " moved=0 "));
+    snprintf(want, sizeof(want), "img=3 probe=HD_R7 flags=0x20 fad=%lu count=7 ssz=2048", (unsigned long)(d + len * 3 / 16));
+    CHECK(find_line(want));
+    CHECK(strstr(line_of("img=3 probe=HD_R7_POS "), "d_start=+7 d_end=+0 moved=1"));
+    CHECK(strstr(line_of("img=3 probe=HD_R16_POS "), "d_start=+16 d_end=+0 moved=1"));
+    snprintf(want, sizeof(want), "img=3 probe=HD_HIT flags=0x20 fad=%lu count=1", (unsigned long)(d + len * 4 / 16 + 8));
+    CHECK(find_line(want) && strstr(line_of("img=3 probe=HD_HIT_POS "), "d_start=+8 d_end=+7 moved=0"));
+    snprintf(want, sizeof(want), "img=3 probe=HD_END1 flags=0x20 fad=%lu count=1", (unsigned long)(e - 2));
+    CHECK(find_line(want) && find_line("img=3 probe=HD_END7 flags=0x20 fad=550134 count=7"));
+    CHECK(find_line("img=3 probe=HD_START7 flags=0x20 fad=45150 count=7") && strstr(line_of("img=3 probe=HD_START7_POS "), "pos=45157 d_start=+7"));
+    l = line_of("img=3 probe=HD_CHK28 ");
+    CHECK(strstr(l, "flags=0x28") && strstr(l, "count=7 ssz=- sense=5/64/00") && strstr(l, "rc=check"));
+    CHECK(strstr(line_of("img=3 probe=HD_CHK28_POS "), "d_start=+0 d_end=-7 moved=1"));
+    CHECK(strstr(line_of("img=3 probe=HD_CHK24 "), "ssz=2048 sense=none") && strstr(line_of("img=3 probe=HD_CHK24_POS "), "d_end=+0"));
+    CHECK(strstr(line_of("img=3 probe=HD_TUR "), "cdb=000000000000000000000000 rc=ok") && strstr(line_of("img=3 probe=HD_TUR_POS "), "moved=0"));
+    CHECK(strstr(line_of("img=3 probe=HD_TOC "), "cdb=140000019800") && strstr(line_of("img=3 probe=HD_TOC_POS "), "moved=0"));
+    CHECK(strstr(line_of("img=3 probe=HD_SES "), "cdb=150001000600") && strstr(line_of("img=3 probe=HD_SES_POS "), "moved=0"));
+    CHECK(!find_line("img=3 probe=HD_AUD"));
+    CHECK(strstr(line_of("img=3 probe=HD_IDLE_POS "), "idle_ms=2000 stat_rc=ok st=pause"));
+    CHECK(find_line("img=3 probe=HD_TUR ") > find_line("img=3 probe=HD_CHK28_POS") && find_line("img=3 probe=HD_IDLE_POS") > find_line("img=3 probe=HD_SES_POS"));
+    /* audio-only image: no data cases, audio reads return 2352-byte sectors */
+    CHECK(find_line("img=11 probe=HD_START data_fad=0 data_end=0 audio_fad=150 audio_end=752 data_cases=0 audio_cases=1"));
+    CHECK(!find_line("img=11 probe=HD_R1") && !find_line("img=11 probe=HD_CHK"));
+    CHECK(find_line("img=11 probe=HD_AUD1 flags=0x20 fad=300 count=1 ssz=2352 sense=none"));
+    CHECK(find_line("img=11 probe=HD_AUD7 flags=0x20 fad=451 count=7 ssz=2352 sense=none"));
+    CHECK(strstr(line_of("img=11 probe=HD_AUD7_POS "), "trk=1 idx=1 pos=458 d_start=+7 d_end=+0 moved=1"));
+    CHECK(!find_line("img=2 probe=HD_") && !find_line("img=0 probe=HD_"));
+    CHECK(count_of("probe=HD_START ") == 2 && find_line("probe=END abort=0"));
+
+    /* a drive whose head never moves (no head model, NetGD-like answer): everything moved=0; no scd / late fields */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\nhead_probe=on\nhead_scd=off\nhead_late_ms=0\nhead_idle_ms=0\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(find_line("img=0 probe=HD_START data_fad=45150"));
+    CHECK(count_of("moved=1") == 0 && count_of("moved=0") >= 14 && !find_line("scd_rc=") && !find_line("late_rc=") && !find_line("HD_IDLE"));
+    CHECK(strstr(line_of("img=0 probe=HD_BASE_POS "), "stat_rc=ok st=standby trk=0 idx=0 pos=0 moved=- stat=0200410000"));
+
+    /* head_probe off: no HD_ lines */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "throughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0 && !find_line("probe=HD_"));
+
+    /* a flags value outside the whitelist is refused and recorded; nothing is sent */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "head_probe=on\nhead_flags=0x30\nhead_idle_ms=0\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0 && f.cd_reads[0x30] == 0);
+    CHECK(strstr(line_of("img=0 probe=HD_R1 "), "rc=refused"));
+
+    /* the drive stops answering: abort, no HD_ cases, the run ends */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1; f.stuck = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "head_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 1 && find_line("probe=END abort=1") && !find_line("probe=HD_START"));
+}
+
+/* The shipped seq 21 run configuration, end to end against the fake drive */
+static void test_seq21_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    FILE *in = fopen("../gdprobe.cfg.seq21.example", "rb");
+    CHECK(in != NULL);
+    if (!in) return;
+    n = fread(text, 1, sizeof(text) - 1, in);
+    fclose(in);
+    text[n] = 0;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, text);
+    CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == 21);
+    CHECK(c.do_switch && c.n_images == 4 && c.images[0] == 4 && c.images[1] == 3 && c.images[2] == 10 && c.images[3] == 11);
+    CHECK(c.return_to == 2 && c.head_probe && c.head_flags == 0x20 && c.n_head_counts == 4 && c.head_scd);
+    CHECK(!c.swap_regpoll && !c.swap_devreset && !c.swap_reswitch && !c.devreset_only && !c.devreset_cmd);
+    CHECK(!c.do_cdread_flags && !c.do_throughput && !c.do_seek && !c.do_identify && c.cdread_flags == 0x20);
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.audio_only_folder = 11; f.passive = 1; f.head_model = 1;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 0 && f.n_mounts == 4 + 1);
+    CHECK(count_of("probe=HD_START ") == 4 && count_of("probe=HD_IDLE_POS ") == 4 && count_of("probe=HD_CHK28_POS ") == 3);
+    CHECK(count_of("probe=HD_AUD7_POS ") == 1 && find_line("probe=END abort=0"));
+    CHECK(f.now < 120ull * 1000000u);
+}
+
 int main(void)
 {
     g_rec = malloc(8u << 20);
@@ -1300,6 +1455,8 @@ int main(void)
     test_seq20_example_cfg();
     test_runner_audio_only();
     test_r148_example_cfg();
+    test_runner_seq21();
+    test_seq21_example_cfg();
     printf("OK: %d checks passed\n", g_checks);
     return 0;
 }

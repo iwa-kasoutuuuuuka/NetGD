@@ -28,6 +28,15 @@ void gp_config_defaults(gp_config *c)
     c->devreset_cmd_ms[1] = 50;
     c->devreset_cmd_ms[2] = 100;
     c->n_devreset_cmd = 3;
+    c->head_flags = 0x20;
+    c->head_counts[0] = 1;
+    c->head_counts[1] = 2;
+    c->head_counts[2] = 7;
+    c->head_counts[3] = 16;
+    c->n_head_counts = 4;
+    c->head_late_ms = 300;
+    c->head_idle_ms = 2000;
+    c->head_scd = 1;
 }
 
 static int parse_bool(const char *v, int *out)
@@ -81,11 +90,11 @@ static void trim(char *s)
     while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
 }
 
-/* "50,200": up to GP_MAX_DEVRESET delays of 0..5000 ms. Any bad token rejects the whole value (the
- * previous list stays). Returns 1 if parsed. */
-static int parse_delays(int *dst, int *n_dst, char *v)
+/* "50,200": up to max_n numbers in lo..hi. Any bad token rejects the whole value (the previous list stays).
+ * Returns 1 if parsed. */
+static int parse_list(int *dst, int *n_dst, char *v, int max_n, long lo, long hi)
 {
-    int tmp[GP_MAX_DEVRESET], n = 0;
+    int tmp[16], n = 0;
     char *tok = v, *next;
     while (tok) {
         int ok;
@@ -95,7 +104,7 @@ static int parse_delays(int *dst, int *n_dst, char *v)
         while (isspace((unsigned char)*tok)) tok++;
         trim(tok);
         d = parse_num(tok, &ok);
-        if (!ok || d < 0 || d > 5000 || n >= GP_MAX_DEVRESET)
+        if (!ok || d < lo || d > hi || n >= max_n || n >= 16)
             return 0;
         tmp[n++] = (int)d;
         tok = next;
@@ -106,6 +115,9 @@ static int parse_delays(int *dst, int *n_dst, char *v)
     *n_dst = n;
     return 1;
 }
+
+/* delay lists: up to GP_MAX_DEVRESET values of 0..5000 ms */
+static int parse_delays(int *dst, int *n_dst, char *v) { return parse_list(dst, n_dst, v, GP_MAX_DEVRESET, 0, 5000); }
 
 static void apply(gp_config *c, const char *k, char *v)
 {
@@ -145,6 +157,12 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "devreset_only_wait_ms")) { n = parse_num(v, &ok); if (ok) c->devreset_only_wait_ms = (uint32_t)clampi(n, 100, 10000);
     } else if (!strcmp(k, "devreset_cmd")) { if (parse_bool(v, &b)) c->devreset_cmd = b; else ok = 0;
     } else if (!strcmp(k, "devreset_cmd_ms")) { ok = parse_delays(c->devreset_cmd_ms, &c->n_devreset_cmd, v);
+    } else if (!strcmp(k, "head_probe")) { if (parse_bool(v, &b)) c->head_probe = b; else ok = 0;
+    } else if (!strcmp(k, "head_flags")) { n = parse_num(v, &ok); if (ok) c->head_flags = (uint8_t)(n & 0xFE);
+    } else if (!strcmp(k, "head_counts")) { ok = parse_list(c->head_counts, &c->n_head_counts, v, GP_MAX_HEADCNT, 1, 16);
+    } else if (!strcmp(k, "head_late_ms")) { n = parse_num(v, &ok); if (ok) c->head_late_ms = (uint32_t)clampi(n, 0, 5000);
+    } else if (!strcmp(k, "head_idle_ms")) { n = parse_num(v, &ok); if (ok) c->head_idle_ms = (uint32_t)clampi(n, 0, 10000);
+    } else if (!strcmp(k, "head_scd")) { if (parse_bool(v, &b)) c->head_scd = b; else ok = 0;
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

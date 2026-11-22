@@ -1,0 +1,36 @@
+# gdprobe run configuration for seq 21: where does the STOCK GDEMU put the reported head position (REQ_STAT bytes 3-7,
+# GET_SCD format 1) after CD_READs of 1..16 sectors, a type-CHECK read, TUR / GET_TOC / REQ_SES, audio reads and an
+# idle wait? (NetGD never moves it; stock record 17 showed it moving.) Copy to <host folder>/gdprobe.cfg.
+# See README_ja.md, "seq 21 の実行計画".
+
+label=stock
+seq=21
+
+# 4 = Mode 2 Form 1 CDI, 3 = GDI, 10 = Mode 1 CDI, 11 = audio-only CDI. Back to the dcload-ip disc at the end.
+switch=on
+images=4,3,10,11
+return_to=2
+switch_timeout_ms=5000
+
+# the swap-window / reset probes: all off
+swap_regpoll=off
+swap_devreset=off
+swap_reswitch=off
+devreset_only=off
+devreset_cmd=off
+
+# the battery's IP_READ (7 sectors at the data track start) with 0x20, so it is not a CHECK on the CDIs;
+# no flag battery, throughput or seek (they would only move the head before the cases)
+cdread_flags=0x20
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off
+
+# the head-position cases after each image's battery (HD_* lines)
+head_probe=on
+head_flags=0x20
+head_counts=1,2,7,16
+head_late_ms=300
+head_idle_ms=2000
+head_scd=on

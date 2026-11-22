@@ -19,6 +19,8 @@ typedef struct {
     uint32_t toc_ip;     /* fallback: first data track of the last valid TOC area */
     int toc_any;         /* some TOC area listed at least one valid track */
     uint32_t toc_audio;  /* first audio track of the first TOC area that has one (no-data-track images) */
+    uint32_t toc_ip_end;     /* seq 21: start of the track after toc_ip in that area, else its lead-out (0 = unknown) */
+    uint32_t toc_audio_end;  /* seq 21: the same for toc_audio */
     uint32_t leadout;
     char line[REC_LINE_MAX];
     char extra[160];
@@ -157,6 +159,22 @@ static void cdb_mount(uint8_t c[12], int n)
 
 static uint32_t fad3(const uint8_t *p) { return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2]; }
 
+/* seq 21: end (exclusive) of TOC entry t = the start of the next valid track after it, else the area lead-out */
+static uint32_t toc_track_end(const uint8_t *toc, int t, uint32_t area_lo)
+{
+    uint32_t f = fad3(toc + 4 * t + 1);
+    int u;
+    for (u = t + 1; u < 99; u++) {
+        const uint8_t *e = toc + 4 * u;
+        uint32_t g = fad3(e + 1);
+        if (e[0] == 0xFF || g < 150 || g >= 0x00F00000)
+            continue;
+        if (g > f)
+            return g;
+    }
+    return area_lo > f ? area_lo : 0;
+}
+
 /* Hash each whole sector the drive returned. ssz = total / count (2048 for the
  * cooked data area, 2352 if the drive gave raw sectors); compare.py knows both. */
 static void hash_sectors(runner *r, uint32_t fad, uint32_t count, const gd_result *res)
@@ -268,9 +286,9 @@ static void battery_info(runner *r, int ready)
         snprintf(nm, sizeof(nm), "GET_TOC_%d", s);
         do_cmd(r, nm, NULL, c, 408, r->cfg->timeout_ms, 1, &res);
         if (res.rc == GD_OK && res.stored >= 408) {
-            uint32_t lo = fad3(r->buf + 405);
+            uint32_t lo = fad3(r->buf + 405), area_lo = 0;
             if (r->buf[404] != 0xFF && lo && lo != 0xFFFFFF)
-                r->leadout = lo;
+                r->leadout = area_lo = lo;
             {   /* first data track (control bit 2) of this area, for the IP_READ fallback */
                 int t, found = 0;
                 for (t = 0; t < 99; t++) {
@@ -280,10 +298,13 @@ static void battery_info(runner *r, int ready)
                         continue;
                     r->toc_any = 1;
                     if (!(e[0] & 0x40)) {
-                        if (!r->toc_audio)
+                        if (!r->toc_audio) {
                             r->toc_audio = f;
+                            r->toc_audio_end = toc_track_end(r->buf, t, area_lo);
+                        }
                     } else if (!found) {
                         r->toc_ip = f;
+                        r->toc_ip_end = toc_track_end(r->buf, t, area_lo);
                         found = 1;
                     }
                 }
@@ -406,13 +427,15 @@ static void battery_reads(runner *r)
 
 /* full = 0: information commands only, no reads (the image as mounted at start,
  * or an image that never became READY). */
-static void battery(runner *r, int full)
+static int battery(runner *r, int full)
 {
     int ready;
     r->ip_fad = 0;
     r->toc_ip = 0;
     r->toc_any = 0;
     r->toc_audio = 0;
+    r->toc_ip_end = 0;
+    r->toc_audio_end = 0;
     r->leadout = 0;
     ready = warmup(r);
     event(r, "WARMUP", "ready=%d", ready);
@@ -421,6 +444,7 @@ static void battery(runner *r, int full)
     if (full && ready && !r->abort)
         battery_reads(r);
     sync_out(r);
+    return ready;
 }
 
 /* ---- R148: the swap window without commands ----------------------------- */
@@ -828,6 +852,257 @@ static void devreset_cmd_run(runner *r, int n, int delay)
     sync_out(r);
 }
 
+/* ---- seq 21: where does the drive put the head after a command? ----------- */
+
+/* REQ_STAT byte 0 low nibble (SPI spec 6.1) */
+static const char *st_name(int s)
+{
+    static const char *const n[10] = { "busy", "pause", "standby", "play", "seek", "scan", "open", "nodisc", "retry", "error" };
+    return (s >= 0 && s < 10) ? n[s] : NULL;
+}
+
+static void fmt_st(char *out, size_t cap, uint8_t b0)
+{
+    const char *nm = st_name(b0 & 0x0F);
+    if (nm)
+        snprintf(out, cap, "%s", nm);
+    else
+        snprintf(out, cap, "0x%02x", b0);
+}
+
+/* One silent REQ_STAT (10 bytes) into out. 1 = ok. */
+static int hp_req_stat(runner *r, uint8_t out[10], int *rc)
+{
+    uint8_t c[12];
+    gd_result res;
+    cdb_simple(c, 0x10, 0, 0, 10);
+    send_cmd(r, c, 10, r->cfg->timeout_ms, &res);
+    *rc = res.rc;
+    if (res.rc == GD_OK && res.stored >= 10) {
+        memcpy(out, r->buf, 10);
+        return 1;
+    }
+    return 0;
+}
+
+typedef struct {
+    int have_prev;
+    uint32_t prev;       /* pos of the previous HD_*_POS line */
+    int abort_noted;
+} hp_state;
+
+static void hp_note_abort(runner *r, hp_state *s)
+{
+    if (r->abort && !s->abort_noted) {
+        s->abort_noted = 1;
+        event(r, "ABORT", "reason=drive-not-answering");
+        say(r, "drive stopped answering: giving up");
+    }
+}
+
+/* After a case: REQ_STAT at once, GET_SCD(1) (head_scd), REQ_STAT again head_late_ms later. One line:
+ *   img=3 probe=HD_R7_POS stat_rc=ok st=pause trk=3 idx=1 pos=76657 d_start=+7 d_end=+0 moved=1
+ *         scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=76657 late_rc=ok late_st=pause late_pos=76657 stat=.. scd=..
+ * d_start / d_end (reads only) = pos - first FAD read / pos - (first FAD + count); moved = pos differs from the
+ * previous HD_*_POS line (- for the first). Fields of a failed query are "-". */
+static void hp_pos(runner *r, hp_state *s, const char *label, int is_read, uint32_t fad, uint32_t count,
+                   const char *pre)
+{
+    uint8_t st[10], late[10], scd[14];
+    int st_rc = GD_REFUSED, late_rc = GD_REFUSED, scd_rc = GD_REFUSED;
+    int st_ok, late_ok = 0, scd_ok = 0;
+    char f[600], nm[40], sn[16], hx[40];
+    size_t n = 0;
+    uint32_t pos = 0;
+
+    if (r->abort)
+        return;
+    st_ok = hp_req_stat(r, st, &st_rc);
+    if (r->cfg->head_scd && !r->abort) {
+        uint8_t c[12];
+        gd_result res;
+        cdb_be16(c, 0x40, 1, 14);
+        send_cmd(r, c, 14, r->cfg->timeout_ms, &res);
+        scd_rc = res.rc;
+        if (res.rc == GD_OK && res.stored >= 14) {
+            memcpy(scd, r->buf, 14);
+            scd_ok = 1;
+        }
+    }
+    if (r->cfg->head_late_ms && !r->abort) {
+        r->ops->sleep_ms(r->ops->ctx, r->cfg->head_late_ms);
+        late_ok = hp_req_stat(r, late, &late_rc);
+    }
+
+#define HP_ADD(...) do { if (n < sizeof(f)) n += (size_t)snprintf(f + n, sizeof(f) - n, __VA_ARGS__); } while (0)
+    if (pre && *pre)
+        HP_ADD("%s ", pre);
+    HP_ADD("stat_rc=%s", rec_rc_name(st_rc));
+    if (st_ok) {
+        pos = fad3(st + 5);
+        fmt_st(sn, sizeof(sn), st[0]);
+        HP_ADD(" st=%s trk=%u idx=%u pos=%lu", sn, st[3], st[4], (unsigned long)pos);
+        if (is_read)
+            HP_ADD(" d_start=%+ld d_end=%+ld", (long)pos - (long)fad, (long)pos - (long)(fad + count));
+        if (s->have_prev)
+            HP_ADD(" moved=%d", pos != s->prev);
+        else
+            HP_ADD(" moved=-");
+    } else {
+        HP_ADD(" st=- trk=- idx=- pos=-%s moved=-", is_read ? " d_start=- d_end=-" : "");
+    }
+    if (r->cfg->head_scd) {
+        HP_ADD(" scd_rc=%s", rec_rc_name(scd_rc));
+        if (scd_ok)
+            HP_ADD(" scd_trk=%u scd_idx=%u scd_pos=%lu", scd[5], scd[6], (unsigned long)fad3(scd + 11));
+        else
+            HP_ADD(" scd_trk=- scd_idx=- scd_pos=-");
+    }
+    if (r->cfg->head_late_ms) {
+        HP_ADD(" late_rc=%s", rec_rc_name(late_rc));
+        if (late_ok) {
+            fmt_st(sn, sizeof(sn), late[0]);
+            HP_ADD(" late_st=%s late_pos=%lu", sn, (unsigned long)fad3(late + 5));
+        } else {
+            HP_ADD(" late_st=- late_pos=-");
+        }
+    }
+    if (st_ok) {
+        rec_hex(hx, st, 10);
+        HP_ADD(" stat=%s", hx);
+    }
+    if (scd_ok) {
+        rec_hex(hx, scd, 14);
+        HP_ADD(" scd=%s", hx);
+    }
+#undef HP_ADD
+    if (st_ok) {
+        s->prev = pos;
+        s->have_prev = 1;
+    }
+    snprintf(nm, sizeof(nm), "HD_%s_POS", label);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+    hp_note_abort(r, s);
+}
+
+/* One CD_READ case: the read (sense from REQ_ERROR at once if it is a CHECK), its line, then hp_pos.
+ *   img=3 probe=HD_R7 flags=0x20 fad=76650 count=7 ssz=2048 sense=none cdb=.. rc=ok ... bytes=14336 us=.. */
+static void hp_read(runner *r, hp_state *s, const char *label, uint8_t flags, uint32_t fad, uint32_t count)
+{
+    uint8_t c[12];
+    gd_result res;
+    rec_probe p;
+    char ex[120], sn[24], ssz[16], nm[32];
+    if (r->abort)
+        return;
+    cdb_read(c, flags, fad, count);
+    send_cmd(r, c, BUFSZ, read_timeout(r), &res);
+    strcpy(ssz, "-");
+    strcpy(sn, "none");
+    if (res.rc == GD_OK && res.total && res.total % count == 0)
+        snprintf(ssz, sizeof(ssz), "%lu", (unsigned long)(res.total / count));
+    else if (res.rc == GD_CHECK && !r->abort) {
+        uint8_t sc[12];
+        gd_result sr;
+        cdb_simple(sc, 0x13, 0, 0, 10);
+        send_cmd(r, sc, 10, r->cfg->timeout_ms, &sr);
+        if (sr.rc == GD_OK && sr.stored >= 10)
+            snprintf(sn, sizeof(sn), "%d/%02x/%02x", r->buf[2] & 0x0F, r->buf[8], r->buf[9]);
+    }
+    snprintf(nm, sizeof(nm), "HD_%s", label);
+    snprintf(ex, sizeof(ex), "flags=0x%02x fad=%lu count=%lu ssz=%s sense=%s", flags, (unsigned long)fad,
+             (unsigned long)count, ssz, sn);
+    p.img = r->img; p.name = nm; p.extra = ex; p.cdb = c; p.res = &res; p.data = NULL;
+    out_line(r, rec_probe_line(r->line, sizeof(r->line), &p), 0);
+    hp_note_abort(r, s);
+    hp_pos(r, s, label, 1, fad, count, NULL);
+}
+
+/* A non-read command case (TUR, GET_TOC, REQ_SES): its normal line, then hp_pos. */
+static void hp_cmd(runner *r, hp_state *s, const char *label, const uint8_t c[12], uint32_t cap)
+{
+    gd_result res;
+    char nm[32];
+    if (r->abort)
+        return;
+    snprintf(nm, sizeof(nm), "HD_%s", label);
+    send_cmd(r, c, cap, r->cfg->timeout_ms, &res);
+    {
+        rec_probe p;
+        p.img = r->img; p.name = nm; p.extra = NULL; p.cdb = c; p.res = &res; p.data = NULL;
+        out_line(r, rec_probe_line(r->line, sizeof(r->line), &p), 0);
+    }
+    hp_note_abort(r, s);
+    hp_pos(r, s, label, 0, 0, 0, NULL);
+}
+
+/* The seq 21 case list, after the image's battery (positions from the battery's TOC):
+ *   BASE                          no command, only the position queries
+ *   R<n>  for n in head_counts    head_flags read of n sectors at D + len*k/16 (k = 1, 2, ...)
+ *   HIT                           1 sector inside the last R<n> range (a re-read, maybe from the buffer)
+ *   MID7 / END7 / END1 / START7   7 sectors at the middle, 7 at E-40, 1 at E-2, 7 at D
+ *   CHK24 / CHK28                 7 sectors with 0x24 / 0x28 at D + len*10/16, *12/16 (one is a type CHECK)
+ *   TUR / TOC / SES               TEST UNIT READY, GET_TOC area 0 (408), REQ_SES session 1 (6)
+ *   AUD1 / AUD7                   head_flags reads of 1 / 7 sectors on the first audio track (1/4, 1/2 in)
+ *   IDLE                          head_idle_ms without a command, then the queries
+ * D..E = first data track of the last TOC area (E = next track or lead-out); data cases need E - D >= 256,
+ * audio cases a track of >= 32 sectors. Every read is FAD addressed, at most 16 sectors, inside one track. */
+static void head_probe(runner *r)
+{
+    hp_state s;
+    uint8_t c[12];
+    char lb[16], f[160];
+    uint32_t d = r->toc_ip, e = r->toc_ip_end, a = r->toc_audio, ae = r->toc_audio_end;
+    uint8_t fl = r->cfg->head_flags;
+    int data_ok, aud_ok, i;
+
+    memset(&s, 0, sizeof(s));
+    if (r->abort)
+        return;
+    data_ok = d && e > d && e - d >= 256;
+    aud_ok = a && ae > a && ae - a >= 32;
+    say(r, "head position probe...");
+    snprintf(f, sizeof(f), "data_fad=%lu data_end=%lu audio_fad=%lu audio_end=%lu data_cases=%d audio_cases=%d",
+             (unsigned long)d, (unsigned long)e, (unsigned long)a, (unsigned long)ae, data_ok, aud_ok);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "HD_START", f), 0);
+
+    hp_pos(r, &s, "BASE", 0, 0, 0, NULL);
+    if (data_ok) {
+        uint32_t len = e - d, last_fad = d, last_n = 1;
+        for (i = 0; i < r->cfg->n_head_counts && !r->abort; i++) {
+            uint32_t n = (uint32_t)r->cfg->head_counts[i];
+            last_fad = d + (uint32_t)(((uint64_t)len * (uint32_t)(i + 1)) / 16u);
+            last_n = n;
+            snprintf(lb, sizeof(lb), "R%lu", (unsigned long)n);
+            hp_read(r, &s, lb, fl, last_fad, n);
+        }
+        hp_read(r, &s, "HIT", fl, last_fad + last_n / 2, 1);
+        hp_read(r, &s, "MID7", fl, d + len / 2, 7);
+        hp_read(r, &s, "END7", fl, e - 40, 7);
+        hp_read(r, &s, "END1", fl, e - 2, 1);
+        hp_read(r, &s, "START7", fl, d, 7);
+        hp_read(r, &s, "CHK24", 0x24, d + (uint32_t)(((uint64_t)len * 10u) / 16u), 7);
+        hp_read(r, &s, "CHK28", 0x28, d + (uint32_t)(((uint64_t)len * 12u) / 16u), 7);
+    }
+    memset(c, 0, 12);
+    hp_cmd(r, &s, "TUR", c, 0);
+    cdb_be16(c, 0x14, 0, 408);
+    hp_cmd(r, &s, "TOC", c, 408);
+    cdb_simple(c, 0x15, 0, 1, 6);
+    hp_cmd(r, &s, "SES", c, 6);
+    if (aud_ok) {
+        uint32_t alen = ae - a;
+        hp_read(r, &s, "AUD1", fl, a + alen / 4, 1);
+        hp_read(r, &s, "AUD7", fl, a + alen / 2, 7);
+    }
+    if (r->cfg->head_idle_ms && !r->abort) {
+        r->ops->sleep_ms(r->ops->ctx, r->cfg->head_idle_ms);
+        snprintf(f, sizeof(f), "idle_ms=%lu", (unsigned long)r->cfg->head_idle_ms);
+        hp_pos(r, &s, "IDLE", 0, 0, 0, f);
+    }
+    sync_out(r);
+}
+
 /* ---- entry --------------------------------------------------------------- */
 
 int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
@@ -860,7 +1135,9 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
             int ready = switch_to(r, n, n, cfg->swap_regpoll, -1, SK_NORMAL);
             snprintf(msg, sizeof(msg), "probing image %d%s...", n, ready ? "" : " (not ready)");
             say(r, msg);
-            battery(r, 1);
+            /* seq 21: the head-position cases, right after the battery (needs a READY image) */
+            if (battery(r, 1) && cfg->head_probe && !r->abort)
+                head_probe(r);
             /* R148: the same image again, once per delay, with a DEVICE RESET inside the window */
             for (j = 0; cfg->swap_devreset && j < cfg->n_devreset && !r->abort; j++)
                 switch_to(r, n, n, 1, cfg->devreset_ms[j], SK_NORMAL);
@@ -878,7 +1155,8 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
     } else {
         r->img = 0;
         say(r, "probing the mounted image...");
-        battery(r, 1);
+        if (battery(r, 1) && cfg->head_probe && !r->abort)
+            head_probe(r);
     }
     event(r, "END", "abort=%d", r->abort);
     sync_out(r);

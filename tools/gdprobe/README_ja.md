@@ -123,6 +123,12 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 | `devreset_only_wait_ms` | 1000 | リセット後の観測時間（100〜10000） |
 | `devreset_cmd` | `off` | **seq 20**。`on` で、各イメージの試験一式のあと、`devreset_cmd_ms` の値ごとに：500 ms 何も送らずに待ち（`DC<ms>_IDLE`）、ATA DEVICE RESET（`DC<ms>_SW_DEVRESET`）、`<ms>` ミリ秒待ってから **TEST UNIT READY**（`DC<ms>_CMD_TUR`：`rc`・`status`・`err`・`sense`・`secnr`・`altst`）、**REQ_STAT**（`DC<ms>_CMD_REQ_STAT`）、**REQ_ERROR**（`DC<ms>_CMD_REQ_ERROR`、保留中のセンス）、そのあと TUR を 10 ms ごとに READY になるまで（最大 2 秒）送り、変化だけを `DC<ms>_CMD_POLL` に、READY までの時間（リセットコマンドから）を `DC<ms>_CMD_RESULT` の `ready_ms` に書く。**リセット中の再検出のあいだ純正がどう答えるか**（NetGD は NOT READY 2/04/01）を見る。DEVICE RESET の許可は他と同じ許可リスト（`switch=on` かつ `swap_devreset` / `devreset_only` / `devreset_cmd` のどれか）。3 回続けてタイムアウトしたら中止。`switch=on` のときだけ |
 | `devreset_cmd_ms` | `10,50,100` | **seq 20**。`devreset_cmd` の、DEVICE RESET から最初の TUR までの待ち（ms）。最大 4 個、0〜5000 |
+| `head_probe` | `off` | **seq 21**。`on` で、各イメージの試験一式のあと（`switch=off` ならマウント中のイメージで）ヘッド位置の試験（下記「seq 21 の実行計画」、`HD_*` 行） |
+| `head_flags` | `0x20` | **seq 21**。普通の読み出しケースの CD_READ バイト1（bit 0 は 0 に強制。許可リストを通らない値は `rc=refused`） |
+| `head_counts` | `1,2,7,16` | **seq 21**。普通の読み出しケースのセクタ数（最大 6 個、1〜16） |
+| `head_late_ms` | 300 | **seq 21**。各ケースの 2 回目の REQ_STAT までの待ち（0 = 送らない、0〜5000） |
+| `head_idle_ms` | 2000 | **seq 21**。最後の `IDLE` ケースの待ち（0 = 省略、0〜10000） |
+| `head_scd` | `on` | **seq 21**。各ケースで GET_SCD 形式 1 も読む |
 
 ### 実行の流れ
 
@@ -417,3 +423,56 @@ KOS の `cdrom_reinit_ex` はセンスキー 2 を「ディスクなし」と扱
 
 安全：新しく送るコマンドは無い（TUR・REQ_STAT・REQ_ERROR・`52 82 n`・ATA DEVICE RESET は既存の許可リスト）。すべて読み取り専用・時間制限つき、3 回続けてタイムアウトしたら中止。
 固まったら Dreamcast の電源を入れ直す。照合は `compare.py`：`ready_ms`・`t_ms`・`polls` などの時間は差分にならず（比の注記だけ）、`rc`・`status`・`err`・`sense`・`secnr`・`altst`・`ready` は差分になる。
+
+## seq 21 の実行計画（読み出しのあと、純正はヘッド位置をどう動かすか）
+
+**状態：用意しただけ。実機では未実行。** Record 17 の再監査で、純正の REQ_STAT が報告するヘッド位置（バイト 3 = トラック、4 = インデックス、5〜7 = FAD）が
+CD_READ のあとで動くことが分かった（NetGD は動かさない）。img=4 では読み出し前 `01 2f 01 01 01 00 00 96`（トラック 1・FAD 150）が、
+あとで FAD 11852（1 セクタ読みの先頭。7 セクタの 0x24 IP_READ はそこで CHECK）、img=3 では 45157 = 45150 + 7（7 セクタ IP_READ の終わり。そのあと 45150 の 1 セクタ読みがあったのに）。
+規則（最後の読み出しの先頭か終わりか、1 セクタと複数セクタの違い、種別 CHECK の読み出しで動くか）を 1 回の実行で読み取れるようにする。
+
+`head_probe=on` のとき、各イメージの試験一式のあと（`switch=off` ならマウント中のイメージで）次のケースを順に実行する。D〜E は最後の TOC 領域の最初のデータトラック
+（E = 次のトラックの開始、無ければリードアウト）、`len` = E − D。読み出しはすべて FAD 指定・16 セクタ以下・1 トラックの中。
+
+| ケース | 送るもの |
+|---|---|
+| `BASE` | 何も送らない（位置の問い合わせだけ。試験一式の IP_READ のあとの位置） |
+| `R<n>`（`head_counts` の各 n） | `head_flags`（既定 0x20）で n セクタを D + len × k / 16（k = 1, 2, …）から |
+| `HIT` | 直前の `R<n>` の範囲の中の 1 セクタ（読み直し。バッファから返るかもしれない） |
+| `MID7` / `END7` / `END1` / `START7` | トラックの中央から 7、E − 40 から 7、E − 2 から 1、D から 7 |
+| `CHK24` / `CHK28` | 0x24 / 0x28 で 7 セクタ（D + len × 10/16、× 12/16）。Mode 1 なら 0x28、Mode 2 なら 0x24 が種別 CHECK になるはず。CHECK ならすぐ REQ_ERROR でセンスを読む |
+| `TUR` / `TOC` / `SES` | TEST UNIT READY、GET_TOC 領域 0（408 バイト）、REQ_SES セッション 1 |
+| `AUD1` / `AUD7` | 最初の音声トラック（長さ 32 以上のとき）の 1/4 から 1 セクタ、1/2 から 7 セクタ（0x20 なら 2352 B/セクタ、R144） |
+| `IDLE` | `head_idle_ms`（既定 2000）何も送らずに待つ |
+
+各ケースのあと：**REQ_STAT をすぐ**、**GET_SCD 形式 1**（`head_scd`）、**`head_late_ms`（既定 300）後にもう一度 REQ_STAT**。記録はケースごとに 2 行
+（命令の行 `HD_<ケース>`、位置の行 `HD_<ケース>_POS`。`BASE`・`IDLE` は位置の行だけ）：
+
+```
+img=3 probe=HD_R7 flags=0x20 fad=139842 count=7 ssz=2048 sense=none cdb=... rc=ok ... bytes=14336 us=...
+img=3 probe=HD_R7_POS stat_rc=ok st=pause trk=3 idx=1 pos=139849 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=139849 late_rc=ok late_st=pause late_pos=139849 stat=018f... scd=0015000e...
+```
+
+- `st` = REQ_STAT バイト 0 の下位ニブル（busy / pause / standby / play / seek / scan / open / nodisc / retry / error）。`trk`・`idx`・`pos` = バイト 3・4・5〜7。
+- `d_start` = pos − 読んだ先頭の FAD、`d_end` = pos − (先頭 + 件数)。**`d_end=+0` なら終わり、`d_start=+0` なら先頭、どちらでもなく `moved=0` なら動いていない。**
+- `moved` = 直前の `_POS` 行の `pos` から変わったか（最初は `-`）。`TUR`・`TOC`・`SES`・`IDLE` で動くかはこれで見る。
+- `scd_*` = GET_SCD 形式 1 のトラック・インデックス・絶対 FAD（バイト 5・6・11〜13）。`late_*` = 遅れて読んだ REQ_STAT（時間とともに先読みで進むか、pause → standby になるか）。
+- `stat=`・`scd=` は生のバイト。問い合わせが失敗したら該当欄は `-`。`HD_START` にトラックの範囲（`data_fad`・`data_end`・`audio_fad`・`audio_end`）と、どのケース群を実行したか。
+
+**読み方の例**：`R1_POS` が `moved=0` で `R2_POS` 以降が `d_end=+0` なら「複数セクタは終わりへ、1 セクタは動かさない」。`CHK28_POS`（GDI）・`CHK24_POS`（CDI Mode 2）が
+`d_start=+0` なら「CHECK でもシークだけは行う」。`HIT_POS` と `R1_POS` の違いで、バッファから返した読み出しの扱いが分かる。
+
+送らないもの：**CD_SEEK（0x21）・CD_PLAY（0x20）・CD_SCAN（0x22）は許可リストに意図的に無い**（`whitelist.c` のコメント）。ピックアップや音声の状態を動かす命令なので、今回も追加していない。
+SEEK の効果は「読み出しで動いた位置」から推定する。**DMA の読み出しは無い**：`gdraw.c` は PIO だけ（FEATURES = 0）で、G1 DMA の転送路を持たない。PIO と DMA で位置の規則が違うかは、この試験では測れない。
+
+準備と実行：
+
+1. SD カードは `02`・`03`・`04`・`10`・`11`（R137・R148 で作った `10` と `11`）。
+2. `gdprobe.cfg.seq21.example` を `host\gdprobe.cfg` にコピー（`label=stock`、`seq=21`、`images=4,3,10,11`、`return_to=2`、`switch_timeout_ms=5000`、他の切替・リセット試験は off、
+   `cdread_flags=0x20`（試験一式の IP_READ を CDI でも CHECK にしない）、`cdread_flags_test=off`・`throughput=off`・`seek=off`、`head_probe=on`、`head_counts=1,2,7,16`、`head_late_ms=300`、`head_idle_ms=2000`、`head_scd=on`）。
+3. `dc_auto.ps1 -Preset <このフォルダ>\profiles\gdprobe.ps1` を 1 回。所要は約 1 分（各イメージ：16 ケース × 約 0.4 秒 + 待ち 2 秒）。
+
+安全：新しく送るコマンドは無い（CD_READ・REQ_STAT・GET_SCD・REQ_ERROR・TUR・GET_TOC・REQ_SES・`52 82 n` は既存の許可リスト）。`head_flags` が許可リストに無い値なら送らずに `rc=refused` と記録する。
+すべて読み取り専用・時間制限つき、3 回続けてタイムアウトしたら中止。照合は `compare.py`（`pos`・`moved`・`d_*`・`st`・`stat` などは差分、`us`・`idle_ms` は時間の注記だけ）。
+
+記録のヘッダには `# config cdread_flags_test=.. seek_span=.. switch_timeout_ms=..` と `# config head_probe=.. head_flags=.. ...` の 2 行が増えた（それ以前の記録には無い。`compare.py` はヘッダを読まない）。

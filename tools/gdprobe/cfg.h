@@ -46,6 +46,18 @@
  *                          wait that many ms, then TEST UNIT READY / REQ_STAT / REQ_ERROR (what does the drive answer while
  *                          it re-detects?), then TUR every 10 ms until READY (max 2 s) (DC<ms>_* lines)
  *   devreset_cmd_ms=10,50,100    delays after the reset (up to 4 values, 0..5000)
+ *
+ * seq 21 probe (default off; with switch=on after each image's battery, with switch=off on the mounted image):
+ *   head_probe=off         on = where does REQ_STAT / GET_SCD(1) put the head after each kind of command? A fixed list
+ *                          of cases (CD_READ of 1..16 sectors at different FADs of the first data track, a re-read
+ *                          inside the last range, start / middle / end of the track, 7-sector reads with 0x24 and 0x28
+ *                          (one of them is a type CHECK), TUR, GET_TOC, REQ_SES, reads on the first audio track, an idle
+ *                          wait); after each: REQ_STAT, GET_SCD format 1, REQ_STAT again after head_late_ms (HD_* lines)
+ *   head_flags=0x20        CD_READ byte 1 of the plain reads (bit 0 forced 0; must pass the whitelist)
+ *   head_counts=1,2,7,16   sector counts of the plain reads (up to 6 values, 1..16)
+ *   head_late_ms=300       second REQ_STAT this long after each case (0 = none; 0..5000)
+ *   head_idle_ms=2000      last case: no command for this long, then REQ_STAT (0 = skip; 0..10000)
+ *   head_scd=on            GET_SCD format 1 after each case's first REQ_STAT
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
@@ -53,6 +65,7 @@
 
 #define GP_MAX_IMAGES 32
 #define GP_MAX_DEVRESET 4
+#define GP_MAX_HEADCNT 6
 
 typedef struct {
     char label[32];
@@ -86,6 +99,13 @@ typedef struct {
     int devreset_cmd;     /* seq 20: commands right after a DEVICE RESET (DC<ms>_) */
     int devreset_cmd_ms[GP_MAX_DEVRESET];
     int n_devreset_cmd;
+    int head_probe;       /* seq 21: head position after reads (HD_) */
+    uint8_t head_flags;
+    int head_counts[GP_MAX_HEADCNT];
+    int n_head_counts;
+    uint32_t head_late_ms;
+    uint32_t head_idle_ms;
+    int head_scd;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 
