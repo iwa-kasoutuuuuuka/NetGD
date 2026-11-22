@@ -706,35 +706,57 @@ fn the_stock_record_of_the_head_after_cd_read() {
     // same-folder re-switch that changes nothing. GDI 03: read from 45150,
     // the head is past the 7th sector (45157), still paused, track 3.
     let g = stock_gdi03();
-    let last = read_end_fad(45150, 7);
+    let last = Some(read_end_fad(45150, 7));
     let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, last));
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_GDROM, 0, fad, tr);
     assert_eq!(&stat[..], &hex("018f41030100b0650000")[..]);
     // CDI 04 (same track layout as the dcload CDI): Mode 1 asked of the Mode 2
     // track at 0x2E4C, refused before any sector -> the start FAD, track 2.
     let c = dcload_cdi();
-    let last = read_end_fad(0x2E4C, 0);
+    let last = read_head_start(&c, 0x2E4C, 7);
+    assert_eq!(last, Some(0x2E4C));
     let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, last));
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
     assert_eq!(&stat[..], &hex("012f410201002e4c0000")[..]);
     // img=0 after a Dreamcast reset (remount, then the BIOS boots dcload): the
     // last read ended at lead-out - 2.
-    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, 0x05017A));
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, Some(0x05017A)));
     let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
     assert_eq!(&stat[..], &hex("012f41020105017a0000")[..]);
     // GET_SCD follows the same head.
     let mut r = [0u8; 100];
-    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, 45157));
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, Some(45157)));
     assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
     assert_eq!(&r[..14], &hex("0015000e4103010000070000b065")[..]);
-    // No read since the mount (0), and before any switch (cold power-on:
+    // No read since the mount (None), and before any switch (cold power-on:
     // standby at 150 whatever the BIOS read): the park rules of idle_fad.
-    assert_eq!(rest_fad(&g, false, true, 0), 45150);
-    assert_eq!(rest_fad(&c, true, true, 0), 150);
-    assert_eq!(rest_fad(&c, true, false, 0x05017A), 150);
-    assert_eq!(rest_fad(&g, false, false, 45157), 150);
+    assert_eq!(rest_fad(&g, false, true, None), 45150);
+    assert_eq!(rest_fad(&c, true, true, None), 150);
+    assert_eq!(rest_fad(&c, true, false, Some(0x05017A)), 150);
+    assert_eq!(rest_fad(&g, false, false, Some(45157)), 150);
     // CD-DA keeps its own position.
-    assert_eq!(head_position(&g, AudioState::Paused, 1000, rest_fad(&g, false, true, 45157)).0, 1000);
+    assert_eq!(head_position(&g, AudioState::Paused, 1000, rest_fad(&g, false, true, Some(45157))).0, 1000);
+}
+
+#[test]
+fn a_read_moves_the_head_only_from_inside_a_track() {
+    // GDI 03: data 0..599, audio 756..1355, data 45000..64999.
+    let g = stock_gdi03();
+    assert_eq!(read_head_start(&g, 45150, 7), Some(45150));
+    assert_eq!(read_head_start(&g, 150, 1), Some(150));
+    assert_eq!(read_head_start(&g, 150 + 599, 1), Some(749)); // last sector of track 1
+    assert_eq!(read_head_start(&g, 150 + 600, 1), None); // pregap before track 2
+    assert_eq!(read_head_start(&g, 906, 1), Some(906)); // audio track 2
+    assert_eq!(read_head_start(&g, 150 + 2000, 1), None); // the gap between the areas
+    assert_eq!(read_head_start(&g, 150 + 64999, 1), Some(65149)); // last HD sector
+    assert_eq!(read_head_start(&g, 150 + 65000, 1), None); // lead-out
+    assert_eq!(read_head_start(&g, 0xFF_FFFF, 1), None);
+    assert_eq!(read_head_start(&g, 45150, 0), None); // count 0
+    assert_eq!(read_head_start(&g, 0, 1), None); // below 150
+    assert_eq!(read_head_start(&g, 149, 1), None);
+    // A request that starts in a track and runs past its end still moves it.
+    assert_eq!(read_head_start(&g, 65149, 10), Some(65149));
+    assert_eq!(read_end_fad(45150, 3), 45153);
 }
 
 #[test]

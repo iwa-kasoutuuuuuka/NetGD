@@ -213,24 +213,48 @@ pub fn idle_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool) -> u32
 /// 00 2e 4c` (the start: the head went there, nothing was read). The status
 /// stays pause; track, index and CTRL are those of the track the FAD is in
 /// ([`head_position`]).
+///
+/// `transferred` is what actually reached the host (whole sectors): a read
+/// abandoned by a reset or a new command, or cut short, moves the head only
+/// that far (stock unmeasured; seq 21).
 pub fn read_end_fad(start_fad: u32, transferred: u32) -> u32 {
     start_fad.wrapping_add(transferred)
 }
 
+/// Whether a CD_READ of `count` sectors from `start_fad` moves the head to
+/// its start before anything is transferred, and so where to: only a request
+/// whose start lies inside a track (bounded by the track's sectors, not the
+/// open-ended [`track_for_lba`]) with at least one sector. A read refused
+/// for its sector type there still moves it (seq 17, CDI 04 at 0x2E4C). A
+/// start in the lead-out, in the GDI's gap between the areas, at FAD
+/// 0xFFFFFF or below 150, or a count of 0, leaves the head where it was
+/// (stock unmeasured; a command refused before CD_READ runs -- NOT READY,
+/// UNIT ATTENTION -- never gets here). FAD 0..149 never qualifies, so the
+/// head never rests below 150.
+pub fn read_head_start<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Option<u32> {
+    if count == 0 || start_fad < 150 {
+        return None;
+    }
+    let lba = start_fad - 150;
+    let t = track_for_lba(tracks, lba)?;
+    (lba - t.start_lba() < t.sector_count()).then_some(start_fad)
+}
+
 /// The head with no CD-DA started: the end of the last CD_READ since the
-/// mount (`last_read` from [`read_end_fad`], 0 = none) once the unit has
-/// switched, else [`idle_fad`]. Before any switch stock keeps standby at
+/// mount (`last_read` from [`read_end_fad`] / [`read_head_start`], or the
+/// position where CD-DA was stopped; `None` = nothing since the mount) once
+/// the unit has switched, else [`idle_fad`]. Before any switch stock keeps standby at
 /// FAD 150 though the BIOS has read the boot disc (records 02/05/06/09/16/17
 /// img=0, a cold power-on); after a Dreamcast reset -- which remounts
 /// (reset_goto) like a switch -- and the BIOS's reads it shows pause, track
 /// 2, FAD 0x05017A, lead-out - 2 of the dcload CDI (records 03/07/08/10-15/
 /// 18/20 img=0, R130's open point). A mount or a DEVICE RESET (seq 17 `DR_`)
 /// starts again from the park position.
-pub fn rest_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool, last_read: u32) -> u32 {
-    if switched && last_read != 0 {
-        return last_read;
+pub fn rest_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool, last_read: Option<u32>) -> u32 {
+    match last_read {
+        Some(fad) if switched => fad,
+        _ => idle_fad(tracks, is_cdi, switched),
     }
-    idle_fad(tracks, is_cdi, switched)
 }
 
 /// Drive status codes (low nibble of SECNR, byte 0 of REQ_STAT / REQ_SES).
