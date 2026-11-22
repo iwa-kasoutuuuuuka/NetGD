@@ -29,6 +29,10 @@ SW_CMD / SW_POLL / SW_RESULT, then the battery, all tagged img=<folder number>.
   * --reswitch / --devreset-only (gdprobe seq 17 swap_reswitch=1 / devreset_only=1): after the battery (and the
     R<ms>_ runs) the same folder again with no reset (RS_ lines, a no-op), then a DEVICE RESET with no switch
     command (DR_ lines).
+  * --devreset-cmd 10,50,100 (gdprobe seq 20 devreset_cmd=1 devreset_cmd_ms=...): after all that, once per delay:
+    500 ms idle, a DEVICE RESET, a TUR / REQ_STAT / REQ_ERROR that many ms later, then TUR polls until READY (DC<ms>_
+    lines). Inside the re-detect (detect_time, --window's second value) NetGD answers NOT READY 2/04/01 with SECNR
+    0x00, then UNIT ATTENTION and READY (no medium: 2/3A/00 until gdprobe's 2 s give up).
   * ERROR is sticky (fix/head-pos-sticky-err): the register polls show the last CHECK's value, 0x01 after DEVICE
     RESET (--old-bitstream: 0x00 after every packet command that succeeds). REQ_STAT after the RS_ / R<ms>_ / DR_
     lines reports where the battery's last CD_READ left the head (RS_), or the park position after a reset.
@@ -92,7 +96,7 @@ class Expect:
 
 
 def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=None, passthrough=(),
-            regpoll=False, devreset=(), reswitch=False, devreset_only=False):
+            regpoll=False, devreset=(), reswitch=False, devreset_only=False, devreset_cmd=()):
     """Return the combined record text."""
     folders = numbered_folders(outdir)
     if images is None:
@@ -153,6 +157,8 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
             parts.append(run(same_args(n, ['--reswitch'])))
         if devreset_only:
             parts.append(run(same_args(n, ['--devreset-only'])))
+        for d in devreset_cmd:
+            parts.append(run(same_args(n, ['--devreset-cmd', str(d)])))
         last_img = n
     if return_to > 0:
         parts.append(run(switch_args(return_to, ['--sw-only'])))
@@ -172,6 +178,7 @@ def main(argv=None):
     ap.add_argument('--devreset', help='gdprobe devreset_ms, e.g. 50,200: DEVICE RESET switches after each image')
     ap.add_argument('--reswitch', action='store_true', help='gdprobe swap_reswitch=1: RS_ re-switch after each image')
     ap.add_argument('--devreset-only', action='store_true', help='gdprobe devreset_only=1: DR_ DEVICE RESET after each image')
+    ap.add_argument('--devreset-cmd', help='gdprobe devreset_cmd_ms, e.g. 10,50,100: DC<ms>_ DEVICE RESET + commands after each image')
     ap.add_argument('--bin', help='a built expect binary (default: cargo run --example expect; env NETGD_EXPECT_BIN)')
     args, extra = ap.parse_known_args(argv)
     if not os.path.isdir(args.outdir):
@@ -181,7 +188,8 @@ def main(argv=None):
         text = predict(args.outdir, parse_images(args.images) if args.images else None, args.return_to,
                        args.label, args.bin, extra, args.regpoll,
                        [int(x) for x in args.devreset.split(',')] if args.devreset else (),
-                       args.reswitch, args.devreset_only)   # unknown options (--no-seek, --tp-batches 8 ...) go to expect
+                       args.reswitch, args.devreset_only,
+                       [int(x) for x in args.devreset_cmd.split(',')] if args.devreset_cmd else ())   # unknown options (--no-seek, --tp-batches 8 ...) go to expect
     except (RuntimeError, OSError, ValueError) as e:
         print('error: %s' % e, file=sys.stderr)
         return 1
