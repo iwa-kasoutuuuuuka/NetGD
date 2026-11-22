@@ -840,3 +840,61 @@ fn cd_read_type_check_follows_the_stock_records() {
     }
     assert_eq!(ASC_ILLEGAL_MODE, (0x64, 0x00));
 }
+
+#[test]
+fn raw_sector_reads_follow_the_stock_records() {
+    // D10: data select 0x1_ is a raw read; 0x20 and friends are not.
+    assert!(cd_read_wants_raw(0x10));
+    assert!(cd_read_wants_raw(0x11));
+    for f in [0x00u8, 0x20, 0x24, 0x28, 0x30, 0xF0] {
+        assert!(!cd_read_wants_raw(f), "{:#x}", f);
+    }
+    assert!(raw_from_stored(2352) && raw_from_stored(2336));
+    assert!(!raw_from_stored(2048) && !raw_from_stored(2324));
+
+    // CDI data at FAD 11852 (LBA 11702) -> MSF 02:38:02.
+    let h = mode2_raw_header(11702);
+    assert_eq!(h, [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0x02, 0x38, 0x02, 0x02]);
+    // GD-ROM HDA start: LBA 45000 -> FAD 45150 = 10:02:00.
+    assert_eq!(&mode2_raw_header(45000)[12..], &[0x10, 0x02, 0x00, 0x02]);
+
+    let stored: Vec<u8> = (0..2336u32).map(|i| (i * 7) as u8).collect();
+    let mut out = [0u8; 2352];
+    raw_sector(&stored, 11702, &mut out);
+    assert_eq!(out[..16], h[..]);
+    assert_eq!(&out[16..], &stored[..]);
+    let stored: Vec<u8> = (0..2352u32).map(|i| (i * 13) as u8).collect();
+    raw_sector(&stored, 99, &mut out);
+    assert_eq!(&out[..], &stored[..]);
+}
+
+#[test]
+fn expand_raw_in_place_matches_a_copy_for_every_alignment() {
+    // The firmware reads whole 512-byte blocks, so the first stored sector
+    // starts `head` bytes in; the expansion then works inside one buffer.
+    const BUF: usize = 14 * 1024;
+    for sec in [2352usize, 2336] {
+        for count in 1..=5usize {
+            for head in [0usize, 1, 15, 16, 17, 100, 255, 256, 400, 510, 511] {
+                if head + count * sec > BUF || count * 2352 > BUF {
+                    continue;
+                }
+                let lba = 11702 + head as u32;
+                let mut buf = vec![0xEEu8; BUF];
+                let stored: Vec<Vec<u8>> = (0..count)
+                    .map(|s| (0..sec).map(|i| (i as u32 * 31 + s as u32 * 7 + head as u32) as u8).collect())
+                    .collect();
+                for (s, st) in stored.iter().enumerate() {
+                    buf[head + s * sec..head + (s + 1) * sec].copy_from_slice(st);
+                }
+                let n = expand_raw_in_place(&mut buf, head, sec, lba, count);
+                assert_eq!(n, count * 2352);
+                for (s, st) in stored.iter().enumerate() {
+                    let mut want = [0u8; 2352];
+                    raw_sector(st, lba + s as u32, &mut want);
+                    assert_eq!(&buf[s * 2352..(s + 1) * 2352], &want[..], "sec {} count {} head {} s {}", sec, count, head, s);
+                }
+            }
+        }
+    }
+}

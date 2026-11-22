@@ -2017,8 +2017,19 @@ async fn handle_cd_read(
     // user-data subset we'd want a proper sync/header skip — punt for
     // now and read the whole 2352-byte sector as-is, sending the first
     // 2048 bytes to the host. Good enough to validate the SD path.
-    const SECTOR_BYTES: usize = 2048;
-    let total = (count as usize).saturating_mul(SECTOR_BYTES);
+    #[cfg(feature = "raw-sectors")]
+    {
+        // Whole sectors (D10), where they can be made from what is stored.
+        // The cache holds 2,048-byte payloads: drop it either way so neither
+        // layout is mistaken for the other.
+        let raw = discimg::atapi::cd_read_wants_raw(packet[1])
+            && track.map_or(false, |t| discimg::atapi::raw_from_stored(t.sector_size as u32));
+        if raw {
+            invalidate_cd_read_cache();
+        }
+        unsafe { RAW_OUT = raw };
+    }
+    let total = (count as usize).saturating_mul(out_sector_bytes());
     // No upper bound on the request size any more: stream_from_sd stages the
     // transfer a chunk at a time rather than buffering it whole, so a request
     // is limited by the disc, not by our RAM. Games ask for far more than the
@@ -2037,6 +2048,8 @@ async fn handle_cd_read(
             "{}: CD_READ rejected: {} sectors from LBA {} ({} available in track)",
             label, count, lba, available
         );
+        #[cfg(feature = "raw-sectors")]
+        unsafe { RAW_OUT = false };
         finish_illegal(dev, state);
         return;
     }
@@ -2046,6 +2059,14 @@ async fn handle_cd_read(
         // The card failed under the read: MEDIUM ERROR for the REQUEST SENSE
         // that follows the error status the stream posted.
         state.pending_sense_key = 0x03;
+    }
+    #[cfg(feature = "raw-sectors")]
+    if raw_out() {
+        // What is staged is laid out 2,352 apart: not a cache entry, and no
+        // read-ahead (it would stage 2,048-byte payloads for the next raw read).
+        invalidate_cd_read_cache();
+        unsafe { RAW_OUT = false };
+        return;
     }
     // Only after a transfer that went all the way through (see `STREAM_OK`).
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
@@ -2137,6 +2158,29 @@ static mut CD_READ_BUF: [u8; CD_READ_BUF_BYTES] = [0; CD_READ_BUF_BYTES];
 static mut CD_READ_BUF_LBA: u32 = u32::MAX;
 static mut CD_READ_BUF_LEN: usize = 0;
 
+/// Feature `raw-sectors`: the CD_READ in flight wants whole 2,352-byte
+/// sectors (D10). Set by `handle_cd_read` for one request only; staging lays
+/// sectors out at [`out_sector_bytes`] apart while it is set, and such a
+/// buffer is never left behind as a cache entry.
+#[cfg(feature = "raw-sectors")]
+static mut RAW_OUT: bool = false;
+
+/// Bytes each sector takes in CD_READ_BUF and on the bus: 2,048, or 2,352
+/// during a raw read (feature `raw-sectors`).
+#[inline(always)]
+fn out_sector_bytes() -> usize {
+    #[cfg(feature = "raw-sectors")]
+    if unsafe { RAW_OUT } {
+        return discimg::atapi::RAW_SECTOR_BYTES;
+    }
+    2048
+}
+
+#[inline(always)]
+fn raw_out() -> bool {
+    out_sector_bytes() != 2048
+}
+
 /// Drop the staged-sector cache.
 ///
 /// Called on eject/load: once the host can rewrite the filesystem those bytes
@@ -2161,7 +2205,7 @@ pub fn loader_scratch() -> &'static mut [u8] {
 /// up to a block of lead-in) and compacted in place, so fewer fit than the
 /// 2048-byte payloads they turn into: 5 instead of 7.
 fn stage_sectors_for(gdi: &crate::gdi::Gdi, lba: u32) -> u32 {
-    let payload_max = (CD_READ_BUF_BYTES / 2048) as u32;
+    let payload_max = (CD_READ_BUF_BYTES / out_sector_bytes()) as u32;
     match gdi.track_for_lba(lba) {
         Some(t) if t.is_mapped() && t.sector_size as usize > 2048 => {
             let sec = t.sector_size as usize;
@@ -2210,6 +2254,10 @@ fn fill_cd_read_buf_raw(
         }
         done += n;
     }
+    #[cfg(feature = "raw-sectors")]
+    if raw_out() {
+        return Some(discimg::atapi::expand_raw_in_place(buf, head, sec_size, start_lba, count as usize));
+    }
     let uoff = track.user_data_offset();
     for s in 0..count as usize {
         let src = head + s * sec_size + uoff;
@@ -2250,7 +2298,8 @@ async fn fill_cd_read_buf_from_sd(
     let block_dev = crate::blockdev::HsmciBlockDevice::new();
     block_dev.set_num_blocks(gdi.num_blocks);
     let mgr = embedded_sdmmc::VolumeManager::new(block_dev, crate::blockdev::DummyClock);
-    let buf = unsafe { &mut CD_READ_BUF[..(count as usize * 2048)] };
+    let osz = out_sector_bytes();
+    let buf = unsafe { &mut CD_READ_BUF[..(count as usize * osz)] };
 
     let volume = mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| ())?;
     let mut dir = volume.open_root_dir().map_err(|_| ())?;
@@ -2276,15 +2325,20 @@ async fn fill_cd_read_buf_from_sd(
         // sync and header but keeps the 8-byte Mode 2 subheader -- taking the
         // first 2048 bytes there would hand the host the subheader and shift
         // every sector by 8. 2048 is already cooked.
+        let dst = (s as usize) * osz;
+        #[cfg(feature = "raw-sectors")]
+        if raw_out() {
+            discimg::atapi::raw_sector(&sector_buf[..sec_size], start_lba + s, &mut buf[dst..dst + osz]);
+            continue;
+        }
         let payload: &[u8] = match sec_size {
             2352 => &sector_buf[16..16 + 2048],
             2336 => &sector_buf[8..8 + 2048],
             _ => &sector_buf[..2048.min(sec_size)],
         };
-        let dst = (s as usize) * 2048;
         buf[dst..dst + payload.len()].copy_from_slice(payload);
     }
-    let len = (count as usize) * 2048;
+    let len = (count as usize) * osz;
     unsafe {
         CD_READ_BUF_LBA = start_lba;
         CD_READ_BUF_LEN = len;
@@ -2327,7 +2381,8 @@ fn fnv1a(mut h: u32, data: &[u8]) -> u32 {
 /// BIOS's first CD_READ start pushing with no SD latency in front of it.
 async fn stage_chunk(gdi: &'static crate::gdi::Gdi, lba: u32, count: u32) -> bool {
     let want = (count as usize) * 2048;
-    let hit = unsafe { CD_READ_BUF_LBA == lba && CD_READ_BUF_LEN >= want };
+    // The cache only ever holds 2,048-byte payloads.
+    let hit = !raw_out() && unsafe { CD_READ_BUF_LBA == lba && CD_READ_BUF_LEN >= want };
     if hit {
         info!("  cache hit: LBA={} ({} sectors)", lba, count);
         return true;
@@ -2818,9 +2873,9 @@ async fn stream_from_sd(
     }
 
     #[cfg(feature = "dma-pattern")]
-    fill_pattern(0, (first as usize) * 2048);
+    fill_pattern(0, (first as usize) * out_sector_bytes());
 
-    let staged_bytes = (first as usize) * 2048;
+    let staged_bytes = (first as usize) * out_sector_bytes();
     let buf = unsafe { &mut CD_READ_BUF[..staged_bytes] };
     let mut hash = fnv1a(FNV_INIT, &buf[..]);
     info!("  staged {} of {} bytes; arming DMA", staged_bytes, total_bytes);
@@ -2917,9 +2972,9 @@ async fn stream_from_sd(
             break;
         }
         #[cfg(feature = "dma-pattern")]
-        fill_pattern((sectors_done as usize) * 2048, (this as usize) * 2048);
+        fill_pattern((sectors_done as usize) * out_sector_bytes(), (this as usize) * out_sector_bytes());
 
-        let chunk = unsafe { &CD_READ_BUF[..(this as usize) * 2048] };
+        let chunk = unsafe { &CD_READ_BUF[..(this as usize) * out_sector_bytes()] };
         hash = fnv1a(hash, chunk);
         let n = push_buf_to_fifo(dev, chunk).await;
         pushed_bytes += n;
@@ -3111,7 +3166,8 @@ async fn stream_pio_from_sd(
     while sent < total_bytes {
         // Stage the chunk holding the next block. Blocks are cut at chunk
         // boundaries, so a block always lies inside the staged window.
-        let sector = (sent / 2048) as u32;
+        let osz = out_sector_bytes();
+        let sector = (sent / osz) as u32;
         if chunk_sectors == 0 || sector >= chunk_start + chunk_sectors {
             chunk_start = sector;
             chunk_sectors = (count - sector).min(stage_sectors);
@@ -3121,7 +3177,7 @@ async fn stream_pio_from_sd(
                 ok = false;
                 break;
             }
-            let chunk = unsafe { &CD_READ_BUF[..(chunk_sectors as usize) * 2048] };
+            let chunk = unsafe { &CD_READ_BUF[..(chunk_sectors as usize) * osz] };
             hash = fnv1a(hash, chunk);
         }
         // Before announcing another block: a reset, or a new command to this
@@ -3132,10 +3188,10 @@ async fn stream_pio_from_sd(
             ok = false;
             break;
         }
-        let off = sent - (chunk_start as usize) * 2048;
+        let off = sent - (chunk_start as usize) * osz;
         let block = (total_bytes - sent)
             .min(limit)
-            .min((chunk_sectors as usize) * 2048 - off)
+            .min((chunk_sectors as usize) * osz - off)
             & !1;
         let data = unsafe { &CD_READ_BUF[off..off + block] };
 

@@ -345,6 +345,77 @@ pub fn cd_read_type_mismatch(flags: u8, is_cdi: bool, track_ctrl: u8) -> bool {
     }
 }
 
+/// Does CD_READ byte 1 ask for the whole 2,352-byte sector (data select
+/// `0x1_`, D10)? Stock GDEMU 6.0 answers `0x10` with 2,352 bytes per sector
+/// on GDI and CDI data tracks (records R117-R132); other data selects were
+/// not probed.
+pub fn cd_read_wants_raw(flags: u8) -> bool {
+    flags & 0xF0 == 0x10
+}
+
+/// Bytes per sector of a raw read.
+pub const RAW_SECTOR_BYTES: usize = 2352;
+
+/// Can the raw form be made from a sector stored with `sector_size` bytes?
+/// 2,352 is stored raw already; 2,336 (a CDI's Mode 2 data) only lacks the
+/// 16-byte sync + header ([`mode2_raw_header`]). A 2,048-byte track would
+/// need EDC/ECC computed, and stock's answer there is not known.
+pub fn raw_from_stored(sector_size: u32) -> bool {
+    sector_size == 2352 || sector_size == 2336
+}
+
+/// The 16 bytes in front of a 2,336-byte stored Mode 2 sector in its raw
+/// form: sync (00, ten FF, 00), the absolute address `lba + 150` as BCD
+/// minute/second/frame, mode 2. What stock GDEMU 6.0 puts there (its 0x10
+/// reads of the CDIs match `tools/mksdcard`'s `raw_xa_form1`, D10).
+pub fn mode2_raw_header(lba: u32) -> [u8; 16] {
+    let mut h = [0xFFu8; 16];
+    h[0] = 0;
+    h[11] = 0;
+    put_msf(&mut h[12..15], lba.wrapping_add(150));
+    h[15] = 2;
+    h
+}
+
+/// Write the raw 2,352-byte form of a stored sector of `stored.len()` bytes
+/// (2,352 or 2,336, see [`raw_from_stored`]) at `lba` into `out[..2352]`.
+pub fn raw_sector(stored: &[u8], lba: u32, out: &mut [u8]) {
+    if stored.len() == 2336 {
+        out[..16].copy_from_slice(&mode2_raw_header(lba));
+        out[16..2352].copy_from_slice(stored);
+    } else {
+        out[..2352].copy_from_slice(&stored[..2352]);
+    }
+}
+
+/// In place: turn `count` stored sectors of `sec_size` bytes
+/// (2,352 or 2,336) starting `head` bytes into `buf` into raw 2,352-byte
+/// sectors from offset 0. 2,352-byte sectors only move down (front to back).
+/// A 2,336-byte sector grows by its 16-byte header: after dropping the
+/// lead-in every destination lies at or above its source, so the walk goes
+/// from the last sector down. Returns the length.
+pub fn expand_raw_in_place(buf: &mut [u8], head: usize, sec_size: usize, lba: u32, count: usize) -> usize {
+    const RAW: usize = RAW_SECTOR_BYTES;
+    let pad = RAW - sec_size; // 0 or 16
+    if pad == 0 {
+        // Downwards only: front to back is safe.
+        for s in 0..count {
+            buf.copy_within(head + s * sec_size..head + (s + 1) * sec_size, s * RAW);
+        }
+    } else {
+        // First drop the block-alignment lead-in, so that sector s's source
+        // (s * sec_size) never lies above its destination (s * RAW + 16).
+        buf.copy_within(head..head + count * sec_size, 0);
+        for s in (0..count).rev() {
+            let src = s * sec_size;
+            buf.copy_within(src..src + sec_size, s * RAW + pad);
+            buf[s * RAW..s * RAW + pad]
+                .copy_from_slice(&mode2_raw_header(lba + s as u32));
+        }
+    }
+    count * RAW
+}
+
 /// Sense keys NetGD reports.
 pub const SENSE_NOT_READY: u8 = 0x02;
 pub const SENSE_MEDIUM_ERROR: u8 = 0x03;

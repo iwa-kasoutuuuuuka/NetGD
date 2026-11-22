@@ -64,6 +64,18 @@ CDI のデータトラックの後ろの postgap 2 セクタは Mode 2 **Form 2*
   完了のタイミングは実機で壊れた前歴がある（R72）。ホストの予測（`expect.rs`）とテストだけで既定のビルドに入れるのは避け、
   feature（例 `raw-sectors`、既定オフ）で入れて実機の gdprobe（`label=netgd`）で純正の記録と比べてから既定にする、が妥当。
 
+## 3.1 実装（D10、feature `raw-sectors`、既定オフ）
+
+ブランチ `feat/raw-sectors` で D10 だけを入れた（D14 はセクタごとに長さが変わるので入れていない）。
+
+- `common/discimg/src/atapi.rs`：`cd_read_wants_raw`（バイト 1 の上位が `0x1`）、`raw_from_stored`（格納 2,352 / 2,336 のときだけ）、
+  `mode2_raw_header`、`raw_sector`、`expand_raw_in_place`（ブロック単位で読んだバッファの中で 2,336 → 2,352 に広げる。先頭の端数をまず詰め、後ろのセクタから動かす）。
+  `expand_raw_in_place` は端数 0〜511 B・1〜5 セクタの全組み合わせを `raw_sector` と照合するテストつき。
+- `ide.rs`：`RAW_OUT`（1 要求の間だけ立つ）と `out_sector_bytes()`（feature 無しでは定数 2,048）。`handle_cd_read`・`stage_sectors_for`（2,352 なら 1 回 5〜6 セクタ）・
+  `fill_cd_read_buf_raw` / `_from_sd`・`stage_chunk`（生のときはキャッシュを使わない）・`stream_from_sd`（DMA）・`stream_pio_from_sd`（PIO）の `2048` を置き換え。
+  生の要求の前後でキャッシュを捨て、先読み（`read_ahead`）はしない。格納 2,048 B のトラックや音声トラックは従来どおり 2,048 B。
+- `examples/expect.rs` に `--raw-sectors`（feature 入りのファームの予測）。`expect_sd.py` にそのまま渡せる。
+
 ## 4. 予測ツール側
 
 `common/discimg/examples/expect.rs` の `CDREAD_FLAGS` は `0x10` でも 2,048 B と予測している（D10 は NetGD 未対応のため）。

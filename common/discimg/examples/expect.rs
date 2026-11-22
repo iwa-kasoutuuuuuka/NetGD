@@ -2,7 +2,7 @@
 //!
 //!     cargo run --example expect -- --image disc.gdi|disc.cdi [--img N] [--label netgd-expected]
 //!                                   [--switch] [--empty-folder] [--missing-folder] [--no-ua] [--header] [--end]
-//!                                   [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test]
+//!                                   [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test] [--raw-sectors]
 //!                                   [--no-throughput] [--tp-batches 64] [--tp-sectors 16]
 //!                                   [--no-seek] [--seek-n 16] [--seek-span 50000] [--no-reads] [--sw-only]
 //!
@@ -54,6 +54,8 @@ struct Opts {
     ip_fad: u32,
     cdread_flags: u8,
     flags_test: bool,
+    /// Predict the firmware built with feature `raw-sectors` (D10).
+    raw_sectors: bool,
     throughput: bool,
     tp_batches: u32,
     tp_sectors: u32,
@@ -68,7 +70,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: expect --image <disc.gdi|disc.cdi> [--img N] [--label L] [--switch] [--empty-folder]\n\
          \x20             [--missing-folder] [--no-ua]\n\
-         \x20             [--header] [--end] [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test]\n\
+         \x20             [--header] [--end] [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test] [--raw-sectors]\n\
          \x20             [--no-throughput] [--tp-batches N] [--tp-sectors N] [--no-seek] [--seek-n N]\n\
          \x20             [--seek-span N] [--no-reads] [--sw-only]"
     );
@@ -97,6 +99,7 @@ fn parse_args() -> Opts {
         ip_fad: 0,
         cdread_flags: 0x24,
         flags_test: true,
+        raw_sectors: false,
         throughput: true,
         tp_batches: 64,
         tp_sectors: 16,
@@ -123,6 +126,7 @@ fn parse_args() -> Opts {
             "--ip-fad" => o.ip_fad = num(&val()),
             "--cdread-flags" => o.cdread_flags = num(&val()) as u8,
             "--no-flags-test" => o.flags_test = false,
+            "--raw-sectors" => o.raw_sectors = true,
             "--no-throughput" => o.throughput = false,
             "--tp-batches" => o.tp_batches = num(&val()),
             "--tp-sectors" => o.tp_sectors = num(&val()).clamp(1, 16),
@@ -248,6 +252,26 @@ impl Disc {
             f.seek(SeekFrom::Start(off)).ok()?;
             f.read_exact(&mut out[s as usize * 2048..(s as usize + 1) * 2048]).ok()?;
         }
+        Some(out)
+    }
+
+    /// Feature `raw-sectors`: one whole 2,352-byte sector at `fad`, if the track stores 2,352 or 2,336 bytes.
+    fn cd_read_raw(&self, fad: u32) -> Option<Vec<u8>> {
+        let lba = fad.saturating_sub(FAD_OFFSET);
+        let t = self.track_for_lba(lba)?;
+        if !atapi::raw_from_stored(t.sector_size as u32) || lba - t.start_lba >= t.sector_count {
+            return None;
+        }
+        let path = match &self.cdi_file {
+            Some(p) => p.clone(),
+            None => self.dir.join(t.filename.as_str()),
+        };
+        let mut f = File::open(path).ok()?;
+        let mut stored = vec![0u8; t.sector_size as usize];
+        f.seek(SeekFrom::Start(t.file_offset as u64 + (lba - t.start_lba) as u64 * t.sector_size as u64)).ok()?;
+        f.read_exact(&mut stored).ok()?;
+        let mut out = vec![0u8; atapi::RAW_SECTOR_BYTES];
+        atapi::raw_sector(&stored, lba, &mut out);
         Some(out)
     }
 }
@@ -534,12 +558,18 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
         // The sector type in byte 1 is checked (D8, D9); what reads is always 2048 bytes (no raw 2352, D10).
         for flags in [0x20u8, 0x24, 0x28, 0x10] {
             let c = cdb_read(flags, ip, 1);
-            let (r, data) = read_res(d, flags, ip, 1);
+            let (mut r, mut data) = read_res(d, flags, ip, 1);
+            if opt.raw_sectors && data.is_some() && atapi::cd_read_wants_raw(flags) {
+                if let Some(raw) = d.cd_read_raw(ip) {
+                    r = Res::ok_big(raw.len(), &raw[..raw.len().min(REC_DATA_MAX)]);
+                    data = Some(raw);
+                }
+            }
             let lba = ip.saturating_sub(FAD_OFFSET);
             let mismatch = atapi::track_for_lba(&d.tracks, lba)
                 .map_or(false, |t| atapi::cd_read_type_mismatch(flags, d.is_cdi, t.ctrl));
             let (ssz, crc, sense) = match &data {
-                Some(dd) => ("2048".to_string(), format!("{:08x}", crc32(dd)), "none"),
+                Some(dd) => (dd.len().to_string(), format!("{:08x}", crc32(dd)), "none"),
                 None if mismatch => ("-".to_string(), "-".to_string(), "5/64/00"), // illegal mode for this track
                 None => ("-".to_string(), "-".to_string(), "5/00/00"), // ILLEGAL REQUEST, ASC 0 (stock's is not known)
             };

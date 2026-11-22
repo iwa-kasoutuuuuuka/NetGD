@@ -115,6 +115,15 @@ sd-highspeed = ["dep:sdfast"]
 fast-complete = []
 sd-fast = ["sd-multiblock", "sd-highspeed", "fast-complete"]
 
+# CD_READ with data select 0x1_ (byte 1 = 0x10) returns the whole 2,352-byte
+# sector, as stock GDEMU 6.0 does (D10, docs/research/d10-d14-raw-sectors.md):
+# a GDI's 2,352-byte track as stored, a CDI's 2,336-byte track behind a
+# generated sync + header. Other tracks keep answering 2,048 bytes. Off by
+# default and not run on hardware: transfers stop being multiples of 2,048
+# bytes, and the read path (DMA, PIO blocks, staging) has broken on hardware
+# before (R72). Check it with gdprobe (label=netgd) before making it default.
+raw-sectors = []
+
 # SD throughput benchmark at boot. Off by default: it takes ~6 s, which
 # delays the IDE task spawn past the point the DC starts issuing ATAPI
 # commands, and the console times out with a CDB-DRQ error.
