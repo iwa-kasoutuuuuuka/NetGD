@@ -84,8 +84,8 @@ class T(unittest.TestCase):
             p = write(d, secs())
             # text = .text + pad + crc, data = .data, bss = .bss
             self.assertEqual(check.berkeley_sizes(p), (99000 + 348 + 4, 160, 5000))
-            self.assertEqual(check.main([p, "--limit", "99352"]), 0)
-            self.assertEqual(check.main([p, "--limit", "99351"]), 1)
+            self.assertEqual(check.main([p, "--limit", "99512"]), 0)
+            self.assertEqual(check.main([p, "--limit", "99511"]), 1)
 
     def test_errors(self):
         with tempfile.TemporaryDirectory() as d:
