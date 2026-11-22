@@ -66,7 +66,8 @@ def main(argv):
                 cur = f.read()
         except OSError:
             cur = None
-        if cur != text:
+        # line endings do not matter to the C compiler: a CRLF (autocrlf) checkout must pass too
+        if cur is None or cur.replace("\r\n", "\n") != text:
             print("fwmsg_gen.h is out of date: run python gen_msgs.py", file=sys.stderr)
             return 1
         return 0

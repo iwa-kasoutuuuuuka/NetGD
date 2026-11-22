@@ -25,7 +25,7 @@ powershell -File tools\ci-local\run.ps1 --only builds   # PowerShell から
 - tests: `cargo test`(lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, stackmark, pinfind)、
   fwupdater は `--lib --target <rustc のホスト>`(自動判定)、gdprobe の C テスト(作業コピー上で実行)。
 - tools: mksdcard, netgd-send, fwbackup(約 12 分、`FWBACKUP_TEST_WRAPPER=1`), fwimage, netgd-recv, netgd-menu, pinfind。
-  CI の対象外だが netgd-expect も実行する。netgd-fwupd は `CI_LOCAL_FWUPD=1` のときだけ実行(下記)。
+  CI の対象外だが netgd-expect も実行する。netgd-fwupd も実行する(gen_msgs.py --check は改行コードを無視する)。
 - fpga: Amaranth のシミュレーションと生成 Verilog のコミット済み確認（約 7 分、うち FIFO の等価性の確認が約 4.5 分）。Python は既定で本体のチェックアウトの `fpga/amaranth/amaranth_env`（`git rev-parse --git-common-dir` の親から探すので、worktree からでも見つかる）。Verilog の確認のあとは生成ファイルを元に戻す（不一致でも作業ツリーを汚さない）。
 
 ## 注意
@@ -40,4 +40,4 @@ powershell -File tools\ci-local\run.ps1 --only builds   # PowerShell から
   `pip install "amaranth==0.5.8" "amaranth-yosys==0.50.0.0.post123"` のうえで `CI_LOCAL_FPGA_PYTHON=<venvのpython>` を指定する
   （版が違うと生成 Verilog の先頭の yosys の版が変わり、Verilog の確認が失敗する）。
   この PC では未導入のため SKIP。
-- tools-netgd-fwupd: CI に無く、`gen_msgs.py --check` がバイト比較なので CRLF 変換された Windows の checkout では必ず失敗する。そのため既定は SKIP。
+- tools-netgd-fwupd: CI に無いが実行する。`gen_msgs.py --check` は CRLF/LF の違いを無視するので、autocrlf の checkout でも通る。
