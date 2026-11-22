@@ -54,7 +54,7 @@ if [ -z "$ARMSIZE" ]; then
         if command -v "$c" >/dev/null 2>&1; then ARMSIZE="$c"; break; fi
     done
 fi
-LIMIT_2E=122368   # text+data of the 2E resident image (docs/research/flash-budget-2e.md)
+LIMIT_2E=gate-2e  # 2E resident image: tools/fwsize/check.py --gate-2e (pre-pad usage vs 122,880)
 
 NFAIL=0; NOK=0; NSKIP=0
 SUMMARY="$LOGDIR/summary.txt"
@@ -69,6 +69,10 @@ report() { # name status extra
 size_check() {
     elf="$1"; lim="$2"
     [ -f "$elf" ] || { echo "no ELF"; return 1; }
+    if [ "$lim" = "gate-2e" ]; then
+        "${PYPLAIN:-python}" "$WT/tools/fwsize/check.py" "$elf" --gate-2e
+        return $?
+    fi
     [ -n "$ARMSIZE" ] || { echo "(no arm-eabi-size)"; return 0; }
     line=$("$ARMSIZE" "$elf" | sed -n 2p)
     t=$(echo "$line" | awk '{print $1}'); d=$(echo "$line" | awk '{print $2}')

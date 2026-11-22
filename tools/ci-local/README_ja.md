@@ -21,7 +21,7 @@ powershell -File tools\ci-local\run.ps1 --only builds   # PowerShell から
 ## 実行内容
 
 - builds: fwupdater、netgd の 6 構成(DEFMT_LOG=off 版を含む)。各 ELF の text/data を `arm-eabi-size` で表示。
-  2E の `release-z,resident,sd-fast` は text+data が 122,368 B 以下であることを検査し、余裕を表示する。
+  2E の `release-z,resident,sd-fast` は `tools/fwsize/check.py --gate-2e`(パッド前の使用量が 122,880 B 以下)で検査し、余裕を表示する。
 - tests: `cargo test`(lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, stackmark, pinfind)、
   fwupdater は `--lib --target <rustc のホスト>`(自動判定)、gdprobe の C テスト(作業コピー上で実行)。
 - tools: mksdcard, netgd-send, fwbackup(約 12 分、`FWBACKUP_TEST_WRAPPER=1`), fwimage, netgd-recv, netgd-menu, pinfind。
