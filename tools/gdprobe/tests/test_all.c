@@ -1928,7 +1928,7 @@ static void test_runner_seq24(void)
     CHECK(find_line("img=4 probe=GP_XGAP2_CHK flags=0x20 fad=11694 count=1 ssz=- sense=5/21/00") && !find_line("img=4 probe=GP_RISKY case=XGAP2"));
     CHECK(find_line("img=4 probe=GP_RISKY case=XLO fad=15846 count=16 edge=15854 crosses=leadout note=may_hang"));
     l = line_of("img=4 probe=GP_XLO ");
-    CHECK(l > hang && strstr(l, "rc=timeout") && strstr(l, "bytes=16384"));
+    CHECK(find_line("img=4 probe=GP_XLO ") > hang && strstr(l, "rc=timeout") && strstr(l, "bytes=16384"));
     CHECK(find_line("probe=ABORT reason=drive-not-answering") > hang && !find_line("img=4 probe=GP_RISKY case=XEND"));
     CHECK(f.n_mounts == 2 + 2);   /* 3, 4, then 3, 4 again; no return_to after the abort */
 
