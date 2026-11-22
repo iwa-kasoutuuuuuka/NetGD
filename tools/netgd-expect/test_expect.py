@@ -218,6 +218,32 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(one(7, 'REQ_ERROR_W0')['cdbst'], '0x18')
         self.assertNotIn('secnr', one(3, 'SW_CMD'))                     # the boot disc's SECNR is not known
 
+    def test_regpoll_and_device_reset_as_netgd_answers(self):
+        # gdprobe swap_regpoll / swap_devreset (R154). The predictor prints what NetGD puts on the bus, not stock's
+        # answer (R157: stock's DEVICE RESET rule is unknown; the FPGA error register has no bit 0): status 0x50,
+        # error 0x00, IRR 1, signature 14/EB, SECNR at rest (the window's byte at the reset), the window running on.
+        text = expect_sd.predict(self.card, images=[3, 4, 7], return_to=0, regpoll=True, devreset=(50, 200))
+        _, entries = compare.parse_record(text)
+        get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
+        self.assertEqual([e['secnr'] for e in get(4, 'SW_REGPOLL')], ['0x81', '0x06', '0x00', '0x21'])
+        self.assertEqual([e['altst'] for e in get(4, 'SW_REGPOLL')], ['0x50'] * 4)
+        for pfx, at, walk in (('R50_', '0x06', ['0x00']), ('R200_', '0x00', [])):
+            for img, final in ((3, '0x81'), (4, '0x21'), (7, '0x07')):
+                before = [final, '0x06'] + (['0x00'] if at == '0x00' else [])    # the new switch's own walk up to the reset
+                rst = get(img, pfx + 'SW_DEVRESET')[0]
+                self.assertEqual((rst['altst'], rst['err'], rst['irr'], rst['secnr'], rst['bcl'], rst['bch']),
+                                 ('0x50', '0x00', '0x01', at, '0x14', '0xeb'))
+                polls = get(img, pfx + 'SW_REGPOLL')
+                self.assertEqual([e['secnr'] for e in polls], before + [at] + walk + [final])
+                self.assertEqual([e['altst'] for e in polls], ['0x50'] * len(polls))
+                self.assertEqual([e['err'] for e in polls], ['0x00'] * len(polls))
+                self.assertEqual([e['irr'] for e in polls][-1], '0x01')
+                sw = get(img, pfx + 'SW_POLL')
+                self.assertEqual(sw[0]['sense'], '2/3a/00' if img == 7 else '6/28/00')
+                self.assertEqual(len(get(img, pfx + 'REQ_STAT')), 1)
+                self.assertEqual(len(get(img, pfx + 'REQ_ERROR')), 1)
+        self.assertTrue(get(4, 'R50_REQ_STAT')[0]['data'].startswith('012f01'))
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '

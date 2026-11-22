@@ -1047,6 +1047,7 @@ async fn handle(
         CMD_DEVICE_RESET if role == Role::Packet => {
             crate::cdda::stop();
             // Soft reset: reload ATAPI signature, return to idle, no error.
+            // The swap window keeps running (stock's rule is not known, R157).
             dev.load_atapi_signature();
             dev.set_error(0);
             dev.set_status_intrq(STATUS_IDLE);
@@ -1689,8 +1690,8 @@ fn idle_status() -> u8 {
 /// its tracks' modes as stock GDEMU 6.0 does (R144): a Mode 2 data track
 /// (mkdcdisc) is CD-ROM XA -- flycast's `GuessDiscType` returns `CdRom_XA`
 /// for any image with a Mode 2 track (`core/imgread/common.cpp`) -- and a CDI
-/// whose data is Mode 1 is plain CD-ROM (stock: REQ_STAT `01 1f ...`, SECNR
-/// `0x11`). Reporting GD-ROM for a CDI contradicts the disc's own IP.BIN,
+/// whose data is Mode 1 -- or that has audio tracks only (R155) -- is plain
+/// CD-ROM (stock: REQ_STAT `01 1f ...`, SECNR `0x11`). Reporting GD-ROM for a CDI contradicts the disc's own IP.BIN,
 /// which says `CD-ROM1/1` in its media field, and the BIOS refuses to boot
 /// across that contradiction: it reads IP.BIN, the ISO9660 PVD and the root
 /// directory, then abandons the boot without ever reading the `1ST_READ.BIN`
