@@ -3,7 +3,7 @@
 .EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools
 .EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net   # g2netbench.elf (phase D: KOS TCP/IP receive)
 #>
-param([string]$BbaTools = $env:BBA_TOOLS, [switch]$Net, [int]$RcvBuf = $(if ($env:G2NET_RCVBUF) { [int]$env:G2NET_RCVBUF } else { 16384 }), [int]$MaxBs = $(if ($env:G2BENCH_MAXBS) { [int]$env:G2BENCH_MAXBS } else { 65536 }))
+param([string]$BbaTools = $env:BBA_TOOLS, [switch]$Net, [int]$RcvBuf = $(if ($env:G2NET_RCVBUF) { [int]$env:G2NET_RCVBUF } else { 20480 }), [int]$MaxBs = $(if ($env:G2BENCH_MAXBS) { [int]$env:G2BENCH_MAXBS } else { 65536 }))
 if (-not $BbaTools -or -not (Test-Path (Join-Path $BbaTools 'scripts\_common.ps1'))) {
     throw 'Set $env:BBA_TOOLS (or -BbaTools) to the Dreamcast-Dev-Tools-for-BBA folder.'
 }

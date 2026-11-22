@@ -45,10 +45,13 @@ KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
 #define DATA_TO_MS     12000      /* WANT -> DATA: report and move on (menu-app.md 8 allows 30 s) */
 #define DRAIN_IDLE_MS  5000       /* after a failed pass: discard what is still in flight until this much silence */
 #ifndef G2N_LISTEN_RCVBUF
-#define G2N_LISTEN_RCVBUF 16384   /* receive buffer = TCP window of accepted connections (set on the listener).
+#define G2N_LISTEN_RCVBUF 20480   /* receive buffer = TCP window of accepted connections (set on the listener).
                                       65535 corrupted the stream on hardware: the PC then sends bursts of up to 45
                                       segments, the BBA drops some, and KOS TCP (net_tcp.c process_pkt) appends a
-                                      later segment as if it were in sequence (no seq == rcv.nxt check) */
+                                      later segment as if it were in sequence (no seq == rcv.nxt check).
+                                      16384 (a 16 KiB DATA frame is 16416 bytes) reset the connection at p1 on the
+                                      4th hardware run: 20480 holds one 16 KiB frame and its headers, and a burst
+                                      of 20480 = 14 segments is close to what the BBA FIFO took without loss (11) */
 #endif
 #define PASS_LIMIT_US  (20ull * 1000000ull)
 #define PASS_BYTES     (32ull << 20)
@@ -103,6 +106,12 @@ static void *heartbeat(void *arg)
 }
 
 static void stage(const char *s) { g_stage = s; }
+static char g_stage_buf[40];
+static void stage_f(const char *fmt, unsigned a, const char *b)
+{
+    snprintf(g_stage_buf, sizeof g_stage_buf, fmt, a, b);
+    g_stage = g_stage_buf;
+}
 
 static int g_fd = -1;
 static uint32_t g_txseq;                       /* sequence of the request being served */
@@ -267,6 +276,7 @@ static int run_pass(unsigned n, const pass_cfg *c)
         uint64_t off; uint32_t len; uint8_t w[16];
         while (g2n_pass_next_want(&ps, &off, &len)) {
             g2n_want_build(w, ps.idx, off, len);
+            if (!st.frames) stage_f("p%u WANT sent (%s)", n, "wait");
             if (send_frame(G2N_T_WANT, w, sizeof w, &st) != 0) { status = "send_failed"; goto out; }
         }
         if (g2n_pass_done(&ps)) break;
@@ -294,6 +304,7 @@ static int run_pass(unsigned n, const pass_cfg *c)
             t = now_us(); fnv = ng_fnv1a(fnv, g_sink, dlen); st.fnv_us += now_us() - t;
         }
         st.frames++;
+        if (st.frames == 1) stage_f("p%u streaming (%s)", n, "ok");
         g_frames_total++;
         uint64_t ft = now_us() - f0;
         if (ft > st.max_frame_us) st.max_frame_us = ft;
@@ -303,6 +314,8 @@ out:;
     uint64_t us = now_us() - t0;
     uint64_t accounted = st.recv_us + st.send_us + st.copy_us + st.crc_frame_us + st.crc_file_us + st.fnv_us;
     int good = strcmp(status, "ok") == 0 || strcmp(status, "time_limit") == 0;
+    say("p%u %s: %lu KB in %u frames, rx %lu B, errno %d", n, status, (unsigned long)(ps.recv_off / 1024), (unsigned)st.frames,
+        (unsigned long)(g_rx_total - rx0), good ? 0 : (int)errno);
     kvp(pfx, "status_ok", (uint64_t)good);
     kvs(pfx, "status", status);
     kvp(pfx, "bytes", ps.recv_off); kvp(pfx, "us", us); kvp(pfx, "kbps", g2b_kbps(ps.recv_off, us));
