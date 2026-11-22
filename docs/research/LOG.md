@@ -2251,7 +2251,7 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 記録：`docs/research/probe-records/stock_20261122_13_r137-abg.txt`（`images=4,10,3,7`、`abort=0`）、`stock_20261122_14_audio-flags.txt`（`images=3`、`ip_fad=906`、`abort=0`）。
   `compare.py --manifest` で 03〜05（547 件）・08〜10（273 件）・音声（9 件）すべて一致、不一致 0。
 - 結論：
-  - **a（CHECK のあとの CDB フェーズの status）**：純正も、ディスクが無い（窓の中・空フォルダ）ときの CHECK のあとの PACKET では CDB フェーズの ALTSTATUS が **0x18**（DRDY = 0）。
+  - **a（CHECK のあとの CDB フェーズの status）**：【R147 で訂正：DRDY は直前のコマンドの最終 status に従い、NetGD はすでに同じ。以下の「違う」は誤り】純正も、ディスクが無い（窓の中・空フォルダ）ときの CHECK のあとの PACKET では CDB フェーズの ALTSTATUS が **0x18**（DRDY = 0）。
     一方、ディスクがあるときの CHECK（CD_READ の種別違い 5/64/00）のあとは **0x58**（DRDY = 1）。CHECK の status 自体はどちらも 0x11。
     純正の DRDY は「CHECK を出したか」ではなく「準備できているか（ディスクがあるか）」に従う。**NetGD は FPGA が DRDY を最後に書いた値のまま残すので、ディスクがある CHECK のあとも 0x18 になるはず（違う）**。直すには FPGA（コマンド書き込みで DRDY を「準備できている」に合わせる）かファームの工夫が要る。
   - **b（切替中の SECNR）**：窓の中は `0x06`（OPEN、上位ニブル 0）→ 約 150 ms で `0x00`（BUSY）→ UA のころ `0xX1`（一時停止、上位はディスク形式：CDI 04 = 2、Mode 1 の CDI 10 = 1、GDI 03 = 8）。
@@ -2280,6 +2280,48 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 未解決：checkpnr が Supra の配置を読めるか（最初の実行で人が指定する見込み）、gatesim が動くか、hold の割り当てを Supra が受け付けるか、`alta_osc`・リングが通るか、`early_done` の扱い（今は安全側で毎回停止。判断が要る）、`ball:` クロックで MCU が止まる場合、§0 の前提（人の作業）。
 - 信頼度：シミュレーション・ホストテスト・ビルドは確認済み。Supra の出力・実機は未確認。
 - 関連：R142、R143、`fpga/pinfind/README_ja.md`。
+
+### R146 4 ブランチの取り込み（R139・R141・R142〜R145）（Opus）
+
+- 担当：Opus（メインセッション）。`fix/review-1`・`feat/gdprobe-more`・`feat/stack-highwater`・`feat/ag16k-pinfind` を main にマージ（`482f9198`、push 済み）。ユーザーの承認による。
+- 衝突は `build.yaml`・`mcu/netgd/Cargo.toml`・`main.rs` の 3 つで、どれも stackmark と pinfind の両方を残すだけの和。
+- 確認：ファームの 9 構成（4E、resident 4E・2E、release-z 2E、2E、2E / v60 + `stack-hw`、`pinfind`）のビルドと、ホストテスト（Rust 10 クレート、gdprobe、mksdcard、netgd-send、pinfind の tools とシミュレーション）がすべて通過。
+- このPC（Windows）では `tools/netgd-recv`・`tools/netgd-menu` の C のテストが、マージ前の main でも同じように失敗する（recv は 52 件中 43 件、menu は 11 件のエラー。`job.ngj missing`・一時ファイルの作成失敗など、Windows の環境によるもの）。CI（Linux）で確認する。マージで増えた失敗はない（recv の追加テスト 1 件は同じ理由で失敗）。
+- `fix/raw-audio`（e2cad6af）は R144 の純正の結果（音声で 0x20・0x10 は 2,352 B）と逆なので取り込まない。ブランチと作業フォルダの削除はユーザーの確認待ち。
+- 信頼度：ビルド・ホストテストは確認済み。実機は未確認。
+- 関連：R139、R141〜R145。
+
+### R147 CHECK のあとの CDB フェーズの DRDY（R144 a の訂正）（Sonnet 調査・Fable レビュー・Opus 確認）
+
+- **訂正：R144 a の読みは誤り**。純正の CDB フェーズの DRDY は「ディスクがあるか」ではなく、**直前のコマンドの最終 status の DRDY** に従う（成功 0x50 → 次の CDB フェーズは 0x58、CHECK 0x11 → 0x18）。
+  記録の各行の `cdbst=` はそのコマンド自身の CDB フェーズで、前のコマンドの結果を表す。R144 が「ディスクがある CHECK のあとは 0x58」としたのは CDREAD_FLAGS の行で、`tools/gdprobe/probes.c` が CHECK のたびに隠れた REQ_ERROR（成功 0x50）を送るため、次の行は 0x50 のあとだった。
+- 確認：隠れたコマンドのない隣り合う行の組を数えると、記録 13 は 0x50 → 0x58 が 67 組・0x11 → 0x18 が 23 組、記録 14 は 27 組・3 組で、例外 0（ディスクあり・なし・窓の中とも）。
+- **NetGD の main はすでに純正と同じ**：FPGA は MCU が最後に書いた status の DRDY を保ち、PACKET でも変えない（`fpga/amaranth/hw/ide_device.py` の `drdy`）。ただし NetGD の実機では `cdbst` を測っていない（コードを読んだ結論）。
+- ブランチ `exp/drdy`（`449fd690` FPGA・`20e83a4b` ファーム、Sonnet）は誤った前提で作られ、取り込むとディスクありの CHECK のあとが 0x58、ディスクなしの成功のあとが 0x18 になって純正から離れる（Fable のレビュー）。**取り込まない**。削除はユーザーの確認待ち。
+- 調べて分かったこと（参考）：MCU が PACKET を知るのは約 100 µs 後で、CDB フェーズの status をファームから合わせることはできない。
+- 信頼度：純正の規則は確認済み（実機の記録）。NetGD 側はコードから。gdprobe で NetGD の `cdbst` を記録 13 と比べれば確定する。
+- 関連：R144、`docs/research/probe-records/stock_20261122_13_r137-abg.txt`。
+
+### R148 R144 の純正の規則を NetGD に入れた（種別検査・音声トラック・ディスク形式・切替中の SECNR をトラックのモードで）（Opus）
+
+- 担当：Opus（サブエージェントが実装）。ブランチ `feat/stock-rules`、コミット `b664e29b`（R146 のマージの先端から）。未取り込み。
+- トラックにモード（音声・Mode 1・Mode 2）を持たせた：CDI は DiscJuggler のトラックモード（記述子の +16）、GDI のデータは Mode 1（2,336 B は Mode 2）。ファームはセッション番号のバイトの bit 7 に入れ、`Track` は 32 B のまま（別のバイトにすると bss +392 B）。
+- CD_READ の種別検査はトラックのモードで判定（`cd_read_type_mismatch(flags, mode)`）：Mode 1 は 0x28、Mode 2 は 0x24、音声は 0x24・0x28 を 5/64/00。0x20・0x10 は常に読める。
+- 音声トラックは 0x20・0x10 で 2,352 B の PCM をそのまま返す（複数セクタも）。従来は 2,048 B（PCM の +16 から）だった。2,352 B の経路を `raw-sectors` の外に出し、この機能はデータトラックの 0x10 だけを足すものにした。
+- ディスク形式：GDI 0x80、CDI は Mode 2 があれば 0x20、Mode 1 だけなら 0x10（純正の `01 1f ...`、SECNR 0x11）、音声だけなら 0x00（未測定、Flycast と同じ）。
+- 切替中の SECNR：0x06 → 0x00 は上位ニブル 0、窓のあとに 0xX1（空フォルダは 0x07）。従来は窓の中もディスク形式を出し（CDI で 0x26 など）、空フォルダは 0x87 だった。窓の中とイメージなしの `disc_format()` は 0。
+- テスト：`common/discimg` 149 件（6 件追加）、`test_expect.py` 13 件（1 件スキップ）。expect の予測と記録 13・14 の差は GDEMU_VERSION（D15）だけ。
+- 大きさ：2E `release-z` の `resident,sd-fast` は +12 B（118,188 B、上限 122,368 B まで残り 4,180 B）、bss は変わらず。
+- 実機での注意：音声トラックの CD_READ は既定のビルドでも 2,352 B の経路を通る（実機未確認。奇数セクタの DMA は 32 B の倍数にならない）。イメージなしで起動したときの SECNR は 0x82 → 0x02。記述子にモードが無い CDI の扱いは推測。
+- 信頼度：ホストのテストと予測は確認済み。実機では未確認。
+- レビュー（Fable）への対応（コミット `f0dccd36`、親 `b664e29b`）：
+  - 起動時と DEVICE RESET で、イメージが無い（`media_present` が偽）ときの SECNR を `0x07`（NO DISC、形式 0）にした（`rest_secnr`）。窓の中の DEVICE RESET・バスリセットは窓の値（`window_secnr`）を書く。
+  - 切替の窓の SECNR を時間で進めるようにした：`ide_task` の待ちを「PIOA の信号か、次の段階の境目のタイマー」にし、タイマーでは SECNR だけを書き直す（`0x06` → open_time で `0x00` → 合計で `0xX1`／`0x07`）。窓を閉じることと UA は従来どおり次のコマンドで。
+  - CDI の記述子のモードが 1・2 なら、control が音声でもそのモードのデータとする（Flycast と同じ）。control の値は TOC のためにそのまま残す。
+  - 2,352 B で格納されていない音声トラックの CD_READ は ILLEGAL REQUEST（`cd_read_unservable`）。
+  - `Track` の ctrl（下位 4 ビット）とモード（ビット 4〜5）を 1 バイトに詰めた（`discimg::pack_ctrl_mode`、ホストテストあり）。32 B であることをコンパイル時に確認。
+  - テスト：`common/discimg` 151 件、`test_expect.py` 13 件（1 件スキップ）。2E `release-z` の `resident,sd-fast` は 118,684 B（`b664e29b` から +508 B、上限 122,368 B まで残り 3,684 B）、bss は −4 B。
+- 関連：R126、R130、R134、R141、R144。
 
 ## 判断の記録（Decisions）
 
