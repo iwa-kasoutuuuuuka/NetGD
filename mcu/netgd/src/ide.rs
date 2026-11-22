@@ -39,7 +39,6 @@ use core::ptr::{read_volatile, write_volatile};
 
 use defmt::{info, warn};
 use embassy_atsam3::smc;
-use embassy_futures::yield_now;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
@@ -3914,7 +3913,7 @@ async fn stream_pio_from_sd(
         }
         // The host owes us exactly `block` bytes of reads; the FPGA shows BSY
         // from the last pop until we re-arm DRQ above or complete below.
-        if let Err(why) = wait_host(dev, || dev.read_fifo_level() == 0, 10_000).await {
+        if let Err(why) = wait_host(dev, &mut || dev.read_fifo_level() == 0, 10_000).await {
             if why == Stall::Timeout {
                 warn!("  host left block {} undrained (lvl={}, {} of {} bytes sent)",
                       blocks, dev.read_fifo_level(), sent, total_bytes);
@@ -3997,7 +3996,7 @@ async fn push_buf_to_fifo(dev: &IdeDevice, data: &[u8]) -> usize {
         // MIL-CD's 1ST_READ.BIN as it pulls, at 2.16 s -- and when the host
         // has genuinely gone the extra five seconds buy nothing but a job
         // that takes longer to fail.
-        if let Err(why) = wait_host(dev, || room() > 0, 5_000).await {
+        if let Err(why) = wait_host(dev, &mut || room() > 0, 5_000).await {
             if why == Stall::Timeout {
                 warn!("push_buf_to_fifo: FIFO never drained after {} bytes", i);
             }
@@ -4083,7 +4082,7 @@ const SECONDARY_FIFO_DEPTH_WORDS: u16 = 1024;
 
 async fn recv_packet(dev: &IdeDevice) -> Result<[u8; PACKET_LEN_BYTES], ()> {
     // Wait for the host to write all 6 words. Yield-only: a sleep here is
-    // a 1 ms tick (see `poll_until`), which was most of a PACKET command's
+    // a 1 ms tick (see `WaitHost`), which was most of a PACKET command's
     // latency. A real drive has no CDB timeout; Sega Rally 2's WinCE
     // driver polls at ~50 ms and took >100 ms to get round to the CDB of
     // its first PIO read, which the old 100 ms cap turned into ABRT. Only
@@ -4095,7 +4094,7 @@ async fn recv_packet(dev: &IdeDevice) -> Result<[u8; PACKET_LEN_BYTES], ()> {
     let mut last_st = dev.read(REG_HOST_STATUS_RDS);
     let mut marks: [(u32, u16); 8] = [(u32::MAX, 0); 8];
     let mut n_marks = 0usize;
-    let r = wait_host(dev, || {
+    let r = wait_host(dev, &mut || {
         let st = dev.read(REG_HOST_STATUS_RDS);
         if st != last_st {
             last_st = st;
@@ -4139,7 +4138,7 @@ async fn recv_data_out(dev: &IdeDevice, len: usize) -> heapless::Vec<u8, 64> {
     dev.set_error(0);
     dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
 
-    if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= words as u16, 10_000).await {
+    if let Err(why) = wait_host(dev, &mut || dev.write_fifo_level() >= words as u16, 10_000).await {
         if why == Stall::Timeout {
             warn!("recv_data_out: host never wrote {} words", words);
         }
@@ -4199,7 +4198,7 @@ async fn send_data_in(dev: &IdeDevice, data: &[u8]) {
     let mut last_st = pre_st;
     let mut last_change_us: u32 = 0;
     let mut first_status_us: u32 = u32::MAX;
-    let r = wait_host(dev, || {
+    let r = wait_host(dev, &mut || {
         let st = dev.read(REG_HOST_STATUS_RDS);
         if st != last_st {
             last_st = st;
@@ -4364,7 +4363,7 @@ async fn handle_disk_read(
             // push_buf_to_fifo blocks on room, so the host is paced by
             // accident -- but a host that waits for the per-sector interrupt
             // would hang forever, and ATA says it is entitled to.
-            if let Err(why) = wait_host(dev, || dev.read_fifo_level() == 0, 10_000).await {
+            if let Err(why) = wait_host(dev, &mut || dev.read_fifo_level() == 0, 10_000).await {
                 if why == Stall::Timeout {
                     warn!("{}: host stopped draining disk read at sector {}", label, sent);
                 }
@@ -4394,7 +4393,7 @@ async fn handle_disk_read(
     // so there is nothing to preserve here.
     // A command to either device ends the wait: the data is all delivered,
     // and FatFs in particular reads what it needs and leaves the rest.
-    if wait_host(dev, || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
+    if wait_host(dev, &mut || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
         == Err(Stall::Timeout)
     {
         warn!("{}: host left {} words in the read FIFO (dma={}, bus={:#04x}, strobes={})",
@@ -4429,7 +4428,8 @@ async fn handle_disk_read(
 /// under an in-flight transfer. Requiring the eject makes the host state its
 /// intent first, and is why START STOP UNIT exists here at all. Refusing with
 /// ABRT is a normal, recoverable answer -- the host learns to eject first.
-/// Poll `cond` until true, spinning on a yield rather than sleeping.
+/// The poll behind [`wait_host`]: `cond` until true, spinning on a yield
+/// rather than sleeping.
 ///
 /// The time driver runs off the SAM3U's 32.768 kHz RTT with a /32 prescaler,
 /// so ~1 ms is the finest sleep available and `Duration::from_micros(100)` is
@@ -4440,17 +4440,61 @@ async fn handle_disk_read(
 /// keep count of the timeout; a host that takes longer than those 400 spins
 /// to deliver a sector -- a PIO write of 256 words does -- paid the tick on
 /// every sector, and 64-sector writes still cost 0.8 ms/sector. The timeout
-/// is now measured, not counted, so nothing here ever sleeps. Returns false
-/// if it gave up.
-async fn poll_until(mut cond: impl FnMut() -> bool, timeout_ms: u32) -> bool {
-    let start = Instant::now();
-    while !cond() {
-        if (Instant::now() - start).as_millis() >= timeout_ms as u64 {
-            return false;
+/// is now measured, not counted, so nothing here ever sleeps.
+///
+/// One poll is one round: `cond` (and the exits) checked, then the
+/// timeout; a yield (wake at once, `Pending`) when neither ends the wait. Kept
+/// as a hand-written future with one non-inlined `poll` shared by every
+/// caller: as an `async fn` taking a closure it was copied into each caller's
+/// state machine, about 300 bytes a site.
+struct WaitHost<'a> {
+    dev: &'a IdeDevice,
+    peer: IdeDevice,
+    cond: &'a mut dyn FnMut() -> bool,
+    timeout_ms: u32,
+    /// Taken on the first poll, where the `async fn` took it.
+    start: Option<Instant>,
+}
+
+impl core::future::Future for WaitHost<'_> {
+    type Output = Result<(), Stall>;
+
+    #[inline(never)]
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let s = self.get_mut();
+        let dev = s.dev;
+        let start = *s.start.get_or_insert_with(Instant::now);
+        let mut peer_cmd = false;
+        let mut reset = false;
+        let done = (s.cond)()
+            || { reset = dev.reset_seen(); reset }
+            || dev.aborted()
+            || { peer_cmd = s.peer.command_pending(); peer_cmd };
+        if !done && (Instant::now() - start).as_millis() < s.timeout_ms as u64 {
+            // `yield_now`: run again on the executor's next pass.
+            cx.waker().wake_by_ref();
+            return core::task::Poll::Pending;
         }
-        yield_now().await;
+        core::task::Poll::Ready(if reset {
+            // The FPGA already dropped the transfer (FIFOs, DMA mode, status);
+            // the flag stays set for the command loop to log and clear.
+            warn!("{}: host reset the bus mid-transfer, abandoning this command",
+                  if dev.is_primary() { "primary" } else { "secondary" });
+            Err(Stall::Reset)
+        } else if dev.aborted() {
+            info!("{}: host wrote a new command mid-transfer, abandoning this one",
+                  if dev.is_primary() { "primary" } else { "secondary" });
+            Err(Stall::OwnCommand)
+        } else if peer_cmd {
+            warn!("{}: host issued a command to the other device mid-transfer, abandoning this one",
+                  if dev.is_primary() { "primary" } else { "secondary" });
+            Err(Stall::PeerCommand)
+        } else if done {
+            Ok(())
+        } else {
+            Err(Stall::Timeout)
+        })
     }
-    true
 }
 
 /// Why a host-paced wait gave up.
@@ -4466,7 +4510,7 @@ enum Stall {
     OwnCommand,
 }
 
-/// `poll_until` for the waits where the host owes us something -- draining a
+/// A poll for the waits where the host owes us something -- draining a
 /// FIFO, filling one -- with one extra exit: the host issuing a command to
 /// the other device. ATA's non-overlapped protocol forbids that until this
 /// command has completed, and no Dreamcast host does it (KOS serialises the
@@ -4485,38 +4529,8 @@ enum Stall {
 /// one. The caller must then post nothing (see `IdeDevice::aborted`); the
 /// command stays latched and the sweep serves it next. Every caller runs
 /// after its own `ack_command`, or the command being served would count.
-async fn wait_host(dev: &IdeDevice, mut cond: impl FnMut() -> bool, timeout_ms: u32)
-    -> Result<(), Stall>
-{
-    let peer = dev.peer();
-    let mut peer_cmd = false;
-    let mut reset = false;
-    let done = poll_until(
-        || cond()
-            || { reset = dev.reset_seen(); reset }
-            || dev.aborted()
-            || { peer_cmd = peer.command_pending(); peer_cmd },
-        timeout_ms,
-    ).await;
-    if reset {
-        // The FPGA already dropped the transfer (FIFOs, DMA mode, status);
-        // the flag stays set for the command loop to log and clear.
-        warn!("{}: host reset the bus mid-transfer, abandoning this command",
-              if dev.is_primary() { "primary" } else { "secondary" });
-        Err(Stall::Reset)
-    } else if dev.aborted() {
-        info!("{}: host wrote a new command mid-transfer, abandoning this one",
-              if dev.is_primary() { "primary" } else { "secondary" });
-        Err(Stall::OwnCommand)
-    } else if peer_cmd {
-        warn!("{}: host issued a command to the other device mid-transfer, abandoning this one",
-              if dev.is_primary() { "primary" } else { "secondary" });
-        Err(Stall::PeerCommand)
-    } else if done {
-        Ok(())
-    } else {
-        Err(Stall::Timeout)
-    }
+fn wait_host<'a>(dev: &'a IdeDevice, cond: &'a mut dyn FnMut() -> bool, timeout_ms: u32) -> WaitHost<'a> {
+    WaitHost { dev, peer: dev.peer(), cond, timeout_ms, start: None }
 }
 
 /// The two firmware-update steps that normal firmware handles; everything
@@ -4697,7 +4711,7 @@ async fn handle_disk_write(
                 dev.set_status_intrq(STATUS_DRDY | STATUS_DSC | STATUS_DRQ);
             }
 
-            if let Err(why) = wait_host(dev, || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
+            if let Err(why) = wait_host(dev, &mut || dev.write_fifo_level() >= WORDS as u16, 10_000).await {
                 if why == Stall::Timeout {
                     // Sample what the FPGA holds while the host is polling. If
                     // this shows 0x58 while the DC reads 0xd8 off the bus, the
@@ -4790,7 +4804,7 @@ async fn handle_disk_write(
 /// IDENTIFY DEVICE need the same ending without the packet-protocol byte
 /// count / interrupt-reason bookkeeping.
 async fn finish_pio_in(dev: &IdeDevice, packet: bool) {
-    if wait_host(dev, || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
+    if wait_host(dev, &mut || dev.read_fifo_level() == 0 || dev.command_pending(), 10_000).await
         == Err(Stall::Timeout)
     {
         warn!("finish_pio_in: host never drained FIFO, abandoning");
