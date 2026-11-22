@@ -351,6 +351,78 @@ pub fn pregap_read<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Op
     (!on_a_track).then_some((t, zeros_end - start_fad))
 }
 
+/// The track a CD_READ from `start_fad` belongs to, for every check before
+/// the transfer -- the expected sector type ([`cd_read_type_mismatch`],
+/// 5/64/00) and the count ([`start_sectors_left`], past the end 5/00/00):
+/// the track whose sectors hold the start (the open-ended [`track_for_lba`]'s
+/// pick, as before); else, for a start in a track's pregap
+/// ([`PREGAP_SECTORS`] before its index 1, on no track's sectors), that
+/// NEXT track, whether or not the request ends in it ([`pregap_read`]
+/// serves the ones that do); else (a gap no pregap reaches, the lead-out:
+/// refused 5/21/00 by [`cd_read_start_outside`]) the open-ended
+/// [`track_for_lba`]'s pick again, unchanged. The firmware
+/// (`handle_cd_read`) and the predictor use this one rule.
+pub fn track_of_start<T: TrackInfo>(tracks: &[T], start_fad: u32) -> Option<&T> {
+    let prev = track_for_lba(tracks, start_fad.saturating_sub(150));
+    if start_fad >= 150 {
+        if let Some(t) = prev {
+            if start_fad - 150 - t.start_lba() < t.sector_count() {
+                return Some(t);
+            }
+        }
+    }
+    let next = tracks.iter().find(|t| t.start_lba().wrapping_add(150) > start_fad);
+    match next {
+        Some(t) if t.start_lba().wrapping_add(150) - start_fad <= PREGAP_SECTORS => Some(t),
+        _ => prev,
+    }
+}
+
+/// Sectors a CD_READ from `start_fad` may cover on `track` (from
+/// [`track_of_start`]): to the end of the track's sectors, its pregap part
+/// included for a start in the pregap. 0 past the end.
+pub fn start_sectors_left<T: TrackInfo>(track: &T, start_fad: u32) -> u32 {
+    track.start_lba().wrapping_add(150).wrapping_add(track.sector_count()).saturating_sub(start_fad)
+}
+
+/// Bytes each pregap zero sector of a CD_READ ([`pregap_read`]) takes on the
+/// bus. Stock GDEMU 6.0 sizes them as the track's own sectors would be sent
+/// for that request kind (seq 22-24, every read `0x20`): 2,352 on an audio
+/// track (GDI 03 track 2, CDI 04 / 10 / 11 track 1), 2,048 on a Mode 1 track
+/// (GDI 03 tracks 1 / 3, CDI 10 track 2), 2,324 -- Form 2 -- on a CDI's Mode
+/// 2 track ([`cd_read_may_be_form2`]; CDI 04 track 2: `GP_PG2_M*` 2,324 B
+/// each, `GP_XPRE2` 11842 x 16 = 10 x 2,324 + 6 x 2,048 = 35,528 B), though
+/// the track's own sectors there are Form 1 and go at 2,048. `raw` = the
+/// track's sectors go whole ([`cd_read_raw_out`]); `form2` = feature
+/// `form2-sectors` (without it NetGD sends 2,048 there).
+pub fn pregap_zero_bytes(flags: u8, track_mode: u8, sector_size: u32, raw: bool, form2: bool) -> usize {
+    if raw {
+        RAW_SECTOR_BYTES
+    } else if form2 && cd_read_may_be_form2(flags, track_mode, sector_size) {
+        FORM2_SECTOR_BYTES
+    } else {
+        2048
+    }
+}
+
+/// Byte offset of sector `i` of a pregap read's transfer: `zeros` sectors of
+/// `zero_bytes`, then the track's of `sector_bytes` ([`pregap_zero_bytes`]).
+pub fn pregap_out_offset(i: u32, zeros: u32, zero_bytes: usize, sector_bytes: usize) -> usize {
+    let z = i.min(zeros) as usize;
+    z * zero_bytes + (i as usize - z) * sector_bytes
+}
+
+/// Whole sectors in the first `bytes` of that transfer (the inverse of
+/// [`pregap_out_offset`], rounded down).
+pub fn pregap_out_sectors(bytes: usize, zeros: u32, zero_bytes: usize, sector_bytes: usize) -> u32 {
+    let zb = zeros as usize * zero_bytes;
+    if bytes < zb {
+        (bytes / zero_bytes.max(1)) as u32
+    } else {
+        zeros + ((bytes - zb) / sector_bytes.max(1)) as u32
+    }
+}
+
 /// Whether stock GDEMU 6.0 would refuse a CD_READ from `start_fad` as LBA
 /// out of range, 5/21/00 ([`ASC_LBA_OUT_OF_RANGE`]): no track holds the
 /// sector, nor its pregap ([`PREGAP_SECTORS`] before the track). Seq 21: CDI

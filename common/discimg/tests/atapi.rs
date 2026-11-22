@@ -1633,3 +1633,101 @@ fn form2_compaction_matches_a_copy_for_every_alignment() {
         }
     }
 }
+
+/// The sense `handle_cd_read` gives a request refused before any data, by
+/// [`track_of_start`]: 5/64/00 for its type, 5/21/00 from outside every
+/// track and pregap, 5/00/00 past the end of the start's track; `None` =
+/// not refused there.
+fn start_refusal(tracks: &[TrackDesc], flags: u8, fad: u32, count: u32) -> Option<&'static str> {
+    let t = track_of_start(tracks, fad);
+    if t.map_or(false, |t| cd_read_type_mismatch(flags, t.mode)) {
+        return Some("5/64/00");
+    }
+    if cd_read_start_outside(tracks, fad) {
+        return Some("5/21/00");
+    }
+    let t = t.unwrap();
+    if count > start_sectors_left(t, fad) || (fad < 150 && pregap_read(tracks, fad, count).is_none()) {
+        return Some("5/00/00");
+    }
+    None
+}
+
+#[test]
+fn a_start_in_a_pregap_belongs_to_the_next_track() {
+    // GDI 03: data track 1 FAD 150..749, audio track 2 906..1505 (pregap
+    // 756..905), track 3 45150..65149.
+    let g = stock_gdi03();
+    let num = |fad| track_of_start(&g, fad).map(|t| t.number);
+    // On a track's sectors: that track (the open-ended lookup's pick).
+    for fad in [150u32, 749, 906, 1505, 45150, 65149] {
+        assert_eq!(num(fad), track_for_lba(&g, fad - 150).map(|t| t.number), "fad {}", fad);
+    }
+    // In a pregap: the next track, also below 150.
+    assert_eq!(num(0), Some(1));
+    assert_eq!(num(149), Some(1));
+    assert_eq!(num(756), Some(2));
+    assert_eq!(num(900), Some(2));
+    assert_eq!(num(905), Some(2));
+    assert_eq!(num(45000), Some(3));
+    // A gap no pregap reaches, the lead-out: the open-ended pick, as before.
+    assert_eq!(num(750), Some(1));
+    assert_eq!(num(755), Some(1));
+    assert_eq!(num(1506), Some(2));
+    assert_eq!(num(44999), Some(2));
+    assert_eq!(num(65150), Some(3));
+    // FAD 900 x 700 runs past audio track 2's end (1505): checked against
+    // track 2. Mode 1 type -> 5/64/00 (was 5/00/00 by data track 1); CD-DA
+    // type and any type -> past the end, 5/00/00.
+    assert_eq!(start_refusal(&g, 0x24, 900, 700), Some("5/64/00"));
+    assert_eq!(start_refusal(&g, 0x22, 900, 700), Some("5/00/00"));
+    assert_eq!(start_refusal(&g, 0x20, 900, 700), Some("5/00/00"));
+    assert_eq!(start_refusal(&g, 0x28, 900, 700), Some("5/64/00"));
+    assert_eq!(start_sectors_left(&g[1], 900), 606);
+    assert_eq!(start_refusal(&g, 0x20, 900, 606), None);
+    assert_eq!(start_refusal(&g, 0x24, 900, 606), Some("5/64/00"));
+    assert!(pregap_read(&g, 900, 606).is_some());
+    // Unchanged: on a track's sectors and in a gap.
+    assert_eq!(start_refusal(&g, 0x24, 700, 100), Some("5/00/00")); // past track 1's end
+    assert_eq!(start_refusal(&g, 0x24, 700, 50), None);
+    assert_eq!(start_refusal(&g, 0x24, 750, 1), Some("5/21/00"));
+    assert_eq!(start_refusal(&g, 0x28, 750, 1), Some("5/64/00")); // by track 1, as before
+    assert_eq!(start_refusal(&g, 0x20, 1506, 1), Some("5/21/00"));
+    // CDI 04: track 2 (Mode 2) 11852..15853, pregap 11702..11851; GP_XPRE2
+    // reads, a start in the pregap running past track 2's end does not.
+    let c = seq21_cdi(true);
+    assert_eq!(track_of_start(&c, 11842).map(|t| t.number), Some(2));
+    assert_eq!(start_sectors_left(&c[1], 11842), 4012);
+    assert_eq!(start_refusal(&c, 0x20, 11842, 16), None);
+    assert_eq!(start_refusal(&c, 0x20, 11842, 4012), None);
+    assert_eq!(start_refusal(&c, 0x20, 11842, 4013), Some("5/00/00"));
+    assert_eq!(start_refusal(&c, 0x22, 11842, 4100), Some("5/00/00"));
+    assert_eq!(start_refusal(&c, 0x24, 11842, 4100), Some("5/64/00"));
+    assert_eq!(start_refusal(&c, 0x28, 11842, 4100), Some("5/00/00")); // Form 1 type fits Mode 2
+    assert_eq!(start_refusal(&c, 0x20, 11694, 16), Some("5/21/00")); // GP_XGAP2
+}
+
+#[test]
+fn pregap_zero_sectors_take_the_tracks_size_form2_on_mode2() {
+    let c = seq21_cdi(true);
+    let d = &c[1];
+    // CDI 04 track 2, 0x20: 2,324 with `form2-sectors`, else 2,048.
+    assert_eq!(pregap_zero_bytes(0x20, d.mode, d.sector_size as u32, false, true), 2324);
+    assert_eq!(pregap_zero_bytes(0x20, d.mode, d.sector_size as u32, false, false), 2048);
+    // A typed read, a Mode 1 track (CDI 10): 2,048; an audio track: whole.
+    assert_eq!(pregap_zero_bytes(0x28, d.mode, d.sector_size as u32, false, true), 2048);
+    let m1 = seq21_cdi(false);
+    assert_eq!(pregap_zero_bytes(0x20, m1[1].mode, m1[1].sector_size as u32, false, true), 2048);
+    assert_eq!(pregap_zero_bytes(0x20, c[0].mode, c[0].sector_size as u32, true, true), 2352);
+    // GP_XPRE2: 10 x 2,324 + 6 x 2,048 = 35,528 B.
+    assert_eq!(pregap_out_offset(16, 10, 2324, 2048), 35528);
+    assert_eq!(pregap_out_offset(10, 10, 2324, 2048), 23240);
+    assert_eq!(pregap_out_offset(3, 10, 2324, 2048), 6972);
+    for i in 0..=16 {
+        let b = pregap_out_offset(i, 10, 2324, 2048);
+        assert_eq!(pregap_out_sectors(b, 10, 2324, 2048), i);
+        if b > 0 {
+            assert_eq!(pregap_out_sectors(b - 1, 10, 2324, 2048), i - 1);
+        }
+    }
+}
