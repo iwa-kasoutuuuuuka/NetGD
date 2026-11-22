@@ -3,10 +3,16 @@
  * plan (docs/design/menu-app.md 8: the Dreamcast sends WANT, the PC answers DATA, up to 64 KiB per frame), and
  * the data goes into a sink (a 64 KiB buffer) instead of the SD card.
  *
- * Needs a Dreamcast + BBA started through dcload-ip (dc_auto.ps1 + the g2netbench preset). KOS is started with
- * INIT_NET: it takes over the BBA from dcload-ip (same IP), the dc-tool console and /pc/ keep working through
- * KOS's fs_dclsocket. The PC side is g2n_send.py (started by the preset). Never touches the GD-ROM drive:
- * INIT_CDROM is off, no G1 / ATA / cdrom call.
+ * Needs a Dreamcast + BBA started through dcload-ip (dc_auto.ps1 + the g2netbench preset). KOS is NOT started
+ * with INIT_NET: with dcload-ip, KOS's net_init(ip) first asks DHCP for that IP and waits up to 60 s (kernel/net/
+ * net_core.c: net_dhcp_request, 60 * 1000 ms), and fs_dclsocket_init() spins forever on the ARP lookup of the
+ * PC (fs_dclsocket.c). With dbgio disabled meanwhile (arch_init_net_dcload_ip) the screen stays black and the
+ * console silent, which is what the first hardware run looked like. So the network is brought up here, by hand,
+ * like tools/vmu-workbench/dc/savemgr/net.c: set the IP on the netif, net_init(0) (no DHCP when the netif has
+ * an address), bounded ARP lookup of the PC, then fs_dclsocket for the exit hand-off only.
+ * Progress is drawn on the screen (bfont) with a once-a-second heartbeat in row 0: the console is not used
+ * once KOS owns the NIC. The PC side is g2n_send.py (started by the preset); results travel as LINE frames.
+ * Never touches the GD-ROM drive: INIT_CDROM is off, no G1 / ATA / cdrom call.
  *
  * Passes (TCP): want size / WANTs in flight / receive buffer / checksums on or off. Then UDP bursts (what a
  * custom UDP transfer could count on). Results are sent to the PC as LINE frames (key=value); g2n_send.py
@@ -22,19 +28,68 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <stdarg.h>
+#include <dc/biosfont.h>
+#include <dc/dcload.h>
+#include <dc/fs_dclsocket.h>
 #include "g2b_core.h"
 #include "g2n_core.h"
 #include "../netgd-recv/src/crc32.h"
 
-KOS_INIT_FLAGS((INIT_DEFAULT & ~INIT_CDROM) | INIT_NET);
+KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
 
 #define WAIT_PC_MS     600000     /* wait this long for the PC sender to connect */
+#define NET_INIT_MS    30000      /* net_init() (link-up wait included) must finish within this */
+#define ARP_MS         8000       /* ARP lookup of the PC */
 #define FRAME_TO_MS    15000      /* inside a frame (menu-app.md 8: 15 s) */
 #define DATA_TO_MS     30000      /* WANT -> DATA (menu-app.md 8: 30 s) */
 #define PASS_LIMIT_US  (20ull * 1000000ull)
 #define PASS_BYTES     (32ull << 20)
 
 static uint64_t now_us(void) { return timer_us_gettime64(); }
+
+/* ---- on-screen log (works when the console is dead) ---- */
+#define SCR_W     640
+#define SCR_ROWS  19                       /* rows 1..19 of 24 px; row 0 = heartbeat */
+static int g_row = 1;
+static int g_con = 1;                      /* mirror to the dcload console (only before KOS owns the NIC) */
+static const char *g_stage = "start";
+static volatile int g_hb_run = 1;
+
+static void scr_put(int row, const char *t)
+{
+    char b[56];
+    snprintf(b, sizeof b, "%-52.52s", t);   /* pad: overwrites the old row text (opaque background) */
+    bfont_draw_str(vram_s + (size_t)row * BFONT_HEIGHT * SCR_W + 4, SCR_W, 1, b);
+}
+
+static void say(const char *fmt, ...)
+{
+    char b[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    if (g_con) printf("[g2net] %s\n", b);
+    if (g_row > SCR_ROWS) { memset(vram_s + BFONT_HEIGHT * SCR_W, 0, (size_t)SCR_ROWS * BFONT_HEIGHT * SCR_W * 2); g_row = 1; }
+    scr_put(g_row++, b);
+}
+
+static void *heartbeat(void *arg)
+{
+    (void)arg;
+    unsigned n = 0;
+    while (g_hb_run) {
+        char b[64];
+        snprintf(b, sizeof b, "g2netbench %c up %us  %s", "|/-\\"[n & 3], (unsigned)(timer_ms_gettime64() / 1000), g_stage);
+        scr_put(0, b);
+        n++;
+        thd_sleep(500);
+    }
+    return NULL;
+}
+
+static void stage(const char *s) { g_stage = s; }
 
 static int g_fd = -1;
 static uint32_t g_txseq;                       /* sequence of the request being served */
@@ -111,7 +166,7 @@ static void send_kv(const char *text)
         size_t n = strcspn(text, "\n");
         if (n >= sizeof line) n = sizeof line - 1;
         memcpy(line, text, n); line[n] = 0;
-        if (n) { send_line(line); printf("[g2net] %s\n", line); }
+        if (n) { send_line(line); say("%s", line); }
         text += n; if (*text == '\n') text++;
     }
 }
@@ -266,12 +321,114 @@ static int run_udp(int ufd, unsigned n, unsigned count, unsigned size, unsigned 
 }
 
 /* ---- main ---- */
+extern void eth_init(void);                /* KOS hardware.c: registers the drivers (only INIT_NET calls it) */
+extern uint32_t _fs_dclsocket_get_ip(void);
+extern void fs_dclsocket_init_console(void);
+
+static void set4(uint8_t *d, uint32_t v) { d[0] = (uint8_t)(v >> 24); d[1] = (uint8_t)(v >> 16); d[2] = (uint8_t)(v >> 8); d[3] = (uint8_t)v; }
+
 static void ip_str(char *out, size_t n)
 {
     snprintf(out, n, "?.?.?.?");
     if (net_default_dev)
         snprintf(out, n, "%u.%u.%u.%u", net_default_dev->ip_addr[0], net_default_dev->ip_addr[1],
                  net_default_dev->ip_addr[2], net_default_dev->ip_addr[3]);
+}
+
+static int g_net_rc, g_net_done;
+static void *netinit_thd(void *arg) { (void)arg; g_net_rc = net_init(0); g_net_done = 1; return NULL; }
+
+static int g_dcls;                         /* fs_dclsocket is up: shut it down at the end (sends DC00) */
+
+/* Bring the BBA up under KOS. 0 = net_default_dev usable. Every step is on the screen. */
+static int bring_up(void)
+{
+    uint32_t ip = 0, hip = 0, hport = 0;
+    int dcl = dcload_type == DCLOAD_TYPE_IP;
+    if (dcl) {
+        ip = _fs_dclsocket_get_ip();                 /* our IP as dcload-ip has it */
+        dcload_gethostinfo(&hip, &hport);            /* dc-tool-ip's IP and port */
+    } else {
+        ip = (192u << 24) | (168u << 16) | (10u << 8) | 2u;
+        hip = (ip & 0xffffff00u) | 1u;
+    }
+    say("dcload type %d  DC %u.%u.%u.%u  PC %u.%u.%u.%u", dcload_type, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255,
+        hip >> 24, (hip >> 16) & 255, (hip >> 8) & 255, hip & 255);
+    if (ip == 0) { say("no IP from dcload: set one by hand"); return -1; }
+    say("console off from here (KOS takes the BBA)");
+    g_con = 0;
+    if (dcl) dbgio_disable();
+
+    stage("eth_init");
+    eth_init();
+    netif_t *nif;
+    int nifs = 0;
+    LIST_FOREACH(nif, net_get_if_list(), if_list) {
+        set4(nif->ip_addr, ip); set4(nif->netmask, 0xffffff00u);
+        set4(nif->broadcast, (ip & 0xffffff00u) | 0xffu); set4(nif->gateway, hip);
+        nifs++;
+    }
+    say("netifs registered: %d", nifs);
+    if (!nifs) return -1;
+
+    stage("net_init (no DHCP)");
+    say("net_init ... (link up wait, <= %d s)", NET_INIT_MS / 1000);
+    uint64_t t0 = timer_ms_gettime64();
+    kthread_t *th = thd_create(0, netinit_thd, NULL);
+    while (th && !g_net_done && timer_ms_gettime64() - t0 < NET_INIT_MS) thd_sleep(100);
+    if (!th || !g_net_done) { say("net_init STUCK after %d s (BBA / link?)", NET_INIT_MS / 1000); return -1; }
+    say("net_init rc=%d in %u ms, default dev %s", g_net_rc, (unsigned)(timer_ms_gettime64() - t0),
+        net_default_dev ? net_default_dev->name : "NONE");
+    if (g_net_rc < 0 || !net_default_dev) return -1;
+
+    /* the driver may have loaded the flashrom ISP settings: force ours */
+    set4(net_default_dev->ip_addr, ip); set4(net_default_dev->netmask, 0xffffff00u);
+    set4(net_default_dev->broadcast, (ip & 0xffffff00u) | 0xffu); set4(net_default_dev->gateway, hip);
+    {
+        const uint8_t *m = net_default_dev->mac_addr;
+        say("MAC %02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
+
+    /* ARP of the PC, bounded (fs_dclsocket_init() would spin forever on a missing reply) */
+    stage("ARP of the PC");
+    uint8_t hb[4], mac[6];
+    net_ipv4_parse_address(hip, hb);
+    int err = -1;
+    t0 = timer_ms_gettime64();
+    while (timer_ms_gettime64() - t0 < ARP_MS) {
+        err = net_arp_lookup(net_default_dev, hb, mac, NULL, NULL, 0);
+        if (err == 0) break;
+        thd_sleep(50);
+    }
+    if (err == 0) {
+        say("PC MAC %02x:%02x:%02x:%02x:%02x:%02x (%u ms)", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            (unsigned)(timer_ms_gettime64() - t0));
+        net_arp_insert(net_default_dev, mac, hb, 0);
+        if (dcl) {
+            fs_dclsocket_init_console();
+            g_dcls = fs_dclsocket_init() == 0;         /* console stays OFF (dbgio not re-selected): only DC00 at the end */
+            say("fs_dclsocket (exit hand-off): %s", g_dcls ? "up" : "failed");
+        }
+    } else {
+        say("PC did not answer ARP in %d s: no route to %u.%u.%u.%u?", ARP_MS / 1000, hb[0], hb[1], hb[2], hb[3]);
+        say("(continuing: the PC may reach us)");
+    }
+    return 0;
+}
+
+static void shutdown_net(void)
+{
+    if (g_dcls) { fs_dclsocket_shutdown(); g_dcls = 0; }   /* DC00: dc-tool-ip ends, dc_auto sees the run finished */
+    net_shutdown();
+}
+
+static int fail(const char *why)
+{
+    say("FAILED: %s", why);
+    stage("failed, returning in 20 s");
+    thd_sleep(20000);
+    g_hb_run = 0;
+    return 1;
 }
 
 static int read_request(uint8_t want_type, uint32_t max_len, g2n_hdr *h)
@@ -288,32 +445,42 @@ static int read_request(uint8_t want_type, uint32_t max_len, g2n_hdr *h)
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
+    bfont_set_encoding(BFONT_CODE_ISO8859_1);
+    bfont_set_foreground_color(0xffff);
+    bfont_set_background_color(0x0000);
+    memset(vram_s, 0, 640 * 480 * 2);
+    thd_create(0, heartbeat, NULL);
+    say("g2netbench: no GD-ROM access (INIT_CDROM off)");
+
+    if (bring_up() != 0) { int r = fail("network bring-up"); shutdown_net(); return r; }
     char ip[24];
     ip_str(ip, sizeof ip);
-    printf("[g2net] start (no GD-ROM access; INIT_CDROM off; KOS net on, dcload type %d). IP %s TCP %u UDP %u\n",
-           dcload_type, ip, G2N_TCP_PORT, G2N_UDP_PORT);
-    if (!net_default_dev) { printf("[g2net] KOS has no network device\n"); return 1; }
+    say("IP %s  TCP %u  UDP %u", ip, G2N_TCP_PORT, G2N_UDP_PORT);
 
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
     int ufd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (lfd < 0 || ufd < 0) { printf("[g2net] socket() failed errno=%d\n", errno); return 1; }
+    if (lfd < 0 || ufd < 0) { say("socket() failed errno=%d", errno); int r = fail("socket"); shutdown_net(); return r; }
     struct sockaddr_in a; memset(&a, 0, sizeof a);
     a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = htons(G2N_TCP_PORT);
-    if (bind(lfd, (struct sockaddr *)&a, sizeof a) != 0 || listen(lfd, 1) != 0) { printf("[g2net] TCP bind/listen failed errno=%d\n", errno); return 1; }
+    if (bind(lfd, (struct sockaddr *)&a, sizeof a) != 0 || listen(lfd, 1) != 0) {
+        say("TCP bind/listen failed errno=%d", errno); int r = fail("listen"); shutdown_net(); return r;
+    }
     a.sin_port = htons(G2N_UDP_PORT);
-    if (bind(ufd, (struct sockaddr *)&a, sizeof a) != 0) { printf("[g2net] UDP bind failed errno=%d\n", errno); return 1; }
+    if (bind(ufd, (struct sockaddr *)&a, sizeof a) != 0) { say("UDP bind failed errno=%d", errno); int r = fail("udp bind"); shutdown_net(); return r; }
     fcntl(ufd, F_SETFL, fcntl(ufd, F_GETFL, 0) | O_NONBLOCK);
-    printf("[g2net] listening; waiting for the PC sender (up to %d s)\n", WAIT_PC_MS / 1000);
+    say("listening on %s:%u; waiting for the PC sender", ip, G2N_TCP_PORT);
+    stage("waiting for the PC sender");
 
-    if (wait_readable(lfd, WAIT_PC_MS) <= 0) { printf("[g2net] no PC connected\n"); return 1; }
+    if (wait_readable(lfd, WAIT_PC_MS) <= 0) { int r = fail("no PC connected"); shutdown_net(); return r; }
     struct sockaddr_in peer; socklen_t pl = sizeof peer;
     g_fd = accept(lfd, (struct sockaddr *)&peer, &pl);
-    if (g_fd < 0) { printf("[g2net] accept failed errno=%d\n", errno); return 1; }
-    printf("[g2net] PC connected\n");
+    if (g_fd < 0) { say("accept failed errno=%d", errno); int r = fail("accept"); shutdown_net(); return r; }
+    say("PC connected");
+    stage("handshake");
 
     g2n_hdr h;
-    if (read_request(G2N_T_HELLO, 256, &h) != 0) { printf("[g2net] bad HELLO\n"); return 1; }
+    if (read_request(G2N_T_HELLO, 256, &h) != 0) { int r = fail("bad HELLO"); shutdown_net(); return r; }
     uint8_t ok[44]; memset(ok, 0, sizeof ok);
     ok[0] = 1;                                         /* version */
     ok[4] = (uint8_t)G2N_MAX_DATA; ok[5] = (uint8_t)(G2N_MAX_DATA >> 8); ok[6] = (uint8_t)(G2N_MAX_DATA >> 16);
@@ -321,8 +488,8 @@ int main(int argc, char **argv)
     send_frame(G2N_T_HELLO_OK, ok, sizeof ok, NULL);
 
     /* PUT starts the measurement (its manifest is ignored) */
-    if (read_request(G2N_T_PUT, 4096, &h) != 0) { printf("[g2net] no PUT\n"); return 1; }
-    printf("[g2net] PUT received: measuring\n");
+    if (read_request(G2N_T_PUT, 4096, &h) != 0) { int r = fail("no PUT"); shutdown_net(); return r; }
+    say("PUT received: measuring");
     g2b_kv_init(&g_kv, g_text, sizeof g_text);
     g2b_kv_str(&g_kv, "tool", "g2netbench");
     g2b_kv_str(&g_kv, "dc_ip", ip);
@@ -333,20 +500,31 @@ int main(int argc, char **argv)
 
     int failed = 0;
     for (unsigned i = 0; i < sizeof PASSES / sizeof PASSES[0] && !failed; i++) {
+        char nm[32];
+        snprintf(nm, sizeof nm, "TCP pass %u", i + 1);
+        stage(nm);
         snprintf(g_text, sizeof g_text, "next_pass=p%u", i + 1);
         send_line(g_text);
         failed = run_pass(i + 1, &PASSES[i]) != 0;
     }
     if (!failed) {
         static const unsigned pps[] = { 0, 2500, 1200 };
-        for (unsigned i = 0; i < sizeof pps / sizeof pps[0]; i++)
+        for (unsigned i = 0; i < sizeof pps / sizeof pps[0]; i++) {
+            char nm[32];
+            snprintf(nm, sizeof nm, "UDP burst %u", i + 1);
+            stage(nm);
             run_udp(ufd, i + 1, 4000, 1400, pps[i]);
+        }
     }
     send_line(failed ? "status=failed" : "status=done");
     uint8_t done[1] = { (uint8_t)!failed };
     send_frame(G2N_T_DONE, done, 1, NULL);
     wait_readable(g_fd, 5000);                         /* let the PC close first: our last frames are not cut off */
-    printf("[g2net] done%s\n", failed ? " (a pass failed)" : "");
+    say("done%s", failed ? " (a pass failed)" : "");
+    stage(failed ? "done (failed)" : "done");
     close(g_fd); close(lfd); close(ufd);
+    thd_sleep(3000);                                   /* the result is readable on the screen */
+    g_hb_run = 0;
+    shutdown_net();
     return failed;
 }

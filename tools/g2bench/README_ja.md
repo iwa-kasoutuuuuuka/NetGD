@@ -124,3 +124,24 @@ PC の `g2n_send.py` が TCP 20039（NGTP の既定ポート）に接続し、`H
 - dcload の `read` は 1 回ごとに dc-tool の `dc_read`（`syscalls.c`）を呼び、これは **ファイルの読み出し + 「PC → DC のバイナリ転送」`send_data`**（アップロードと同じ経路）で返す：`CMD_LOADBIN` の往復 → 1440 B の `CMD_PARTBIN` を連続送信（10 パケットごとに 1800 µs 待つ）→ **（`-f` 無しだと）固定 25 ms の待ち**（`PACKET_TIMEOUT/10`）→ `CMD_DONEBIN` の往復（欠落があれば再送と再度の `DONEBIN`）→ `CMD_RETVAL`。つまり 1 呼び出しあたり固定費が「往復 3 回 + 25 ms」あり、ブロックを大きくすれば薄まる（ただし 1 呼び出しは 1 本の同期処理）。
 - `send_cmd` は送信エラーを（`WSAEWOULDBLOCK` 以外）致命とみなして `return -1` する（`dc-io.h`）。`dc_read` は `send_data` の失敗を無視して `CMD_RETVAL` も送ろうとし、それも失敗すると `CatchError` で dc-tool 全体が終了する。2 回続く `10055` はこの流れ。
 - 25 ms + 往復では 105 ms に足りない分（約 80 ms）はソースだけでは説明できない。DC 側の取りこぼし→再送、Windows の NIC キューなどを疑うが未確認。1 / 4 / 16 KiB と `raw_4k` の呼び出しあたり時間を比べて、固定費と容量比例の分を分ける。
+
+## g2netbench の起動と画面表示（初回の実機で固まった件の対応）
+
+初回は黒い画面のまま止まり、ログは `dc-load says our IP is 192.168.10.2` で終わった。KOS 2.3 のソースから：
+`INIT_NET` + dcload-ip だと `arch_init_net_dcload_ip`（kernel/init.c）が **dbgio を止めてから** `net_init(dcload の IP)` を呼び、
+それが **DHCP で同じ IP を要求して最大 60 秒待つ**（net_core.c → net_dhcp_request、直結ケーブルには DHCP サーバーが無い）。
+続く `fs_dclsocket_init()` は PC の ARP が引けるまで**無限ループ**（fs_dclsocket.c）。その間コンソールも画面も無音。
+原因の特定はソースからの推定で、実機では未確認。
+
+対応：`INIT_NET` を使わず、savemgr の `net.c` と同じ手順で手動で上げる（IP を netif に入れてから `net_init(0)` = DHCP 無し）。
+各段に時間制限（net_init 30 秒、PC の ARP 8 秒）を付け、**進捗を画面に出す**（bfont、コンソールは KOS が NIC を持った後は使わない）。
+
+画面の見方（上の行 0 は 1 秒ごとの心拍。`up NNs` が進んでいればフリーズではなく待ち）：
+
+1. `dcload type 1  DC 192.168.10.2  PC 192.168.10.x`（dcload から取った IP。0 なら失敗）
+2. `netifs registered: 1` → `net_init ... ` → `net_init rc=0 in NNN ms, default dev bba`（STUCK と出たら BBA / リンクの問題）
+3. `MAC ...`、`PC MAC ... (NN ms)`（出なければ `PC did not answer ARP`：DC→PC が通っていない）
+4. `fs_dclsocket (exit hand-off): up`、`listening on 192.168.10.2:20039; waiting for the PC sender`
+5. PC の送信側が繋ぐと `PC connected` → `PUT received: measuring` → 各パスの結果行。終わると 3 秒表示して dcload に戻る。
+
+失敗したときは `FAILED: <理由>` を出して 20 秒後に戻る。
