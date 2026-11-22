@@ -1275,9 +1275,9 @@ async fn load_media(state: &mut DeviceState) -> bool {
 }
 
 /// After a mount attempt (`ok` = an image mounted): the interlock, the
-/// empty-slot flag, the format nibble (GDI -> GD-ROM, CDI -> CD-ROM XA;
-/// without it a swap between the two showed the old one until reset) and the
-/// swap window -- opened whether or not anything mounted, as stock does for
+/// empty-slot flag, SECNR (open, format 0; the window's end puts up the new
+/// disc's format, so a swap between a GDI and a CDI never shows the old one)
+/// and the swap window -- opened whether or not anything mounted, as stock does for
 /// an empty folder too (D12, D13).
 fn mounted(state: &mut DeviceState, ok: bool) {
     if ok {
@@ -1288,8 +1288,11 @@ fn mounted(state: &mut DeviceState, ok: bool) {
     }
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
-    IdeDevice::primary().reassert_disc_format();
     open_swap_window(state);
+    // The window starts now: SECNR shows the tray open, format nibble 0
+    // (stock `0x06`, R144), until `drive_not_ready` moves it on. The format
+    // of the new disc goes up when the window ends.
+    IdeDevice::primary().set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Open, ok, 0));
 }
 
 /// Swap discs without the host's help: eject, mount the selection, load.
@@ -1440,7 +1443,10 @@ fn cancel_swap_window(state: &mut DeviceState) {
     let dev = IdeDevice::primary();
     let st = (dev.read(REG_LBA_LOW_MID) & 0x0F) as u8;
     if st == discimg::atapi::DRIVE_OPEN || st == discimg::atapi::DRIVE_BUSY {
-        dev.set_secnr(secnr(discimg::atapi::swap_drive_status(discimg::atapi::SwapPhase::Done, medium)));
+        dev.set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Done, medium, mounted_disc_format()));
+    } else {
+        // Whatever the status, the format nibble was held at 0 in the window.
+        dev.reassert_disc_format();
     }
 }
 
@@ -1451,8 +1457,8 @@ fn cancel_swap_window(state: &mut DeviceState) {
 /// the switch); without one the drive stays "no medium". SECNR's status
 /// nibble follows the phase (open, busy, then paused or no disc), written
 /// here, before the command's completion, since nothing runs between
-/// commands to time it: until the first command after a switch it keeps the
-/// value it had.
+/// commands to time it: from the switch (`mounted`: open, `0x06`) until the
+/// next command it keeps the value it had.
 fn drive_not_ready(dev: &IdeDevice, state: &mut DeviceState) -> Option<(u8, u8)> {
     use discimg::atapi::SwapPhase;
     let w = unsafe { &mut *core::ptr::addr_of_mut!(SWAP_WINDOW) };
@@ -1462,7 +1468,8 @@ fn drive_not_ready(dev: &IdeDevice, state: &mut DeviceState) -> Option<(u8, u8)>
     };
     let elapsed = (Instant::now() - sw.at).as_millis().min(u32::MAX as u64) as u32;
     let phase = discimg::atapi::swap_phase(elapsed, sw.open_ms, sw.detect_ms);
-    dev.set_secnr(secnr(discimg::atapi::swap_drive_status(phase, medium)));
+    // Format nibble 0 through the window, the disc's once it is over (R144).
+    dev.set_secnr(discimg::atapi::swap_secnr(phase, medium, mounted_disc_format()));
     if phase == SwapPhase::Done {
         *w = None;
         if medium {
@@ -1560,9 +1567,8 @@ const NO_SELECTION: u8 = 0xFF;
 /// GdRom=0x80`, and `gdromv3.h` declares SECNR as `Status:4` then
 /// `DiscFormat:4` -- disc format high, drive status low, exactly as this
 /// firmware already assumed. (`CdRom_CDI=0x40` is CD-**I**, an unrelated
-/// format; it has nothing to do with DiscJuggler `.cdi` files.)
-const DISC_FMT_CDROM_XA: u8 = 0x20;
-const DISC_FMT_GDROM: u8 = 0x80;
+/// format; it has nothing to do with DiscJuggler `.cdi` files.) The values
+/// are `discimg::atapi::DISC_FORMAT_*`.
 
 /// Drive status: the low nibble of SECNR (flycast `gdromv3.h:301`).
 pub const GD_PAUSE: u8 = 0x01;
@@ -1585,21 +1591,36 @@ fn idle_status() -> u8 {
     IDLE_STATUS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// The disc format to report for whatever is mounted.
+/// The format of the mounted image (`discimg::atapi::disc_format`), window
+/// or not.
 ///
-/// A GDI is a GD-ROM. A CDI is a MIL-CD, and a MIL-CD is a CD: its data
-/// track is Mode 2, which is what a real drive reports as CD-ROM XA --
-/// flycast's `GuessDiscType` returns `CdRom_XA` for any image with a Mode 2
-/// track (`core/imgread/common.cpp`). Reporting GD-ROM for one contradicts
-/// the disc's own IP.BIN, which says `CD-ROM1/1` in its media field, and the
-/// BIOS refuses to boot across that contradiction: it reads IP.BIN, the
-/// ISO9660 PVD and the root directory, then abandons the boot without ever
-/// reading the `1ST_READ.BIN` the directory just pointed it at.
-pub fn disc_format() -> u8 {
+/// A GDI is a GD-ROM. A CDI is a MIL-CD, and a MIL-CD is a CD, reported by
+/// its tracks' modes as stock GDEMU 6.0 does (R144): a Mode 2 data track
+/// (mkdcdisc) is CD-ROM XA -- flycast's `GuessDiscType` returns `CdRom_XA`
+/// for any image with a Mode 2 track (`core/imgread/common.cpp`) -- and a CDI
+/// whose data is Mode 1 is plain CD-ROM (stock: REQ_STAT `01 1f ...`, SECNR
+/// `0x11`). Reporting GD-ROM for a CDI contradicts the disc's own IP.BIN,
+/// which says `CD-ROM1/1` in its media field, and the BIOS refuses to boot
+/// across that contradiction: it reads IP.BIN, the ISO9660 PVD and the root
+/// directory, then abandons the boot without ever reading the `1ST_READ.BIN`
+/// the directory just pointed it at. Nothing mounted: 0 (stock's empty
+/// folder shows SECNR `0x07`, R144).
+fn mounted_disc_format() -> u8 {
     match gdi_ref() {
-        Some(g) if g.is_cdi => DISC_FMT_CDROM_XA,
-        _ => DISC_FMT_GDROM,
+        Some(g) => discimg::atapi::disc_format(g.tracks(), g.is_cdi),
+        None => 0,
     }
+}
+
+/// The disc format to report now: the mounted image's, but 0 while the swap
+/// window is open (stock: SECNR `0x06`, then `0x00`, the format nibble only
+/// with the UNIT ATTENTION, R144), so a bus reset or DEVICE RESET inside the
+/// window does not put it up early.
+pub fn disc_format() -> u8 {
+    if unsafe { (*core::ptr::addr_of!(SWAP_WINDOW)).is_some() } {
+        return 0;
+    }
+    mounted_disc_format()
 }
 
 /// SECNR byte for a drive status: mounted disc's format high, `status` low.
@@ -2028,11 +2049,11 @@ async fn handle_cd_read(
     };
 
     // The sector type the host expects (byte 1, bits 3..1) must fit the
-    // data track, as on stock: Mode 1 on a CDI or Mode 2 Form 1 on a GDI is
-    // CHECK 5/64/00 (D8, D9).
+    // track's mode, as on stock: Mode 2 Form 1 on a Mode 1 track, Mode 1 on a
+    // Mode 2 track, either on an audio track is CHECK 5/64/00 (D8, D9, R144).
     let track = gdi.track_for_lba(lba);
     if let Some(t) = track {
-        if discimg::atapi::cd_read_type_mismatch(packet[1], gdi.is_cdi, t.ctrl) {
+        if discimg::atapi::cd_read_type_mismatch(packet[1], t.mode()) {
             warn!("{}: CD_READ type {=u8:#x} does not fit the track", label, packet[1]);
             finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, discimg::atapi::ASC_ILLEGAL_MODE);
             return;
@@ -2044,13 +2065,14 @@ async fn handle_cd_read(
     // user-data subset we'd want a proper sync/header skip — punt for
     // now and read the whole 2352-byte sector as-is, sending the first
     // 2048 bytes to the host. Good enough to validate the SD path.
-    #[cfg(feature = "raw-sectors")]
     {
-        // Whole sectors (D10), where they can be made from what is stored.
-        // The cache holds 2,048-byte payloads: drop it either way so neither
-        // layout is mistaken for the other.
-        let raw = discimg::atapi::cd_read_wants_raw(packet[1])
-            && track.map_or(false, |t| discimg::atapi::raw_from_stored(t.sector_size as u32));
+        // Whole 2,352-byte sectors: an audio track's PCM always (R144), a
+        // data track's for 0x1_ with feature `raw-sectors` (D10). The cache
+        // holds 2,048-byte payloads: drop it either way so neither layout is
+        // mistaken for the other.
+        let raw = track.map_or(false, |t| {
+            discimg::atapi::cd_read_raw_out(packet[1], t.mode(), t.sector_size as u32, RAW_DATA)
+        });
         if raw {
             invalidate_cd_read_cache();
         }
@@ -2075,7 +2097,6 @@ async fn handle_cd_read(
             "{}: CD_READ rejected: {} sectors from LBA {} ({} available in track)",
             label, count, lba, available
         );
-        #[cfg(feature = "raw-sectors")]
         unsafe { RAW_OUT = false };
         finish_illegal(dev, state);
         return;
@@ -2087,7 +2108,6 @@ async fn handle_cd_read(
         // that follows the error status the stream posted.
         state.pending_sense_key = 0x03;
     }
-    #[cfg(feature = "raw-sectors")]
     if raw_out() {
         // What is staged is laid out 2,352 apart: not a cache entry, and no
         // read-ahead (it would stage 2,048-byte payloads for the next raw read).
@@ -2185,18 +2205,21 @@ static mut CD_READ_BUF: [u8; CD_READ_BUF_BYTES] = [0; CD_READ_BUF_BYTES];
 static mut CD_READ_BUF_LBA: u32 = u32::MAX;
 static mut CD_READ_BUF_LEN: usize = 0;
 
-/// Feature `raw-sectors`: the CD_READ in flight wants whole 2,352-byte
-/// sectors (D10). Set by `handle_cd_read` for one request only; staging lays
-/// sectors out at [`out_sector_bytes`] apart while it is set, and such a
-/// buffer is never left behind as a cache entry.
-#[cfg(feature = "raw-sectors")]
+/// The CD_READ in flight sends whole 2,352-byte sectors: an audio track
+/// (R144), or a data track's raw read (D10, feature `raw-sectors`). Set by
+/// `handle_cd_read` for one request only; staging lays sectors out at
+/// [`out_sector_bytes`] apart while it is set, and such a buffer is never
+/// left behind as a cache entry.
 static mut RAW_OUT: bool = false;
 
+/// Feature `raw-sectors`: data select 0x1_ reads whole data sectors (D10).
+/// Without it only audio tracks are sent whole.
+const RAW_DATA: bool = cfg!(feature = "raw-sectors");
+
 /// Bytes each sector takes in CD_READ_BUF and on the bus: 2,048, or 2,352
-/// during a raw read (feature `raw-sectors`).
+/// during a raw read ([`RAW_OUT`]).
 #[inline(always)]
 fn out_sector_bytes() -> usize {
-    #[cfg(feature = "raw-sectors")]
     if unsafe { RAW_OUT } {
         return discimg::atapi::RAW_SECTOR_BYTES;
     }
@@ -2281,16 +2304,17 @@ fn fill_cd_read_buf_raw(
         }
         done += n;
     }
-    #[cfg(feature = "raw-sectors")]
-    if raw_out() {
+    if RAW_DATA && raw_out() {
         return Some(discimg::atapi::expand_raw_in_place(buf, head, sec_size, start_lba, count as usize));
     }
-    let uoff = track.user_data_offset();
+    // A whole sector (without `raw-sectors` only an audio track's, stored
+    // 2,352 bytes: a straight copy), or the 2,048-byte payload.
+    let (uoff, len) = if raw_out() { (0, discimg::atapi::RAW_SECTOR_BYTES) } else { (track.user_data_offset(), 2048) };
     for s in 0..count as usize {
         let src = head + s * sec_size + uoff;
-        buf.copy_within(src..src + 2048, s * 2048);
+        buf.copy_within(src..src + len, s * len);
     }
-    Some(count as usize * 2048)
+    Some(count as usize * len)
 }
 
 /// Read `count` sectors starting at `start_lba` into CD_READ_BUF.
@@ -2353,12 +2377,13 @@ async fn fill_cd_read_buf_from_sd(
         // first 2048 bytes there would hand the host the subheader and shift
         // every sector by 8. 2048 is already cooked.
         let dst = (s as usize) * osz;
-        #[cfg(feature = "raw-sectors")]
-        if raw_out() {
+        if RAW_DATA && raw_out() {
             discimg::atapi::raw_sector(&sector_buf[..sec_size], start_lba + s, &mut buf[dst..dst + osz]);
             continue;
         }
         let payload: &[u8] = match sec_size {
+            // Without `raw-sectors` a raw read is an audio track's 2,352 bytes.
+            _ if raw_out() => &sector_buf[..],
             2352 => &sector_buf[16..16 + 2048],
             2336 => &sector_buf[8..8 + 2048],
             _ => &sector_buf[..2048.min(sec_size)],

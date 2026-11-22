@@ -19,6 +19,14 @@ struct T {
 /// Build a CDI file: `data_len` bytes of fake track data, then the descriptor
 /// for `sessions` (each a list of tracks), a terminator, and the length word.
 fn build(data_len: usize, sessions: &[Vec<T>]) -> Vec<u8> {
+    build_modes(data_len, sessions, &[])
+}
+
+/// [`build`] with DiscJuggler track modes (track data offset 16: 0 audio,
+/// 1 Mode 1, 2 Mode 2) for the first `modes.len()` tracks, in disc order; the
+/// rest keep 0, as `build` leaves them.
+fn build_modes(data_len: usize, sessions: &[Vec<T>], modes: &[u32]) -> Vec<u8> {
+    let mut n = 0usize;
     let mut f = vec![0xAAu8; data_len];
     let desc_start = f.len();
     f.push(sessions.len() as u8);
@@ -35,6 +43,10 @@ fn build(data_len: usize, sessions: &[Vec<T>]) -> Vec<u8> {
             let mut d = vec![0u8; if i + 1 == s.len() { 188 } else { 180 }];
             d[2..6].copy_from_slice(&t.pregap.to_le_bytes());
             d[6..10].copy_from_slice(&t.sector_count.to_le_bytes());
+            if let Some(m) = modes.get(n) {
+                d[16..20].copy_from_slice(&m.to_le_bytes());
+            }
+            n += 1;
             d[32..36].copy_from_slice(&t.start_lba.to_le_bytes());
             d[36..40].copy_from_slice(&t.total_length.to_le_bytes());
             d[56..60].copy_from_slice(&t.read_mode.to_le_bytes());
@@ -405,4 +417,31 @@ fn v2_and_unknown_versions_are_bad_cdi() {
         let f = with_trailer(&mil_cd(), v, |start, n| (n - start) as u32);
         assert_eq!(parse_slice(&f), Err(Error::BadCdi), "version {:#x}", v);
     }
+}
+
+#[test]
+fn track_mode_comes_from_the_descriptor() {
+    use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    // R144: image 10 is image 04's layout (audio, then a data session) with a
+    // Mode 1 data track stored as 2,352-byte raw sectors (DiscJuggler track
+    // mode 1, read mode 2). Image 04's data track is Mode 2 stored as 2,336.
+    let layout = |read_mode| {
+        [
+            vec![T { name_len: 4, pregap: 150, sector_count: 302, start_lba: 0, total_length: 302, read_mode: 2, control: 0 }],
+            vec![T { name_len: 4, pregap: 150, sector_count: 1000, start_lba: 11700, total_length: 1000, read_mode, control: 4 }],
+        ]
+    };
+    let modes = |f: &[u8]| parse_slice(f).unwrap().1.iter().map(|t| t.mode).collect::<Vec<_>>();
+    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[0, 1])), vec![TRACK_AUDIO, TRACK_MODE1]);
+    assert_eq!(modes(&build_modes(4_000_000, &layout(1), &[0, 2])), vec![TRACK_AUDIO, TRACK_MODE2]);
+    // Mode 2 stored raw (2,352) is still Mode 2.
+    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[0, 2])), vec![TRACK_AUDIO, TRACK_MODE2]);
+    // No usable mode in the descriptor: a CDI's data defaults to Mode 2, as
+    // NetGD assumed before R144 (and a 2,336-byte track can only be Mode 2).
+    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[0, 7])), vec![TRACK_AUDIO, TRACK_MODE2]);
+    assert_eq!(modes(&build(4_000_000, &layout(1))), vec![TRACK_AUDIO, TRACK_MODE2]);
+    // A 2,336-byte track the descriptor calls Mode 1 is taken at its word.
+    assert_eq!(modes(&build_modes(4_000_000, &layout(1), &[0, 1]))[1], TRACK_MODE1);
+    // The control nibble decides audio vs data, whatever the mode field says.
+    assert_eq!(modes(&build_modes(4_000_000, &layout(2), &[1, 1]))[0], TRACK_AUDIO);
 }

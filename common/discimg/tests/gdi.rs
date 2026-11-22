@@ -17,6 +17,7 @@ fn tr(number: u8, start_lba: u32, ctrl: u8, sector_size: u16, name: &str) -> Tra
         filename: name.try_into().unwrap(),
         file_offset: 0,
         session: 0,
+        mode: discimg::track_mode(ctrl, None, sector_size),
     }
 }
 
@@ -330,4 +331,15 @@ fn leading_blank_lines_and_spaces_before_the_count() {
     assert_eq!(parse_vec(with.as_bytes()).unwrap(), want);
     // Only blanks: still no count.
     assert_eq!(parse_vec(b"\n  \n"), Err(Error::Parse));
+}
+
+#[test]
+fn gdi_track_modes() {
+    use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    // A GDI has no mode column: data is Mode 1 (every GD-ROM's is, and stock
+    // takes 0x24 / refuses 0x28 on GDI data, R134), audio is audio, and a
+    // 2,336-byte data track (a size only Mode 2 has) is Mode 2.
+    let t = parse_vec(b"4\n1 0 4 2352 a.bin 0\n2 450 0 2352 b.raw 0\n3 45000 4 2048 c.iso 0\n4 50000 4 2336 d.bin 0\n").unwrap();
+    let m: Vec<u8> = t.iter().map(|t| t.mode).collect();
+    assert_eq!(m, vec![TRACK_MODE1, TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2]);
 }

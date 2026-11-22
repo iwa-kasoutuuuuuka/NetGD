@@ -138,6 +138,7 @@ fn gdi_boot_area_keeps_track_3_and_the_45000_fallback() {
         filename: Default::default(),
         file_offset: 0,
         session: 0,
+        mode: discimg::track_mode(4, None, 2352),
     };
     assert_eq!(gdi_boot_area_lba(&[mk(1, 0), mk(2, 450), mk(3, 45000)]), 45000);
     // Non-standard HDA start is honoured.
@@ -226,6 +227,7 @@ fn mk(number: u8, start_lba: u32, ctrl: u8) -> TrackDesc {
         filename: Default::default(),
         file_offset: 0,
         session: 0,
+        mode: discimg::track_mode(ctrl, None, 2352),
     }
 }
 

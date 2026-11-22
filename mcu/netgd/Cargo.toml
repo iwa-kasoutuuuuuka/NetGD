@@ -135,7 +135,9 @@ sd-fast = ["sd-multiblock", "sd-highspeed", "fast-complete"]
 # CD_READ with data select 0x1_ (byte 1 = 0x10) returns the whole 2,352-byte
 # sector, as stock GDEMU 6.0 does (D10, docs/research/d10-d14-raw-sectors.md):
 # a GDI's 2,352-byte track as stored, a CDI's 2,336-byte track behind a
-# generated sync + header. Other tracks keep answering 2,048 bytes. Off by
+# generated sync + header. Other data reads keep answering 2,048 bytes. (Audio
+# tracks answer 0x20 / 0x10 with their 2,352-byte PCM sectors in every build,
+# as stock does, R144; this feature only adds the data tracks.) Off by
 # default and not run on hardware: transfers stop being multiples of 2,048
 # bytes, and the read path (DMA, PIO blocks, staging) has broken on hardware
 # before (R72). Check it with gdprobe (label=netgd) before making it default.

@@ -25,6 +25,9 @@ const FAD_OFFSET: u32 = 150;
 
 const OFF_PREGAP: usize = 2;
 const OFF_SECTOR_COUNT: usize = 6;
+/// DiscJuggler track mode: 0 audio, 1 Mode 1, 2 Mode 2 (Flycast `cdipsr.cpp`
+/// reads it as `track->mode`; `tools/mksdcard` writes it).
+const OFF_TRACK_MODE: usize = 16;
 const OFF_START_LBA: usize = 32;
 const OFF_TOTAL_LENGTH: usize = 36;
 const OFF_READ_MODE: usize = 56;
@@ -153,6 +156,7 @@ where
             let total_length = rd_u32(&td, OFF_TOTAL_LENGTH);
             let read_mode = rd_u32(&td, OFF_READ_MODE);
             let control = rd_u32(&td, OFF_CONTROL);
+            let desc_mode = rd_u32(&td, OFF_TRACK_MODE);
 
             let ssize = sector_size(read_mode).ok_or(Error::BadCdi)?;
 
@@ -201,6 +205,7 @@ where
                 filename: String::new(),
                 file_offset,
                 session: session_no,
+                mode: crate::track_mode((control & 0x0F) as u8, Some(desc_mode), ssize),
             };
             sink.push(&t).map_err(Error::Sink)?;
             count += 1;

@@ -53,6 +53,41 @@ pub struct TrackDesc {
     /// in descriptor order. GDI: 0 (not tracked; REQ_SES uses the fixed
     /// GD-ROM layout there).
     pub session: u8,
+    /// Sector mode of the track: [`TRACK_AUDIO`], [`TRACK_MODE1`] or
+    /// [`TRACK_MODE2`] (see [`track_mode`]).
+    pub mode: u8,
+}
+
+/// Track sector modes ([`TrackDesc::mode`], [`TrackInfo::mode`]). Stock GDEMU
+/// 6.0 decides CD_READ's sector-type check and the reported disc format by
+/// the track's mode, not by the image format (R144: a CDI whose data track is
+/// Mode 1 takes `0x24`, refuses `0x28` and reports CD-ROM).
+pub const TRACK_AUDIO: u8 = 0;
+pub const TRACK_MODE1: u8 = 1;
+pub const TRACK_MODE2: u8 = 2;
+
+/// Mode of a track from its control nibble (`ctrl`, bit 2 = data), the mode
+/// its descriptor states (`desc_mode`: a CDI's DiscJuggler track mode, 0
+/// audio / 1 Mode 1 / 2 Mode 2; `None` for a GDI, which has no such field) and
+/// its stored sector size.
+///
+/// The control nibble decides audio vs data, as everywhere else here. A data
+/// track the descriptor calls Mode 1 or Mode 2 is that; otherwise (a GDI, or a
+/// CDI descriptor with an unknown mode) a 2,336-byte track is Mode 2 (that
+/// size only exists for Mode 2), and the rest default by format: a GDI's data
+/// is Mode 1 (every GD-ROM's is), a CDI's Mode 2 (what mkdcdisc writes and
+/// what NetGD assumed before R144).
+pub fn track_mode(ctrl: u8, desc_mode: Option<u32>, sector_size: u16) -> u8 {
+    if ctrl & 0x04 == 0 {
+        return TRACK_AUDIO;
+    }
+    match desc_mode {
+        Some(1) => TRACK_MODE1,
+        Some(2) => TRACK_MODE2,
+        _ if sector_size == 2336 => TRACK_MODE2,
+        None => TRACK_MODE1,
+        Some(_) => TRACK_MODE2,
+    }
 }
 
 /// What the reply builders need to know about a track.
@@ -68,6 +103,8 @@ pub trait TrackInfo {
     fn session(&self) -> u8 {
         0
     }
+    /// Sector mode ([`TRACK_AUDIO`], [`TRACK_MODE1`], [`TRACK_MODE2`]).
+    fn mode(&self) -> u8;
 }
 
 impl TrackInfo for TrackDesc {
@@ -85,6 +122,9 @@ impl TrackInfo for TrackDesc {
     }
     fn session(&self) -> u8 {
         self.session
+    }
+    fn mode(&self) -> u8 {
+        self.mode
     }
 }
 

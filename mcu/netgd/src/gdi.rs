@@ -73,10 +73,17 @@ pub struct Track {
     /// the pool, read through `fat::lazy_locate`). Use `is_mapped`.
     pub ext_start: u16,
     pub ext_len: u16,
-    /// CDI: 1-based session number (`discimg::TrackDesc::session`), for
-    /// REQ_SES(n); 0 for a GDI. Fits in the struct's tail padding.
-    pub session: u8,
+    /// Bits 0..6: CDI 1-based session number (`discimg::TrackDesc::session`,
+    /// counts only sessions with tracks, so at most 99), for REQ_SES(n); 0 for
+    /// a GDI. Bit 7 ([`MODE2_BIT`]): the track is Mode 2. Read them with
+    /// [`Track::session`] and [`Track::mode`]. One byte for both keeps the
+    /// struct at 32 bytes (99 tracks: a separate mode byte would cost 396 B
+    /// of RAM, R144).
+    session_mode: u8,
 }
+
+/// [`Track::session_mode`]: the track's sector mode is Mode 2.
+const MODE2_BIT: u8 = 0x80;
 
 /// Block-run map of every mapped track file, filled by `load_image`.
 static mut EXTENTS: Vec<crate::fat::Extent, { crate::fat::MAX_EXTENTS }> = Vec::new();
@@ -142,6 +149,25 @@ impl Track {
         }
     }
 
+    /// CDI session number (1-based), 0 for a GDI.
+    pub fn session(&self) -> u8 {
+        self.session_mode & !MODE2_BIT
+    }
+
+    /// Sector mode (`discimg::TRACK_AUDIO` / `TRACK_MODE1` / `TRACK_MODE2`,
+    /// `discimg::TrackDesc::mode`): CD_READ's sector-type check and the disc
+    /// format follow it (R144). Audio vs data is the control nibble, as
+    /// `discimg::track_mode` decides it.
+    pub fn mode(&self) -> u8 {
+        if self.ctrl & 0x04 == 0 {
+            discimg::TRACK_AUDIO
+        } else if self.session_mode & MODE2_BIT != 0 {
+            discimg::TRACK_MODE2
+        } else {
+            discimg::TRACK_MODE1
+        }
+    }
+
     /// Byte offset of the 2048-byte user data within one stored sector.
     /// 2352 is a raw sector (12 sync + 4 header) and 2336 is the CDI
     /// data form, which drops sync and header but keeps the 8-byte
@@ -184,7 +210,7 @@ pub struct Gdi {
     /// A CDI here means a MIL-CD, and it is presented as what it is: a CD,
     /// not a GD-ROM. That changes three things, all of which have to agree or
     /// the BIOS abandons the boot -- the disc format reported in SECNR
-    /// (CD-ROM XA, see `ide::disc_format`), the TOC (every track in the
+    /// (CD-ROM XA or CD-ROM by its tracks' modes, see `ide::disc_format`), the TOC (every track in the
     /// single-density area, since a CD has no high-density one), and the
     /// lead-out (the truth; a GDI now reports the end of its last track too,
     /// as stock GDEMU 6.0 does, D1). See [`Gdi::leadout_lba`] and
@@ -1356,13 +1382,14 @@ impl discimg::TrackSink for PoolSink<'_> {
                 file_offset: t.file_offset,
                 ext_start: 0,
                 ext_len: 0,
-                session: t.session,
+                session_mode: (t.session & !MODE2_BIT)
+                    | if t.mode == discimg::TRACK_MODE2 { MODE2_BIT } else { 0 },
             })
             .map_err(|_| if is_cdi { GdiError::BadCdi } else { GdiError::TooManyTracks })?;
         if is_cdi {
             info!(
-                "cdi: track {} lba={} sectors={} ssize={} ctrl={:#04x} off={}",
-                t.number, t.start_lba, t.sector_count, t.sector_size, t.ctrl, t.file_offset
+                "cdi: track {} lba={} sectors={} ssize={} ctrl={:#04x} mode={} off={}",
+                t.number, t.start_lba, t.sector_count, t.sector_size, t.ctrl, t.mode, t.file_offset
             );
         }
         Ok(())
@@ -1374,7 +1401,8 @@ impl discimg::TrackInfo for Track {
     fn start_lba(&self) -> u32 { self.start_lba }
     fn ctrl(&self) -> u8 { self.ctrl }
     fn sector_count(&self) -> u32 { self.sector_count }
-    fn session(&self) -> u8 { self.session }
+    fn session(&self) -> u8 { Track::session(self) }
+    fn mode(&self) -> u8 { Track::mode(self) }
 }
 
 /// Format a short filename as `BASE.EXT` into a fixed-size buffer

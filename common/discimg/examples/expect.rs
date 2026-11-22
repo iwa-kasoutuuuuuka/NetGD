@@ -12,8 +12,9 @@
 //! `handle_packet` wraps them: status / error / interrupt-reason registers (a CHECK CONDITION is status 0x11,
 //! error = sense key << 4, as stock), REQ_MODE contents, REQ_ERROR (`F0`, the pending sense key and its
 //! ASC/ASCQ), the swap window after `52 82` (no medium, becoming ready, then UNIT ATTENTION), the answers with
-//! no medium (`atapi::not_ready_answer`), CD_READ checking the expected sector type in byte 1 of the CDB as
-//! stock does (5/64/00 on a mismatch, LOG R134) and returning 2048 bytes per sector (no 2352-byte raw reads).
+//! no medium (`atapi::not_ready_answer`), CD_READ checking the expected sector type in byte 1 of the CDB against
+//! the track's mode as stock does (5/64/00 on a mismatch, LOG R134, R144) and returning 2048 bytes per data sector
+//! (2352 for 0x10 only with --raw-sectors) and the whole 2352-byte PCM sector of an audio track (R144).
 //!
 //! Time is not simulated. The window's phases (`atapi::swap_phase`; GDEMU.INI open_time / detect_time, else
 //! 500 + 250 ms) are written as the sequence
@@ -257,9 +258,16 @@ impl Disc {
 
     /// Feature `raw-sectors`: one whole 2,352-byte sector at `fad`, if the track stores 2,352 or 2,336 bytes.
     fn cd_read_raw(&self, fad: u32) -> Option<Vec<u8>> {
+        self.cd_read_raw_n(fad, 1)
+    }
+
+    /// `count` whole 2,352-byte sectors from `fad` (an audio track's PCM, or a raw data read), or None
+    /// = ILLEGAL REQUEST (the track does not store them, or the request runs past it).
+    fn cd_read_raw_n(&self, fad: u32, count: u32) -> Option<Vec<u8>> {
         let lba = fad.saturating_sub(FAD_OFFSET);
         let t = self.track_for_lba(lba)?;
-        if !atapi::raw_from_stored(t.sector_size as u32) || lba - t.start_lba >= t.sector_count {
+        let available = t.sector_count.saturating_sub(lba - t.start_lba);
+        if !atapi::raw_from_stored(t.sector_size as u32) || count == 0 || count > available {
             return None;
         }
         let path = match &self.cdi_file {
@@ -268,10 +276,14 @@ impl Disc {
         };
         let mut f = File::open(path).ok()?;
         let mut stored = vec![0u8; t.sector_size as usize];
-        f.seek(SeekFrom::Start(t.file_offset as u64 + (lba - t.start_lba) as u64 * t.sector_size as u64)).ok()?;
-        f.read_exact(&mut stored).ok()?;
-        let mut out = vec![0u8; atapi::RAW_SECTOR_BYTES];
-        atapi::raw_sector(&stored, lba, &mut out);
+        let mut out = vec![0u8; atapi::RAW_SECTOR_BYTES * count as usize];
+        for s in 0..count {
+            let at = t.file_offset as u64 + (lba + s - t.start_lba) as u64 * t.sector_size as u64;
+            f.seek(SeekFrom::Start(at)).ok()?;
+            f.read_exact(&mut stored).ok()?;
+            let o = s as usize * atapi::RAW_SECTOR_BYTES;
+            atapi::raw_sector(&stored, lba + s, &mut out[o..o + atapi::RAW_SECTOR_BYTES]);
+        }
         Some(out)
     }
 }
@@ -353,8 +365,8 @@ impl Out {
         self.s.push('\n');
     }
 
-    fn hash(&mut self, fad: u32, crc: u32) {
-        let _ = writeln!(self.s, "img={} probe=HASH fad={} ssz=2048 crc={:08x}", self.img, fad, crc);
+    fn hash(&mut self, fad: u32, ssz: usize, crc: u32) {
+        let _ = writeln!(self.s, "img={} probe=HASH fad={} ssz={} crc={:08x}", self.img, fad, ssz, crc);
     }
 }
 
@@ -420,11 +432,20 @@ fn cut(data: &[u8], alloc: usize) -> Res {
 
 /// What the runner prints for the CD_READ at `fad` (`handle_cd_read`).
 fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>) {
-    // handle_cd_read: the expected sector type is checked first (D8, D9).
+    // handle_cd_read: the expected sector type is checked first, by the
+    // track's mode (D8, D9, R144).
     let lba = fad.saturating_sub(FAD_OFFSET);
     if let Some(t) = atapi::track_for_lba(&d.tracks, lba) {
-        if atapi::cd_read_type_mismatch(flags, d.is_cdi, t.ctrl) {
+        if atapi::cd_read_type_mismatch(flags, t.mode) {
             return (Res::illegal(), None);
+        }
+        // An audio track sends its 2,352-byte PCM sectors as stored (R144),
+        // in every build (`cd_read_raw_out` with raw_data = false).
+        if atapi::cd_read_raw_out(flags, t.mode, t.sector_size as u32, false) {
+            return match d.cd_read_raw_n(fad, count) {
+                Some(data) => (Res::ok_big(data.len(), &data[..data.len().min(REC_DATA_MAX)]), Some(data)),
+                None => (Res::illegal(), None),
+            };
         }
     }
     match d.cd_read(fad, count) {
@@ -435,9 +456,11 @@ fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>)
 
 fn hash_sectors(o: &mut Out, fad: u32, count: u32, data: &Option<Vec<u8>>) {
     if let Some(data) = data {
+        // 2,048-byte payloads, or whole 2,352-byte sectors (audio).
+        let ssz = data.len() / count.max(1) as usize;
         for i in 0..count {
-            let s = &data[i as usize * 2048..(i as usize + 1) * 2048];
-            o.hash(fad + i, crc32(s));
+            let s = &data[i as usize * ssz..(i as usize + 1) * ssz];
+            o.hash(fad + i, ssz, crc32(s));
         }
     }
 }
@@ -466,9 +489,9 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
     let idle = if switched { atapi::DRIVE_PAUSE } else { atapi::DRIVE_STANDBY };
     let idle_fad = atapi::idle_fad(&d.tracks, d.is_cdi, switched);
     let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, idle_fad);
-    // disc_format() in ide.rs: CDI -> CD-ROM XA, anything else -> GD-ROM; the repeat
-    // nibble is F whenever nothing plays (req_stat_reply).
-    let fmt = if d.is_cdi { atapi::DISC_FORMAT_CDROM_XA } else { atapi::DISC_FORMAT_GDROM };
+    // disc_format() in ide.rs: GDI -> GD-ROM, CDI by its tracks' modes (Mode 2 -> CD-ROM XA,
+    // Mode 1 -> CD-ROM, R144); the repeat nibble is F whenever nothing plays (req_stat_reply).
+    let fmt = atapi::disc_format(&d.tracks, d.is_cdi);
     let stat = atapi::req_stat_reply(AudioState::Standby, idle, fmt, 0, fad, track);
     let c = cdb_simple(0x10, 0, 0, 10);
     o.probe("REQ_STAT", None, Some(&c), &cut(&stat, 10), true);
@@ -555,7 +578,8 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
     hash_sectors(o, ip, 7, &data);
 
     if opt.flags_test {
-        // The sector type in byte 1 is checked (D8, D9); what reads is always 2048 bytes (no raw 2352, D10).
+        // The sector type in byte 1 is checked by the track's mode (D8, D9, R144); a data track reads 2048 bytes
+        // (2352 for 0x10 with --raw-sectors, D10), an audio track its 2352-byte PCM sectors (R144).
         for flags in [0x20u8, 0x24, 0x28, 0x10] {
             let c = cdb_read(flags, ip, 1);
             let (mut r, mut data) = read_res(d, flags, ip, 1);
@@ -567,7 +591,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             }
             let lba = ip.saturating_sub(FAD_OFFSET);
             let mismatch = atapi::track_for_lba(&d.tracks, lba)
-                .map_or(false, |t| atapi::cd_read_type_mismatch(flags, d.is_cdi, t.ctrl));
+                .map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode));
             let (ssz, crc, sense) = match &data {
                 Some(dd) => (dd.len().to_string(), format!("{:08x}", crc32(dd)), "none"),
                 None if mismatch => ("-".to_string(), "-".to_string(), "5/64/00"), // illegal mode for this track

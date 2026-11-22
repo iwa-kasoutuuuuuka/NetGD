@@ -17,6 +17,7 @@ fn t(number: u8, start_lba: u32, ctrl: u8, sector_count: u32) -> TrackDesc {
         filename: Default::default(),
         file_offset: 0,
         session: 0,
+        mode: discimg::track_mode(ctrl, None, 2352),
     }
 }
 
@@ -821,24 +822,124 @@ fn what_stock_answers_with_no_medium() {
 
 #[test]
 fn cd_read_type_check_follows_the_stock_records() {
-    // Stock GDEMU 6.0, CDREAD_FLAGS in every record (D8, D9):
-    //   GDI (data ctrl 4): 0x20 ok, 0x24 ok,    0x28 5/64/00, 0x10 ok
-    //   CDI (data ctrl 4): 0x20 ok, 0x24 5/64/00, 0x28 ok,    0x10 ok
-    for (flags, gdi_bad, cdi_bad) in [(0x20u8, false, false), (0x24, false, true), (0x28, true, false), (0x10, false, false)] {
-        assert_eq!(cd_read_type_mismatch(flags, false, 4), gdi_bad, "GDI flags {:#x}", flags);
-        assert_eq!(cd_read_type_mismatch(flags, true, 4), cdi_bad, "CDI flags {:#x}", flags);
+    use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    // Stock GDEMU 6.0, CDREAD_FLAGS (D8, D9, R144) -- by the track's mode:
+    //   Mode 1 (GDI data, Mode 1 CDI 10): 0x20 ok, 0x24 ok,      0x28 5/64/00, 0x10 ok
+    //   Mode 2 (mkdcdisc CDI 04 data):    0x20 ok, 0x24 5/64/00, 0x28 ok,      0x10 ok
+    //   audio  (GDI 03, FAD 906):         0x20 ok, 0x24 5/64/00, 0x28 5/64/00, 0x10 ok
+    for (flags, m1_bad, m2_bad, audio_bad) in [
+        (0x20u8, false, false, false),
+        (0x24, false, true, true),
+        (0x28, true, false, true),
+        (0x10, false, false, false),
+    ] {
+        assert_eq!(cd_read_type_mismatch(flags, TRACK_MODE1), m1_bad, "Mode 1 flags {:#x}", flags);
+        assert_eq!(cd_read_type_mismatch(flags, TRACK_MODE2), m2_bad, "Mode 2 flags {:#x}", flags);
+        assert_eq!(cd_read_type_mismatch(flags, TRACK_AUDIO), audio_bad, "audio flags {:#x}", flags);
         // Bit 0 (address type) does not change it.
-        assert_eq!(cd_read_type_mismatch(flags | 1, true, 4), cdi_bad);
-        // Audio tracks were never probed: let through.
-        assert!(!cd_read_type_mismatch(flags, true, 0));
-        assert!(!cd_read_type_mismatch(flags, false, 0));
+        assert_eq!(cd_read_type_mismatch(flags | 1, TRACK_MODE2), m2_bad);
+        assert_eq!(cd_read_type_mismatch(flags | 1, TRACK_AUDIO), audio_bad);
     }
-    // Types stock was not asked about: let through.
+    // Types stock was not asked about (CD-DA, Mode 2 formless, Form 2, ...): let through.
     for ty in [1u8, 3, 5, 6, 7] {
-        assert!(!cd_read_type_mismatch(0x20 | (ty << 1), true, 4));
-        assert!(!cd_read_type_mismatch(0x20 | (ty << 1), false, 4));
+        for m in [TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2] {
+            assert!(!cd_read_type_mismatch(0x20 | (ty << 1), m));
+        }
     }
     assert_eq!(ASC_ILLEGAL_MODE, (0x64, 0x00));
+}
+
+#[test]
+fn cd_read_type_check_is_by_track_mode_not_image_format() {
+    use discimg::{TrackInfo, TRACK_MODE1};
+    // R144 g: image 10, a CDI whose data track is Mode 1, takes 0x24 and
+    // refuses 0x28, like a GDI.
+    let mut data = t(2, 11700, 4, 1000);
+    data.mode = TRACK_MODE1;
+    assert!(!cd_read_type_mismatch(0x24, data.mode()));
+    assert!(cd_read_type_mismatch(0x28, data.mode()));
+}
+
+#[test]
+fn audio_tracks_read_whole_pcm_sectors() {
+    use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    // R144: GDI 03's audio track (FAD 906) answers 0x20 and 0x10 with the
+    // 2,352-byte PCM sector as stored, seven sectors = 2,352 x 7 -- with or
+    // without the raw-sectors feature (`raw_data`).
+    for raw_data in [false, true] {
+        for flags in [0x20u8, 0x10, 0x21, 0x11] {
+            assert!(cd_read_raw_out(flags, TRACK_AUDIO, 2352, raw_data), "{:#x}", flags);
+        }
+        // An audio track not stored as 2,352-byte sectors cannot be sent whole.
+        assert!(!cd_read_raw_out(0x20, TRACK_AUDIO, 2048, raw_data));
+        assert!(!cd_read_raw_out(0x20, TRACK_AUDIO, 2336, raw_data));
+        // Data tracks: 0x20 stays a 2,048-byte payload.
+        for m in [TRACK_MODE1, TRACK_MODE2] {
+            assert!(!cd_read_raw_out(0x20, m, 2352, raw_data));
+            assert!(!cd_read_raw_out(0x24, m, 2352, raw_data));
+        }
+    }
+    // Data 0x10 is whole only with raw-sectors (D10), from 2,352 or 2,336.
+    for m in [TRACK_MODE1, TRACK_MODE2] {
+        assert!(!cd_read_raw_out(0x10, m, 2352, false));
+        assert!(cd_read_raw_out(0x10, m, 2352, true));
+        assert!(cd_read_raw_out(0x10, m, 2336, true));
+        assert!(!cd_read_raw_out(0x10, m, 2048, true));
+    }
+}
+
+#[test]
+fn disc_format_follows_the_track_modes() {
+    use discimg::{TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
+    let mk = |modes: &[u8]| -> Vec<TrackDesc> {
+        modes
+            .iter()
+            .enumerate()
+            .map(|(i, &m)| {
+                let mut x = t(i as u8 + 1, i as u32 * 1000, if m == TRACK_AUDIO { 0 } else { 4 }, 1000);
+                x.mode = m;
+                x
+            })
+            .collect()
+    };
+    // GDI 03: GD-ROM whatever its tracks (REQ_STAT `01 8f ...`, SECNR 0x81).
+    assert_eq!(disc_format(&mk(&[TRACK_MODE1, TRACK_AUDIO, TRACK_MODE1]), false), DISC_FORMAT_GDROM);
+    // CDI 04 (Mode 2 data): CD-ROM XA (`01 2f ...`, SECNR 0x21).
+    assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_MODE2]), true), DISC_FORMAT_CDROM_XA);
+    // CDI 10 (Mode 1 data): CD-ROM (`01 1f 01 01 01 00 00 96`, SECNR 0x11).
+    assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_MODE1]), true), DISC_FORMAT_CDROM);
+    // Any Mode 2 track makes it XA (Flycast `GuessDiscType`); audio only is CD-DA (not probed on stock).
+    assert_eq!(disc_format(&mk(&[TRACK_MODE1, TRACK_MODE2]), true), DISC_FORMAT_CDROM_XA);
+    assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_AUDIO]), true), DISC_FORMAT_CDDA);
+
+    // R144's REQ_STAT of the Mode 1 CDI after a switch, byte for byte.
+    let tracks = mk(&[TRACK_AUDIO, TRACK_MODE1]);
+    let fad = idle_fad(&tracks, true, true);
+    let (fad, tr) = head_position(&tracks, AudioState::Standby, 0, fad);
+    let fmt = disc_format(&tracks, true);
+    assert_eq!(
+        req_stat_reply(AudioState::Standby, DRIVE_PAUSE, fmt, 0, fad, tr),
+        [0x01, 0x1f, 0x01, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
+    );
+}
+
+#[test]
+fn secnr_through_the_swap_window() {
+    use SwapPhase::*;
+    // R144 b (gdprobe secnr=): 0x06 (open), 0x00 (busy), format nibble 0 in
+    // both, then 0xX1 with the disc's format by the UNIT ATTENTION.
+    for fmt in [DISC_FORMAT_CDROM_XA, DISC_FORMAT_CDROM, DISC_FORMAT_GDROM] {
+        assert_eq!(swap_secnr(Open, true, fmt), 0x06);
+        assert_eq!(swap_secnr(Detect, true, fmt), 0x00);
+        assert_eq!(swap_secnr(Done, true, fmt), fmt | 0x01);
+        // Empty folder: 0x06, 0x00, then 0x07 (NO DISC), never a format.
+        assert_eq!(swap_secnr(Open, false, fmt), 0x06);
+        assert_eq!(swap_secnr(Detect, false, fmt), 0x00);
+        assert_eq!(swap_secnr(Done, false, fmt), 0x07);
+    }
+    assert_eq!(swap_secnr(Done, true, DISC_FORMAT_CDROM_XA), 0x21);
+    assert_eq!(swap_secnr(Done, true, DISC_FORMAT_CDROM), 0x11);
+    assert_eq!(swap_secnr(Done, true, DISC_FORMAT_GDROM), 0x81);
 }
 
 #[test]

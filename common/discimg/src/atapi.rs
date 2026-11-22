@@ -5,7 +5,7 @@
 //! wrapping arithmetic because the firmware is built without overflow checks
 //! and the replies must stay byte-identical.
 
-use crate::TrackInfo;
+use crate::{TrackInfo, TRACK_AUDIO, TRACK_MODE1, TRACK_MODE2};
 
 /// CDDA player state as the replies see it (mirrors the firmware's
 /// `cdda::Status`).
@@ -214,10 +214,35 @@ pub const DRIVE_BUSY: u8 = 0x00;
 pub const DRIVE_OPEN: u8 = 0x06;
 pub const DRIVE_NODISC: u8 = 0x07;
 
-/// Disc format, already in the high nibble (SECNR, REQ_STAT byte 1).
-/// Stock GDEMU 6.0 reports CD-ROM XA for a CDI (R117).
+/// Disc format, already in the high nibble (SECNR, REQ_STAT byte 1;
+/// Flycast `gdrom_if.h`: CD-DA 0x00, CD-ROM 0x10, CD-ROM XA 0x20, GD-ROM 0x80).
+/// See [`disc_format`].
+pub const DISC_FORMAT_CDDA: u8 = 0x00;
+pub const DISC_FORMAT_CDROM: u8 = 0x10;
 pub const DISC_FORMAT_CDROM_XA: u8 = 0x20;
 pub const DISC_FORMAT_GDROM: u8 = 0x80;
+
+/// The disc format a mounted image reports (SECNR's and REQ_STAT byte 1's
+/// high nibble). A GDI is a GD-ROM. A CDI is a CD whose format follows its
+/// tracks' modes, as on stock GDEMU 6.0 (R144: the mkdcdisc CDI 04, Mode 2
+/// data, reports `2_`; the same layout with a Mode 1 data track, 10, reports
+/// `1_`, REQ_STAT `01 1f ...`, SECNR `0x11`): any Mode 2 track makes it
+/// CD-ROM XA, else any Mode 1 track CD-ROM, else (audio only, never probed on
+/// stock) CD-DA, as Flycast's `GuessDiscType` decides.
+pub fn disc_format<T: TrackInfo>(tracks: &[T], is_cdi: bool) -> u8 {
+    if !is_cdi {
+        return DISC_FORMAT_GDROM;
+    }
+    let mut fmt = DISC_FORMAT_CDDA;
+    for t in tracks {
+        match t.mode() {
+            TRACK_MODE2 => return DISC_FORMAT_CDROM_XA,
+            TRACK_MODE1 => fmt = DISC_FORMAT_CDROM,
+            _ => {}
+        }
+    }
+    fmt
+}
 
 /// Drive status for the pickup state: what REQ_STAT and REQ_SES put in
 /// byte 0 (and SECNR's low nibble). `idle` is the status while no CD-DA has
@@ -326,22 +351,35 @@ pub const CD_READ_TYPE_MODE1: u8 = 2;
 pub const CD_READ_TYPE_MODE2_FORM1: u8 = 4;
 
 /// Does a CD_READ asking for sector type `(flags >> 1) & 7` (CDB byte 1) not
-/// fit the data track it reads (D8, D9)? Then stock GDEMU 6.0 answers CHECK
-/// 5/64/00 and sends nothing. Its records (R117, R119-R132; dcload-ip, two
-/// GD-ROM GDIs, three CDIs, every run) all follow one rule: a GDI's data is
-/// Mode 1, a CDI's is Mode 2 Form 1 (the CD-ROM XA it reports), so Mode 1
-/// (`0x24`) is refused on a CDI and Mode 2 Form 1 (`0x28`) on a GDI, for one
-/// sector or seven. "Any type" (`0x20`, `0x10`) always reads. Other types
-/// (CD-DA, Mode 2 formless, Form 2) and audio tracks were never probed, so
-/// they are let through as before.
-pub fn cd_read_type_mismatch(flags: u8, is_cdi: bool, track_ctrl: u8) -> bool {
-    if track_ctrl & 0x04 == 0 {
-        return false; // audio track: not probed
-    }
+/// fit the track it reads, whose mode is `track_mode` ([`crate::TrackInfo::mode`])
+/// (D8, D9)? Then stock GDEMU 6.0 answers CHECK 5/64/00 and sends nothing.
+///
+/// Stock decides by the track's mode, not by the image format (R144): a Mode
+/// 1 track (GDI data, the Mode 1 CDI 10) takes Mode 1 (`0x24`) and refuses
+/// Mode 2 Form 1 (`0x28`); a Mode 2 track (mkdcdisc CDI data) the reverse; an
+/// audio track (GDI 03 at FAD 906) refuses both. "Any type" (`0x20`, `0x10`)
+/// always reads, one sector or seven. Other types (CD-DA, Mode 2 formless,
+/// Form 2) were never probed, so they are let through as before.
+pub fn cd_read_type_mismatch(flags: u8, track_mode: u8) -> bool {
     match (flags >> 1) & 0x07 {
-        CD_READ_TYPE_MODE1 => is_cdi,
-        CD_READ_TYPE_MODE2_FORM1 => !is_cdi,
+        CD_READ_TYPE_MODE1 => track_mode != TRACK_MODE1,
+        CD_READ_TYPE_MODE2_FORM1 => track_mode != TRACK_MODE2,
         _ => false,
+    }
+}
+
+/// Does a CD_READ that passed [`cd_read_type_mismatch`] send whole
+/// 2,352-byte sectors rather than 2,048-byte payloads? An audio track always
+/// does (stock GDEMU 6.0 returns its PCM sectors as stored for `0x20` and
+/// `0x10`, one sector or seven, R144), provided it is stored 2,352 bytes per
+/// sector. A data track only for data select `0x1_` ([`cd_read_wants_raw`],
+/// D10) and only when `raw_data` (the firmware's `raw-sectors` feature), from
+/// a sector stored raw or as 2,336 bytes ([`raw_from_stored`]).
+pub fn cd_read_raw_out(flags: u8, track_mode: u8, sector_size: u32, raw_data: bool) -> bool {
+    if track_mode == TRACK_AUDIO {
+        sector_size == RAW_SECTOR_BYTES as u32
+    } else {
+        raw_data && cd_read_wants_raw(flags) && raw_from_stored(sector_size)
     }
 }
 
@@ -494,16 +532,30 @@ pub fn not_ready_asc(phase: SwapPhase) -> (u8, u8) {
 }
 
 /// SECNR's drive status nibble for `phase`; `medium` = an image mounted.
-/// gdprobe does not record SECNR, so stock's value here is not known: open
-/// and busy are the GD-ROM's own codes for a tray cycle, and a disc that has
-/// just come up is paused, which is what stock's REQ_STAT byte 0 says after a
-/// switch (01, D2) and what the FPGA's reset value 0x81 holds.
+/// Open, busy, then paused (or no disc): what stock GDEMU 6.0 shows (R144,
+/// gdprobe `secnr=`; R126 had guessed the same from the GD-ROM's own codes
+/// for a tray cycle). The whole byte is [`swap_secnr`].
 pub fn swap_drive_status(phase: SwapPhase, medium: bool) -> u8 {
     match phase {
         SwapPhase::Open => DRIVE_OPEN,
         SwapPhase::Detect => DRIVE_BUSY,
         SwapPhase::Done if medium => DRIVE_PAUSE,
         SwapPhase::Done => DRIVE_NODISC,
+    }
+}
+
+/// The whole SECNR byte for `phase` ([`swap_drive_status`] low): the disc
+/// format (`disc_format`, high nibble) only once the window is over with a
+/// medium. Stock GDEMU 6.0 (R144, gdprobe `secnr=`): `0x06` in the open
+/// phase and `0x00` in the detect phase, format nibble 0 in both, then
+/// `0xX1` with the format by the UNIT ATTENTION (CDI 04 `0x21`, Mode 1 CDI 10
+/// `0x11`, GDI 03 `0x81`); an empty folder `0x06`, `0x00`, then `0x07`.
+pub fn swap_secnr(phase: SwapPhase, medium: bool, disc_format: u8) -> u8 {
+    let status = swap_drive_status(phase, medium);
+    if phase == SwapPhase::Done && medium {
+        (disc_format & 0xF0) | status
+    } else {
+        status
     }
 }
 
