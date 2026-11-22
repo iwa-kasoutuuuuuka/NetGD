@@ -775,6 +775,11 @@ pub async fn ide_task(
     // answered TEST UNIT READY with "ready" and refused disk writes with
     // "eject first" over an empty drive (R89 A4).
     MEDIA_PRESENT.store(gdi_ref().is_some(), core::sync::atomic::Ordering::Relaxed);
+    // A boot mount that came up empty (GDEMU.CFG `image=` at an empty folder,
+    // no folder 01) leaves the card the firmware's, like the empty-folder case
+    // of a switch (D12): the button and `52 81` may step from here. Without
+    // this only `52 81` worked (R139). Nothing changes when the mount worked.
+    EMPTY_SLOT.store(gdi_ref().is_none(), core::sync::atomic::Ordering::Relaxed);
 
     // Assert the mounted disc's format before serving anything. The FPGA's
     // reset state machine loads a fixed GD-ROM SECNR, and until now nothing
@@ -1645,7 +1650,13 @@ async fn handle_packet(
     // Not ready (swap window, no medium): what the command gets is decided
     // below, but an expiring window raises the new medium's UNIT ATTENTION
     // here, before it is looked at.
-    let not_ready = drive_not_ready(dev, state);
+    // The sense readers are the exception: they report the last CHECK's sense,
+    // so the window neither advances nor closes inside them (R139).
+    let not_ready = if discimg::atapi::advances_swap_window(opcode) {
+        drive_not_ready(dev, state)
+    } else {
+        None
+    };
 
     // ATAPI: when UNIT_ATTENTION is pending (set on reset), every PACKET
     // command other than REQUEST_SENSE / REQ_ERROR completes immediately
@@ -1747,8 +1758,11 @@ async fn handle_packet(
             let mut sense = REQUEST_SENSE_REPLY;
             sense[2] = state.pending_sense_key;
             let n = core::cmp::min(alloc, sense.len() as u16);
+            let key = state.pending_sense_key;
             send_data_in(dev, &sense[..n as usize]).await;
-            state.unit_attention = false;
+            if discimg::atapi::sense_read_clears_ua(key) {
+                state.unit_attention = false;
+            }
             state.clear_sense();
         }
         SEGA_REQ_STAT => {
@@ -1850,7 +1864,9 @@ async fn handle_packet(
             let reply = discimg::atapi::req_error_reply(state.pending_sense_key, asc, ascq);
             let n = core::cmp::min(alloc, reply.len() as u16);
             send_data_in(dev, &reply[..n as usize]).await;
-            state.unit_attention = false;
+            if discimg::atapi::sense_read_clears_ua(state.pending_sense_key) {
+                state.unit_attention = false;
+            }
             state.clear_sense();
         }
         SEGA_GET_TOC => {
@@ -2609,7 +2625,9 @@ async fn handle_image_ctl(
 ///                whatever `reset_goto` says); 01 is then the selection, so
 ///                the button and `52 81` step on from it. With no folder 01
 ///                either the drive goes empty (no medium) and the selection
-///                stays as it was. A missing number past 999 is ILLEGAL
+///                stays as it was. A card that cannot be read during that
+///                lookup is not "no folder": ILLEGAL REQUEST, the disc stays.
+///                (R139) A missing number past 999 is ILLEGAL
 ///                REQUEST and leaves the current media untouched (stock: not
 ///                probed). A folder with nothing to mount (no image, or one
 ///                that fails to parse) is accepted like stock does (D12):
@@ -2657,10 +2675,16 @@ fn stage_folder(n: Option<u16>, dir: Option<discimg::slot::Step>) -> bool {
             // `mount_target` asks about 01 only after `n` came back empty,
             // so `found` ends up holding the folder that answered.
             let mut found = None;
-            let target = discimg::slot::mount_target(n, |k| {
-                found = crate::gdi::folder_for_number(blocks, k);
-                found.is_some()
+            let target = discimg::slot::mount_target_checked(n, |k| {
+                found = crate::gdi::folder_lookup(blocks, k)?;
+                Ok::<bool, ()>(found.is_some())
             });
+            // A card read error is not "no such folder": refuse and keep the
+            // disc, as before R132 (R139).
+            let Ok(target) = target else {
+                warn!("GDEMU mount: the card could not be read looking for {}", n);
+                return false;
+            };
             match target {
                 discimg::slot::Target::Folder(k) => {
                     if k != n {
