@@ -192,8 +192,8 @@ pub fn lookup(g: &Geometry, dir_cluster: u32, key: &Key<'_>, buf: &mut [u8; 512]
         Key::Long(_) => None,
     };
     let mut cluster = dir_cluster;
-    // A directory has at most `clusters` clusters; a longer walk is a chain
-    // that loops (the watchdog is off, so it would never return).
+    // A directory has at most 4096 blocks (65536 entries); a longer walk is
+    // a chain that loops (the watchdog is off, so it would never return).
     let mut hops = 0u32;
     loop {
         hops += 1;

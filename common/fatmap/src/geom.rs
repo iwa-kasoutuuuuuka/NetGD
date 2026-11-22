@@ -31,6 +31,14 @@ pub enum BpbError {
     RootOutside,
 }
 
+/// Most clusters a FAT32 volume can have (Microsoft's FAT specification):
+/// valid cluster numbers are `2..=0x0FFF_FFF6`.
+pub const MAX_CLUSTERS: u32 = 0x0FFF_FFF5;
+
+/// Blocks of the largest directory FAT allows: 65536 entries of 32 bytes
+/// (the limit Windows and Linux keep).
+pub const DIR_MAX_BLOCKS: u32 = 65536 * 32 / 512;
+
 fn rd16(b: &[u8], off: usize) -> u32 {
     u16::from_le_bytes([b[off], b[off + 1]]) as u32
 }
@@ -61,6 +69,10 @@ pub fn parse_fat32(sec: &[u8; 512], base: u32) -> Result<Geometry, BpbError> {
     if root_entries != 0 || spf16 != 0 || spf32 == 0 || num_fats == 0 || root_cluster < 2 {
         return Err(BpbError::NotFat32);
     }
+    // FAT 0 on top of the boot sector.
+    if reserved == 0 {
+        return Err(BpbError::BadBpb);
+    }
     // Cluster count: what the volume holds after the metadata, and no more
     // than the FAT has entries for (a BPB that claims more is damaged, and the
     // smaller number is the safe one).
@@ -70,14 +82,23 @@ pub fn parse_fat32(sec: &[u8; 512], base: u32) -> Result<Geometry, BpbError> {
     if blocks_per_cluster == 0 || total <= meta {
         return Err(BpbError::BadBpb);
     }
-    let clusters = ((total - meta) / blocks_per_cluster).min(spf32.saturating_mul(128).saturating_sub(2));
+    // And no more than FAT32's 28-bit cluster numbers allow, so that a root
+    // or an entry with any of the top four bits set is outside the volume
+    // instead of an alias, and the bad mark 0x0FFFFFF7 is never a link.
+    let clusters = ((total - meta) / blocks_per_cluster)
+        .min(spf32.saturating_mul(128).saturating_sub(2))
+        .min(MAX_CLUSTERS);
     if root_cluster - 2 >= clusters {
         return Err(BpbError::RootOutside);
     }
+    // The whole volume must end inside the 32-bit block space, so that no
+    // block number computed from it wraps (release builds do not check).
+    let data_lba = base.checked_add(meta).ok_or(BpbError::BadBpb)?;
+    data_lba.checked_add(clusters * blocks_per_cluster).ok_or(BpbError::BadBpb)?;
     Ok(Geometry {
-        fat_lba: base.wrapping_add(reserved),
+        fat_lba: base + reserved,
         sectors_per_fat: spf32,
-        data_lba: base.wrapping_add(meta),
+        data_lba,
         blocks_per_cluster,
         root_cluster,
         clusters,
@@ -99,8 +120,11 @@ impl Geometry {
     }
 
     /// Where a walk of the file with this first cluster and size starts;
-    /// `None` for an empty file or one that cannot be walked.
+    /// `None` for an empty file or a first cluster outside the volume (a
+    /// file of one cluster never consults the FAT, so `extent::walk` would
+    /// turn such a cluster straight into an extent).
     pub fn start(&self, first_cluster: u32, size: u32) -> Option<Cursor> {
+        self.cluster_lba(first_cluster)?;
         Cursor::start(first_cluster, size)
     }
 
@@ -119,8 +143,10 @@ impl Geometry {
     }
 
     /// Most clusters a directory walk visits before it calls the chain a
-    /// loop.
+    /// loop: a directory holds at most [`DIR_MAX_BLOCKS`] blocks. (The
+    /// volume's cluster count alone let a looping directory on a large card
+    /// run for hours, and nothing resets the firmware while it waits.)
     pub fn dir_max_hops(&self) -> u32 {
-        self.clusters
+        DIR_MAX_BLOCKS.div_ceil(self.blocks_per_cluster).min(self.clusters)
     }
 }

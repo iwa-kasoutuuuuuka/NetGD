@@ -247,6 +247,18 @@ fn broken_bpbs_are_refused() {
         ("root cluster 1", Box::new(|i| put32(i, 0x2C, 1))),
         ("root cluster beyond volume", Box::new(|i| put32(i, 0x2C, 0x0FFF_FFF0))),
         ("no jump", Box::new(|i| i[0] = 0x00)),
+        // A BPB claiming more than 2^28 clusters (FAT and volume both huge;
+        // only LBA 0 is read): the count is capped at 0x0FFFFFF5, so a root
+        // of 0x10000002 is out of range instead of an alias of cluster 2.
+        (
+            "root cluster with the top bits set",
+            Box::new(|i| {
+                i[0x10] = 1;
+                put32(i, 0x20, u32::MAX);
+                put32(i, 0x24, 0x01FC_1000);
+                put32(i, 0x2C, 0x1000_0002);
+            }),
+        ),
     ];
     for (name, f) in cases {
         let mut img = base.img.clone();
