@@ -42,11 +42,19 @@ KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
 #define NET_INIT_MS    30000      /* net_init() (link-up wait included) must finish within this */
 #define ARP_MS         8000       /* ARP lookup of the PC */
 #define FRAME_TO_MS    15000      /* inside a frame (menu-app.md 8: 15 s) */
-#define DATA_TO_MS     30000      /* WANT -> DATA (menu-app.md 8: 30 s) */
+#define DATA_TO_MS     12000      /* WANT -> DATA: report and move on (menu-app.md 8 allows 30 s) */
+#define DRAIN_IDLE_MS  5000       /* after a failed pass: discard what is still in flight until this much silence */
+#ifndef G2N_LISTEN_RCVBUF
+#define G2N_LISTEN_RCVBUF 65535   /* receive buffer = TCP window of accepted connections (set on the listener) */
+#endif
 #define PASS_LIMIT_US  (20ull * 1000000ull)
 #define PASS_BYTES     (32ull << 20)
 
 static uint64_t now_us(void) { return timer_us_gettime64(); }
+
+static volatile uint64_t g_rx_total;           /* every byte recv_all() took */
+static volatile unsigned g_frames_total;
+static volatile int g_conn_dead;               /* the TCP connection is gone (closed / reset) */
 
 /* ---- on-screen log (works when the console is dead) ---- */
 #define SCR_W     640
@@ -81,7 +89,8 @@ static void *heartbeat(void *arg)
     unsigned n = 0;
     while (g_hb_run) {
         char b[64];
-        snprintf(b, sizeof b, "g2netbench %c up %us  %s", "|/-\\"[n & 3], (unsigned)(timer_ms_gettime64() / 1000), g_stage);
+        snprintf(b, sizeof b, "%c %us %s rx=%luKB fr=%u", "|/-\\"[n & 3], (unsigned)(timer_ms_gettime64() / 1000), g_stage,
+                 (unsigned long)(g_rx_total / 1024), g_frames_total);
         scr_put(0, b);
         n++;
         thd_sleep(500);
@@ -122,11 +131,12 @@ static int recv_all(int fd, uint8_t *buf, size_t n, int ms, g2n_stat *st)
     uint64_t t0 = now_us();
     while (got < n) {
         int w = wait_readable(fd, ms);
-        if (w <= 0) { if (st) st->recv_us += now_us() - t0; errno = w == 0 ? ETIMEDOUT : errno; return -1; }
+        if (w <= 0) { if (st) st->recv_us += now_us() - t0; if (w < 0) g_conn_dead = 1; errno = w == 0 ? ETIMEDOUT : errno; return -1; }
         ssize_t r = recv(fd, buf + got, n - got, 0);
         if (st) st->recv_calls++;
-        if (r <= 0) { if (st) st->recv_us += now_us() - t0; if (r == 0) errno = 0; return -1; }
+        if (r <= 0) { if (st) st->recv_us += now_us() - t0; g_conn_dead = 1; if (r == 0) errno = 0; return -1; }
         got += (size_t)r;
+        g_rx_total += (uint64_t)r;
     }
     if (st) st->recv_us += now_us() - t0;
     return 0;
@@ -171,17 +181,35 @@ static void send_kv(const char *text)
     }
 }
 
+/* After a failed pass the PC may still be sending the DATA frame we gave up on: discard it until it is quiet,
+   so the next pass starts on a frame boundary. Returns the bytes thrown away. */
+static uint64_t drain(int idle_ms)
+{
+    uint64_t n = 0;
+    for (;;) {
+        int w = wait_readable(g_fd, idle_ms);
+        if (w < 0) { g_conn_dead = 1; break; }
+        if (w == 0) break;
+        ssize_t r = recv(g_fd, g_sink, sizeof g_sink, 0);
+        if (r <= 0) { g_conn_dead = 1; break; }
+        n += (uint64_t)r;
+        g_rx_total += (uint64_t)r;
+    }
+    return n;
+}
+
 /* ---- one TCP pass ---- */
 typedef struct { uint32_t want, depth, rcvbuf; int ck; } pass_cfg;
-static const pass_cfg PASSES[] = {
-    { 16384, 1,  8192, 1 },   /* KOS default receive buffer (8 KiB window) */
-    { 16384, 1, 65535, 1 },
-    { 65536, 1, 65535, 1 },   /* netgd-recv's plan (menu-app.md D6) */
-    { 65536, 2, 65535, 1 },   /* one WANT read ahead */
-    { 65536, 1, 65535, 0 },   /* no checksums: the network alone */
-    { 65536, 2, 65535, 0 },
+static const pass_cfg PASSES[] = {   /* the 64 KiB frames (the ones that hung in the first run) come last */
+    { 16384, 1, 0, 1 },
+    { 16384, 1, 0, 0 },       /* no checksums: the network alone */
+    { 65536, 1, 0, 1 },       /* netgd-recv's plan (menu-app.md D6) */
+    { 65536, 1, 0, 0 },
+    { 65536, 2, 0, 1 },       /* one WANT read ahead */
+    { 65536, 2, 0, 0 },
 };
 
+static volatile unsigned g_pass_no;
 static char g_text[2048];
 static g2b_kv g_kv;
 
@@ -213,11 +241,13 @@ static int run_pass(unsigned n, const pass_cfg *c)
     g2b_kv_init(&g_kv, g_text, sizeof g_text);
     kvp(pfx, "want", c->want); kvp(pfx, "depth", c->depth); kvp(pfx, "checksums", (uint64_t)c->ck);
 
-    uint32_t rb = c->rcvbuf;
-    int sorc = setsockopt(g_fd, SOL_SOCKET, SO_RCVBUF, &rb, sizeof rb);
+    /* SO_RCVBUF on a connected KOS socket only reallocs the buffer, the advertised window (rcv.wnd) stays at the
+       value from accept(): the size is therefore set once on the listener (main) */
     uint32_t got_rb = 0; socklen_t gl = sizeof got_rb;
     if (getsockopt(g_fd, SOL_SOCKET, SO_RCVBUF, &got_rb, &gl) != 0) got_rb = 0;
-    kvp(pfx, "rcvbuf_set_ok", (uint64_t)(sorc == 0)); kvp(pfx, "rcvbuf", got_rb);
+    kvp(pfx, "rcvbuf", got_rb);
+    g_pass_no = n;
+    uint64_t rx0 = g_rx_total;
 
     g2n_pass ps;
     g2n_pass_init(&ps, (uint16_t)n, PASS_BYTES, c->want, c->depth);
@@ -258,6 +288,7 @@ static int run_pass(unsigned n, const pass_cfg *c)
             t = now_us(); fnv = ng_fnv1a(fnv, g_sink, dlen); st.fnv_us += now_us() - t;
         }
         st.frames++;
+        g_frames_total++;
         uint64_t ft = now_us() - f0;
         if (ft > st.max_frame_us) st.max_frame_us = ft;
         if (!ps.stopped && now_us() - t0 > PASS_LIMIT_US) { g2n_pass_stop(&ps); status = "time_limit"; }
@@ -274,6 +305,8 @@ out:;
     kvp(pfx, "crc_frame_us", st.crc_frame_us); kvp(pfx, "crc_file_us", st.crc_file_us); kvp(pfx, "fnv_us", st.fnv_us);
     kvp(pfx, "other_us", us > accounted ? us - accounted : 0);
     kvp(pfx, "max_frame_us", st.max_frame_us);
+    kvp(pfx, "rx_bytes_total", g_rx_total - rx0);   /* incl. a frame cut off by the failure */
+    kvp(pfx, "outstanding", ps.outstanding);
     kvh(pfx, "crc", crc); kvh(pfx, "fnv", fnv);
     send_kv(g_text);
     return good ? 0 : -1;
@@ -460,6 +493,11 @@ int main(int argc, char **argv)
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
     int ufd = socket(AF_INET, SOCK_DGRAM, 0);
     if (lfd < 0 || ufd < 0) { say("socket() failed errno=%d", errno); int r = fail("socket"); shutdown_net(); return r; }
+    {   /* accepted connections inherit it, window included (before bind / listen: the socket is plain then) */
+        uint32_t rb = G2N_LISTEN_RCVBUF;
+        int rc = setsockopt(lfd, SOL_SOCKET, SO_RCVBUF, &rb, sizeof rb);
+        say("listener SO_RCVBUF %u: %s", (unsigned)rb, rc == 0 ? "ok" : "failed");
+    }
     struct sockaddr_in a; memset(&a, 0, sizeof a);
     a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = htons(G2N_TCP_PORT);
@@ -498,14 +536,22 @@ int main(int argc, char **argv)
     g2b_kv_u64(&g_kv, "passes", sizeof PASSES / sizeof PASSES[0]);
     send_kv(g_text);
 
-    int failed = 0;
+    int failed = 0, nfail = 0;
     for (unsigned i = 0; i < sizeof PASSES / sizeof PASSES[0] && !failed; i++) {
         char nm[32];
         snprintf(nm, sizeof nm, "TCP pass %u", i + 1);
         stage(nm);
         snprintf(g_text, sizeof g_text, "next_pass=p%u", i + 1);
         send_line(g_text);
-        failed = run_pass(i + 1, &PASSES[i]) != 0;
+        if (run_pass(i + 1, &PASSES[i]) != 0) {
+            nfail++;
+            stage("draining");
+            uint64_t d = g_conn_dead ? 0 : drain(DRAIN_IDLE_MS);
+            snprintf(g_text, sizeof g_text, "p%u_drained_bytes=%lu", i + 1, (unsigned long)d);
+            send_line(g_text);
+            say("p%u failed; drained %lu bytes%s", i + 1, (unsigned long)d, g_conn_dead ? " (connection lost)" : "");
+            if (g_conn_dead) { failed = 1; break; }
+        }
     }
     if (!failed) {
         static const unsigned pps[] = { 0, 2500, 1200 };
@@ -516,11 +562,13 @@ int main(int argc, char **argv)
             run_udp(ufd, i + 1, 4000, 1400, pps[i]);
         }
     }
+    snprintf(g_text, sizeof g_text, "passes_failed=%d", nfail);
+    send_line(g_text);
     send_line(failed ? "status=failed" : "status=done");
     uint8_t done[1] = { (uint8_t)!failed };
     send_frame(G2N_T_DONE, done, 1, NULL);
     wait_readable(g_fd, 5000);                         /* let the PC close first: our last frames are not cut off */
-    say("done%s", failed ? " (a pass failed)" : "");
+    say("done%s", failed ? " (connection lost)" : (nfail ? " (some passes failed)" : ""));
     stage(failed ? "done (failed)" : "done");
     close(g_fd); close(lfd); close(ufd);
     thd_sleep(3000);                                   /* the result is readable on the screen */

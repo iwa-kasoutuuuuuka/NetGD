@@ -108,7 +108,7 @@ def connect(host, port, wait_s, log=print):
     deadline, shown = time.time() + wait_s, 0
     while True:
         try:
-            return ngtp.Client(host, port, timeout=30.0)
+            return ngtp.Client(host, port, timeout=90.0)
         except ngtp.ConnectionLost as e:
             if time.time() >= deadline:
                 raise
@@ -142,6 +142,11 @@ def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print):
     lines = []
     cli = connect(host, port, wait_s, log)
     log("[g2n_send] connected to %s:%d" % (host, port))
+    path = pick_path(out_dir)
+    fout = open(path, "w")
+    fout.write("pc_time=%s\npc_partial=1\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    fout.flush()
+    log("[g2n_send] result file (written as lines arrive): %s" % path)
     with cli:
         info = cli.hello(0)
         log("[g2n_send] HELLO_OK app=%s max_data=%d" % (info.app, info.max_data))
@@ -153,11 +158,17 @@ def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print):
                 lines.append("u%s_pc_sent=%s" % (kv["pass"], kv["count"]))
                 return
             lines.append(text)
-            if text.startswith("next_pass="):
-                log("[g2n_send] " + text)
+            log("[g2n_send] DC: " + text)
+            fout.write(text + "\n")        # incrementally: a later hang keeps the earlier numbers
+            fout.flush()
 
         payload = struct.pack("<BBH", ngtp.PUT_NEW, 0, 0) + b"9999" + b"G2NBENCH 1\n"
-        res = cli.request(ngtp.PUT, payload, source=src, on_line=on_line)
+        try:
+            res = cli.request(ngtp.PUT, payload, source=src, on_line=on_line)
+        except (ngtp.ConnectionLost, ngtp.NgtpError) as e:
+            fout.write("pc_error=%s\n" % e)
+            fout.close()
+            raise
     kv = parse_kv(lines)
     all_ok = res.ok and kv.get("status") == "done"
     n = 1
@@ -175,11 +186,10 @@ def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print):
             lines.append("%s_pc_bytes_ok=%d" % (p, 1 if done == int(kv[p + "_bytes"]) else 0))
         all_ok = all_ok and kv.get(p + "_status_ok") == "1"
         n += 1
-    path = pick_path(out_dir)
-    with open(path, "w") as f:
-        f.write("pc_time=%s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
-        f.write("\n".join(lines) + "\n")
-        f.write("pc_all_ok=%d\n" % (1 if all_ok else 0))
+    # the PC's own checks go after the Dreamcast's lines; pc_partial=1 above is superseded by pc_partial=0
+    fout.write("\n".join(l for l in lines if l.startswith("p") and "_pc_" in l or l.startswith("u") and "_pc_" in l) + "\n")
+    fout.write("pc_partial=0\npc_all_ok=%d\n" % (1 if all_ok else 0))
+    fout.close()
     return all_ok, path, kv
 
 
