@@ -2700,6 +2700,22 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - ホストテスト netgd-t2 33 件・netgd-recv 53 件・netgd-menu 77 件・netgd-send 108 件。DreamSDK で 5 構成のビルド。実機は未確認（NetGD が載るまでは `T2_NO_DRIVE=1` 版でネットだけ確かめられる）。
 - 関連：R175、R178、R185、`docs/design/menu-app.md` §8.3。
 
+### R187 メニューの BBA の立ち上げを DHCP なしに・NOLINK の再試行の落ち（fix/menu-net）（Opus・比較のセッション・Fable のレビュー 2 回）
+
+- `fix/menu-net`（`7417dbc7`・`470839f7`・`24e31684`）：メニューの BBA の立ち上げを netgd-t2 と同じ DHCP なしの手順にし、`net_kos.c` と `nm_netup.c` を 2 つのアプリで共有した。WANT は素の TCP で 16 KiB × 1、直した TCP をリンクするビルドで 64 KiB × 2。メニューも純正に送るのは `52 00` だけ（`fw_probe_netgd`）。
+- Fable のレビューで見つかった不具合：KOS 2.3 の `bba_if_start` は、リンクを 10 秒待って失敗すると rx スレッドを残したまま -1 を返す。そのため 2 回目の `net_init` が `assert(bba_rx_thread == NULL)` で落ちる（assert は有効）。ケーブルなしで Y → NOLINK → Y でメニューが止まるところだった。
+  - 直し：`net_init` が失敗したらその起動中は最終（「restart the console」）にして、もう `net_init` を呼ばない。`nm_net_shutdown` のあとも呼ばない（`g_net_tried`）。BBA なし・アドレスなしも最終。
+- KOS の `net_tcp.c` で、listen のソケットに付けた `SO_RCVBUF` は close で解放されない（20 KiB のリーク）。転送画面に入るたびに漏れていた。listen のソケットを閉じずに残して使い回すようにし、たまった接続は最大 4 本まで捨てる。
+- 残る小さい危険（2 回目のレビュー）：残したソケットに PC がつないで消えると約 28 KiB が残る、一覧の画面で PC がつなぐと 1〜2 秒後に拒否になる、Y の約 1 秒前につないだ送信は 1 回切れる。どれもまれなので今は直さない。
+- ホストテスト netgd-menu 88 件・netgd-t2 33 件。DreamSDK で 4 構成のビルドが警告なし。実機は未確認（実機の確認の項目 9：Y をもう一度押して落ちないこと、転送画面の出入りで空きメモリが減らないこと）。
+
+### R188 2E の容量を 1,984 B 減らす（perf/2e-size-2）（Opus・比較のセッション・Fable のレビュー）
+
+- 2E の増加の主因は seq 21〜24 の head / pregap の規則（batch10 で +896）と、pregap の開始・form2 の大きさ（batch11 で +544）。構造的には、`wait_host` / `poll_until` の async のループが状態機械の 9 か所に複製されていた。
+- `f6ee4289`：`wait_host` を手書きの future `WaitHost` にした（poll は `inline(never)` で 1 つ、cond は `dyn FnMut`）。判定の順・タイムアウト・yield は従来どおり。2E −1,888 B、4E も約 −3.6 KB。
+- `b88b4c0d`：`finish_cmd` / `error_status_intrq` で −96 B。ERROR → STATUS+INTRQ → ack の書き込みの順は同じ。
+- 2E used 116,336（空き 6,544）。ci-local の builds・tests 19/19、test_expect OK、純正の記録との監査は main と同じ。Fable のレビューで振る舞いの変化なし。ただし ide.rs を通るホストテストはなく、待ちのループ 1 回あたり数十サイクル遅い分は実機で未計測。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
