@@ -79,9 +79,7 @@ def main(argv=None):
             extra = check_mode1_cdi(path, e) if e['format'] == 'cdi' else []
             if extra:
                 bad += 1
-                print('MISMATCH (Mode 1 content)
-  ' + '
-  '.join(extra))
+                print('MISMATCH (Mode 1 content)\n  ' + '\n  '.join(extra))
             else:
                 print('OK (matches manifest)' + (' + Mode 1 sectors' if any(t.get('form') == 'cdi_mode1_2352' for t in e['tracks']) else ''))
     return 1 if bad else 0
