@@ -349,7 +349,12 @@ MCU からは見えないので、ロジックアナライザで読む（`g1-ag1
   `placed at pin` なし、`checkpnr.py` が io.asf を読んで 169 本すべて一致、ネットリストの座標 169 個がすべて別、pinmap のユーザー I/O になりうるボールで設計に無いものは 0 本。
   hold（G1・G2・C1・D2・特別な機能・DDR の F10/M10/L11/M11・クロックボール）の割り当ても Supra は受け付けた（hold のパッドは `.oe(gnd)`）。
   `.asf` を読む前の「locatiion is not assigned」の Error は hold の 37 本ぶん出る（既知の種類で、`build.sh` は除外している）。
-- 確かめていないこと：`gatesim.py`（WSL に Icarus Verilog が無い）、Supra の報告どおりにシリコンが動くこと、`alta_osc` の周波数・極性、実機のすべて。
+- `gatesim.py`（Icarus Verilog 12.0、WSL）：Supra のモデルから必要なモジュールだけを `--work` に取り出して使う（`alta_sim.v` の ADC は SystemVerilog 専用で Icarus が読めず、`etc/` に同じ写しがある）。
+  本番の設定（prescale 10・start 256）は 1 周が実時間で約 1.2 秒分になり Icarus では何時間もかかるので、ゲートシミュレーション用に `gen.py --prescale 1 --start 8` で別に作ったもの（論理は同じでティックだけ短い）にかける。
+  リングは遅延ゼロだと発振しないため、`--clock ring` ではモデルの LUT に 0.4 ns の遅延と「X の入力は 0」を足す（シミュレーション専用の上書き）。
+  結果（2026-11-22）：段階 0 と osc は合格（同時に Low は最大 1 本）。ただし配置配線後のネットリストは RTL と違い、1 周で止まらずに回り続け、最後のボール（131）を駆動しない。
+  ring は上の上書きでもクロックが発振せず（`half` が動かない）、判定できなかった（INCONCLUSIVE）。
+- 確かめていないこと：Supra の報告どおりにシリコンが動くこと、`alta_osc` の周波数・極性、実機のすべて。
 
 ## 9. 設計メモ：逆向きの探し方（R143 の 9。未実装・要判断）
 
