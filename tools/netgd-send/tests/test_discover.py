@@ -153,8 +153,17 @@ class TestCommands(Tmp):
 
     def test_push_without_host_discovers_then_pushes(self):
         gdi = self.make_gdi()
-        menu = FakeMenu(listing=["NGD:LIST complete 02"])
-        beacon = FakeBeacon(port=menu.port)                # the TCP and the UDP port numbers are separate spaces
+        # push/discover use one --port for both the UDP discovery and the TCP session, so the beacon needs the menu's number.
+        # That number may be unusable for UDP (Windows excluded port ranges -> PermissionError): try another menu then.
+        for attempt in range(20):
+            menu = FakeMenu(listing=["NGD:LIST complete 02"])
+            try:
+                beacon = FakeBeacon(port=menu.port)
+                break
+            except OSError:
+                menu.srv.close()
+        else:
+            self.skipTest("no port free for both TCP and UDP")
         self.addCleanup(beacon.close)
         rc, text = self.run_main("push", gdi, "--code", "4821", "--port", str(menu.port), "--broadcast", "127.0.0.1",
                                  "--discover-timeout", "1", "--timeout", "20", "--title", "T")

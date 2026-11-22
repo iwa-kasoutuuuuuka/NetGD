@@ -8,7 +8,8 @@ directory:
 
     python3 -I fpga/pinfind/checkpnr.py --gen fpga/pinfind/build \\
         --work fpga/pinfind/build/supra --pinmap "$SUPRA_HOME/etc/AG16KDDF256.pinmap" \\
-        [--placement FILE --placement-regex REGEX] [--unused-ok PIN_xx,...]
+        [--placement FILE --placement-regex REGEX] [--unused-ok PIN_xx,...] \\
+        [--sites-ref OLD.sites]
 
 Exit 0 only if all of these hold (R143 item 1 and 2):
 
@@ -25,21 +26,37 @@ Exit 0 only if all of these hold (R143 item 1 and 2):
      treatment of unused pins is unknown (Quartus's old default was "output
      driving ground"), so the design leaves none unused instead of relying on it.
 
-Where the actual placement comes from (3). The format of Supra's reports is
-NOT known to this script's author (no Supra on the machine it was written
-on). The script therefore only accepts a source that lists every port with
-exactly one ball, and stops otherwise:
+Where the actual placement comes from (3). The script only accepts a source
+that lists every port with exactly one ball, and stops otherwise:
 
-  * built-in: a Quartus-style pin table (`<port> : <ball> : ...`, as in a
-    `.pin` file) in any file of the work directory, or `// Location: PIN_xx`
-    comments directly above the I/O cell of a port in the routed netlist;
+  * built-in, Supra 2026.03.b0 (seen on the first real build): af_run writes
+    its I/O placement database as `alta_db/io.asf` (after `place_pseudo
+    -place_io`, before placement of the logic; ports in reverse order, an
+    IO_STANDARD line each). It is Supra's own output, not the request: the
+    pre-.asf pass logs e.g. "Place virtual pin HOLD[0] at PIN_T16" and io.asf
+    then says PIN_G1, and a port left out of the request shows up in io.asf on
+    the ball Supra chose (README_ja.md 3-3). Every port must be in it exactly
+    once, and nothing else.
+    The routed netlist (`PinFind_routed.v`) names no balls, only die sites
+    (coord_x/y/z of each pad cell); the site -> ball table is in Supra's
+    encrypted architecture files. So the netlist is used as a cross-check:
+    every port has exactly one pad cell, no two ports share a site, and no
+    other pad cell exists. The sites are written to `<work>/checkpnr.sites`
+    (`port ball x y z`); with --sites-ref FILE (an earlier build's .sites),
+    each ball must sit on the same site as there and different balls on
+    different sites.
+  * built-in, other formats: a Quartus-style pin table (`<port> : <ball> :
+    ...`, as in a `.pin` file) in any file of the work directory, or
+    `// Location: PIN_xx` comments directly above the I/O cell of a port in
+    the routed netlist;
   * or a source a human named after looking at the reports:
     --placement FILE --placement-regex 'REGEX' with named groups (?P<port>)
     and (?P<ball>), applied to each line.
 
 Never point --placement at the .asf, the .qsf, a Tcl file, or a report that
 only repeats the constraints: that would "confirm" the request, not the
-result. Lines containing `set_location_assignment` are ignored for that reason.
+result. Lines containing `set_location_assignment` are ignored for that reason
+(except in Supra's own alta_db/io.asf above).
 """
 import argparse
 import glob
@@ -58,6 +75,9 @@ from mklist import BALL, DEDICATED, parse_pinmap, read_list, user_capable  # noq
 AUTO_PLACED = re.compile(r"placed at pin|is not assigned,|auto[- ]?placed|automatically placed", re.I)
 BALL_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:PIN_)?([A-HJ-NPRT](?:1[0-6]|[1-9]))(?![A-Za-z0-9_])")
 SKIP_FILES = (".asf", ".qsf", ".tcl", ".sdc", ".gz", ".rbf", ".bin", ".prg", ".vqm")
+SUPRA_IO = os.path.join("alta_db", "io.asf")   # Supra's I/O placement database (written by af_run)
+ROUTED = "PinFind_routed.v"                     # Supra's routed netlist (write_routed_design)
+LOC_LINE = re.compile(r"^\s*set_location_assignment\s+-to\s+(\S+)\s+(\S+)\s*$")
 
 
 def norm_port(q):
@@ -177,6 +197,100 @@ def from_location_comments(path, ports):
     return got
 
 
+def from_supra_io(work):
+    """Supra's own I/O placement (alta_db/io.asf): {port: {ball}} or None if absent.
+    A location that is not a PIN_xx ball (Supra also has NC_PIN_.., DDR_..)
+    is kept as written, so it shows up as a mismatch instead of vanishing."""
+    path = os.path.join(work, SUPRA_IO)
+    if not os.path.isfile(path):
+        return None
+    got = {}
+    for line in open(path, encoding="utf-8", errors="replace"):
+        m = LOC_LINE.match(line)
+        if m:
+            q = norm_port(m.group(1))
+            got.setdefault(q, set()).add(norm_ball(m.group(2)) or m.group(2).strip().upper())
+    return got
+
+
+def routed_sites(path):
+    """Pad cells of Supra's routed netlist: {port: [(x, y, z), ...]} (one per
+    cell whose .padio names the port)."""
+    cells, coords = {}, {}
+    cur = None
+    head = re.compile(r"^\s*(\w+)\s+(\\\S+|[A-Za-z_][\w$]*)\s*\(\s*$")
+    pad = re.compile(r"\.padio\s*\(\s*(\\?[^\s)]+)\s*\)")
+    dp = re.compile(r"^\s*defparam\s+(\\\S+|[A-Za-z_][\w$]*)\s*\.coord_([xyz])\s*=\s*(\d+)\s*;")
+    for line in open(path, encoding="utf-8", errors="replace"):
+        m = dp.match(line)
+        if m:
+            coords.setdefault(m.group(1), {})[m.group(2)] = int(m.group(3))
+            continue
+        m = head.match(line)
+        if m and m.group(1) not in ("module", "input", "output", "inout", "wire", "assign", "defparam"):
+            cur = m.group(2)
+            continue
+        if cur is not None:
+            m = pad.search(line)
+            if m:
+                cells[cur] = norm_port(m.group(1))
+            if line.rstrip().endswith(");"):
+                cur = None
+    out = {}
+    for cell, q in cells.items():
+        c = coords.get(cell, {})
+        out.setdefault(q, []).append(tuple(c.get(k) for k in "xyz"))
+    return out
+
+
+def check_sites(work, exp, actual, sites_ref=None):
+    """Cross-check the placement against the routed netlist's pad sites.
+    Returns (errors, notes, rows) with rows = [(port, ball, x, y, z)]."""
+    errors, notes, rows = [], [], []
+    path = os.path.join(work, ROUTED)
+    if not os.path.isfile(path):
+        return [f"{ROUTED} not found: the placement cannot be cross-checked against the routed netlist"], notes, rows
+    s = routed_sites(path)
+    ports = [q for q, _ in exp]
+    missing = [q for q in ports if q not in s]
+    multi = [q for q in ports if len(s.get(q, ())) > 1]
+    extra = sorted(set(s) - set(ports))
+    nosite = [q for q in ports if q in s and None in s[q][0]]
+    if missing or multi or extra or nosite:
+        errors.append(f"routed netlist: {len(missing)} port(s) without a pad cell (e.g. {missing[:5]}), "
+                      f"{len(multi)} with several (e.g. {multi[:5]}), {len(extra)} other pad cell(s) "
+                      f"(e.g. {extra[:5]}), {len(nosite)} without coord_x/y/z (e.g. {nosite[:5]})")
+        return errors, notes, rows
+    by_site = {}
+    for q in ports:
+        by_site.setdefault(s[q][0], []).append(q)
+    shared = [v for v in by_site.values() if len(v) > 1]
+    if shared:
+        errors.append(f"routed netlist: {len(shared)} site(s) carry two ports (e.g. {shared[:3]})")
+    rows = [(q, actual[q], *s[q][0]) for q in ports]
+    notes.append(f"routed netlist: {len(ports)} pad cells, {len(by_site)} distinct sites ({ROUTED})")
+    if sites_ref:
+        ref = {}
+        for line in open(sites_ref, encoding="utf-8"):
+            w = line.split()
+            if len(w) == 5 and not line.startswith("#"):
+                ref[w[1]] = tuple(int(v) for v in w[2:])
+        ref_site = {v: k for k, v in ref.items()}
+        bad = []
+        for q, b, x, y, z in rows:
+            if b in ref and ref[b] != (x, y, z):
+                bad.append(f"{b}: site {(x, y, z)} here, {ref[b]} in {os.path.basename(sites_ref)}")
+            elif b not in ref and (x, y, z) in ref_site:
+                bad.append(f"{b}: site {(x, y, z)} is {ref_site[(x, y, z)]} in {os.path.basename(sites_ref)}")
+        if bad:
+            errors.append("sites differ from --sites-ref:\n    " + "\n    ".join(bad[:30]))
+        else:
+            common = sum(1 for r in rows if r[1] in ref)
+            notes.append(f"sites: {common} balls on the same site as in {os.path.basename(sites_ref)}, "
+                         f"no site reused by another ball")
+    return errors, notes, rows
+
+
 def complete(got, ports):
     return set(got) >= set(ports) and all(len(got[q]) == 1 for q in ports)
 
@@ -196,6 +310,16 @@ def find_placement(work, ports, placement=None, regex=None):
                              f"(e.g. {missing[:5]}), {len(multi)} with several balls (e.g. {multi[:5]})")
         return f"{placement} (--placement-regex)", {q: next(iter(got[q])) for q in ports}
     sources = []
+    sio = from_supra_io(work)
+    if sio is not None:
+        missing = [q for q in ports if q not in sio]
+        multi = [q for q in ports if len(sio.get(q, ())) > 1]
+        extra = sorted(set(sio) - set(ports))
+        if missing or multi or extra:
+            raise SystemExit(f"checkpnr: {SUPRA_IO} (Supra's I/O placement): {len(missing)} port(s) missing "
+                             f"(e.g. {missing[:5]}), {len(multi)} with several balls (e.g. {multi[:5]}), "
+                             f"{len(extra)} other I/O (e.g. {extra[:5]}). Do not load this bitstream.")
+        sources.append((f"{SUPRA_IO} (Supra I/O placement)", {q: next(iter(sio[q])) for q in ports}))
     for f in sorted(glob.glob(os.path.join(work, "**", "*"), recursive=True)):
         if not os.path.isfile(f) or f.lower().endswith(SKIP_FILES) or os.path.getsize(f) > 64 << 20:
             continue
@@ -233,6 +357,7 @@ def main(argv=None):
     ap.add_argument("--placement-regex")
     ap.add_argument("--unused-ok", action="append", default=[],
                     help="user-capable balls a human accepts as unused (comma-separated)")
+    ap.add_argument("--sites-ref", help="an earlier build's checkpnr.sites: every ball must be on the same site")
     ap.add_argument("--report", help="write a summary here")
     a = ap.parse_args(argv)
 
@@ -263,6 +388,18 @@ def main(argv=None):
                       "\n    ".join(f"{q}: expected {b}, placed {got}" for q, b, got in wrong[:30]))
     else:
         notes.append(f"placement: all {len(exp)} ports on their expected balls ({src})")
+
+    if os.path.isfile(os.path.join(a.work, SUPRA_IO)) or os.path.isfile(os.path.join(a.work, ROUTED)):
+        e2, n2, rows = check_sites(a.work, exp, actual, a.sites_ref)
+        errors += e2
+        notes += n2
+        if rows:
+            with open(os.path.join(a.work, "checkpnr.sites"), "w", encoding="utf-8", newline="\n") as f:
+                f.write("# port ball coord_x coord_y coord_z (Supra routed netlist; written by checkpnr.py)\n")
+                for r in rows:
+                    f.write("%s %s %d %d %d\n" % r)
+    elif a.sites_ref:
+        errors.append(f"--sites-ref given but {ROUTED} is not in the work directory")
 
     plain, special = parse_pinmap(open(a.pinmap, "rb").read().decode("utf-8", "replace"))
     design = {b for _, b in exp}

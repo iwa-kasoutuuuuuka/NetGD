@@ -1,0 +1,29 @@
+# seq 18: identical to seq 17, but BEFORE this run edit GDEMU.ini on the SD card:
+#     detect_time = 400        (open_time stays 150)
+# and put detect_time back afterwards. It tells whether the 150 ms after DEVICE RESET is detect_time.
+# Copy to <host folder>/gdprobe.cfg. See README_ja.md, "seq 17 の実行計画".
+
+label=stock
+seq=18
+
+switch=on
+images=4,3,7
+return_to=2
+switch_timeout_ms=5000
+
+swap_regpoll=on
+swap_regpoll_ms=1000
+swap_regpoll_interval_ms=2
+
+swap_devreset=off
+
+swap_reswitch=on
+swap_reswitch_wait_ms=1000
+
+devreset_only=on
+devreset_only_wait_ms=1000
+
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off

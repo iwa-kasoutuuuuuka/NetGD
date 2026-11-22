@@ -36,6 +36,7 @@ CSN_IDLE = 0b11
 MCU_STATUS = 1
 MCU_HW_INFO = 0
 MCU_DMA_MODE = 19
+MCU_SECNR8 = 32
 SECONDARY = 0x80
 
 
@@ -175,6 +176,24 @@ async def tb_primary_status_when_dev0(ctx, dut):
     )
 
 
+async def tb_slot32_per_device_and_unmapped_above(ctx, dut):
+    """Slot 32 acts on the device whose window it is addressed in and leaves
+    the other alone; slots 33+ read 0 in both windows."""
+    await release_reset(ctx, dut)
+    for base, other in ((0, SECONDARY), (SECONDARY, 0)):
+        await mcu_write(ctx, dut, base | 6, 0x1100)           # known lba_low/mid
+        await mcu_write(ctx, dut, other | 6, 0x2200)
+        await mcu_write(ctx, dut, base | MCU_SECNR8, 0x0042)
+        assert await mcu_read(ctx, dut, base | MCU_SECNR8) == 0xA542
+        assert await mcu_read(ctx, dut, base | 6) == 0x1142, "lba_mid kept"
+        assert await mcu_read(ctx, dut, other | MCU_SECNR8) == 0xA500, "other lba_low untouched"
+        assert await mcu_read(ctx, dut, other | 6) == 0x2200, "other window untouched"
+    for slot in (33, 34, 40, 63, 127):
+        for base in (0, SECONDARY):
+            v = await mcu_read(ctx, dut, base | slot)
+            assert v == 0, f"slot {base | slot:#x} should read 0, got {v:#06x}"
+
+
 async def tb_write_command_routes_to_selected_device(ctx, dut):
     """A command written with DEV=1 must land on the secondary only."""
     await release_reset(ctx, dut)
@@ -278,6 +297,7 @@ TESTBENCHES = [
     ("secondary_status_not_masked_by_primary", tb_secondary_status_not_masked_by_primary),
     ("primary_status_when_dev0", tb_primary_status_when_dev0),
     ("write_command_routes_to_selected_device", tb_write_command_routes_to_selected_device),
+    ("slot32_per_device_and_unmapped_above", tb_slot32_per_device_and_unmapped_above),
 ]
 
 

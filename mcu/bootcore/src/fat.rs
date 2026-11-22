@@ -230,6 +230,9 @@ impl Volume {
         if clusters == 0 || (spf as u64) * 128 < clusters as u64 + 2 {
             return Err(FatError::BadBpb);
         }
+        // No more than FAT32's 28-bit cluster numbers allow: a root or an
+        // entry with any of the top four bits set is then out of range.
+        let clusters = clusters.min(0x0FFF_FFF5);
         let max_cluster = clusters + 1;
         if root < 2 || root > max_cluster {
             return Err(FatError::BadBpb);

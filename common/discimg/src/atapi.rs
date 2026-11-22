@@ -204,6 +204,59 @@ pub fn idle_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool) -> u32
     150
 }
 
+/// Where a CD_READ from `start_fad` leaves the head (REQ_STAT / GET_SCD):
+/// just past the last of the `transferred` sectors. Stock GDEMU 6.0 (seq
+/// 17/18, `RS_REQ_STAT` after the IP_READ and a same-folder re-switch that
+/// changes nothing): 7 sectors from FAD 45150 of GDI 03 -> `01 8f 41 03 01
+/// 00 b0 65` (45157); the 7-sector read of CDI 04's Mode 2 track at 0x2E4C
+/// with type Mode 1, refused 5/64/00 before any sector, -> `01 2f 41 02 01
+/// 00 2e 4c` (the start: the head went there, nothing was read). The status
+/// stays pause; track, index and CTRL are those of the track the FAD is in
+/// ([`head_position`]).
+///
+/// `transferred` is what actually reached the host (whole sectors): a read
+/// abandoned by a reset or a new command, or cut short, moves the head only
+/// that far (stock unmeasured; seq 21).
+pub fn read_end_fad(start_fad: u32, transferred: u32) -> u32 {
+    start_fad.wrapping_add(transferred)
+}
+
+/// Whether a CD_READ of `count` sectors from `start_fad` moves the head to
+/// its start before anything is transferred, and so where to: only a request
+/// whose start lies inside a track (bounded by the track's sectors, not the
+/// open-ended [`track_for_lba`]) with at least one sector. A read refused
+/// for its sector type there still moves it (seq 17, CDI 04 at 0x2E4C). A
+/// start in the lead-out, in the GDI's gap between the areas, at FAD
+/// 0xFFFFFF or below 150, or a count of 0, leaves the head where it was
+/// (stock unmeasured; a command refused before CD_READ runs -- NOT READY,
+/// UNIT ATTENTION -- never gets here). FAD 0..149 never qualifies, so the
+/// head never rests below 150.
+pub fn read_head_start<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Option<u32> {
+    if count == 0 || start_fad < 150 {
+        return None;
+    }
+    let lba = start_fad - 150;
+    let t = track_for_lba(tracks, lba)?;
+    (lba - t.start_lba() < t.sector_count()).then_some(start_fad)
+}
+
+/// The head with no CD-DA started: the end of the last CD_READ since the
+/// mount (`last_read` from [`read_end_fad`] / [`read_head_start`], or the
+/// position where CD-DA was stopped; `None` = nothing since the mount) once
+/// the unit has switched, else [`idle_fad`]. Before any switch stock keeps standby at
+/// FAD 150 though the BIOS has read the boot disc (records 02/05/06/09/16/17
+/// img=0, a cold power-on); after a Dreamcast reset -- which remounts
+/// (reset_goto) like a switch -- and the BIOS's reads it shows pause, track
+/// 2, FAD 0x05017A, lead-out - 2 of the dcload CDI (records 03/07/08/10-15/
+/// 18/20 img=0, R130's open point). A mount or a DEVICE RESET (seq 17 `DR_`)
+/// starts again from the park position.
+pub fn rest_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool, last_read: Option<u32>) -> u32 {
+    match last_read {
+        Some(fad) if switched => fad,
+        _ => idle_fad(tracks, is_cdi, switched),
+    }
+}
+
 /// Drive status codes (low nibble of SECNR, byte 0 of REQ_STAT / REQ_SES).
 pub const DRIVE_PAUSE: u8 = 0x01;
 pub const DRIVE_STANDBY: u8 = 0x02;
@@ -216,32 +269,29 @@ pub const DRIVE_NODISC: u8 = 0x07;
 
 /// Disc format, already in the high nibble (SECNR, REQ_STAT byte 1;
 /// Flycast `gdrom_if.h`: CD-DA 0x00, CD-ROM 0x10, CD-ROM XA 0x20, GD-ROM 0x80).
-/// See [`disc_format`].
+/// See [`disc_format`]. Stock GDEMU 6.0 never reports CD-DA for an image
+/// (R155: an audio-only CDI is CD-ROM); the constant is Flycast's.
 pub const DISC_FORMAT_CDDA: u8 = 0x00;
 pub const DISC_FORMAT_CDROM: u8 = 0x10;
 pub const DISC_FORMAT_CDROM_XA: u8 = 0x20;
 pub const DISC_FORMAT_GDROM: u8 = 0x80;
 
 /// The disc format a mounted image reports (SECNR's and REQ_STAT byte 1's
-/// high nibble). A GDI is a GD-ROM. A CDI is a CD whose format follows its
-/// tracks' modes, as on stock GDEMU 6.0 (R144: the mkdcdisc CDI 04, Mode 2
-/// data, reports `2_`; the same layout with a Mode 1 data track, 10, reports
-/// `1_`, REQ_STAT `01 1f ...`, SECNR `0x11`): any Mode 2 track makes it
-/// CD-ROM XA, else any Mode 1 track CD-ROM, else (audio only, never probed on
-/// stock) CD-DA, as Flycast's `GuessDiscType` decides.
+/// high nibble), as stock GDEMU 6.0 does: a GDI is a GD-ROM; a CDI with any
+/// Mode 2 track is CD-ROM XA (R144: the mkdcdisc CDI 04 reports `2_`);
+/// every other CDI is CD-ROM -- Mode 1 data (R144: CDI 10, REQ_STAT
+/// `01 1f ...`, SECNR `0x11`) and audio only alike (R155: the two-audio-track
+/// CDI 11, REQ_STAT `01 1f ...`, SECNR `0x11`; R148 had guessed CD-DA 0x00
+/// from Flycast's `GuessDiscType`).
 pub fn disc_format<T: TrackInfo>(tracks: &[T], is_cdi: bool) -> u8 {
     if !is_cdi {
         return DISC_FORMAT_GDROM;
     }
-    let mut fmt = DISC_FORMAT_CDDA;
-    for t in tracks {
-        match t.mode() {
-            TRACK_MODE2 => return DISC_FORMAT_CDROM_XA,
-            TRACK_MODE1 => fmt = DISC_FORMAT_CDROM,
-            _ => {}
-        }
+    if tracks.iter().any(|t| t.mode() == TRACK_MODE2) {
+        DISC_FORMAT_CDROM_XA
+    } else {
+        DISC_FORMAT_CDROM
     }
-    fmt
 }
 
 /// Drive status for the pickup state: what REQ_STAT and REQ_SES put in
@@ -614,6 +664,96 @@ pub fn swap_secnr(phase: SwapPhase, medium: bool, disc_format: u8) -> u8 {
         (disc_format & 0xF0) | status
     } else {
         status
+    }
+}
+
+/// What a running NOT READY window is: the tray cycle of an image switch, or
+/// the re-detect a DEVICE RESET starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowKind {
+    /// After `52 82 n` to another folder (or any mount): open, detect, done.
+    Switch,
+    /// After ATA DEVICE RESET (0x08): detect, done -- never the open `0x06`
+    /// ([`device_reset_window`]).
+    Redetect,
+}
+
+/// How long the re-detect after DEVICE RESET lasts: GDEMU.INI detect_time,
+/// the swap window's detect phase (`detect_ms`; [`SWAP_DETECT_MS`] without
+/// the key). Stock GDEMU 6.0: SECNR `0x00` at the reset and the final byte
+/// 147-154 ms later with detect_time = 150 (R155, R159, seq 17), about
+/// 401 ms later with detect_time = 400 (seq 18, open_time 150), so it is
+/// detect_time, not open_time and not a fixed time.
+pub const fn device_reset_redetect_ms(detect_ms: u32) -> u32 {
+    detect_ms
+}
+
+/// The window an ATA DEVICE RESET (0x08) leaves running, as `(open_ms,
+/// detect_ms)` for [`swap_phase`] from the reset: no open phase, then the
+/// re-detect. Stock GDEMU 6.0 (R155, R159, seq 17) does this on every DEVICE
+/// RESET -- inside a switch's window, after a same-folder re-switch, and with
+/// no switch at all: SECNR `0x00` at once (never `0x06`), the final byte
+/// detect_time later, then one UNIT ATTENTION 6/28/00 with a medium (seq 17
+/// `DR_`: `ua_28=1`; an empty folder stays 2/3A/00). A reset inside a
+/// switch's window replaces it, and ends the same way.
+pub const fn device_reset_window(detect_ms: u32) -> (u32, u32) {
+    (0, device_reset_redetect_ms(detect_ms))
+}
+
+/// Status (ALTSTATUS) a DEVICE RESET completes with: `0x00`, DRDY clear,
+/// until the next command -- the re-detect's end does not change it (R155,
+/// R159: through 1,000 and 2,300 ms of polling).
+pub const DEVICE_RESET_STATUS: u8 = 0x00;
+/// Error register after DEVICE RESET: diagnostic code 0x01, "no error"
+/// (R155, R159). Bit 0 needs a bitstream with the MCU-writable ERROR bits
+/// 0-1 (feat/fpga-regs); an older one shows 0x00.
+pub const DEVICE_RESET_ERROR: u8 = 0x01;
+/// Interrupt reason after DEVICE RESET (the signature's sector count, 0x01).
+pub const DEVICE_RESET_IRR: u8 = 0x01;
+
+/// SECNR for a window of `kind` in `phase`. A switch's window is
+/// [`swap_secnr`] (it ends paused: stock's `0xX1` after `52 82`). The
+/// re-detect after DEVICE RESET is busy `0x00` and then the byte at rest:
+/// the disc format with `idle_status` (the status REQ_STAT reports idle, D2)
+/// -- stock's records only show it after a switch, i.e. paused, where the two
+/// agree -- or NO DISC `0x07` with no medium.
+pub fn window_secnr(kind: WindowKind, phase: SwapPhase, medium: bool, disc_format: u8, idle_status: u8) -> u8 {
+    match (kind, phase) {
+        (WindowKind::Redetect, SwapPhase::Done) if medium => (disc_format & 0xF0) | (idle_status & 0x0F),
+        _ => swap_secnr(phase, medium, disc_format),
+    }
+}
+
+/// How the last mount attempt by folder name ended (for [`same_folder_reswitch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountOutcome {
+    /// An image mounted.
+    Mounted,
+    /// The folder exists and has nothing to mount: stock accepts it and
+    /// reports no medium (D12).
+    NoImage,
+    /// Anything else: no such folder, a parse error, a card read error. The
+    /// next `52 82 n` must try again.
+    Failed,
+}
+
+/// Whether `52 82` / `52 81` to the folder `staged` is a same-folder
+/// re-switch, which stock GDEMU 6.0 treats as a no-op (R159; seq 17 `RS_`:
+/// no window, SECNR and ALTSTATUS flat, no UNIT ATTENTION -- `ua_28=0`, the
+/// next TUR is READY --, REQ_STAT's state and head position unchanged).
+///
+/// `last` is the last mount attempt's folder name and outcome (`None` once
+/// any other mount -- the default, a hard-reset remount -- has run). Only
+/// the same folder, compared by name (so `04` and `0004` stay different
+/// folders), and only while the drive still holds what that attempt left:
+/// the image (`medium`) after [`MountOutcome::Mounted`], the empty folder's
+/// no medium (`empty_slot`) after [`MountOutcome::NoImage`]. A failed attempt,
+/// an eject or a write session never makes one: the host can retry.
+pub fn same_folder_reswitch(staged: &str, last: Option<(&str, MountOutcome)>, medium: bool, empty_slot: bool) -> bool {
+    match last {
+        Some((name, MountOutcome::Mounted)) => medium && !staged.is_empty() && name == staged,
+        Some((name, MountOutcome::NoImage)) => !medium && empty_slot && !staged.is_empty() && name == staged,
+        _ => false,
     }
 }
 

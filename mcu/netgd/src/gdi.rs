@@ -470,9 +470,16 @@ where
     // Small on purpose. These files hold a handful of keys, and this part has
     // about two kilobytes of RAM to spare in total -- a 1 KB buffer here was
     // a quarter of it.
-    static mut CFG_BUF: [u8; 256] = [0; 256];
+    //
+    // One byte more than is parsed: reading 257 tells a file of exactly 256
+    // bytes (parsed as is, as before) from a longer one. A longer one is cut
+    // back to its last whole line (`complete_lines`), so a line broken by the
+    // cut is dropped instead of being parsed half-read or failing UTF-8
+    // validation for the whole buffer.
+    static mut CFG_BUF: [u8; 257] = [0; 257];
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG_BUF) };
     let got = f.read(buf).unwrap_or(0);
+    let got = if got > 256 { gamecfg::complete_lines(&buf[..257]).len() } else { got };
     // Not UTF-8 as a whole: the defaults, as `from_utf8(..).unwrap_or("")`
     // gave before (`parse_bytes` checks).
     gamecfg::Meta::parse_bytes(&buf[..got])
@@ -496,15 +503,15 @@ pub fn configured_name(num_blocks: u32) -> Option<String<MAX_NAME_CHARS>> {
     let len = read_file_to_buf(&root, &name, buf).ok()?;
 
     for line in buf[..len].split(|c| *c == b'\n') {
-        let line = trim_ascii(line);
+        let line = gamecfg::trim_bytes(line);
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
         // Split at the first `=`; a line without one ends the search, as
         // `splitn(2, ..)` returning no second part did.
         let eq = line.iter().position(|c| *c == b'=')?;
-        let key = trim_ascii(&line[..eq]);
-        let val = trim_ascii(&line[eq + 1..]);
+        let key = gamecfg::trim_bytes(&line[..eq]);
+        let val = gamecfg::trim_bytes(&line[eq + 1..]);
         if !key.eq_ignore_ascii_case(b"image") {
             continue;
         }
@@ -518,16 +525,6 @@ pub fn configured_name(num_blocks: u32) -> Option<String<MAX_NAME_CHARS>> {
         return Some(out);
     }
     None
-}
-
-fn trim_ascii(mut s: &[u8]) -> &[u8] {
-    while let Some((f, rest)) = s.split_first() {
-        if f.is_ascii_whitespace() { s = rest; } else { break; }
-    }
-    while let Some((l, rest)) = s.split_last() {
-        if l.is_ascii_whitespace() { s = rest; } else { break; }
-    }
-    s
 }
 
 /// The enumerated images, and which one is mounted.
@@ -798,17 +795,20 @@ fn walk_to(d: &mut RootDir<'_>, want: &str, path: &mut ImagePath) -> Result<(), 
                 hit = Some(entry.name.clone());
             }
         });
+        // No such folder (`NoImageDir`), unlike a folder with nothing to
+        // mount in it (`NoGdiFile`, stock's empty folder): `ide.rs` lets a
+        // re-switch be a no-op only after the latter (R159).
         let Some(short) = hit else {
-            return Err(GdiError::NoGdiFile);
+            return Err(GdiError::NoImageDir);
         };
         if path.push(short.clone()).is_err() {
             warn!("gdi: '{}' is deeper than {} levels", want, MAX_PATH_PARTS);
-            return Err(GdiError::NoGdiFile);
+            return Err(GdiError::NoImageDir);
         }
         d.change_dir(short).map_err(|_| GdiError::OpenImageDir)?;
     }
     if path.is_empty() {
-        return Err(GdiError::NoGdiFile);
+        return Err(GdiError::NoImageDir);
     }
     Ok(())
 }
@@ -1439,7 +1439,7 @@ pub enum GdiError {
     ReadGdiFile,
     #[allow(dead_code)]
     LbaOutOfRange,
-    #[allow(dead_code)]
+    /// No folder by that name (`walk_to`).
     NoImageDir,
     NoGdiFile,
     BadCdi,

@@ -52,6 +52,7 @@ MCU_WRITE_FIFO_LEVEL = 11
 MCU_INTRQ_PENDING = 13
 MCU_DEBUG = 12
 MCU_DMA_MODE = 19
+MCU_SECNR8 = 32
 
 
 # -- Bus helpers ------------------------------------------------------------
@@ -422,7 +423,7 @@ async def tb_packet_write_opens_cdb_phase(ctx, dut):
     irr = await ide_read(ctx, dut, CSN_CMD, ADDR_SECTOR_COUNT) & 0xFF
     assert irr == 0x01, f"IRR should be C/D=1, got {irr:#04x}"
     er = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF
-    assert er == 0x00, f"Error should be cleared, got {er:#04x}"
+    assert er == 0x24, f"Error should be kept (stock: sticky until the next CHECK), got {er:#04x}"
     assert (await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2, "command should be pending for the MCU"
     assert ctx.get(dut.ide_intrq) == 0, "no INTRQ for the CDB phase"
 
@@ -1420,6 +1421,129 @@ async def tb_irr_write_keeps_sector_count_prev(ctx, dut):
     assert (val & 0xFF) == 0x03, f"HOB=0 should read the IRR, got {val:#06x}"
 
 
+async def tb_slot32_writes_lba_low_only(ctx, dut):
+    """Slot 32 writes lba_low alone: a host BYTE COUNT LOW (lba_mid) write
+    is never lost to it, which slot 6's whole-word write cannot promise."""
+    await release_reset(ctx, dut)
+    # Presence probe: high byte 0xA5 (an older bitstream reads 0 here).
+    v = await mcu_read(ctx, dut, MCU_SECNR8)
+    assert v >> 8 == 0xA5, f"slot 32 probe byte, got {v:#06x}"
+    await ide_write(ctx, dut, CSN_CMD, ADDR_LBA_MID, 0x34)    # byte count low
+    await mcu_write(ctx, dut, MCU_SECNR8, 0xFF21)             # high byte ignored
+    v = await mcu_read(ctx, dut, MCU_SECNR8)
+    assert v == 0xA521, f"slot 32 read back, got {v:#06x}"
+    lm = await mcu_read(ctx, dut, MCU_LBA_LOW_MID)
+    assert lm == 0x3421, f"lba_mid must stay 0x34, lba_low 0x21; got {lm:#06x}"
+    # Host-visible side too.
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_LBA_LOW)
+    assert val & 0xFF == 0x21, f"host LBA_LOW, got {val:#06x}"
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_LBA_MID)
+    assert val & 0xFF == 0x34, f"host LBA_MID, got {val:#06x}"
+    # The old path is unchanged: a whole-word write to slot 6 stores both.
+    await mcu_write(ctx, dut, MCU_LBA_LOW_MID, 0x5607)
+    lm = await mcu_read(ctx, dut, MCU_LBA_LOW_MID)
+    assert lm == 0x5607, f"slot 6 whole-word write, got {lm:#06x}"
+    v = await mcu_read(ctx, dut, MCU_SECNR8)
+    assert v == 0xA507, f"slot 32 follows lba_low, got {v:#06x}"
+
+
+async def tb_slot32_host_write_during_secnr_update(ctx, dut):
+    """The race slot 32 exists for: the host writes lba_mid in the same
+    window as the MCU updates SECNR. With slot 32 the host byte survives."""
+    await release_reset(ctx, dut)
+    await mcu_write(ctx, dut, MCU_LBA_LOW_MID, 0x0006)
+    # Firmware (new): no read of slot 6 at all, just the low-byte write; the
+    # host's write lands before, between or after -- model "after the old
+    # read": host write first, then the MCU write.
+    await ide_write(ctx, dut, CSN_CMD, ADDR_LBA_MID, 0xC8)
+    await mcu_write(ctx, dut, MCU_SECNR8, 0x0081)
+    lm = await mcu_read(ctx, dut, MCU_LBA_LOW_MID)
+    assert lm == 0xC881, f"BYCTLLO lost: {lm:#06x}"
+    # Same thing through slot 6 read-modify-write loses it (documents the
+    # limitation the old path has): stale read, host write, MCU write.
+    stale = await mcu_read(ctx, dut, MCU_LBA_LOW_MID)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_LBA_MID, 0x11)
+    await mcu_write(ctx, dut, MCU_LBA_LOW_MID, (stale & 0xFF00) | 0x82)
+    lm = await mcu_read(ctx, dut, MCU_LBA_LOW_MID)
+    assert lm == 0xC882, f"slot 6 RMW expected to overwrite lba_mid, got {lm:#06x}"
+
+
+async def tb_error_low_bits(ctx, dut):
+    """ERROR bits 0-1 are MCU-owned: stored, mirrored in slot 3, visible to
+    the host, cleared by a hardware reset (not by the PACKET write); old
+    firmware's writes (bits 0-1 = 0) behave exactly as before."""
+    await release_reset(ctx, dut)
+    # Old-style write: ABRT + sense key, bits 0-1 zero.
+    await mcu_write(ctx, dut, MCU_ERROR, 0x34)
+    assert await mcu_read(ctx, dut, MCU_ERROR) == 0x34
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
+    assert val & 0xFF == 0x34, f"old-style ERROR, got {val:#06x}"
+    # Zero write clears everything, as before.
+    await mcu_write(ctx, dut, MCU_ERROR, 0x00)
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
+    assert val & 0xFF == 0x00
+    # New: stock's ERROR 0x01 after DEVICE RESET, then the full low nibble.
+    await mcu_write(ctx, dut, MCU_ERROR, 0x01)
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
+    assert val & 0xFF == 0x01, f"ERROR 0x01, got {val:#06x}"
+    assert await mcu_read(ctx, dut, MCU_ERROR) == 0x01
+    await mcu_write(ctx, dut, MCU_ERROR, 0x57)
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
+    assert val & 0xFF == 0x57, f"ERROR 0x57, got {val:#06x}"
+    # Bit 3 is still not modelled.
+    await mcu_write(ctx, dut, MCU_ERROR, 0x0F)
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
+    assert val & 0xFF == 0x07, f"bit 3 must read 0, got {val:#06x}"
+    # A host PACKET write keeps all of it (stock's sticky ERROR).
+    await mcu_write(ctx, dut, MCU_ERROR, 0x53)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0xA0)
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
+    assert val & 0xFF == 0x53, f"PACKET write must keep ERROR, got {val:#06x}"
+
+
+async def tb_error_sticky_across_commands(ctx, dut):
+    """Stock GDEMU 6.0 keeps the last CHECK's ERROR (0x50, 0x60 ...) through
+    the commands that succeed after it, until the next CHECK or a reset
+    (seq 15-17 register polls). The FPGA only stores it: PACKET and other
+    Command writes clear the ERR status bit, never the ERROR register."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+    # A CHECK: status 0x11, error = key << 4.
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+    await mcu_write(ctx, dut, MCU_ERROR, 0x50)
+    await mcu_write(ctx, dut, MCU_STATUS, 0x11)
+    assert (await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF) == 0x11
+    for cmd in (0xA0, 0x00, 0xA1, 0xEF):
+        await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, cmd)
+        for _ in range(3):
+            await ctx.tick()
+        st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+        assert not (st & 0x01), f"cmd {cmd:#04x}: the Command write must clear ERR, got {st:#04x}"
+        er = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF
+        assert er == 0x50, f"cmd {cmd:#04x}: ERROR must stay 0x50, got {er:#04x}"
+        # The firmware completes it without touching ERROR.
+        await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+        await mcu_write(ctx, dut, MCU_STATUS, 0x50)
+        er = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF
+        assert er == 0x50, f"cmd {cmd:#04x}: ERROR after completion, got {er:#04x}"
+    # The next CHECK replaces it; an MCU write of 0 (old firmware) clears it.
+    await mcu_write(ctx, dut, MCU_ERROR, 0x60)
+    assert (await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF) == 0x60
+    await mcu_write(ctx, dut, MCU_ERROR, 0x00)
+    assert (await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF) == 0x00
+
+
+async def tb_error_low_bits_cleared_by_reset(ctx, dut):
+    await release_reset(ctx, dut)
+    await mcu_write(ctx, dut, MCU_ERROR, 0x03)
+    await ide_write(ctx, dut, CSN_CTRL, ADDR_DEVICE_CONTROL, 0x04)  # SRST
+    await ide_write(ctx, dut, CSN_CTRL, ADDR_DEVICE_CONTROL, 0x00)
+    await release_reset(ctx, dut)
+    val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
+    assert val & 0xFF == 0x00, f"SRST should clear ERROR, got {val:#06x}"
+    assert await mcu_read(ctx, dut, MCU_ERROR) == 0x00
+
+
 # -- Runner -----------------------------------------------------------------
 
 async def ide_read_short_hold(ctx, dut, csn, addr):
@@ -1538,6 +1662,11 @@ TESTBENCHES = [
     ("stale_status_keeps_bsy_of_next_command", tb_stale_status_keeps_bsy_of_next_command, True),
     ("status_strobe_does_not_clear_bsy_of_command_write", tb_status_strobe_does_not_clear_bsy_of_command_write, True),
     ("status_write_forms", tb_status_write_forms, True),
+    ("slot32_writes_lba_low_only", tb_slot32_writes_lba_low_only, True),
+    ("slot32_host_write_during_secnr_update", tb_slot32_host_write_during_secnr_update, True),
+    ("error_low_bits", tb_error_low_bits, True),
+    ("error_low_bits_cleared_by_reset", tb_error_low_bits_cleared_by_reset, True),
+    ("error_sticky_across_commands", tb_error_sticky_across_commands, True),
 ]
 
 

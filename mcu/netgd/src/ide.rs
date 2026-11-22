@@ -53,6 +53,11 @@ const REG_ERROR: usize = 3;
 const REG_CMD_FEAT: usize = 4;
 const REG_SECTOR_COUNT: usize = 5;
 const REG_LBA_LOW_MID: usize = 6;
+/// LBA_LOW alone (bitstreams with the byte-lane write; see `set_secnr`).
+/// Reads 0xA5 in the high byte, 0 on a bitstream without the slot.
+const REG_LBA_LOW8: usize = 32;
+/// ID slot: reads 0xC0DE on a live FPGA (used by the slot 32 probe).
+const REG_ID: usize = 12;
 const REG_LBA_HIGH_LOWP: usize = 7;
 const REG_LBA_MIDP_HIGHP: usize = 8;
 const REG_DATA_FIFO: usize = 9;
@@ -123,7 +128,10 @@ const STATUS_DSC: u8 = 0x10;
 const STATUS_DRQ: u8 = 0x08;
 const STATUS_ERR: u8 = 0x01;
 
-// Error register bits (we only model ABRT for now).
+// Error register bits. ABRT (bit 2) and the sense key (bits 4-7) are what the
+// firmware sets today. A bitstream from the ERROR bit 0/1 change also keeps
+// bits 0-1 of a write (stock's ERROR 0x01 after DEVICE RESET); an older one
+// reads them back as 0 and drops them.
 const ERR_ABRT: u8 = 0x04;
 /// ATAPI Error register for a CD_READ the card failed under: sense key 3
 /// (MEDIUM ERROR) in the high nibble, as stock writes every CHECK (D5; this
@@ -311,7 +319,18 @@ impl IdeDevice {
         }
     }
 
+    /// Write ERROR. On the packet device (the primary) a 0 is not written:
+    /// stock GDEMU 6.0 keeps the last CHECK's ERROR (0x50, 0x60 ...) through
+    /// every command that succeeds, until the next CHECK or a reset (seq
+    /// 15-17 register polls). The ERR status bit, cleared by the FPGA on
+    /// every Command write, tells the host it means nothing now. A bitstream
+    /// that still clears ERROR on the PACKET write (before
+    /// fix/head-pos-sticky-err) reads 0 after a successful packet command, as
+    /// before. The disk (secondary) keeps writing 0.
     fn set_error(&self, err: u8) {
+        if err == 0 && self.is_primary() {
+            return;
+        }
         self.write(REG_ERROR, err as u16);
     }
 
@@ -561,8 +580,51 @@ impl IdeDevice {
     /// idle (`ide_task`'s swap-window timer, `cdda`'s end of play) can meet
     /// one. The pair runs with interrupts off so the gap is two back-to-back
     /// bus cycles rather than whatever an interrupt in between costs; closing
-    /// it needs a low-byte-only MCU write in the FPGA, as slot 5 has.
+    /// it takes the low-byte-only write described below.
+    ///
+    /// Is slot 32 really the LBA_LOW byte write? A bitstream without it
+    /// reads 0 there, but a board whose A6 line is wrong or stuck would alias
+    /// slot 32 onto slot 0 (HW_INFO, whose high byte is 0x80 | cmd_seq), and
+    /// a write there would drop or forge commands. So nothing is written
+    /// until the reads agree: the ID slot says 0xC0DE, slot 32 has 0xA5 in
+    /// the high byte and slot 6's LBA_LOW in the low byte. Only then SECNR as
+    /// it stands is written through slot 32 and must read back unchanged in
+    /// slot 6. Any mismatch (including a host LBA_LOW write landing between
+    /// the reads, which a packet device does not do) means "absent", which
+    /// is the safe answer: the slot 6 path.
+    fn probe_low8(&self) -> bool {
+        critical_section::with(|_| {
+            if self.read(REG_ID) != 0xC0DE {
+                return false;
+            }
+            let w = self.read(REG_LBA_LOW8);
+            let low = self.read(REG_LBA_LOW_MID) as u8;
+            if (w >> 8) != 0xA5 || (w as u8) != low {
+                return false;
+            }
+            self.write(REG_LBA_LOW8, low as u16);
+            self.read(REG_LBA_LOW_MID) as u8 == low && (self.read(REG_LBA_LOW8) as u8) == low
+        })
+    }
+
+    /// A bitstream with slot 32 (`REG_LBA_LOW8`, LBA_LOW alone) gets exactly
+    /// that: one write, no read, nothing of lba_mid touched. Whether it has
+    /// it is asked once (slot 32 reads 0xA5 in the high byte there and 0
+    /// before) and remembered; without it the read-modify-write above stays.
     pub fn set_secnr(&self, v: u8) {
+        use core::sync::atomic::Ordering::Relaxed;
+        // 0 = not asked yet, 1 = slot 32 present, 2 = absent.
+        static LOW8: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+        let mut have = LOW8.load(Relaxed);
+        if have == 0 {
+            have = if self.probe_low8() { 1 } else { 2 };
+            LOW8.store(have, Relaxed);
+            info!("slot 32 (LBA_LOW byte write): {}", if have == 1 { "present" } else { "absent" });
+        }
+        if have == 1 {
+            self.write(REG_LBA_LOW8, v as u16);
+            return;
+        }
         critical_section::with(|_| {
             let low_mid = self.read(REG_LBA_LOW_MID) & 0xFF00;
             self.write(REG_LBA_LOW_MID, low_mid | v as u16);
@@ -827,7 +889,8 @@ pub async fn ide_task(
         // stays idle and a swap still lands immediately. While a swap window
         // still has a phase to go, also wake at its end: stock moves SECNR
         // by time (0x06, 0x00 at open_time, 0xX1 / 0x07 at open + detect,
-        // R144) whether or not the host sends anything.
+        // R144) whether or not the host sends anything; the same
+        // timer ends DEVICE RESET's re-detect (0x00, then the byte at rest).
         let woke = match swap_window_deadline() {
             Some(at) => matches!(
                 select(embassy_atsam3::gpio::pioa_wait_irq(), Timer::at(at)).await,
@@ -885,6 +948,15 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
     if RSTN_FALLS_SEEN.swap(falls, core::sync::atomic::Ordering::Relaxed) == falls {
         return;
     }
+    // Stock remounts on a Dreamcast reset (reset_goto): pause, the head
+    // parked, then following the BIOS's reads (img=0 of records 03/07/08/
+    // 10-15/18/20: pause, track 2, lead-out - 2). Do the same for status and
+    // head whether or not an image is reloaded below (the early returns skip
+    // `mounted`). The power-on reset is not one of these: its edge is counted
+    // before `ide_task` takes the counter, so a cold boot stays standby/150.
+    SWITCHED.store(true, core::sync::atomic::Ordering::Relaxed);
+    IDLE_STATUS.store(GD_PAUSE, core::sync::atomic::Ordering::Relaxed);
+    set_last_read_fad(None);
     // No NOT READY window survives a reset: the host is rebooting and a
     // window left open would answer the booting BIOS with NOT READY. A
     // medium that was still in its window gets its UNIT ATTENTION now.
@@ -1045,11 +1117,32 @@ async fn handle(
         // 0x08, and hold BSY for ten seconds waiting for a CDB on 0xA0 (the
         // FPGA only opens the CDB phase on the primary) (R89 A7).
         CMD_DEVICE_RESET if role == Role::Packet => {
+            // Stopping CD-DA also puts the head back where a fresh mount
+            // leaves it (`idle_fad`): stock's REQ_STAT after a reset shows
+            // the park position (seq 17 `DR_`: CDI `01 2f 01 01 01 00 00 96`,
+            // GDI `01 8f 41 03 01 00 b0 5e`), whatever was read before.
             crate::cdda::stop();
-            // Soft reset: reload ATAPI signature, return to idle, no error.
+            set_last_read_fad(None);
+            // Stock re-detects on every DEVICE RESET, window or not (R155,
+            // R159, seq 17): SECNR 0x00 now, the byte at rest detect_time
+            // later (`ide_task`'s timer, which writes SECNR only), then the
+            // UNIT ATTENTION. Not while the host holds the card for a write
+            // session: no medium there, and nothing to detect.
+            // After a host EJECT (no medium, not the empty slot) this still
+            // runs: the drive answers 2/04/01 for detect_time and then
+            // 2/3A/00 again (stock has no eject to compare with).
+            if !write_session_active() {
+                start_device_reset_redetect(state);
+            }
+            // The signature (IRR 1, 14/EB) with SECNR at rest -- the
+            // re-detect's busy 0x00 (`rest_secnr`).
             dev.load_atapi_signature();
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
+            // Status 0x00 (DRDY clear) and error 0x01 until the next command:
+            // nothing between commands writes either (R159). Error bit 0
+            // needs the bitstream's MCU-writable ERROR bits 0-1; an older one
+            // shows 0x00.
+            dev.set_error(discimg::atapi::DEVICE_RESET_ERROR);
+            dev.set_status_intrq(discimg::atapi::DEVICE_RESET_STATUS);
             dev.ack_command();
         }
         CMD_SET_FEATURES => {
@@ -1337,8 +1430,12 @@ fn mounted(state: &mut DeviceState, ok: bool) {
         SWITCHED.store(true, core::sync::atomic::Ordering::Relaxed);
         IDLE_STATUS.store(GD_PAUSE, core::sync::atomic::Ordering::Relaxed);
     }
+    set_last_read_fad(None);
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
+    // Whatever was mounted by name before is gone; `mount_named` records its
+    // own attempt after this.
+    unsafe { LAST_MOUNT = None };
     open_swap_window(state);
     // The window starts now: SECNR shows the tray open, format nibble 0
     // (stock `0x06`, R144), until `drive_not_ready` moves it on. The format
@@ -1409,23 +1506,57 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
     invalidate_cd_read_cache();
 
-    let ok = match crate::gdi::load_by_name(disk_sectors(), name) {
+    let (ok, outcome) = match crate::gdi::load_by_name(disk_sectors(), name) {
         Ok(g) => {
             mount_gdi(g);
             if let Some(g) = gdi_ref() {
                 prefetch_ip_bin(g).await;
             }
-            true
+            (true, discimg::atapi::MountOutcome::Mounted)
         }
         Err(e) => {
             warn!("{}: mount '{}' failed: {:?}", label, name, e);
             unsafe { GDI = None };
-            false
+            // Only "the folder has nothing to mount" (`NoGdiFile`, after the
+            // walk into it) is stock's empty folder; no such folder
+            // (`NoImageDir`), a parse or card error stays retryable.
+            let outcome = if matches!(e, crate::gdi::GdiError::NoGdiFile) {
+                discimg::atapi::MountOutcome::NoImage
+            } else {
+                discimg::atapi::MountOutcome::Failed
+            };
+            (false, outcome)
         }
     };
     mounted(state, ok);
+    record_mount_attempt(name, outcome);
     info!("{}: mounted '{}' ({})", label, name, ok);
     ok
+}
+
+/// The last mount by folder name (`mount_named`): the name it was asked for
+/// and how it ended. `None` after any other mount (`mounted` clears it).
+/// Only `ide_task` touches it. What `gdemu_mount_staged` asks before
+/// treating `52 82 n` as a same-folder re-switch
+/// (`discimg::atapi::same_folder_reswitch`): `gdi::mounted_number` is the
+/// last folder walked to, which a failure before that walk (no such folder,
+/// a card error) leaves pointing at the previous one.
+static mut LAST_MOUNT: Option<discimg::atapi::MountOutcome> = None;
+static mut LAST_MOUNT_NAME: heapless::String<{ gamecfg::MAX_NEXT }> = heapless::String::new();
+
+fn record_mount_attempt(name: &str, outcome: discimg::atapi::MountOutcome) {
+    // SAFETY: `ide_task` only; `name` may be MOUNT_NAME, a different static.
+    let n = unsafe { &mut *core::ptr::addr_of_mut!(LAST_MOUNT_NAME) };
+    n.clear();
+    // A name too long to keep is recorded as a failure: never a no-op.
+    let fits = n.push_str(name).is_ok();
+    unsafe { LAST_MOUNT = Some(if fits { outcome } else { discimg::atapi::MountOutcome::Failed }) };
+}
+
+/// The last mount by name, for `discimg::atapi::same_folder_reswitch`.
+fn last_mount() -> Option<(&'static str, discimg::atapi::MountOutcome)> {
+    let outcome = unsafe { LAST_MOUNT }?;
+    Some((unsafe { &*core::ptr::addr_of!(LAST_MOUNT_NAME) }.as_str(), outcome))
 }
 
 async fn swap_media(state: &mut DeviceState, label: &'static str) -> bool {
@@ -1462,6 +1593,9 @@ struct SwapWindow {
     at: Instant,
     open_ms: u32,
     detect_ms: u32,
+    /// A switch's tray cycle, or the re-detect of a DEVICE RESET (no open
+    /// phase; ends with the byte at rest, `discimg::atapi::window_secnr`).
+    kind: discimg::atapi::WindowKind,
 }
 static mut SWAP_WINDOW: Option<SwapWindow> = None;
 
@@ -1474,9 +1608,38 @@ static mut SWAP_WINDOW: Option<SwapWindow> = None;
 fn open_swap_window(state: &mut DeviceState) {
     let (open_ms, detect_ms) = crate::gdi::ini()
         .swap_window_ms(discimg::atapi::SWAP_OPEN_MS, discimg::atapi::SWAP_DETECT_MS);
-    unsafe { SWAP_WINDOW = Some(SwapWindow { at: Instant::now(), open_ms, detect_ms }) };
+    unsafe {
+        SWAP_WINDOW = Some(SwapWindow { at: Instant::now(), open_ms, detect_ms, kind: discimg::atapi::WindowKind::Switch })
+    };
     state.unit_attention = false;
     state.clear_sense();
+}
+
+/// ATA DEVICE RESET (0x08): start the re-detect, replacing any window that is
+/// running (`discimg::atapi::device_reset_window`; stock does this on every
+/// DEVICE RESET, R155, R159, seq 17). SECNR goes busy `0x00` now (the
+/// caller's `load_atapi_signature` writes `rest_secnr`), `ide_task`'s timer
+/// puts up the byte at rest when it ends, and the next command after that
+/// gets the UNIT ATTENTION with a medium (`drive_not_ready`; seq 17 `DR_`
+/// shows 6/28/00 after a reset with no switch) or no medium for good. A UNIT
+/// ATTENTION or sense still pending goes now, as on a switch: the re-detect
+/// raises its own. Its length is GDEMU.INI detect_time, as stock's
+/// (`discimg::atapi::device_reset_redetect_ms`; seq 18: detect_time 400 ->
+/// the final byte at ~401 ms).
+fn start_device_reset_redetect(state: &mut DeviceState) {
+    let (_, detect_ms) = crate::gdi::ini()
+        .swap_window_ms(discimg::atapi::SWAP_OPEN_MS, discimg::atapi::SWAP_DETECT_MS);
+    let (open_ms, detect_ms) = discimg::atapi::device_reset_window(detect_ms);
+    unsafe {
+        SWAP_WINDOW = Some(SwapWindow { at: Instant::now(), open_ms, detect_ms, kind: discimg::atapi::WindowKind::Redetect })
+    };
+    state.unit_attention = false;
+    state.clear_sense();
+}
+
+/// SECNR for window `sw` in `phase` (`discimg::atapi::window_secnr`).
+fn sw_secnr(sw: &SwapWindow, phase: discimg::atapi::SwapPhase) -> u8 {
+    discimg::atapi::window_secnr(sw.kind, phase, media_present(), mounted_disc_format(), idle_status())
 }
 
 /// End the window now (hard reset, eject, write session). A medium still in
@@ -1484,9 +1647,9 @@ fn open_swap_window(state: &mut DeviceState) {
 /// busy nibble a command already put in SECNR is taken down (a window ended
 /// before any command leaves SECNR as it was, as on the hard reset paths).
 fn cancel_swap_window(state: &mut DeviceState) {
-    if unsafe { (*core::ptr::addr_of_mut!(SWAP_WINDOW)).take() }.is_none() {
+    let Some(sw) = (unsafe { (*core::ptr::addr_of_mut!(SWAP_WINDOW)).take() }) else {
         return;
-    }
+    };
     let medium = media_present();
     if medium {
         state.medium_changed();
@@ -1494,7 +1657,7 @@ fn cancel_swap_window(state: &mut DeviceState) {
     let dev = IdeDevice::primary();
     let st = (dev.read(REG_LBA_LOW_MID) & 0x0F) as u8;
     if st == discimg::atapi::DRIVE_OPEN || st == discimg::atapi::DRIVE_BUSY {
-        dev.set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Done, medium, mounted_disc_format()));
+        dev.set_secnr(sw_secnr(&sw, discimg::atapi::SwapPhase::Done));
     } else {
         // Whatever the status, the format nibble was held at 0 in the window;
         // with no medium left (EJECT, write session) NO DISC 0x07.
@@ -1512,7 +1675,7 @@ fn window_elapsed_ms(sw: &SwapWindow) -> u32 {
 fn window_secnr() -> Option<u8> {
     let sw = unsafe { (*core::ptr::addr_of!(SWAP_WINDOW)).as_ref() }?;
     let phase = discimg::atapi::swap_phase(window_elapsed_ms(sw), sw.open_ms, sw.detect_ms);
-    Some(discimg::atapi::swap_secnr(phase, media_present(), mounted_disc_format()))
+    Some(sw_secnr(sw, phase))
 }
 
 /// SECNR at rest (start-up, DEVICE RESET): the window's byte inside one;
@@ -1560,7 +1723,7 @@ fn drive_not_ready(dev: &IdeDevice, state: &mut DeviceState) -> Option<(u8, u8)>
     };
     let phase = discimg::atapi::swap_phase(window_elapsed_ms(sw), sw.open_ms, sw.detect_ms);
     // Format nibble 0 through the window, the disc's once it is over (R144).
-    dev.set_secnr(discimg::atapi::swap_secnr(phase, medium, mounted_disc_format()));
+    dev.set_secnr(sw_secnr(sw, phase));
     if phase == SwapPhase::Done {
         *w = None;
         if medium {
@@ -1670,13 +1833,45 @@ pub const GD_PLAY: u8 = 0x03;
 /// SECNR): standby from power-on -- the boot mount included -- until the
 /// first successful image switch, pause after one (D2, stock GDEMU 6.0:
 /// records 02/05/06 img=0 vs every `img=n` after `52 82 n`). CD_READ leaves
-/// it alone (no stock record shows REQ_STAT after a read without a switch or
-/// a Dreamcast reset in between). CD_SEEK stop (types other than 4) sets
-/// standby again, as SECNR already did.
+/// it alone (stock stays pause after its reads, seq 17/18 `RS_REQ_STAT`, and
+/// standby after a cold power-on's BIOS reads). CD_SEEK stop (types other
+/// than 4) sets standby again, as SECNR already did.
 static IDLE_STATUS: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(GD_STANDBY);
 /// An image was switched in since power-on: the idle head is the switch's
 /// park position (`discimg::atapi::idle_fad`, D4), not FAD 150.
 static SWITCHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Where the last CD_READ since the mount left the head
+/// (`discimg::atapi::read_head_start` / `read_end_fad`), or where CD_SEEK
+/// stopped CD-DA; `NO_HEAD` = nothing since the mount. REQ_STAT / GET_SCD
+/// report it once switched (`discimg::atapi::rest_fad`; stock seq 17/18). A
+/// mount, DEVICE RESET and a hard reset put it back to `NO_HEAD` (the park
+/// position).
+static LAST_READ_FAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(NO_HEAD);
+/// No FAD a read can leave (`read_head_start` needs a start of 150 or more
+/// inside a track, so the head is never 0..149 nor this).
+const NO_HEAD: u32 = u32::MAX;
+
+fn set_last_read_fad(fad: Option<u32>) {
+    LAST_READ_FAD.store(fad.unwrap_or(NO_HEAD), core::sync::atomic::Ordering::Relaxed);
+}
+
+fn last_read_fad() -> Option<u32> {
+    let v = LAST_READ_FAD.load(core::sync::atomic::Ordering::Relaxed);
+    (v != NO_HEAD).then_some(v)
+}
+
+/// What the last `stream_from_sd` / `stream_pio_from_sd` actually got to the
+/// host, in bytes: the head moves by these sectors, not by the request
+/// (a reset or new command before or during the data phase, a block the host
+/// left undrained, a short DMA, a card failure). Unlike `STREAM_OK` it is in
+/// every build. A transfer abandoned by a reset or a new command counts only
+/// what is known delivered: 0 for DMA (the Command write cleared the FIFO, so
+/// its level says nothing), the fully drained blocks for PIO.
+static STREAM_DELIVERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn set_stream_delivered(bytes: usize) {
+    STREAM_DELIVERED.store(bytes as u32, core::sync::atomic::Ordering::Relaxed);
+}
 
 fn idle_status() -> u8 {
     IDLE_STATUS.load(core::sync::atomic::Ordering::Relaxed)
@@ -1689,8 +1884,8 @@ fn idle_status() -> u8 {
 /// its tracks' modes as stock GDEMU 6.0 does (R144): a Mode 2 data track
 /// (mkdcdisc) is CD-ROM XA -- flycast's `GuessDiscType` returns `CdRom_XA`
 /// for any image with a Mode 2 track (`core/imgread/common.cpp`) -- and a CDI
-/// whose data is Mode 1 is plain CD-ROM (stock: REQ_STAT `01 1f ...`, SECNR
-/// `0x11`). Reporting GD-ROM for a CDI contradicts the disc's own IP.BIN,
+/// whose data is Mode 1 -- or that has audio tracks only (R155) -- is plain
+/// CD-ROM (stock: REQ_STAT `01 1f ...`, SECNR `0x11`). Reporting GD-ROM for a CDI contradicts the disc's own IP.BIN,
 /// which says `CD-ROM1/1` in its media field, and the BIOS refuses to boot
 /// across that contradiction: it reads IP.BIN, the ISO9660 PVD and the root
 /// directory, then abandons the boot without ever reading the `1ST_READ.BIN`
@@ -1963,6 +2158,13 @@ async fn handle_packet(
                 crate::cdda::pause();
                 dev.set_secnr(secnr(GD_PAUSE));
             } else {
+                // The head stays where CD-DA stopped (a drive's pickup does not
+                // jump back to the last data read); stock has no record of
+                // REQ_STAT after CD-DA, so this is unmeasured.
+                let s = crate::cdda::snapshot();
+                if s.status != crate::cdda::Status::Standby {
+                    set_last_read_fad(Some(s.fad));
+                }
                 crate::cdda::stop();
                 // Stopped: standby in REQ_STAT too, not the idle pause of a switch.
                 IDLE_STATUS.store(GD_STANDBY, core::sync::atomic::Ordering::Relaxed);
@@ -2146,6 +2348,15 @@ async fn handle_cd_read(
     // track's mode, as on stock: Mode 2 Form 1 on a Mode 1 track, Mode 1 on a
     // Mode 2 track, either on an audio track is CHECK 5/64/00 (D8, D9, R144).
     let track = gdi.track_for_lba(lba);
+    // The head goes to the start of a request that starts inside a track,
+    // whatever follows (stock seq 17: a type refused 5/64/00 leaves REQ_STAT
+    // at the start FAD), and on by the sectors actually delivered (below). A
+    // start outside every track (lead-out, the GDI's gap between the areas,
+    // FAD 0xFFFFFF) or a count of 0 leaves it where it was.
+    let head_start = discimg::atapi::read_head_start(gdi.tracks(), starting_fad, count);
+    if head_start.is_some() {
+        set_last_read_fad(head_start);
+    }
     if let Some(t) = track {
         if discimg::atapi::cd_read_type_mismatch(packet[1], t.mode()) {
             warn!("{}: CD_READ type {=u8:#x} does not fit the track", label, packet[1]);
@@ -2214,10 +2425,17 @@ async fn handle_cd_read(
     }
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
     unsafe { STREAM_OK = false };
+    set_stream_delivered(0);
     if stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await {
         // The card failed under the read: MEDIUM ERROR for the REQUEST SENSE
         // that follows the error status the stream posted.
         state.pending_sense_key = 0x03;
+    }
+    // Whole sectors that reached the host, in the layout just sent (2,048,
+    // 2,352 or 2,324 B), before `clear_out_layout` below.
+    if head_start.is_some() {
+        let done = STREAM_DELIVERED.load(core::sync::atomic::Ordering::Relaxed) as usize / out_sector_bytes();
+        set_last_read_fad(Some(discimg::atapi::read_end_fad(starting_fad, (done as u32).min(count))));
     }
     if raw_out() {
         // What is staged is laid out 2,352 apart: not a cache entry, and no
@@ -3011,6 +3229,20 @@ async fn handle_gdemu_cmd(
 /// nothing to mount with status 0x50, D12); the swap window tells the host.
 async fn gdemu_mount_staged(dev: &IdeDevice, state: &mut DeviceState, label: &'static str) {
     let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
+    // The folder already mounted (an image, or the empty folder's no medium):
+    // stock does nothing at all (R159, seq 17 `RS_`) -- no window, SECNR and
+    // ALTSTATUS flat, no UNIT ATTENTION, REQ_STAT's state and head kept --
+    // so nothing is reloaded, CD-DA is not stopped and the cache stays. Only
+    // when the last mount attempt was this very folder name and it mounted
+    // (or found the folder empty) and the drive still holds that; after a
+    // failed attempt, an eject or a write session it mounts again.
+    let empty_slot = EMPTY_SLOT.load(core::sync::atomic::Ordering::Relaxed);
+    if discimg::atapi::same_folder_reswitch(name.as_str(), last_mount(), media_present(), empty_slot) {
+        info!("{}: GDEMU re-switch to the mounted folder '{}': nothing to do", label, name.as_str());
+        clear_mount_name();
+        finish_ok(dev);
+        return;
+    }
     let _ = mount_named(state, label, name.as_str()).await;
     // `0x52` stages through the same buffer as MOUNT_NAME: leave nothing
     // behind for a later WSESSION_END 2 to mount.
@@ -3327,6 +3559,7 @@ async fn stream_from_sd(
         // DMA mode itself on a reset but not on a Command write.
         info!("  host reset or new command during CD_READ; no completion");
         dev.disarm();
+        set_stream_delivered(0);
         return false;
     }
     let leftover = dev.read_fifo_level();
@@ -3354,6 +3587,7 @@ async fn stream_from_sd(
     // the full request we set up at data-phase start). Without this
     // the BIOS keeps thinking the transfer is still in flight.
     dev.set_atapi_byte_count((delivered.min(0xFFFE) & !1) as u16);
+    set_stream_delivered(delivered);
     dev.set_irr(0x03);
     if sd_failed {
         // The card failed mid-stream: the host got fewer sectors than it
@@ -3484,6 +3718,7 @@ async fn stream_pio_from_sd(
         info!("  host reset or abandoned CD_READ after {} of {} bytes; no completion",
               delivered, total_bytes);
         dev.disarm();
+        set_stream_delivered(sent);
         return false;
     }
     // Hold BSY (and drop DRQ) *before* releasing flow control: the FPGA's
@@ -3496,6 +3731,7 @@ async fn stream_pio_from_sd(
         blocks, delivered, total_bytes, (Instant::now() - t0).as_millis(), hash
     );
     dev.set_atapi_byte_count((delivered.min(0xFFFE) & !1) as u16);
+    set_stream_delivered(delivered);
     dev.set_irr(0x03);
     if ok {
         dev.complete(0, STATUS_IDLE);
@@ -4409,11 +4645,12 @@ fn build_req_stat_reply() -> [u8; 10] {
 }
 
 /// Idle head position (D4): FAD 150 until the first switch, then the
-/// mounted image's park position (GDI: track 3's start).
+/// mounted image's park position (GDI: track 3's start), or where the last
+/// CD_READ since the mount ended / CD_SEEK stopped CD-DA (`LAST_READ_FAD`).
 fn idle_fad() -> u32 {
     let switched = SWITCHED.load(core::sync::atomic::Ordering::Relaxed);
     let is_cdi = matches!(gdi_ref(), Some(g) if g.is_cdi);
-    discimg::atapi::idle_fad(mounted_tracks(), is_cdi, switched)
+    discimg::atapi::rest_fad(mounted_tracks(), is_cdi, switched, last_read_fad())
 }
 
 /// Build a 6-byte REQ_SES reply describing one session (0-indexed).

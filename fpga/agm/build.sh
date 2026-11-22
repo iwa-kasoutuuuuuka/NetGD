@@ -14,6 +14,24 @@
 #   --timeout S   give up on place-and-route after S seconds (default 1200).
 #                 Supra's router can circle on a last conflict without ending;
 #                 run again (the result differs from run to run) or try a seed.
+#   --supra-retiming
+#                 leave af_map's RETIMING step (Yosys `abc -dff` before
+#                 dfflegalize) on. For testing only: the result is broken (below).
+#
+# af_map.tcl runs `abc -markgroups -dff -D 100` ("RETIMING") by default. In
+# Supra 2026.03.b0 (Yosys 0.61) that pass hands each flop to ABC as a plain
+# latch (Q <= D every clock) and puts its enable / sync reset back afterwards,
+# so ABC's scorr / retime work on a wrong model. In this core:
+#   - cdda.pair_valid (set to constant 1 under its enable, cleared by its sync
+#     reset) is folded away: the audio FIFO is never read, CDDA is silent and
+#     no underflow is counted (gate-level simulation of the mapped .vqm);
+#   - $sdffce (reset only while enabled) comes back as $sdffe (reset always
+#     wins): cdda.shift[0] (the right sample's LSB would always be 0) and
+#     cdda.sdat (no visible effect there);
+#   - power-up values move (cdda.phase starts elsewhere; harmless there).
+# build.sh switches it off through OpenGDEMU.pre_map.asf (af_map.tcl sources
+# it after setting its default) and stops if map.log still shows an ABC pass
+# before DFFLEGALIZE. Same fix as fpga/pinfind/build.sh.
 #
 # Linux / WSL only. Every Supra program runs inside `unshare -rn` (a user
 # namespace with no network), and only af_cmd, af_setup, af_map and af_run are
@@ -33,6 +51,7 @@ CORE=$HERE/../amaranth/out/OpenGDEMUCore_ag16k.v
 WORK=$HERE/build
 SEED=
 AF_TIMEOUT=1200
+RETIME=0
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -43,7 +62,8 @@ while [ $# -gt 0 ]; do
         --core) CORE=$2; shift 2 ;;
         --work) WORK=$2; shift 2 ;;
         --timeout) AF_TIMEOUT=$2; shift 2 ;;
-        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+        --supra-retiming) RETIME=1; shift ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -110,9 +130,29 @@ python3 -I "$HERE/mkpll.py" pll/Audio_PLL_PLLVE.v Audio_PLL.v
 echo "== af_setup"
 ns af_setup --design $DESIGN --device $DEVICE --verilog $DESIGN.v Audio_PLL.v OpenGDEMUCore_ag16k.v >setup.out 2>&1 ||
     { tail -20 setup.out >&2; die "af_setup failed (setup.out)"; }
+# RETIMING off (see the top of this file): af_map.tcl sets its default
+# ("100") and then sources $DESIGN.pre_map.asf, which af_setup leaves empty.
+[ -f $DESIGN.pre_map.asf ] || die "af_setup wrote no $DESIGN.pre_map.asf (Supra changed?)"
+[ -s $DESIGN.pre_map.asf ] && die "$DESIGN.pre_map.asf from af_setup is not empty (Supra changed?)"
+grep -q 'RETIMING != "None"' af_map.tcl && grep -q 'source .*pre_map.asf' af_map.tcl ||
+    die "af_map.tcl has no RETIMING switch / pre_map.asf hook (Supra changed?): cannot turn the step off"
+if [ "$RETIME" = 0 ]; then
+    echo 'set RETIMING "None"' >$DESIGN.pre_map.asf
+fi
 echo "== af_map"
 ns af_map -TQd -v 1 -L map.log -c af_map.tcl >map.out 2>&1 ||
     { tail -20 map.out >&2; die "af_map failed (map.out, map.log)"; }
+# Did the RETIMING `abc -dff` run? It is the only ABC pass before DFFLEGALIZE.
+first_abc=$(grep -n 'Executing ABC pass' map.log | head -1 | cut -d: -f1)
+legalize=$(grep -n 'Executing DFFLEGALIZE pass' map.log | head -1 | cut -d: -f1)
+[ -n "$first_abc" ] && [ -n "$legalize" ] || die "map.log: ABC / DFFLEGALIZE pass not found (Supra changed?)"
+if [ "$first_abc" -lt "$legalize" ]; then
+    RETIMED=on
+    [ "$RETIME" = 1 ] || die "af_map ran its RETIMING abc -dff although it was switched off (map.log)"
+else
+    RETIMED=off
+    [ "$RETIME" = 0 ] || die "--supra-retiming given but af_map did not run the RETIMING step (map.log)"
+fi
 python3 -I "$HERE/fixio.py" $DESIGN.vqm $DESIGN.fixed.vqm --expect 32
 mv $DESIGN.vqm $DESIGN.orig.vqm
 cp $DESIGN.fixed.vqm $DESIGN.vqm
@@ -164,6 +204,11 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
     echo "supra       $(ns af_cmd --version 2>/dev/null | head -1)"
     echo "device      $DEVICE"
     echo "seed        ${SEED:-default}"
+    if [ "$RETIMED" = on ]; then
+        echo "retiming    ON (--supra-retiming: af_map abc -dff before dfflegalize; CDDA broken, testing only, DO NOT USE)"
+    else
+        echo "retiming    off (af_map abc -dff before dfflegalize switched off; build.sh header)"
+    fi
     echo "pins        $(basename "$PINS") sha256 $(tr -d '\r' <"$PINS" | sha256sum | cut -d' ' -f1)"
     echo "core        $(basename "$CORE") sha256(LF) $(sha OpenGDEMUCore_ag16k.v)"
     echo "wrapper     sha256 $(sha $DESIGN.v)  sdc $(sha $DESIGN.sdc)"

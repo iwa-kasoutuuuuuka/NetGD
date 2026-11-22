@@ -8,6 +8,22 @@ edition = "2021"
 # Let the firmware log these types. Off by default so the host tests do not
 # need defmt.
 defmt = ["dep:defmt"]
+# The read-only FAT reader (`vol`, `dir`, `sfn`) meant to replace
+# embedded_sdmmc. Off by default so that the firmware, which does not use it
+# yet, is built from exactly the same code as before: even unreferenced, the
+# extra functions shift fat-LTO's inlining/outlining by a few bytes. The
+# tests turn it on (the self dev-dependency below).
+reader = []
+# FAT16 volumes in the reader (fixed root directory, 16-bit FAT). Off: such
+# a card does not mount. Undecided whether the firmware keeps them.
+fat16 = ["reader"]
 
 [dependencies]
 defmt = { version = "0.3", optional = true }
+
+[dev-dependencies]
+# The FAT reader the firmware links today (mcu/netgd/Cargo.toml), used by the
+# host tests as the oracle for this crate's reader. Not a dependency of the
+# library.
+embedded-sdmmc = { version = "=0.9.0", default-features = false }
+fatmap = { path = ".", features = ["reader"] }

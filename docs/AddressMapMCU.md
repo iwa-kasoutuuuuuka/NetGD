@@ -15,7 +15,7 @@ and `mcu/embassy-atsam3/src/smc.rs` (window placement). Where the sources disagr
 - `MCU_ADDR[8:1]` is wired to SAM3U `A[8:1]` (`OpenGDEMU.v`, `OpenGDEMU.qsf`). The SMC address is therefore a
   byte address, and every slot is one 16-bit word: slot `n` is at byte `0x6300_0000 + 2n`.
 - `io_MCU_ADDR[7]` selects the device:
-  - Primary (GD-ROM): slots `0x00`-`0x7F`, bytes `0x6300_0000`-`0x6300_00FE`. Only slots `0x00`-`0x1F` are decoded.
+  - Primary (GD-ROM): slots `0x00`-`0x7F`, bytes `0x6300_0000`-`0x6300_00FE`. Only slots `0x00`-`0x1F` and `0x20` (LBA_LOW alone) are decoded.
   - Secondary (ATA disk): slots `0x80`-`0xFF`, bytes `0x6300_0100`-`0x6300_01FE`. In Rust this is
     `fpga_window().add(0x80)` (a `*mut u16`).
 - Within a device, the 7-bit slot index is `io_MCU_ADDR[6:0]`.
@@ -43,7 +43,7 @@ offsets are the slot number times two, for comparison with the old version of th
 | 0 | 0x00 | HW_INFO | R/W | Device id, COMMAND_PEND, RESET_SEEN, nIEN, IN_RESET, command number |
 | 1 | 0x02 | STATUS | R/W (bits 8-15 W) | ATA status; write bit 8 to raise INTRQ; bits 9-15 tie the write to a command number |
 | 2 | 0x04 | DEVICE | R/W | Device register (bit 4 = DEV) |
-| 3 | 0x06 | ERROR | R/W | ABRT and sense key |
+| 3 | 0x06 | ERROR | R/W | Bits 0-1, ABRT and sense key |
 | 4 | 0x08 | COMMAND / FEATURES | R/W | Latched command (low), features (high) |
 | 5 | 0x0A | SECTOR_COUNT | R/W (low byte W) | Sector count; ATAPI interrupt reason in the low byte |
 | 6 | 0x0C | LBA_LOW / LBA_MID | R/W | LBA bits 7:0 and 15:8 |
@@ -150,12 +150,15 @@ on the disk path; the FPGA only stores it). An MCU write changes only this devic
 
 ### Slot 3 (0x06): ERROR
 
-R/W. Only two parts of the byte are stored:
+R/W. Three parts of the byte are stored:
 
+- Bits 1-0: MCU-owned, shown to the host as written (stock reads ERROR `0x01` after DEVICE RESET). Cleared by a
+  reset and, with the sense key, by the host's PACKET Command write. Old firmware writes them as 0, so nothing
+  changes for it; on a bitstream from before this they are dropped and read back 0.
 - Bit 2: ABRT.
 - Bits 7-4: sense key (ATAPI).
 
-Other bits read 0. ERR (bit 0) lives in slot 1, not here. The firmware writes whole bytes such as `0x20`
+Bit 3 reads 0. The ERR status bit lives in slot 1, not here. The firmware writes whole bytes such as `0x20`
 (NOT READY, sense 2) and `0x60` (UNIT ATTENTION, sense 6) on the packet path.
 
 ### Slot 4 (0x08): COMMAND (low) / FEATURES (high)
@@ -323,6 +326,15 @@ Primary device only. RO. Words in the CDDA sample FIFO (depth 768). The firmware
 
 Primary device only. Write only. Each write pushes one 16-bit PCM word. Samples go in left then right. The
 push is edge-sampled, so one write is one word.
+
+### Slot 32 (0x40): LBA_LOW alone
+
+R/W. A write changes `lba_low` from bits 7:0 and nothing else; a read gives `lba_low` in the low byte and `0xA5`
+in the high byte. Slot 6 stores `lba_low` and `lba_mid` together from one word, and the host writes BYTE COUNT
+LOW into `lba_mid`, so the firmware's read-modify-write of slot 6 to set SECNR could lose a host write that fell
+between its read and its write. `set_secnr` uses slot 32 when the high byte reads `0xA5`. A bitstream without the
+slot reads 0 there and the firmware keeps the slot 6 path; old firmware never touches slot 32. Decoded on both
+devices.
 
 ## Discrepancies and open points
 

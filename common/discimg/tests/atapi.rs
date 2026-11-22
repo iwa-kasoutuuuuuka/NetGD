@@ -701,6 +701,65 @@ fn the_stock_record_of_a_cdi_after_a_switch() {
 }
 
 #[test]
+fn the_stock_record_of_the_head_after_cd_read() {
+    // seq 17/18 RS_REQ_STAT: the IP_READ (7 sectors, type 0x24), then a
+    // same-folder re-switch that changes nothing. GDI 03: read from 45150,
+    // the head is past the 7th sector (45157), still paused, track 3.
+    let g = stock_gdi03();
+    let last = Some(read_end_fad(45150, 7));
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, last));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_GDROM, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("018f41030100b0650000")[..]);
+    // CDI 04 (same track layout as the dcload CDI): Mode 1 asked of the Mode 2
+    // track at 0x2E4C, refused before any sector -> the start FAD, track 2.
+    let c = dcload_cdi();
+    let last = read_head_start(&c, 0x2E4C, 7);
+    assert_eq!(last, Some(0x2E4C));
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, last));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("012f410201002e4c0000")[..]);
+    // img=0 after a Dreamcast reset (remount, then the BIOS boots dcload): the
+    // last read ended at lead-out - 2.
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, Some(0x05017A)));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("012f41020105017a0000")[..]);
+    // GET_SCD follows the same head.
+    let mut r = [0u8; 100];
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, Some(45157)));
+    assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
+    assert_eq!(&r[..14], &hex("0015000e4103010000070000b065")[..]);
+    // No read since the mount (None), and before any switch (cold power-on:
+    // standby at 150 whatever the BIOS read): the park rules of idle_fad.
+    assert_eq!(rest_fad(&g, false, true, None), 45150);
+    assert_eq!(rest_fad(&c, true, true, None), 150);
+    assert_eq!(rest_fad(&c, true, false, Some(0x05017A)), 150);
+    assert_eq!(rest_fad(&g, false, false, Some(45157)), 150);
+    // CD-DA keeps its own position.
+    assert_eq!(head_position(&g, AudioState::Paused, 1000, rest_fad(&g, false, true, Some(45157))).0, 1000);
+}
+
+#[test]
+fn a_read_moves_the_head_only_from_inside_a_track() {
+    // GDI 03: data 0..599, audio 756..1355, data 45000..64999.
+    let g = stock_gdi03();
+    assert_eq!(read_head_start(&g, 45150, 7), Some(45150));
+    assert_eq!(read_head_start(&g, 150, 1), Some(150));
+    assert_eq!(read_head_start(&g, 150 + 599, 1), Some(749)); // last sector of track 1
+    assert_eq!(read_head_start(&g, 150 + 600, 1), None); // pregap before track 2
+    assert_eq!(read_head_start(&g, 906, 1), Some(906)); // audio track 2
+    assert_eq!(read_head_start(&g, 150 + 2000, 1), None); // the gap between the areas
+    assert_eq!(read_head_start(&g, 150 + 64999, 1), Some(65149)); // last HD sector
+    assert_eq!(read_head_start(&g, 150 + 65000, 1), None); // lead-out
+    assert_eq!(read_head_start(&g, 0xFF_FFFF, 1), None);
+    assert_eq!(read_head_start(&g, 45150, 0), None); // count 0
+    assert_eq!(read_head_start(&g, 0, 1), None); // below 150
+    assert_eq!(read_head_start(&g, 149, 1), None);
+    // A request that starts in a track and runs past its end still moves it.
+    assert_eq!(read_head_start(&g, 65149, 10), Some(65149));
+    assert_eq!(read_end_fad(45150, 3), 45153);
+}
+
+#[test]
 fn identify_packet_is_the_stock_80_bytes() {
     // stock_20261122_08_identify.txt, probe=IDENTIFY_PACKET: 80 bytes, in the
     // order gdprobe stores them (each 16-bit data word little-endian) (D16).
@@ -777,6 +836,71 @@ fn swap_window_sense_and_drive_status() {
     assert_eq!(swap_drive_status(SwapPhase::Done, true), DRIVE_PAUSE);
     assert_eq!(swap_drive_status(SwapPhase::Done, false), DRIVE_NODISC);
     assert_eq!((DRIVE_BUSY, DRIVE_OPEN, DRIVE_NODISC), (0x00, 0x06, 0x07));
+}
+
+#[test]
+fn device_reset_re_detects_like_the_stock_records() {
+    // R155 / R159 / seq 17: every DEVICE RESET, with or without a window:
+    // status 0x00, error 0x01, IRR 1 until the next command.
+    assert_eq!((DEVICE_RESET_STATUS, DEVICE_RESET_ERROR, DEVICE_RESET_IRR), (0x00, 0x01, 0x01));
+    // The re-detect lasts detect_time (seq 17: 150 -> ~150 ms; seq 18:
+    // 400 -> ~401 ms), with no open phase.
+    assert_eq!(device_reset_redetect_ms(150), 150);
+    assert_eq!(device_reset_redetect_ms(400), 400);
+    assert_eq!(device_reset_window(400), (0, 400));
+    assert_eq!(swap_phase(399, 0, 400), SwapPhase::Detect);
+    assert_eq!(swap_phase(400, 0, 400), SwapPhase::Done);
+    // No open phase: 0x00 at once (never 0x06), the final byte at the end.
+    let (o, d) = device_reset_window(150);
+    let k = WindowKind::Redetect;
+    let at = |t| window_secnr(k, swap_phase(t, o, d), true, DISC_FORMAT_CDROM_XA, DRIVE_PAUSE);
+    assert_eq!(at(0), 0x00);
+    assert_eq!(at(149), 0x00);
+    assert_eq!(at(150), 0x21); // record 16: 601 -> 752 ms, 0x00 -> 0x21
+    assert_eq!(window_secnr(k, SwapPhase::Done, true, DISC_FORMAT_GDROM, DRIVE_PAUSE), 0x81);
+    assert_eq!(window_secnr(k, SwapPhase::Done, false, 0, DRIVE_PAUSE), 0x07);
+    // The byte at rest keeps the idle status (standby before any switch).
+    assert_eq!(window_secnr(k, SwapPhase::Done, true, DISC_FORMAT_CDROM_XA, 0x02), 0x22);
+    // A switch's window is unchanged: open 0x06, busy 0x00, then paused.
+    let s = WindowKind::Switch;
+    assert_eq!(window_secnr(s, SwapPhase::Open, true, DISC_FORMAT_GDROM, 0x02), 0x06);
+    assert_eq!(window_secnr(s, SwapPhase::Detect, true, DISC_FORMAT_GDROM, 0x02), 0x00);
+    assert_eq!(window_secnr(s, SwapPhase::Done, true, DISC_FORMAT_GDROM, 0x02), 0x81);
+    // NOT READY inside the re-detect is "becoming ready" (stock not probed).
+    assert_eq!(not_ready_asc(swap_phase(0, o, d)), ASC_BECOMING_READY);
+}
+
+#[test]
+fn same_folder_re_switch_is_a_no_op_only_for_the_mounted_folder() {
+    use MountOutcome::*;
+    // seq 17 RS_: 52 82 n for the folder already mounted, image or empty.
+    assert!(same_folder_reswitch("04", Some(("04", Mounted)), true, false));
+    assert!(same_folder_reswitch("07", Some(("07", NoImage)), false, true));
+    // Another folder, or the same number spelled as another folder name.
+    assert!(!same_folder_reswitch("03", Some(("04", Mounted)), true, false));
+    assert!(!same_folder_reswitch("0004", Some(("04", Mounted)), true, false));
+    // Nothing remembered (a default / hard-reset mount ran since), or an
+    // empty staged name (no folder n and no 01).
+    assert!(!same_folder_reswitch("04", None, true, false));
+    assert!(!same_folder_reswitch("", Some(("", Mounted)), true, false));
+    // Ejected or in a write session after the mount: no medium, no empty slot.
+    assert!(!same_folder_reswitch("04", Some(("04", Mounted)), false, false));
+    assert!(!same_folder_reswitch("07", Some(("07", NoImage)), false, false));
+}
+
+#[test]
+fn re_switch_after_a_failed_mount_mounts_again() {
+    use MountOutcome::*;
+    // 04 mounted, then `52 82 9` with no folder 9 and no 01: the attempt at
+    // "" failed, the drive is empty (empty slot), the old selection may still
+    // say 04. `52 82 4` must mount again.
+    assert!(!same_folder_reswitch("04", Some(("", Failed)), false, true));
+    // The previous mount of the same folder errored (parse error, card read
+    // error): the host's retry mounts again.
+    assert!(!same_folder_reswitch("04", Some(("04", Failed)), false, true));
+    assert!(!same_folder_reswitch("04", Some(("04", Failed)), false, false));
+    // An empty folder's record does not cover a medium that appeared since.
+    assert!(!same_folder_reswitch("07", Some(("07", NoImage)), true, false));
 }
 
 fn cdb(b: &[u8]) -> [u8; 12] {
@@ -934,9 +1058,21 @@ fn disc_format_follows_the_track_modes() {
     assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_MODE2]), true), DISC_FORMAT_CDROM_XA);
     // CDI 10 (Mode 1 data): CD-ROM (`01 1f 01 01 01 00 00 96`, SECNR 0x11).
     assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_MODE1]), true), DISC_FORMAT_CDROM);
-    // Any Mode 2 track makes it XA (Flycast `GuessDiscType`); audio only is CD-DA (not probed on stock).
+    // Any Mode 2 track makes it XA (Flycast `GuessDiscType`).
     assert_eq!(disc_format(&mk(&[TRACK_MODE1, TRACK_MODE2]), true), DISC_FORMAT_CDROM_XA);
-    assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_AUDIO]), true), DISC_FORMAT_CDDA);
+    // CDI 11 (audio only): CD-ROM, not Flycast's CD-DA (R155: `01 1f ...`, SECNR 0x11).
+    assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_AUDIO]), true), DISC_FORMAT_CDROM);
+    assert_eq!(disc_format(&mk(&[TRACK_AUDIO]), true), DISC_FORMAT_CDROM);
+    assert_eq!(disc_format::<TrackDesc>(&[], true), DISC_FORMAT_CDROM);
+
+    // R155's REQ_STAT of the audio-only CDI after a switch, byte for byte.
+    let tracks = mk(&[TRACK_AUDIO, TRACK_AUDIO]);
+    let fad = idle_fad(&tracks, true, true);
+    let (fad, tr) = head_position(&tracks, AudioState::Standby, 0, fad);
+    assert_eq!(
+        req_stat_reply(AudioState::Standby, DRIVE_PAUSE, disc_format(&tracks, true), 0, fad, tr),
+        [0x01, 0x1f, 0x01, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
+    );
 
     // R144's REQ_STAT of the Mode 1 CDI after a switch, byte for byte.
     let tracks = mk(&[TRACK_AUDIO, TRACK_MODE1]);

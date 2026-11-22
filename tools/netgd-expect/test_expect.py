@@ -218,6 +218,94 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(one(7, 'REQ_ERROR_W0')['cdbst'], '0x18')
         self.assertNotIn('secnr', one(3, 'SW_CMD'))                     # the boot disc's SECNR is not known
 
+    def test_cdbst_carries_a_check_from_the_last_battery_command_into_the_next_section(self):
+        # Records 17 / 18 (cdread_flags_test=0, no throughput / seek): the battery ends with IP_READ, which is a
+        # CHECK for the CDI with a Mode 2 track at 0x24, and no hidden REQ_ERROR follows it, so the next section's
+        # first command (RS_SW_CMD) sees 0x18. With the flag test on, the last command is CDREAD_FLAGS 0x10 (ok): 0x58.
+        base = ['--cdread-flags', '0x24', '--no-throughput', '--no-seek']
+        for extra, want in (([ '--no-flags-test'], '0x18'), ([], '0x58')):
+            text = expect_sd.predict(self.card, images=[4], return_to=0, regpoll=True, reswitch=True,
+                                     passthrough=base + extra)
+            _, entries = compare.parse_record(text)
+            get = lambda probe: [e for e in entries if e['img'] == 4 and e['probe'] == probe]
+            self.assertEqual(get('IP_READ')[0]['rc'], 'check')
+            self.assertEqual(get('RS_SW_CMD')[0]['cdbst'], want)
+            self.assertEqual(get('RS_REQ_STAT')[0]['cdbst'], '0x58')
+
+    def test_regpoll_and_device_reset_as_netgd_answers(self):
+        # gdprobe swap_regpoll / swap_devreset (R154), as NetGD answers since R159: the R<ms>_ switch is a
+        # same-folder re-switch (a no-op: SECNR flat, ALTSTATUS 0x50), then DEVICE RESET re-detects: status 0x00,
+        # error 0x01, IRR 1, 14/EB, SECNR 0x00 at once and the byte at rest detect_time later, then UNIT
+        # ATTENTION (records 15 / 16, seq 17).
+        text = expect_sd.predict(self.card, images=[3, 4, 7], return_to=0, regpoll=True, devreset=(50, 200))
+        _, entries = compare.parse_record(text)
+        get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
+        self.assertEqual([e['secnr'] for e in get(4, 'SW_REGPOLL')], ['0x81', '0x06', '0x00', '0x21'])
+        self.assertEqual([e['altst'] for e in get(4, 'SW_REGPOLL')], ['0x50'] * 4)
+        for pfx in ('R50_', 'R200_'):
+            for img, final in ((3, '0x81'), (4, '0x21'), (7, '0x07')):
+                rst = get(img, pfx + 'SW_DEVRESET')[0]
+                self.assertEqual((rst['altst'], rst['err'], rst['irr'], rst['secnr'], rst['bcl'], rst['bch']),
+                                 ('0x00', '0x01', '0x01', '0x00', '0x14', '0xeb'))
+                polls = get(img, pfx + 'SW_REGPOLL')
+                self.assertEqual([e['secnr'] for e in polls], [final, '0x00', final])   # no 0x06: no window
+                self.assertEqual([e['altst'] for e in polls], ['0x50', '0x00', '0x00'])
+                # ERROR is sticky: the last CHECK's (the battery's 0x50, or 2/3A/00's 0x20 with no medium, and in
+                # R200_ the UNIT ATTENTION 0x60 of R50_), then the reset's 0x01.
+                first = {('R50_', 7): '0x20', ('R200_', 7): '0x20', ('R50_', 3): '0x50', ('R50_', 4): '0x50'}
+                self.assertEqual([e['err'] for e in polls], [first.get((pfx, img), '0x60'), '0x01', '0x01'])
+                self.assertEqual([e['irr'] for e in polls], ['0x03', '0x01', '0x01'])
+                sw = get(img, pfx + 'SW_POLL')
+                self.assertEqual(sw[0]['sense'], '2/3a/00' if img == 7 else '6/28/00')
+                self.assertNotIn('ua_28', get(img, pfx + 'SW_RESULT')[0])
+                self.assertEqual(len(get(img, pfx + 'REQ_STAT')), 1)
+                self.assertEqual(len(get(img, pfx + 'REQ_ERROR')), 1)
+        self.assertTrue(get(4, 'R50_REQ_STAT')[0]['data'].startswith('012f01'))
+        # A bitstream without ERROR bit 0 shows 0x00 there.
+        old = expect_sd.predict(self.card, images=[4], return_to=0, devreset=(50,), passthrough=['--old-bitstream'])
+        _, oe = compare.parse_record(old)
+        self.assertEqual([e['err'] for e in oe if e['probe'] == 'R50_SW_DEVRESET'], ['0x00'])
+        # ... and clears ERROR on every PACKET write: 0x00 after the successful re-switch.
+        self.assertEqual([e['err'] for e in oe if e['probe'] == 'R50_SW_REGPOLL'], ['0x00', '0x00', '0x00'])
+
+    def test_head_follows_cd_read_and_sticky_error(self):
+        # Stock seq 17/18: after the battery's reads and a no-op re-switch REQ_STAT reports where the last CD_READ
+        # ended (GDI 03: IP_READ of 7 at 45150 -> 0xB065); a read refused for its type leaves the start FAD
+        # (CDI 04 at 0x2E4C); DEVICE RESET parks the head again. ERROR stays the last CHECK's.
+        text = expect_sd.predict(self.card, images=[3, 4], return_to=0, regpoll=True, reswitch=True,
+                                 devreset_only=True, passthrough=['--no-throughput', '--no-seek', '--no-flags-test'])
+        _, entries = compare.parse_record(text)
+        get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
+        self.assertEqual(get(3, 'RS_REQ_STAT')[0]['data'], '018f41030100b0650000')
+        self.assertEqual(get(3, 'DR_REQ_STAT')[0]['data'], '018f41030100b05e0000')
+        self.assertEqual(get(4, 'RS_REQ_STAT')[0]['data'], '012f410201002e4c0000')
+        self.assertEqual(get(4, 'DR_REQ_STAT')[0]['data'], '012f0101010000960000')
+        self.assertEqual(get(3, 'REQ_STAT')[0]['data'], '018f41030100b05e0000')     # before the reads
+        # The first switch: the img=0 battery's REQ_SES_3 CHECK (0x50); img=4's: DR_'s UNIT ATTENTION (0x60);
+        # RS_ after img=4's refused IP_READ: 0x50.
+        self.assertEqual({e['err'] for e in get(3, 'SW_REGPOLL')}, {'0x50'})
+        self.assertEqual({e['err'] for e in get(4, 'SW_REGPOLL')}, {'0x60'})
+        self.assertEqual([e['err'] for e in get(4, 'RS_SW_REGPOLL')], ['0x50'])
+
+    def test_reswitch_and_devreset_only_as_netgd_answers(self):
+        # gdprobe seq 17: RS_ (52 82 n for the mounted folder) is a no-op, no UNIT ATTENTION; DR_ (DEVICE RESET
+        # with no switch) re-detects and raises the UNIT ATTENTION with a medium; the empty folder stays 2/3A/00.
+        text = expect_sd.predict(self.card, images=[3, 7], return_to=0, regpoll=True, reswitch=True,
+                                 devreset_only=True)
+        _, entries = compare.parse_record(text)
+        get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
+        for img, final, medium in ((3, '0x81', True), (7, '0x07', False)):
+            self.assertEqual([e['secnr'] for e in get(img, 'RS_SW_REGPOLL')], [final])
+            self.assertEqual(get(img, 'RS_SW_POLL')[0]['sense'], 'none' if medium else '2/3a/00')
+            self.assertEqual(get(img, 'RS_SW_RESULT')[0]['ua_28'], '0')
+            self.assertEqual(get(img, 'DR_IDLE')[0]['idle_ms'], '500')
+            rst = get(img, 'DR_SW_DEVRESET')[0]
+            self.assertEqual((rst['delay_ms'], rst['altst'], rst['err'], rst['secnr']), ('0', '0x00', '0x01', '0x00'))
+            self.assertEqual([e['secnr'] for e in get(img, 'DR_SW_REGPOLL')], ['0x00', final])
+            self.assertEqual(get(img, 'DR_SW_POLL')[0]['sense'], '6/28/00' if medium else '2/3a/00')
+            self.assertEqual(get(img, 'DR_SW_RESULT')[0]['ua_28'], '1' if medium else '0')
+        self.assertEqual(get(3, 'DR_REQ_STAT')[0]['data'], '018f41030100b05e0000')
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '

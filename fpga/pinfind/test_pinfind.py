@@ -485,6 +485,87 @@ def test_checkpnr_placement_and_coverage():
         assert code == 1 and "not the list" in text, text
 
 
+def _supra_work(tmp, placement, sites=None, routed=True):
+    """A work directory shaped like Supra 2026.03.b0's (first real build):
+    alta_db/io.asf (ports in reverse order, no braces, IO_STANDARD lines) and
+    PinFind_routed.v whose pad cells carry coord_x/y/z, in both naming styles
+    (`\\P[0]~io (` with `defparam \\P[0]~io .coord_x`, `hold_keep_o_0(` with
+    `defparam hold_keep_o_0.coord_x`). The contents are synthetic."""
+    work = os.path.join(tmp, "work")
+    os.makedirs(os.path.join(work, "alta_db"), exist_ok=True)
+    with open(os.path.join(work, "run.out"), "w") as f:
+        f.write("Error: Pin HOLD[0]'s locatiion is not assigned.\nInfo: Place virtual pin HOLD[0] at PIN_T16.\n")
+    with open(os.path.join(work, "alta_db", "io.asf"), "w") as f:
+        for q, b in reversed(placement):
+            f.write(f"set_location_assignment -to {q} {b}\n")
+        for q, _ in reversed(placement):
+            f.write(f'set_instance_assignment -name IO_STANDARD -to {q} "3.3-V LVTTL"\n')
+    if routed:
+        sites = sites or {q: (i // 4, 7, i % 4) for i, (q, _) in enumerate(placement)}
+        with open(os.path.join(work, "PinFind_routed.v"), "w") as f:
+            f.write("module PinFind (P, HOLD);\nwire gnd;\n")
+            for i, (q, _) in enumerate(placement):
+                cell = f"\\{q}~io " if q.startswith("P[") else f"hold_keep_o_{i}"
+                f.write(f"alta_dio {cell}(\n\t.padio({q}),\n\t.oe(gnd),\n\t.regout());\n")
+                for k, v in zip("xyz", sites[q]):
+                    f.write(f"defparam {cell}.coord_{k} = {v};\n")
+            f.write("alta_slice \\core|x (\n\t.A(gnd),\n\t.Q());\ndefparam \\core|x .coord_x = 3;\n")
+            f.write("endmodule\n")
+    return work
+
+
+def test_checkpnr_reads_supra_io_placement():
+    """checkpnr.py's default source with Supra 2026.03.b0: alta_db/io.asf,
+    cross-checked against the pad sites of the routed netlist."""
+    tempfile, mklist, gen, fake_pinmap = _gen_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        balls, user = _fake_list(tmp, "--max-drive", "20")
+        pinmap = os.path.join(tmp, "fake.pinmap")
+        out = os.path.join(tmp, "gen")
+        _quiet(gen.generate, gen.build_args(["--balls", balls, "--out", out]))
+        locs = _locs(out)
+
+        work = _supra_work(os.path.join(tmp, "ok"), locs)
+        code, text = _checkpnr(out, work, pinmap)
+        assert code == 0, text
+        assert "io.asf (Supra I/O placement)" in text and "distinct sites" in text, text
+        sites_file = os.path.join(work, "checkpnr.sites")
+        rows = [l.split() for l in open(sites_file) if not l.startswith("#")]
+        assert len(rows) == len(locs) and rows[0][:2] == list(locs[0]), rows[:2]
+
+        # Same balls on the same sites in another build: ok. A ball on another site: fail.
+        work2 = _supra_work(os.path.join(tmp, "ref"), locs)
+        assert _checkpnr(out, work2, pinmap, "--sites-ref", sites_file)[0] == 0
+        moved = {q: (i // 4, 7, i % 4) for i, (q, _) in enumerate(locs)}
+        moved[locs[0][0]], moved[locs[1][0]] = moved[locs[1][0]], moved[locs[0][0]]
+        code, text = _checkpnr(out, _supra_work(os.path.join(tmp, "mv"), locs, moved), pinmap,
+                               "--sites-ref", sites_file)
+        assert code == 1 and "differ from --sites-ref" in text, text
+
+        # Supra put two ports on other balls.
+        bad = list(locs)
+        bad[0], bad[1] = (bad[0][0], bad[1][1]), (bad[1][0], bad[0][1])
+        code, text = _checkpnr(out, _supra_work(os.path.join(tmp, "swap"), bad), pinmap)
+        assert code == 1 and "differs" in text, text
+        # ... or on something that is not a PIN_ ball: kept, so it is a mismatch.
+        bad = [(locs[0][0], "NC_PIN_226N_CLK8")] + locs[1:]
+        code, text = _checkpnr(out, _supra_work(os.path.join(tmp, "nc"), bad), pinmap)
+        assert code == 1 and "NC_PIN_226N_CLK8" in text, text
+
+        # A port missing from io.asf, or an I/O that is not a port: stop.
+        code, text = _checkpnr(out, _supra_work(os.path.join(tmp, "miss"), locs[1:]), pinmap)
+        assert code == 1 and "missing" in text, text
+        code, text = _checkpnr(out, _supra_work(os.path.join(tmp, "ext"), locs + [("X", "PIN_T16")]), pinmap)
+        assert code == 1 and "other I/O" in text, text
+
+        # Two ports on one site in the routed netlist; no routed netlist at all.
+        same = {q: (0, 7, 0) if i < 2 else (i // 4, 8, i % 4) for i, (q, _) in enumerate(locs)}
+        code, text = _checkpnr(out, _supra_work(os.path.join(tmp, "site"), locs, same), pinmap)
+        assert code == 1 and "carry two ports" in text, text
+        code, text = _checkpnr(out, _supra_work(os.path.join(tmp, "nor"), locs, routed=False), pinmap)
+        assert code == 1 and "cannot be cross-checked" in text, text
+
+
 def test_gatesim_testbench_reads_both_port_styles():
     """gatesim.py's port parser and testbench on two synthetic routed-netlist
     headers (bus ports; escaped per-bit ports). The real format is unknown."""
@@ -498,6 +579,9 @@ def test_gatesim_testbench_reads_both_port_styles():
         tb = gatesim.testbench(p, gatesim.top_ports(a), 5)
         assert ".P(pad)" in tb and ".HOLD({2{1'b1}})" in tb and ".CLKIN(clkin)" in tb, tb
         assert "pads low at once" in tb and "lows > 1" in tb
+        assert "GATESIM DONE" not in tb
+        tb = gatesim.testbench(p, gatesim.top_ports(a), 5, expect_done=True)
+        assert "GATESIM DONE" in tb and "n_ever == 3" in tb and "5 * 900000.0" in tb, tb
         b = os.path.join(tmp, "b.v")
         open(b, "w").write("module PinFind (\\P[0] , \\P[1] , \\P[2] , \\HOLD[0] , \\HOLD[1] , CLKIN);\n"
                            " inout \\P[0] ;\n inout \\P[1] ;\n inout \\P[2] ;\n"
@@ -507,6 +591,13 @@ def test_gatesim_testbench_reads_both_port_styles():
         p0 = dict(p, stage0="1", clock="none")
         tb = gatesim.testbench(p0, gatesim.top_ports(a), 5)
         assert "lows > 0" in tb and "clkin" not in tb
+        r = os.path.join(tmp, "r.v")
+        open(r, "w").write("module PinFind (P);\n alta_slice \\u_clk|stage[0].inv (\n .A(vcc));\n"
+                           " alta_slice \\u_clk|stage[1].inv (\n .A(vcc));\nendmodule\n")
+        seed = gatesim.ring_seed(r)
+        assert seed == ["\\u_clk|stage[0].inv"], seed
+        tb = gatesim.testbench(dict(p, clock="ring"), gatesim.top_ports(a), 5, xres=seed)
+        assert "defparam dut.\\u_clk|stage[0].inv .GATESIM_XRES = 1'b1;" in tb, tb
 
 
 def write_golden():
@@ -539,6 +630,7 @@ TESTS = [
     test_gen_stage0_has_no_outputs,
     test_gen_refuses_unsafe_options,
     test_checkpnr_placement_and_coverage,
+    test_checkpnr_reads_supra_io_placement,
     test_gatesim_testbench_reads_both_port_styles,
 ]
 
