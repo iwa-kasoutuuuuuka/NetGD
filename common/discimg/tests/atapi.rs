@@ -898,3 +898,27 @@ fn expand_raw_in_place_matches_a_copy_for_every_alignment() {
         }
     }
 }
+
+/// R136: a sense read (REQUEST SENSE 0x03, REQ_ERROR 0x13) reports the sense
+/// of the last CHECK. It must not advance or close the swap window: the TUR
+/// that got 2/04/01 and the REQ_ERROR that follows it would otherwise see the
+/// window close in between and report 6/28/00 (stock: 2/04/01, then 6/28/00 on
+/// the next TUR).
+#[test]
+fn sense_reads_do_not_advance_the_swap_window() {
+    assert!(!advances_swap_window(0x03));
+    assert!(!advances_swap_window(0x13));
+    for op in [0x00u8, 0x10, 0x11, 0x14, 0x15, 0x20, 0x30, 0x40, 0x52, 0xE0] {
+        assert!(advances_swap_window(op), "opcode {:#04x}", op);
+    }
+}
+
+/// R136: a sense read clears the UNIT ATTENTION only when it reported it
+/// (key 6). After `52 00` has cleared the pending key, REQ_ERROR reports
+/// nothing and the UA must stay for the next command's CHECK.
+#[test]
+fn sense_read_clears_ua_only_when_reported() {
+    assert!(sense_read_clears_ua(SENSE_UNIT_ATTENTION));
+    assert!(!sense_read_clears_ua(0));
+    assert!(!sense_read_clears_ua(SENSE_NOT_READY));
+}

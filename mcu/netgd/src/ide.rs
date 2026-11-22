@@ -1645,7 +1645,13 @@ async fn handle_packet(
     // Not ready (swap window, no medium): what the command gets is decided
     // below, but an expiring window raises the new medium's UNIT ATTENTION
     // here, before it is looked at.
-    let not_ready = drive_not_ready(dev, state);
+    // The sense readers are the exception: they report the last CHECK's sense,
+    // so the window neither advances nor closes inside them (R136).
+    let not_ready = if discimg::atapi::advances_swap_window(opcode) {
+        drive_not_ready(dev, state)
+    } else {
+        None
+    };
 
     // ATAPI: when UNIT_ATTENTION is pending (set on reset), every PACKET
     // command other than REQUEST_SENSE / REQ_ERROR completes immediately
@@ -1747,8 +1753,11 @@ async fn handle_packet(
             let mut sense = REQUEST_SENSE_REPLY;
             sense[2] = state.pending_sense_key;
             let n = core::cmp::min(alloc, sense.len() as u16);
+            let key = state.pending_sense_key;
             send_data_in(dev, &sense[..n as usize]).await;
-            state.unit_attention = false;
+            if discimg::atapi::sense_read_clears_ua(key) {
+                state.unit_attention = false;
+            }
             state.clear_sense();
         }
         SEGA_REQ_STAT => {
@@ -1850,7 +1859,9 @@ async fn handle_packet(
             let reply = discimg::atapi::req_error_reply(state.pending_sense_key, asc, ascq);
             let n = core::cmp::min(alloc, reply.len() as u16);
             send_data_in(dev, &reply[..n as usize]).await;
-            state.unit_attention = false;
+            if discimg::atapi::sense_read_clears_ua(state.pending_sense_key) {
+                state.unit_attention = false;
+            }
             state.clear_sense();
         }
         SEGA_GET_TOC => {

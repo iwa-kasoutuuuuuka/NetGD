@@ -456,6 +456,24 @@ pub enum SwapPhase {
     Done,
 }
 
+/// Whether a command runs the swap window's clock (`drive_not_ready`: closes an
+/// expired window and raises its UNIT ATTENTION). REQUEST SENSE (0x03) and
+/// REQ_ERROR (0x13) do not: they report the sense of the last CHECK, and a
+/// window closing inside them would replace that sense with 6/28/00 and
+/// swallow the UNIT ATTENTION before any CHECK showed it (R136). The window
+/// ends on the next normal command.
+pub fn advances_swap_window(opcode: u8) -> bool {
+    opcode != 0x03 && opcode != 0x13
+}
+
+/// Whether a sense read that reported `key` also clears the UNIT ATTENTION: only
+/// when it reported it (key 6). `52 00` clears the pending key without
+/// serving the UA, so a REQ_ERROR after it reports nothing and must leave the
+/// UA for the next command's CHECK (R136).
+pub fn sense_read_clears_ua(key: u8) -> bool {
+    key == SENSE_UNIT_ATTENTION
+}
+
 /// The phase `elapsed_ms` after a switch.
 pub fn swap_phase(elapsed_ms: u32, open_ms: u32, detect_ms: u32) -> SwapPhase {
     if elapsed_ms < open_ms {
