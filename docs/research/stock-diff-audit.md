@@ -140,6 +140,23 @@
 3. D は、6.0 のビットストリーム（AG16K）の大きさが分かり、余裕が足りないと分かってから。
 4. E・F・G は採らない。
 
+## 4.4 追記：予測ツールが `cdbst=`・`secnr=` を書くようにした（R144 a・b の点検）
+
+ブランチ `feat/expect-cdbst-secnr`（`docs/stock-audit` から）。変えたのは予測ツール（`common/discimg/examples/expect.rs`・`tools/netgd-expect/expect_sd.py`）とそのテスト・README だけで、ファームは変えていない。
+
+- **`cdbst=`**：直前のコマンドの最終 status が CHECK なら `0x18`、それ以外は `0x58`（R147）。gdprobe が記録しないコマンドも数える：
+  `CDREAD_FLAGS` の CHECK のあとの REQ_ERROR、切替のポーリング（TUR と、CHECK なら REQ_ERROR）。区間をまたぐ状態は `expect_sd.py` が渡す（`--prev-check`）。
+- **`secnr=`**：main（`rest_secnr`・`window_secnr`）と同じ規則。試験の間は「ディスク形式 ｜ 一時停止」（電源投入直後は待機）、ディスクなしは `0x07`、
+  切替の窓は `0x06` → `0x00` → 窓のあと「形式 ｜ 0x01」か `0x07`。`SW_CMD` は切替前のディスクの値（`--prev-secnr`）。
+  最初の切替の前（電源投入時のディスク）の値は分からないので書かない（`compare.py` は両方にある欄だけ比べる）。
+  `fix/secnr-reset`（`237130e6`）の `reset_secnr` はバスリセットのときの値で、gdprobe の試験では起きないので予測には入れていない。
+- **結果**：記録 13・14 の `cdbst=`・`secnr=` は**すべて一致**（記録 13 は予測の `cdbst=` 171 行・`secnr=` 189 行、14 は 23 行・30 行。差の数は増えない）。
+  記録 13 は既定 9 → `--raw-sectors` で 6（D15 × 4、D14 × 2。D14 はこのブランチに無い）、14 は 1（D15）のまま。ほかの記録は欄が無いので数は変わらない（2 節と同じ）。
+- 比べていることの確認：予測の 2 行の `cdbst`・`secnr` をわざと変えると、`compare.py` がその 2 行を差として出す（8 件になる）。
+- テスト：`tools/netgd-expect/test_expect.py` に `test_cdbst_and_secnr_follow_stock` を追加（CHECK の次の `0x18`、`CDREAD_FLAGS` の隠れた REQ_ERROR、窓の `0x06`/`0x00`/`0x81`、
+  `SW_CMD` が前のディスクの値、空フォルダの `0x07`、最初の `SW_CMD` に `secnr` が無いこと）。14 件（1 件スキップ）通過、`common/discimg` 全通過。
+- 意味：NetGD の main は、ソースの読みでは R144 a（R147 で訂正）・b について純正と同じ。実機の NetGD で gdprobe（`label=netgd`）を取れば、この予測と比べて確定できる。
+
 ## 5. 再現
 
 ```sh

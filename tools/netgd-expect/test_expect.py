@@ -197,9 +197,31 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual((cmd['rc'], cmd['status'], cmd['err']), ('check', '0x11', '0x50'))
         self.assertEqual(one(1000, 'GET_TOC_0')['data'], one(3, 'GET_TOC_0')['data'])
 
+    def test_cdbst_and_secnr_follow_stock(self):
+        # gdprobe's cdbst= is the CDB-phase ALTSTATUS, which keeps the previous command's DRDY (R147): 0x18 after
+        # a CHECK, else 0x58; a CHECK in CDREAD_FLAGS and in the switch polls is followed by an unlogged REQ_ERROR.
+        # secnr= is the SECNR byte at completion (R144 b, R148): format | pause at rest, 0x07 with no medium,
+        # 0x06 / 0x00 / format|1 through the window. records 13 and 14 match all of it.
+        _, entries = compare.parse_record(self.text)
+        one = lambda img, probe, i=0: [e for e in entries if e['img'] == img and e['probe'] == probe][i]
+        self.assertEqual(one(3, 'REQ_SES_2')['cdbst'], '0x58')
+        self.assertEqual(one(3, 'REQ_SES_3')['cdbst'], '0x18')          # after REQ_SES_2's CHECK
+        self.assertEqual(one(3, 'GET_SCD_0')['cdbst'], '0x18')          # after REQ_SES_3's CHECK
+        flags = [e for e in entries if e['img'] == 3 and e['probe'] == 'CDREAD_FLAGS']
+        self.assertEqual([e['cdbst'] for e in flags], ['0x58'] * 4)    # hidden REQ_ERROR after the 0x28 CHECK
+        self.assertEqual([one(3, 'SW_POLL', i)['secnr'] for i in range(4)], ['0x06', '0x00', '0x81', '0x81'])
+        self.assertEqual(one(3, 'TUR')['secnr'], '0x81')
+        self.assertEqual(one(4, 'SW_CMD')['secnr'], '0x81')             # still the previous disc's
+        self.assertEqual(one(4, 'TUR')['secnr'], '0x21')                # CDI with a Mode 2 track: XA
+        self.assertEqual([one(7, 'SW_POLL', i)['secnr'] for i in range(3)], ['0x06', '0x00', '0x07'])
+        self.assertEqual((one(7, 'TUR_W0')['cdbst'], one(7, 'TUR_W0')['secnr']), ('0x58', '0x07'))
+        self.assertEqual(one(7, 'REQ_ERROR_W0')['cdbst'], '0x18')
+        self.assertNotIn('secnr', one(3, 'SW_CMD'))                     # the boot disc's SECNR is not known
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
-        want = 'img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 us=-'
+        want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '
+                'cdbst=0x58 secnr=0x81 us=-')
         self.assertIn(want, self.text)
         stock = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 '
                  'bytes=6 data=01000300b05e us=1234\n')

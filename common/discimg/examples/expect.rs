@@ -57,6 +57,10 @@ struct Opts {
     flags_test: bool,
     /// Predict the firmware built with feature `raw-sectors` (D10).
     raw_sectors: bool,
+    /// gdprobe's `cdbst=` / `secnr=` state carried over from the previous section (`expect_sd.py`):
+    /// was the last command before this section a CHECK, and the SECNR byte at rest before it.
+    prev_check: bool,
+    prev_secnr: Option<u8>,
     throughput: bool,
     tp_batches: u32,
     tp_sectors: u32,
@@ -101,6 +105,8 @@ fn parse_args() -> Opts {
         cdread_flags: 0x24,
         flags_test: true,
         raw_sectors: false,
+        prev_check: false,
+        prev_secnr: None,
         throughput: true,
         tp_batches: 64,
         tp_sectors: 16,
@@ -128,6 +134,8 @@ fn parse_args() -> Opts {
             "--cdread-flags" => o.cdread_flags = num(&val()) as u8,
             "--no-flags-test" => o.flags_test = false,
             "--raw-sectors" => o.raw_sectors = true,
+            "--prev-check" => o.prev_check = num(&val()) != 0,
+            "--prev-secnr" => o.prev_secnr = Some(num(&val()) as u8),
             "--no-throughput" => o.throughput = false,
             "--tp-batches" => o.tp_batches = num(&val()),
             "--tp-sectors" => o.tp_sectors = num(&val()).clamp(1, 16),
@@ -330,6 +338,12 @@ impl Res {
 struct Out {
     s: String,
     img: i32,
+    /// The last command's final status was CHECK (0x11). gdprobe's `cdbst=` is the ALTSTATUS in a command's
+    /// own CDB phase, which keeps the previous command's DRDY: 0x18 after a CHECK, else 0x58 (R147; NetGD's
+    /// FPGA keeps the last status the MCU wrote, so the same).
+    last_check: bool,
+    /// The SECNR byte (gdprobe `secnr=`, read at completion), None = not known (the boot disc's).
+    secnr: Option<u8>,
 }
 
 impl Out {
@@ -350,6 +364,11 @@ impl Out {
             r.irr,
             r.total
         );
+        let _ = write!(self.s, " cdbst=0x{:02x}", if self.last_check { 0x18 } else { 0x58 });
+        if let Some(v) = self.secnr {
+            let _ = write!(self.s, " secnr=0x{:02x}", v);
+        }
+        self.last_check = !r.ok;
         if show_data && !r.data.is_empty() {
             let n = r.data.len().min(REC_DATA_MAX);
             let _ = write!(self.s, " data={}", hex(&r.data[..n]));
@@ -475,6 +494,9 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
     // warmup(): TUR until READY. A pending UNIT ATTENTION is answered by the first command and cleared.
     let tur = [0u8; 12];
     let req_err = cdb_simple(0x13, 0, 0, 10);
+    // SECNR at rest (ide.rs `rest_secnr` / `secnr(idle_status())`): the disc format over the idle status --
+    // pause after a switch, standby on a unit fresh from power-on. Nothing in the battery changes it.
+    o.secnr = Some(atapi::disc_format(&d.tracks, d.is_cdi) | if switched { atapi::DRIVE_PAUSE } else { atapi::DRIVE_STANDBY });
     if ua {
         o.probe("TUR_W0", None, Some(&tur), &Res::ua(), false);
         o.probe("REQ_ERROR_W0", None, Some(&req_err), &Res::ok(&atapi::req_error_reply(6, atapi::ASC_MEDIUM_CHANGED.0, atapi::ASC_MEDIUM_CHANGED.1)), true);
@@ -603,6 +625,10 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             };
             let ex = format!("flags=0x{:02x} fad={} count=1 ssz={} crc={} sense={}", flags, ip, ssz, crc, sense);
             o.probe("CDREAD_FLAGS", Some(&ex), Some(&c), &r, false);
+            if !r.ok {
+                // probes.c reads the sense with a REQ_ERROR that is not logged: the next CDB phase follows it.
+                o.last_check = false;
+            }
         }
     }
 
@@ -656,6 +682,8 @@ fn gdemu_version(o: &mut Out) {
 /// The battery with no medium (an empty folder after its swap window): warmup gives up after eight TUR /
 /// REQ_ERROR rounds, then the information commands as `atapi::not_ready_answer` sorts them, no reads.
 fn battery_no_medium(o: &mut Out) {
+    // SECNR with no medium: NO DISC, format 0 (ide.rs `rest_secnr`, R144 b).
+    o.secnr = Some(atapi::DRIVE_NODISC);
     let tur = [0u8; 12];
     let req_err = cdb_simple(0x13, 0, 0, 10);
     let (asc, ascq) = atapi::ASC_NO_MEDIUM;
@@ -710,38 +738,47 @@ enum Target {
     Missing,
 }
 
-fn sw_poll(o: &mut Out, r: &Res, sense: &str) {
-    o.event(
-        "SW_POLL",
-        &format!("t_ms=- poll=- rc={} status=0x{:02x} err=0x{:02x} sense={}", if r.ok { "ok" } else { "check" }, r.status, r.err, sense),
-    );
+fn sw_poll(o: &mut Out, r: &Res, sense: &str, secnr: Option<u8>) {
+    let mut f = format!("t_ms=- poll=- rc={} status=0x{:02x} err=0x{:02x} sense={}", if r.ok { "ok" } else { "check" }, r.status, r.err, sense);
+    if let Some(v) = secnr {
+        f.push_str(&format!(" secnr=0x{:02x}", v));
+    }
+    o.event("SW_POLL", &f);
+    // A poll is a TUR, after a CHECK followed by a REQ_ERROR (both unlogged): it ends on a good status.
+    o.last_check = false;
+    o.secnr = secnr;
 }
 
 /// `switch_to`: `52 82 n`, then TUR / REQ_ERROR polls, one line per change of state. With an image or an
 /// empty folder the swap window plays out (`atapi::swap_phase`): no medium, becoming ready, then UNIT
 /// ATTENTION and READY -- or no medium again, until gdprobe's switch timeout. A refused mount leaves the old
 /// image (and its already-consumed UNIT ATTENTION) in place.
-fn switch_lines(o: &mut Out, n: u32, target: Target) {
+fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8) {
     let c = cdb_mount(n);
     let fmt = |(asc, ascq): (u8, u8), key: u8| format!("{}/{:02x}/{:02x}", key, asc, ascq);
     let nr = atapi::SENSE_NOT_READY;
     let ready = match target {
         Target::Missing => {
             o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::illegal(), false);
-            sw_poll(o, &Res::ok(&[]), "none");
+            let keep = o.secnr;
+            sw_poll(o, &Res::ok(&[]), "none", keep);
             true
         }
         Target::Image | Target::Empty => {
             o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::ok(&[]), false);
+            // SECNR through the window (ide.rs `window_secnr`, `atapi::swap_secnr`, R144 b).
+            let medium = target == Target::Image;
             for phase in [atapi::SwapPhase::Open, atapi::SwapPhase::Detect] {
-                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(phase), nr));
+                let v = atapi::swap_secnr(phase, medium, disc_format);
+                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(phase), nr), Some(v));
             }
-            if target == Target::Image {
-                sw_poll(o, &Res::ua(), &fmt(atapi::ASC_MEDIUM_CHANGED, atapi::SENSE_UNIT_ATTENTION));
-                sw_poll(o, &Res::ok(&[]), "none");
+            let done = Some(atapi::swap_secnr(atapi::SwapPhase::Done, medium, disc_format));
+            if medium {
+                sw_poll(o, &Res::ua(), &fmt(atapi::ASC_MEDIUM_CHANGED, atapi::SENSE_UNIT_ATTENTION), done);
+                sw_poll(o, &Res::ok(&[]), "none", done);
                 true
             } else {
-                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(atapi::SwapPhase::Done), nr));
+                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(atapi::SwapPhase::Done), nr), done);
                 false
             }
         }
@@ -751,7 +788,7 @@ fn switch_lines(o: &mut Out, n: u32, target: Target) {
 
 fn main() {
     let opt = parse_args();
-    let mut o = Out { s: String::new(), img: opt.img };
+    let mut o = Out { s: String::new(), img: opt.img, last_check: opt.prev_check, secnr: opt.prev_secnr };
 
     let disc = match &opt.image {
         Some(p) => match load_disc(p) {
@@ -786,7 +823,8 @@ fn main() {
         } else {
             Target::Image
         };
-        switch_lines(&mut o, opt.img as u32, target);
+        let fmt = disc.as_ref().map_or(0, |d| atapi::disc_format(&d.tracks, d.is_cdi));
+        switch_lines(&mut o, opt.img as u32, target, fmt);
     }
     if !opt.sw_only {
         match &disc {
@@ -804,5 +842,11 @@ fn main() {
     if opt.end {
         o.event("END", "abort=0");
     }
+    // Carried into the next section by expect_sd.py (and dropped from the record there).
+    o.s.push_str(&format!("# expect-state last_check={}", o.last_check as u8));
+    if let Some(v) = o.secnr {
+        o.s.push_str(&format!(" secnr=0x{:02x}", v));
+    }
+    o.s.push('\n');
     print!("{}", o.s);
 }
