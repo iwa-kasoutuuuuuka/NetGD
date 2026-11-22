@@ -12,6 +12,9 @@ Images generated here (all synthetic, no copyrighted content, they do not boot):
   04  CDI        : session 1 = one audio track, session 2 = one data track (MIL-CD "audio/data")
   05  CDI        : session 1 = two audio tracks, session 2 = one data track
   06  GDI        : like 03 with three audio tracks in the low-density area, data track05 at 45000
+  10  CDI        : like 04 (one audio track, then a data session) but the data track is Mode 1 stored as
+                   2352-byte raw sectors (DiscJuggler track mode 1, read mode 2), not mkdcdisc's Mode 2 Form 1
+                   (--set variants only; LOG R137 g)
 
 Data sectors
   Each 2048-byte user-data block starts with the ASCII tag
@@ -21,6 +24,7 @@ Data sectors
   offset 0 and the tag moves to offset 0x100.
   GDI data tracks are raw 2352-byte Mode 1 sectors (sync, header, data, EDC, P/Q ECC; ECMA-130).
   CDI data tracks are 2336-byte Mode 2 Form 1 sectors (subheader, data, EDC, ECC), as mkdcdisc writes them.
+  the variant image 10 stores 2352-byte raw Mode 1 sectors instead (identical to the GDI data sectors).
   Audio sectors: 2352 bytes of 16-bit stereo PCM, a quiet sawtooth; the first stereo frame
   of each sector is (left = lba & 0xFFFF, right = lba >> 16).
 
@@ -214,7 +218,7 @@ def audio_sector(lba):
 # Track description (shared with compare.py --manifest)
 # ----------------------------------------------------------------------------
 # A manifest track has: number, type ('data'|'audio'), form ('gd_mode1_2352' | 'cdi_xa_form1_2336' |
-# 'audio_2352'), start_lba, sector_count, sector_size, file, file_offset, img, ip_product (or null).
+# 'cdi_mode1_2352' | 'audio_2352'), start_lba, sector_count, sector_size, file, file_offset, img, ip_product (or null).
 
 
 def _user(track, lba):
@@ -235,6 +239,8 @@ def sector_for(track, lba, want):
         return user, None
     if form == 'gd_mode1_2352' and want == 2352:
         return raw_mode1(lba, user), None
+    if form == 'cdi_mode1_2352' and want == 2352:
+        return raw_mode1(lba, user), None
     if form == 'cdi_xa_form1_2336':
         if want == 2336:
             return stored_form1(user), None
@@ -249,7 +255,7 @@ def stored_sector(track, lba):
     if form == 'audio_2352':
         return audio_sector(lba)
     user = _user(track, lba)
-    return raw_mode1(lba, user) if form == 'gd_mode1_2352' else stored_form1(user)
+    return raw_mode1(lba, user) if form in ('gd_mode1_2352', 'cdi_mode1_2352') else stored_form1(user)
 
 
 def sector_crc(data):
@@ -333,7 +339,8 @@ PREGAP, DATA_POSTGAP, CDDA_MIN = 150, 2, 302
 
 def build_cdi(folder, img, sessions, volname='disc.cdi'):
     """sessions: list of sessions, each a list of (type, count, ip_product|None).
-    Audio counts are raised to 302 (mkdcdisc's floor). Returns the manifest entry."""
+    type 'data' = Mode 2 Form 1 (2336 bytes stored, mkdcdisc), 'data1' = Mode 1 (2352 raw bytes stored,
+    DiscJuggler read mode 2). Audio counts are raised to 302 (mkdcdisc's floor). Returns the manifest entry."""
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, 'disc.cdi')
     tracks, sess_lens, layout = [], [], []
@@ -350,10 +357,12 @@ def build_cdi(folder, img, sessions, volname='disc.cdi'):
                 count, post = max(count, CDDA_MIN), 0
             else:
                 post = DATA_POSTGAP
-            t = {'number': number, 'type': typ, 'session': si + 1,
-                 'form': 'audio_2352' if typ == 'audio' else 'cdi_xa_form1_2336',
+            form = {'audio': 'audio_2352', 'data': 'cdi_xa_form1_2336', 'data1': 'cdi_mode1_2352'}[typ]
+            ssz = 2336 if form == 'cdi_xa_form1_2336' else 2352
+            t = {'number': number, 'type': 'audio' if typ == 'audio' else 'data', 'session': si + 1,
+                 'form': form,
                  'start_lba': pos, 'sector_count': count, 'pregap': PREGAP, 'postgap': post,
-                 'sector_size': 2352 if typ == 'audio' else 2336, 'file': 'disc.cdi',
+                 'sector_size': ssz, 'file': 'disc.cdi',
                  'img': img, 'ip_product': ip, 'ctrl': 0 if typ == 'audio' else 4,
                  'parsed_sector_count': count + post}
             t['file_offset'] = base + PREGAP * t['sector_size']
@@ -367,7 +376,8 @@ def build_cdi(folder, img, sessions, volname='disc.cdi'):
         session_start += sl
     with open(path, 'wb') as f:
         for t in tracks:
-            f.write((bytes(2352) if t['type'] == 'audio' else FORM2_GAP) * PREGAP)
+            gap = FORM2_GAP if t['form'] == 'cdi_xa_form1_2336' else bytes(2352)   # audio / Mode 1 gaps: zero sectors
+            f.write(gap * PREGAP)
             crc = 0
             for n in range(t['sector_count']):
                 s = stored_sector(t, t['start_lba'] + n)
@@ -376,7 +386,7 @@ def build_cdi(folder, img, sessions, volname='disc.cdi'):
             t['crc32'] = '%08x' % (crc & 0xFFFFFFFF)
             t['bytes'] = t['sector_count'] * t['sector_size']
             if t['postgap']:
-                f.write(FORM2_GAP * t['postgap'])
+                f.write(gap * t['postgap'])
         data_end = f.tell()
         name = volname.encode('ascii')[:32].ljust(32, b' ')
         marker = bytes((0, 0, 1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF))
@@ -390,8 +400,9 @@ def build_cdi(folder, img, sessions, volname='disc.cdi'):
             for ti, t in enumerate(row):
                 d += track_header()
                 last = ti == len(row) - 1
-                track_mode = 0 if t['type'] == 'audio' else 2
-                read_mode = 2 if t['type'] == 'audio' else 1
+                # DiscJuggler: track mode 0 audio / 1 Mode 1 / 2 Mode 2; read mode 0 = 2048, 1 = 2336, 2 = 2352 bytes stored
+                track_mode = {'audio_2352': 0, 'cdi_mode1_2352': 1, 'cdi_xa_form1_2336': 2}[t['form']]
+                read_mode = {'audio_2352': 2, 'cdi_mode1_2352': 2, 'cdi_xa_form1_2336': 1}[t['form']]
                 tl = t['sector_count'] + t['postgap']
                 td = bytearray()
                 td += struct.pack('<H', 2)
@@ -435,6 +446,12 @@ def cdi_spec_04(small):
     return [[('audio', CDDA_MIN, None)], [('data', 1100 if small else 4000, 'NETGD PROBE 04')]]
 
 
+def cdi_spec_10(small):
+    """Same layout as 04 with a Mode 1 data track (R137 g): does stock take CD_READ byte 1 = 0x24 (Mode 1) here,
+    and refuse 0x28 (Mode 2 Form 1)?"""
+    return [[('audio', CDDA_MIN, None)], [('data1', 1100 if small else 4000, 'NETGD PROBE 10')]]
+
+
 def cdi_spec_05(small):
     return [[('audio', CDDA_MIN, None), ('audio', CDDA_MIN + 100, None)],
             [('data', 1100 if small else 4000, 'NETGD PROBE 05')]]
@@ -465,15 +482,15 @@ def crc_file(path):
 
 
 def make_variants(outdir, small=False, force=False):
-    """--set variants: only the extra GDIs 08 and 09 (copied next to an existing card's 01-07)."""
+    """--set variants: only the extra images 08, 09 (GDI) and 10 (CDI, Mode 1) (copied next to an existing card's 01-07)."""
     if os.path.exists(outdir) and os.listdir(outdir) and not force:
         raise SystemExit('error: %s is not empty (use --force to write into it)' % outdir)
     os.makedirs(outdir, exist_ok=True)
     manifest = {'tool': 'mksdcard', 'version': VERSION, 'small': bool(small), 'set': 'variants',
                 'folders': {}, 'images': {}}
-    for n, spec in ((8, gdi_spec_08), (9, gdi_spec_09)):
+    for n, kind, spec in ((8, 'gdi', gdi_spec_08), (9, 'gdi', gdi_spec_09), (10, 'cdi', cdi_spec_10)):
         folder = os.path.join(outdir, '%02d' % n)
-        e = build_gdi(folder, n, spec(small))
+        e = build_gdi(folder, n, spec(small)) if kind == 'gdi' else build_cdi(folder, n, spec(small))
         e['file_crc32'] = {fn: crc_file(os.path.join(folder, fn)) for fn in e['files']}
         manifest['images']['%02d' % n] = e
     with open(os.path.join(outdir, MANIFEST_NAME), 'w') as f:
@@ -540,7 +557,7 @@ def main(argv=None):
     ap.add_argument('--small', action='store_true', help='a few MB instead of ~100 MB (for tests)')
     ap.add_argument('--force', action='store_true', help='write into a non-empty OUTDIR')
     ap.add_argument('--set', choices=('card', 'variants'), default='card',
-                    help='card = the full 01-07 card (default); variants = only the extra GDIs 08 and 09')
+                    help='card = the full 01-07 card (default); variants = only the extra images 08, 09 (GDI) and 10 (CDI, Mode 1)')
     a = ap.parse_args(argv)
     if a.set == 'variants':
         m = make_variants(a.outdir, a.small, a.force)

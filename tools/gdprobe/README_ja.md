@@ -29,6 +29,7 @@ Dreamcast（KallistiOS 2.3.0）上で動き、GD-ROM ドライブ（= **純正�
   | REQ_SES | 0x15 | セッション 0〜3 の開始位置を読む |
   | GET_SCD | 0x40 | サブコード Q（形式 0・1）を読む |
   | CD_READ | 0x30 | データセクタを読む（FAD 指定、1 回 64 セクタまで）。バイト1 は `0x20` / `0x24` / `0x28` / `0x10` と設定の `cdread_flags` の値だけ許可（`0x30`・`0xE6`・`0xF0`、MSF 指定の `0x11` などは拒否） |
+  | （レジスタの受動読み出し） | — | コマンドではない。ALTSTATUS（0xA05F7018、CDB フェーズの `cdbst`）と GD-ROM ステータス `SECNR`（0xA05F708C、`secnr`）を**読むだけ**。書くレジスタは FEATURES・バイト数・COMMAND・DATA のまま増えない |
   | GDEMU バージョン | `52 00` | 8 バイトのバージョンを読む |
   | **GDEMU 切替（オプトイン）** | `52 82 n` | フォルダ n のイメージをマウントする。openMenu がゲームを起動するときと同じ。設定で `switch=on` のときだけ許可 |
   | IDENTIFY PACKET DEVICE（オプトイン） | ATA 0xA1 | 機器の識別文字列（GD-ROM は 80 バイトを返す）。設定で `identify=on` のときだけ |
@@ -176,6 +177,13 @@ img=3 probe=HASH fad=45150 ssz=2048 crc=0badf00d
 - `status` / `err` / `irr` = ATA のステータス、エラー、割り込み理由レジスタ（`err` の上位 4 ビット = センスキー）。
 - `bytes` = ドライブが返した実際のバイト数、`data` = その先頭（最大 512 バイト、16 進）。`us` = PACKET コマンドから完了までのマイクロ秒。
 - `SW_POLL` の `sense=キー/ASC/ASCQ`（`none` = エラーなし）。変化したときだけ書く。
+- **受動的な観測（R137 a・b）**：PACKET 経由の行には、`bytes=` の次に次の 2 つが付く。ハードウェアの転送層（`gdraw.c`）だけが付ける（古い記録・ホストテストの偽ドライブには無い）。
+  - `cdbst=0x58`：CDB フェーズ（PACKET の後に DRQ が立った瞬間）の ALTSTATUS。DRQ を見つけた読み出しそのものの値で、追加のバスアクセスは無い。
+    直前の CHECK の後でも純正が 0x58（DRDY あり）か 0x18（DRDY なし）かが分かる（NetGD は CHECK を 0x11 にするので 0x18 に見える疑い、R137 a）。
+  - `secnr=0x82`：GD-ROM の「セクタ番号」ステータスレジスタ（0xA05F708C）をコマンド完了時に読んだ値。下位ニブル = ドライブの状態、上位ニブル = ディスク形式。
+    KOS `g1ata.c:90` の `G1_ATA_LBA_LOW`（= `G1_ATA_CHS_SECTOR`、Read/Write）と同じアドレスだが、**読むだけ**で書かない（読んでも割り込みは消えない）。
+    `SW_POLL` 行にも付き、**`secnr` だけが変わった場合も状態変化として 1 行書く**（R137 b）。
+  - `compare.py` は `cdbst` / `secnr` を**両方の記録にあるときだけ**比べる（古い記録との比較は差分にならない）。
 - `HASH` = 読んだセクタごとの CRC-32（`ssz` = 1 セクタのバイト数。2048 = ユーザーデータ、2352 = 生セクタ）。
 
 ## 比較（`compare.py`、Python 3 標準ライブラリのみ）
@@ -222,7 +230,7 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 | `hash.c/.h` | CRC-32（`zlib.crc32` と同じ） | あり |
 | `cfg.c/.h` | 設定ファイルの解析 | あり |
 | `compare.py` | 比較・イメージ照合 | あり（合成の記録と GDI） |
-| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` | ビルド、dc_auto のプリセット、設定の雛形 | — |
+| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` / `gdprobe.cfg.r137.example`（R137 の実行用） | ビルド、dc_auto のプリセット、設定の雛形 | — |
 | `tests/` | `sh tests/run_tests.sh`（gcc と python が要る。make は不要） | — |
 
 ## ホストテストでできていないこと（実機で最初に確認すること）
@@ -270,3 +278,28 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 5. `python compare.py --image <GDI> --img 0 rec.txt` で `hashes: N match, 0 mismatch`。 **［済：R119・R120。`--manifest` で HASH 1,050 / 1,056 / 2,098 件が全一致、不一致 0］**
 6. ここまで良ければ `switch=on` と `images=` を有効にし、**最初は `images=3` だけ**で、`SW_RESULT` と READY までの時間を確認してから全フォルダ（`3,4,5,6,7`、`return_to=2`）に広げる。 **［済：R119（`images=3` → `3,4,5,6,7`）。READY までは約 0.33〜0.35 秒（`open_time`・`detect_time` が 150 / 150 のとき。R129・R135 で INI 依存と判明）］**
 7. 純正での記録を、`docs/research/probe-records/` に置く（チャットに渡してもよい）。 **［済：`stock_20261121_01`〜`stock_20261122_11`］**
+
+## R137 の実行計画（a・b・g を 1 回の純正実行で測る）
+
+**状態：用意しただけ。実機では未実行。** 結果は実機の記録を見てから書く（LOG R137 の項目 a・b・g）。
+
+準備：
+
+1. `python tools/mksdcard/mksdcard.py E:\variants_out --set variants`（`08`・`09`・`10`。`10` は約 10.8 MB。`--small` なら約 4 MB）を作り、
+   `python tools/mksdcard/verify.py E:\variants_out` で表が一致し「Mode 1 sectors」と出ることを確かめる。
+2. SD カードの既存の `01`〜`07` の横に **`10` だけ**をコピーする（`08`・`09` は今回は不要）。ファイルサイズを確認する（途中で切れたイメージは結果を壊す）。
+3. `gdprobe.cfg.r137.example` を `host\gdprobe.cfg` にコピーして `label=` を確認する。`switch=on`、`images=4,10,3,7`、`return_to=2`、`cdread_flags_test=on`。
+   **まず `switch=off` で 1 回**走らせる流れは今までどおり（安全のルール参照）。今回の追加はレジスタの読み出しだけなので、書くレジスタは増えない。
+4. 実行は 1 回ずつ（`dc_auto.ps1 -Preset ...\profiles\gdprobe.ps1`）。記録は `host\gdprobe_stock_*.txt`。
+
+見るところ：
+
+| 項目 | 記録のどこを見るか | 読み方 |
+|---|---|---|
+| **a** CDB フェーズの status | 各行の `cdbst=`。とくに `TUR_W0`（起動直後の CHECK の後）と、`rc=check` の行の**次の行**の `cdbst` | 純正が 0x58 なら DRDY が立っている（NetGD は 0x18 に見える疑い）。0x18 なら純正も同じ。全行が同じ値か、直前の結果で変わるかも見る |
+| **b** SECNR | `SW_POLL` 行の `secnr=`（`img=4`・`10`・`3`・`7` の切替中。変化のたびに 1 行）と、各プローブ行の `secnr=` | 切替中の値の並び（OPEN 6 / BUSY 0 / NODISC 7 などの下位ニブル、上位ニブル = ディスク形式）と、空フォルダ `07` での値。READY になったときの値。R126 の推測との違いを見る |
+| **g** Mode 1 の CDI | `img=10` の `CDREAD_FLAGS` 行（`flags=0x20` / `0x24` / `0x28` / `0x10`）を `img=4`（Mode 2 Form 1 の CDI）・`img=3`（GDI）と並べる | `0x24` が `rc=ok`・`0x28` が `rc=check`（`sense=5/64/00`）なら、純正は CDI かどうかでなく**トラックのモード**で検査している（NetGD の `is_cdi` 判定は誤り）。`0x24` も `0x28` も通る／`0x24` が `check` で `0x28` が通るなら、CDI なら Mode 2 として扱う。`ssz` と `crc`（`compare.py --manifest <variants_out>\NETGD-PROBE-MANIFEST.json 記録` で照合）も見る |
+
+記録の照合：`python compare.py --manifest E:\variants_out\NETGD-PROBE-MANIFEST.json host\gdprobe_stock_....txt`（`img=10` の `HASH` と `CDREAD_FLAGS` が再計算で照合される。
+03〜06 を同じ記録で照合するときは、通常カードのマニフェストを別に渡す）。
+

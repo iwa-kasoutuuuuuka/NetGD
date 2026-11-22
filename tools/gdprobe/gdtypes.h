@@ -24,6 +24,13 @@ typedef struct {
     uint32_t total;    /* bytes the drive sent in the data-in phase */
     uint32_t stored;   /* bytes that fit in the caller's buffer */
     uint64_t us;       /* time from PACKET command to completion, microseconds */
+    /* Passive observations (R137 a, b); the has_* flag says whether the transport filled the value
+     * (the host fake drive may leave them out, then the record omits the field). */
+    uint8_t cdbst;     /* ALTSTATUS at the moment DRQ was seen for the CDB (PACKET only) */
+    uint8_t has_cdbst;
+    uint8_t secnr;     /* GD-ROM "sector number" status register 0xA05F708C at completion:
+                          low nibble = drive status, high nibble = disc format */
+    uint8_t has_secnr;
 } gd_result;
 
 /* The transport the runner uses. gdraw.c implements it on real hardware; the

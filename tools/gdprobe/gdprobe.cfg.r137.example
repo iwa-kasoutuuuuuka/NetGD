@@ -1,0 +1,25 @@
+# gdprobe run configuration for the R137 hardware probe (a, b, g). Copy to <host folder>/gdprobe.cfg.
+# Needs the variant images on the SD card:  python tools/mksdcard/mksdcard.py OUT --set variants
+# and copy OUT/10 (and 08, 09 if wanted) next to the normal card's 01-07. See README_ja.md, "R137 の実行計画".
+
+label=stock
+
+# image switching: 4 = the Mode 2 Form 1 CDI (baseline), 10 = the Mode 1 CDI (the question), 3 = the GDI (baseline),
+# 7 = the empty folder (b: SECNR in the SW_POLL lines of a failed switch). Back to the dcload-ip disc at the end.
+switch=on
+images=4,10,3,7
+return_to=2
+switch_timeout_ms=15000
+
+# CD_READ byte 1 = 0x20 / 0x24 / 0x28 / 0x10 on the IP sector of every image (g)
+cdread_flags_test=on
+# image 10's data track starts at FAD 11852 like 04's; REQ_SES(2) normally finds it, this is the fallback
+# ip_fad=11852
+
+# the usual per-image battery (a and b are recorded in every probe line, no setting needed)
+throughput=on
+tp_batches=16
+tp_sectors=16
+seek=on
+seek_n=8
+identify=off

@@ -22,6 +22,10 @@
 #define GD_ERROR        0xA05F7084u /* read */
 #define GD_FEATURES     0xA05F7084u /* write */
 #define GD_IRQ_REASON   0xA05F7088u /* read */
+/* Read-only here. KOS g1ata.c:90 calls it G1_ATA_LBA_LOW / G1_ATA_CHS_SECTOR (0xA05F708C, Read/Write);
+ * on the GD-ROM interface it is the "sector number" register: low nibble = drive status, high nibble =
+ * disc format. Reading it has no side effect; gdprobe never writes it. */
+#define GD_SECNR        0xA05F708Cu /* read */
 #define GD_LBA_MID      0xA05F7090u /* byte count low  */
 #define GD_LBA_HIGH     0xA05F7094u /* byte count high */
 #define GD_STATUS       0xA05F709Cu /* read; reading clears the interrupt */
@@ -115,12 +119,14 @@ static int wait_drq(uint64_t deadline)
  * previous command's CHECK bit, and PACKET itself never ends in ERR before the
  * CDB phase. Treating that stale ERR as a failure would leave the device
  * waiting for a CDB that never comes. openMenu also waits for DRQ only. */
-static int wait_pkt_drq(uint64_t deadline)
+static int wait_pkt_drq(uint64_t deadline, uint8_t *seen)
 {
     for (;;) {
         uint8_t s = IN8(GD_ALTSTATUS);
-        if (!(s & SR_BSY) && (s & SR_DRQ))
+        if (!(s & SR_BSY) && (s & SR_DRQ)) {
+            *seen = s;      /* the very read that saw DRQ: no extra bus access (R137 a) */
             return 1;
+        }
         if (now_us() >= deadline)
             return 0;
     }
@@ -172,8 +178,9 @@ static int gd_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     OUT8(GD_COMMAND, ATAPI_PACKET);
     settle();
 
-    if (!wait_pkt_drq(deadline)) { r->rc = GD_TIMEOUT; r->status = IN8(GD_ALTSTATUS); goto done; }
+    if (!wait_pkt_drq(deadline, &r->cdbst)) { r->rc = GD_TIMEOUT; r->status = IN8(GD_ALTSTATUS); goto done; }
 
+    r->has_cdbst = 1;
     (void)IN32(GD_STATUS);
     for (i = 0; i < 6; i++)
         OUT16(GD_DATA, (uint16_t)(cdb[2 * i] | (cdb[2 * i + 1] << 8)));
@@ -211,6 +218,8 @@ static int gd_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     r->status = st;
 done:
     r->irr = IN8(GD_IRQ_REASON);
+    r->secnr = IN8(GD_SECNR);       /* passive read (R137 b) */
+    r->has_secnr = 1;
     r->total = total;
     r->stored = total < cap ? total : cap;
     r->us = now_us() - t0;
@@ -264,6 +273,8 @@ static int gd_identify(void *ctx, uint8_t *buf, uint32_t timeout_ms, gd_result *
     }
 done:
     r->irr = IN8(GD_IRQ_REASON);
+    r->secnr = IN8(GD_SECNR);       /* passive read (R137 b) */
+    r->has_secnr = 1;
     r->us = now_us() - t0;
     bus_unlock();
     return r->rc;

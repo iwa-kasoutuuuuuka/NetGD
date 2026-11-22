@@ -118,6 +118,9 @@ FIELDS_EXACT = ('rc', 'status', 'err', 'irr', 'bytes')
 # fields of event lines that are timings (compared by ratio, never as exact differences)
 TIMING_FIELDS = ('us', 't_ms', 'poll', 'polls', 'changes', 'min_us', 'max_us', 'kib_s')
 NO_COMPARE = ('img', 'probe', '_line', 'cdb', 'data')
+# fields added later (cdbst = ALTSTATUS in the CDB phase, secnr = GD-ROM sector-number status register): compared
+# only when BOTH records have them, so older records still compare cleanly
+OPTIONAL_FIELDS = ('cdbst', 'secnr')
 
 
 def diff_hex(a, b, limit=8):
@@ -175,6 +178,8 @@ def compare_records(ea, eb, ratio_limit=TIMING_RATIO_DEFAULT, ignore_timing=Fals
             parts.append('data differs (%s)' % '; '.join(diff_hex(da, db)))
         # free-form event fields (n=, ready=, sense=, ok=, abort= ...) except timings
         for f in sorted((set(a) | set(b)) - set(NO_COMPARE) - set(FIELDS_EXACT) - set(TIMING_FIELDS) - {'us'}):
+            if f in OPTIONAL_FIELDS and (f not in a or f not in b):
+                continue
             if a.get(f) != b.get(f):
                 parts.append('%s %s vs %s' % (f, a.get(f), b.get(f)))
         if parts:

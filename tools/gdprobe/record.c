@@ -75,6 +75,10 @@ size_t rec_probe_line(char *out, size_t cap, const rec_probe *p)
     pos = put(out, cap, pos, " rc=%s status=0x%02x err=0x%02x irr=0x%02x bytes=%lu",
               rec_rc_name(p->res->rc), p->res->status, p->res->error, p->res->irr,
               (unsigned long)p->res->total);
+    if (p->res->has_cdbst)
+        pos = put(out, cap, pos, " cdbst=0x%02x", p->res->cdbst);
+    if (p->res->has_secnr)
+        pos = put(out, cap, pos, " secnr=0x%02x", p->res->secnr);
     n = p->res->stored;
     if (!p->data)
         n = 0;

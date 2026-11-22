@@ -32,6 +32,27 @@ def expected_rows(entry):
     return rows
 
 
+def check_mode1_cdi(path, entry):
+    """Image 10 (R137 g): the CDI's data track must hold raw 2352-byte Mode 1 sectors (sync, mode byte 1 at
+    offset 15, the generator's user data at 16). The parser table alone cannot tell Mode 1 from Mode 2."""
+    sys.path.insert(0, HERE)
+    import mksdcard
+    problems = []
+    with open(path, 'rb') as f:
+        for t in entry['tracks']:
+            if t.get('form') != 'cdi_mode1_2352':
+                continue
+            for i in (0, 1, t['sector_count'] - 1):
+                f.seek(t['file_offset'] + i * 2352)
+                s = f.read(2352)
+                lba = t['start_lba'] + i
+                if s[0:12] != mksdcard.SYNC or s[15] != 1:
+                    problems.append('track %d sector %d: no Mode 1 sync/header (mode byte %d)' % (t['number'], i, s[15]))
+                elif s != mksdcard.sector_for(t, lba, 2352)[0]:
+                    problems.append('track %d sector %d: differs from the generator' % (t['number'], i))
+    return problems
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('outdir')
@@ -55,7 +76,12 @@ def main(argv=None):
             bad += 1
             print('MISMATCH\n  parser:   %s\n  manifest: %s' % (got, want))
         else:
-            print('OK (matches manifest)')
+            extra = check_mode1_cdi(path, e) if e['format'] == 'cdi' else []
+            if extra:
+                bad += 1
+                print('MISMATCH (Mode 1 content)\n  ' + '\n  '.join(extra))
+            else:
+                print('OK (matches manifest)' + (' + Mode 1 sectors' if any(t.get('form') == 'cdi_mode1_2352' for t in e['tracks']) else ''))
     return 1 if bad else 0
 
 
