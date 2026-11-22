@@ -551,13 +551,32 @@ impl IdeDevice {
     /// Set the GD-ROM "SECNR" byte the host reads back in Sector Count
     /// after a command: disc type in the high nibble, drive status low.
     /// Lives in the LBA_LOW slot's low byte; the byte-count half is kept.
+    ///
+    /// The FPGA has no byte lanes on this slot: an MCU write stores both
+    /// `lba_low` and `lba_mid` (`fpga/amaranth/hw/ide_device.py`, slot 6),
+    /// and `lba_mid` is also where the host writes BYTE COUNT LOW before a
+    /// PACKET command. So this is a read-modify-write, and a host write
+    /// landing between the read and the write is lost (the next command then
+    /// reads a stale byte-count limit). Callers that run while the bus is
+    /// idle (`ide_task`'s swap-window timer, `cdda`'s end of play) can meet
+    /// one. The pair runs with interrupts off so the gap is two back-to-back
+    /// bus cycles rather than whatever an interrupt in between costs; closing
+    /// it needs a low-byte-only MCU write in the FPGA, as slot 5 has.
     pub fn set_secnr(&self, v: u8) {
-        let low_mid = self.read(REG_LBA_LOW_MID) & 0xFF00;
-        self.write(REG_LBA_LOW_MID, low_mid | v as u16);
+        critical_section::with(|_| {
+            let low_mid = self.read(REG_LBA_LOW_MID) & 0xFF00;
+            self.write(REG_LBA_LOW_MID, low_mid | v as u16);
+        });
+    }
+
+    /// The SECNR byte currently latched (LBA_LOW).
+    fn secnr_now(&self) -> u8 {
+        self.read(REG_LBA_LOW_MID) as u8
     }
 
     /// Re-apply the mounted disc's format to SECNR, keeping the drive status
-    /// nibble that is currently latched.
+    /// nibble that is currently latched -- or, with no medium, NO DISC `0x07`
+    /// (`discimg::atapi::reset_secnr`).
     ///
     /// The FPGA's registers reset to a fixed GD-ROM signature -- LBA_LOW is
     /// `8'h81` in `fpga/amaranth/out/OpenGDEMUCore.v`, reloaded by its reset
@@ -566,12 +585,13 @@ impl IdeDevice {
     /// otherwise only written at `ide_task` startup and by DEVICE RESET, and a
     /// host *bus* reset is neither. The console then saw a disc that had
     /// announced itself as a CD go back to claiming GD-ROM mid-boot, which is
-    /// the contradiction it refuses to boot across. Only the format nibble is
-    /// touched, because the status nibble is the FPGA's to choose.
+    /// the contradiction it refuses to boot across. With a medium only the
+    /// format nibble is touched, because the status nibble is the FPGA's to
+    /// choose. With none the FPGA's reloaded `0x81` (or an EJECT's stale
+    /// `fmt|1`) would claim a disc: stock shows `0x07`, as start-up and
+    /// DEVICE RESET write (`rest_secnr`).
     fn reassert_disc_format(&self) {
-        let low_mid = self.read(REG_LBA_LOW_MID);
-        let status = (low_mid & 0x0F) as u8;
-        self.write(REG_LBA_LOW_MID, (low_mid & 0xFF00) | (disc_format() | status) as u16);
+        self.set_secnr(discimg::atapi::reset_secnr(media_present(), disc_format(), self.secnr_now()));
     }
 
     /// Words in the write FIFO (host -> MCU), for "has the host sent enough".
@@ -821,8 +841,12 @@ pub async fn ide_task(
         if !woke {
             // Only SECNR. Closing the window and its UNIT ATTENTION stay with
             // the next command (`drive_not_ready`), which writes the same byte.
+            // Skipped when the byte is already right: each write is a
+            // read-modify-write of the host's byte count (`set_secnr`).
             if let Some(v) = window_secnr() {
-                primary.set_secnr(v);
+                if primary.secnr_now() != v {
+                    primary.set_secnr(v);
+                }
             }
             continue;
         }
@@ -963,8 +987,8 @@ async fn sweep(
                     Some(v) => dev.set_secnr(v),
                     None => dev.reassert_disc_format(),
                 }
-                info!("{}: disc format re-asserted after reset: SECNR low nibble kept, fmt={:#04x}",
-                      label, disc_format());
+                info!("{}: disc format re-asserted after reset: SECNR={:#04x}",
+                      label, dev.secnr_now());
             }
         }
         // Mirror command snapshot to UART — defmt/RTT goes away when
@@ -1472,7 +1496,8 @@ fn cancel_swap_window(state: &mut DeviceState) {
     if st == discimg::atapi::DRIVE_OPEN || st == discimg::atapi::DRIVE_BUSY {
         dev.set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Done, medium, mounted_disc_format()));
     } else {
-        // Whatever the status, the format nibble was held at 0 in the window.
+        // Whatever the status, the format nibble was held at 0 in the window;
+        // with no medium left (EJECT, write session) NO DISC 0x07.
         dev.reassert_disc_format();
     }
 }

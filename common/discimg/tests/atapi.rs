@@ -969,6 +969,22 @@ fn secnr_through_the_swap_window() {
 }
 
 #[test]
+fn secnr_after_a_bus_reset() {
+    // No medium: NO DISC, format 0, whatever the FPGA reloaded (0x81) or an
+    // EJECT left behind (the old image's format | 1).
+    for latched in [0x81, 0x21, 0x11, 0x01, 0x07] {
+        for fmt in [DISC_FORMAT_GDROM, DISC_FORMAT_CDROM_XA, 0] {
+            assert_eq!(reset_secnr(false, fmt, latched), DRIVE_NODISC);
+        }
+    }
+    // A medium: its format, the latched status nibble kept.
+    assert_eq!(reset_secnr(true, DISC_FORMAT_GDROM, 0x81), 0x81);
+    assert_eq!(reset_secnr(true, DISC_FORMAT_CDROM_XA, 0x81), 0x21);
+    assert_eq!(reset_secnr(true, DISC_FORMAT_CDROM, 0x81), 0x11);
+    assert_eq!(reset_secnr(true, DISC_FORMAT_CDROM_XA, 0x02), 0x22);
+}
+
+#[test]
 fn raw_sector_reads_follow_the_stock_records() {
     // D10: data select 0x1_ is a raw read; 0x20 and friends are not.
     assert!(cd_read_wants_raw(0x10));
