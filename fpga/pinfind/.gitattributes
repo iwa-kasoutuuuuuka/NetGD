@@ -1,0 +1,6 @@
+# build.sh runs inside WSL/Linux and the generated files are read there:
+# keep LF in the working tree even with core.autocrlf=true (as fpga/agm).
+*.sh  text eol=lf
+*.py  text eol=lf
+*.v   text eol=lf
+*.txt text eol=lf
