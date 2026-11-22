@@ -919,16 +919,22 @@ fn regpoll_line(o: &mut Out, altst: u8, err: u8, irr: u8, secnr: Option<u8>) {
 /// `52 82` completed with (ALTSTATUS 0x50, IRR 3, ERROR the last CHECK's -- sticky --) and SECNR walks the window (ide.rs
 /// `show_window_open`, then `ide_task`'s timer): the old byte, `0x06`, `0x00`, the final one. Ends with the window over.
 ///
-/// Order: `gdemu_mount_staged` completes the command (`finish_ok`: status 0x50, INTRQ, SECNR still the old byte) and
-/// only then writes the window's `0x06` (stock's order, R155 / R159-R161). The old byte is therefore the state at
-/// completion; how long it stays visible is not modelled (NetGD writes `0x06` microseconds after the completion,
-/// stock a few ms), so a poll that starts 1 ms later may already see `0x06` first.
+/// Order: for an image `gdemu_mount_staged` completes the command (`finish_ok`: status 0x50, INTRQ, SECNR still the
+/// old byte) and only then writes the window's `0x06` (stock's order, R155 / R159-R161). The old byte is therefore the
+/// state at completion; how long it stays visible is not modelled (NetGD writes `0x06` microseconds after the
+/// completion, stock a few ms), so a poll that starts 1 ms later may already see `0x06` first. For the empty folder /
+/// no medium it writes `0x06` before completing (stock shows `0x06` at the first sample, records 15-18), so the poll
+/// starts at `0x06`.
 fn regpoll_lines(o: &mut Out, rp: &RegPoll, medium: bool, disc_format: u8) {
     use atapi::SwapPhase::*;
     let _ = (rp.open_ms, rp.detect_ms);
     let mut last = o.secnr;
     let err = o.err_reg;
-    regpoll_line(o, 0x50, err, 0x03, last);
+    if medium {
+        regpoll_line(o, 0x50, err, 0x03, last);
+    } else {
+        last = None;
+    }
     for phase in [Open, Detect, Done] {
         let v = Some(atapi::swap_secnr(phase, medium, disc_format));
         if v != last {

@@ -3268,10 +3268,23 @@ async fn gdemu_mount_staged(dev: &IdeDevice, state: &mut DeviceState, label: &'s
     // `0x52` stages through the same buffer as MOUNT_NAME: leave nothing
     // behind for a later WSESSION_END 2 to mount.
     clear_mount_name();
-    // Stock completes the command first (status 0x50, SECNR still the old
-    // byte) and only then shows the window's 0x06 (R155, R159-R161).
-    finish_ok(dev);
-    show_window_open(ok);
+    // An image: stock completes the command first (status 0x50, SECNR still
+    // the old byte) and only then shows the window's 0x06 (R155, R159-R161;
+    // record 17: secnr 0x21 at the first sample, 0x06 at 6 ms).
+    // The empty folder / no medium (nothing loaded): stock shows 0x06 already
+    // at the first sample (record 17: 0x06 at 1 ms, 0x00 at 152 ms, 0x07 at
+    // 302 ms). Stock likely completes first in both cases, but an empty
+    // folder has nothing to load so its window byte appears <1 ms later,
+    // while an image takes ~3-6 ms to load; writing 0x06 before completing
+    // is the closest model with our timing (hypothesis from the records,
+    // not verified).
+    if !ok {
+        show_window_open(ok);
+        finish_ok(dev);
+    } else {
+        finish_ok(dev);
+        show_window_open(ok);
+    }
 }
 
 /// Sub-commands of [`OGDM_IMAGE_CTL`].
