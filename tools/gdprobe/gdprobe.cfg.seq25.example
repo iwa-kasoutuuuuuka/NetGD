@@ -1,0 +1,48 @@
+# gdprobe run configuration for seq 25: CD_READ by G1 DMA (the way games read) on the stock GDEMU, images 3, 4 and 11.
+# Questions: (1) does an odd number of 2352-byte audio sectors (7 x 2352 = 16464, not a multiple of 32) transfer by DMA, and
+# with which length (pad = rounded up to 32, exact); (2) does a DMA read move the head and leave REQ_STAT / GET_SCD like the
+# same PIO read (every DMA case is followed by the PIO read of the same range); (3) DMA vs PIO throughput.
+# Read-only: CD_READ only (whitelist), at most 16 sectors, every wait bounded, the DMA engine is always stopped and the
+# first DMA that does not complete stops all further DMA reads. See README_ja.md, "seq 25".
+
+label=stock
+seq=25
+
+# 3 = GDI (data, audio track 2), 4 = Mode 2 Form 1 CDI (audio track 1 + data), 11 = audio-only CDI
+switch=on
+images=3,4,11
+return_to=2
+switch_timeout_ms=5000
+
+# the swap-window / reset probes and everything of seq 21-24: off
+swap_regpoll=off
+swap_devreset=off
+swap_reswitch=off
+devreset_only=off
+devreset_cmd=off
+head_probe=off
+gap_probe=off
+pregap_probe=off
+ctl_probe=off
+
+# battery IP_READ with 0x20; no flag battery, throughput or seek (the DMA throughput below replaces them)
+cdread_flags=0x20
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off
+
+# seq 25
+dma_probe=on
+dma_data=on
+dma_audio=on
+dma_counts=1,2,7,16
+dma_modes=pad,exact
+dma_flags=0x20
+dma_pio_ref=on
+dma_timeout_ms=3000
+dma_late_ms=300
+dma_scd=on
+dma_throughput=on
+dma_tp_batches=64
+dma_tp_max_ms=10000

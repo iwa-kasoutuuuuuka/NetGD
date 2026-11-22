@@ -56,6 +56,18 @@ void gp_config_defaults(gp_config *c)
         c->n_pregap_offs = 8;
     }
     c->pregap_cross = 16;
+    c->dma_data = 1;
+    c->dma_counts[0] = 1; c->dma_counts[1] = 2; c->dma_counts[2] = 7; c->dma_counts[3] = 16;
+    c->n_dma_counts = 4;
+    c->dma_mode_list[0] = GP_DMA_PAD; c->dma_mode_list[1] = GP_DMA_EXACT;
+    c->n_dma_modes = 2;
+    c->dma_flags = 0x20;
+    c->dma_pio_ref = 1;
+    c->dma_timeout_ms = 3000;
+    c->dma_late_ms = 300;
+    c->dma_scd = 1;
+    c->dma_tp_batches = 64;
+    c->dma_tp_max_ms = 10000;
 }
 
 static int parse_bool(const char *v, int *out)
@@ -201,6 +213,33 @@ static void apply(gp_config *c, const char *k, char *v)
         else if (!strcmp(v, "off")) c->risky_cross = GP_RISKY_OFF;
         else ok = 0;
     } else if (!strcmp(k, "ctl_probe")) { if (parse_bool(v, &b)) c->ctl_probe = b; else ok = 0;
+    } else if (!strcmp(k, "dma_probe")) { if (parse_bool(v, &b)) c->dma_probe = b; else ok = 0;
+    } else if (!strcmp(k, "dma_data")) { if (parse_bool(v, &b)) c->dma_data = b; else ok = 0;
+    } else if (!strcmp(k, "dma_audio")) { if (parse_bool(v, &b)) c->dma_audio = b; else ok = 0;
+    } else if (!strcmp(k, "dma_counts")) { ok = parse_list(c->dma_counts, &c->n_dma_counts, v, GP_MAX_DMACNT, 1, 16);
+    } else if (!strcmp(k, "dma_modes")) {
+        int m[2], nm = 0;
+        char *tok = v, *next;
+        while (tok && ok) {
+            next = strchr(tok, ',');
+            if (next) *next++ = 0;
+            while (isspace((unsigned char)*tok)) tok++;
+            trim(tok);
+            if (nm >= 2) ok = 0;
+            else if (!strcmp(tok, "pad")) m[nm++] = GP_DMA_PAD;
+            else if (!strcmp(tok, "exact")) m[nm++] = GP_DMA_EXACT;
+            else ok = 0;
+            tok = next;
+        }
+        if (ok && nm && (nm < 2 || m[0] != m[1])) { memcpy(c->dma_mode_list, m, sizeof(m)); c->n_dma_modes = nm; } else ok = 0;
+    } else if (!strcmp(k, "dma_flags")) { n = parse_num(v, &ok); if (ok) c->dma_flags = (uint8_t)(n & 0xFE);
+    } else if (!strcmp(k, "dma_pio_ref")) { if (parse_bool(v, &b)) c->dma_pio_ref = b; else ok = 0;
+    } else if (!strcmp(k, "dma_timeout_ms")) { n = parse_num(v, &ok); if (ok) c->dma_timeout_ms = (uint32_t)clampi(n, 200, 10000);
+    } else if (!strcmp(k, "dma_late_ms")) { n = parse_num(v, &ok); if (ok) c->dma_late_ms = (uint32_t)clampi(n, 0, 5000);
+    } else if (!strcmp(k, "dma_scd")) { if (parse_bool(v, &b)) c->dma_scd = b; else ok = 0;
+    } else if (!strcmp(k, "dma_throughput")) { if (parse_bool(v, &b)) c->dma_throughput = b; else ok = 0;
+    } else if (!strcmp(k, "dma_tp_batches")) { n = parse_num(v, &ok); if (ok) c->dma_tp_batches = clampi(n, 1, 256);
+    } else if (!strcmp(k, "dma_tp_max_ms")) { n = parse_num(v, &ok); if (ok) c->dma_tp_max_ms = (uint32_t)clampi(n, 1000, 30000);
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

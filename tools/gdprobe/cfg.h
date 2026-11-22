@@ -91,6 +91,25 @@
  *                          time again (GP_RISKY line flushed before each read), off = not sent (GP_RISKY_SKIP)
  *   ctl_probe=off          on = CTRL off-track cases (CTLF_* forward / CTLR_* reverse + GP_CTL lines) per region from the
  *                          TOC (GAP, HDG, LO; toc.c gp_ctl_regions); 1-sector reads only
+ *
+ * seq 25 DMA probes (default off; needs a transport with G1 DMA, i.e. the real Dreamcast; CD_READ only, read-only):
+ *   dma_probe=off          on = after each image's battery, CD_READ with the DMA feature bit (G1 DMA into RAM) of
+ *                          dma_counts sectors on the first data track (DM_D<n>_<mode>) and on the first audio track
+ *                          (DM_A<n>_<mode>), each followed by the usual REQ_STAT / GET_SCD / late REQ_STAT (DM_*_POS)
+ *                          and, with dma_pio_ref, the SAME range read by PIO (..._PIO, CRC compared) and its _POS line
+ *   dma_data=on            data-track cases      dma_audio=off   audio-track cases (7 x 2352 = 16464 is not a multiple of 32)
+ *   dma_counts=1,2,7,16    sector counts (up to 6 values, 1..16)
+ *   dma_modes=pad,exact    DMA length programmed: pad = bytes rounded up to a multiple of 32 (the G1 DMA unit),
+ *                          exact = the sector bytes as they are (only differs when they are not a multiple of 32);
+ *                          tried in this order; the first DMA that does not complete stops all further DMA cases
+ *   dma_flags=0x20         CD_READ byte 1 of the DMA reads (bit 0 forced 0; must pass the whitelist)
+ *   dma_pio_ref=on         PIO re-read of the same range after each DMA read (crc / same= compare)
+ *   dma_timeout_ms=3000    wait for the DMA to finish (200..10000)
+ *   dma_late_ms=300        late REQ_STAT delay of the _POS lines (0..5000)
+ *   dma_scd=on             GET_SCD(1) in the _POS lines
+ *   dma_throughput=off     on = dma_tp_batches DMA reads of 16 data sectors from the IP area (DM_TP_<b>, DM_TP_SUMMARY), then
+ *                          the same batches by PIO (DM_TPP_SUMMARY, crc compare); stops after dma_tp_max_ms
+ *   dma_tp_batches=64      (1..256)      dma_tp_max_ms=10000   (1000..30000)
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
@@ -104,6 +123,9 @@
 #define GP_RISKY_INLINE 0
 #define GP_RISKY_END 1
 #define GP_RISKY_OFF 2
+#define GP_MAX_DMACNT 6
+#define GP_DMA_PAD 1
+#define GP_DMA_EXACT 2
 
 typedef struct {
     char label[32];
@@ -163,6 +185,21 @@ typedef struct {
     int pregap_cross;
     int risky_cross;      /* seq 24: GP_RISKY_INLINE / _END / _OFF */
     int ctl_probe;
+    int dma_probe;        /* seq 25 */
+    int dma_data;
+    int dma_audio;
+    int dma_counts[GP_MAX_DMACNT];
+    int n_dma_counts;
+    int dma_mode_list[2]; /* GP_DMA_PAD / GP_DMA_EXACT in the order to run */
+    int n_dma_modes;
+    uint8_t dma_flags;
+    int dma_pio_ref;
+    uint32_t dma_timeout_ms;
+    uint32_t dma_late_ms;
+    int dma_scd;
+    int dma_throughput;
+    int dma_tp_batches;
+    uint32_t dma_tp_max_ms;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 

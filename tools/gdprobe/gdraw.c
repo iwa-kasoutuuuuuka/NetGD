@@ -33,6 +33,21 @@
 #define GD_COMMAND      0xA05F709Cu /* write */
 #define GD_EXT_INT_STAT 0xA05F6904u /* bit 0 = GD-ROM interrupt */
 
+/* seq 25: the G1 DMA registers, as g1ata.c / cdrom.c use them (kernel/arch/dreamcast/hardware/g1ata.c:104-118) */
+#define G1_DMA_ADDRESS   0xA05F7404u
+#define G1_DMA_LENGTH    0xA05F7408u
+#define G1_DMA_DIRECTION 0xA05F740Cu   /* 1 = to memory */
+#define G1_DMA_ENABLE    0xA05F7414u
+#define G1_DMA_STATUS    0xA05F7418u   /* write 1 = start, 0 = stop; reads 1 while a transfer runs (g1_dma_in_progress) */
+#define G1_DMA_PROT      0xA05F74B8u   /* DMA address-range protection (P2 view of 0x005F74B8) */
+#define G1_DMA_UNLOCK_SYSMEM 0x8843407Fu /* system RAM only (cdrom.c unlocks ALL memory: not needed here) */
+#define ASIC_IRQ_NRM     0xA05F6900u   /* bit 14 = GD-ROM DMA end, ASIC_EVT_GD_DMA = 0x000e */
+#define ASIC_IRQ_ERR     0xA05F6908u   /* bit 13 = GD DMA overrun (0x020d), bit 12 = illegal address (0x020c) */
+#define ASIC_GD_DMA_END  (1u << 14)
+#define ASIC_GD_OVERRUN  (1u << 13)
+#define ASIC_GD_ILLADDR  (1u << 12)
+#define DMA_GRACE_US     200000u       /* after one side (drive / DMA engine) finished: how long the other may take */
+
 #define SR_ERR  0x01
 #define SR_DRQ  0x08
 #define SR_BSY  0x80
@@ -55,6 +70,7 @@ static void bus_unlock(void) { sem_signal(&_g1_ata_sem); }
 #define IN8(a)      (*(volatile uint8_t *)(a))
 #define IN16(a)     (*(volatile uint16_t *)(a))
 #define IN32(a)     (*(volatile uint32_t *)(a))
+#define OUT32(a, v) (*(volatile uint32_t *)(a) = (v))
 #define OUT16(a, v) (*(volatile uint16_t *)(a) = (v))
 
 static uint64_t now_us(void) { return timer_us_gettime64(); }
@@ -346,6 +362,157 @@ static int gd_ata_reset(void *ctx, uint32_t timeout_ms, gd_regs *after, uint32_t
     return rc;
 }
 
+/* seq 25: CD_READ (and nothing else) with the DMA feature bit, data to RAM through the G1 DMA engine (the way the BIOS
+ * and cdrom.c do it, but with raw registers so the drive's own behaviour can be observed). Same bus lock and the same
+ * register writes as gd_packet, plus the DMA registers:
+ *   FEATURES = 1 (DMA); the DMA address / length / direction (to memory) / enable are programmed before PACKET and the
+ *   transfer is started (G1_DMA_STATUS = 1) right after the CDB was written (g1ata.c order: registers, command, start).
+ * Every wait is bounded by timeout_ms (and a 200 ms grace after one side finished). On every exit the DMA engine is
+ * stopped (STATUS = 0, ENABLE = 0), the data cache over the buffer is invalidated, the ASIC DMA bits are acknowledged
+ * and a DRQ left pending by the drive (it fell back to PIO) is drained, so the drive is idle again. The buffer must
+ * be 32-byte aligned cached RAM; the length is whatever the runner asks for (its `exact` mode is deliberately not a
+ * multiple of 32 when the sector bytes are not). */
+static int gd_packet_dma(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t buflen, uint32_t dma_len,
+                         uint32_t timeout_ms, gd_result *r, gd_dma *d)
+{
+    uint64_t t0, deadline, t_dma = 0, t_idle = 0, t_irq = 0;
+    uint8_t st = 0;
+    uint32_t total_drain = 0;
+    int i, gd_irq = 0, dma_idle = 0, finished = 0;
+    (void)ctx;
+    memset(r, 0, sizeof(*r));
+    memset(d, 0, sizeof(*d));
+    d->len_left = 0xFFFFFFFFu;
+    d->req_len = dma_len;
+    /* defence in depth: only CD_READ, only into an aligned cached-RAM buffer that holds the length */
+    if (cdb[0] != 0x30 || ((uintptr_t)buf & 31u) || (buflen & 31u) || dma_len == 0 || dma_len > buflen ||
+        ((uintptr_t)buf & 0xE0000000u) == 0xA0000000u) {
+        r->rc = GD_REFUSED;
+        return r->rc;
+    }
+    if (bus_lock()) {
+        r->rc = GD_BUSY;
+        return r->rc;
+    }
+    t0 = now_us();
+    deadline = t0 + (uint64_t)timeout_ms * 1000u;
+
+    if (!wait_clear(SR_BSY | SR_DRQ, deadline) || (IN32(G1_DMA_STATUS) & 1u)) {
+        r->rc = GD_BUSY;
+        r->status = IN8(GD_ALTSTATUS);
+        goto done;
+    }
+    (void)IN32(GD_STATUS);          /* clear a stale interrupt */
+    OUT32(ASIC_IRQ_NRM, ASIC_GD_DMA_END);                   /* clear a stale DMA-end bit (write 1 = clear) */
+    OUT32(ASIC_IRQ_ERR, ASIC_GD_OVERRUN | ASIC_GD_ILLADDR);
+    OUT32(G1_DMA_PROT, G1_DMA_UNLOCK_SYSMEM);
+    d->prot_ok = (IN32(G1_DMA_PROT) == G1_DMA_UNLOCK_SYSMEM);
+    /* the runner filled the buffer with its pattern through the cache: write it back, then drop the lines so the
+     * CPU re-reads what the DMA wrote */
+    dcache_flush_range((uintptr_t)buf, buflen);
+    dcache_inval_range((uintptr_t)buf, buflen);
+    OUT32(G1_DMA_ADDRESS, (uint32_t)((uintptr_t)buf & 0x1FFFFFFFu));
+    OUT32(G1_DMA_LENGTH, dma_len);
+    OUT32(G1_DMA_DIRECTION, 1);
+    OUT32(G1_DMA_ENABLE, 1);
+
+    OUT8(GD_FEATURES, 1);           /* DMA */
+    OUT8(GD_LBA_MID, BYTE_LIMIT & 0xFF);
+    OUT8(GD_LBA_HIGH, BYTE_LIMIT >> 8);
+    OUT8(GD_COMMAND, ATAPI_PACKET);
+    settle();
+    if (!wait_pkt_drq(deadline, &r->cdbst)) {
+        r->rc = GD_TIMEOUT;
+        r->status = IN8(GD_ALTSTATUS);
+        goto done;
+    }
+    r->has_cdbst = 1;
+    (void)IN32(GD_STATUS);
+    for (i = 0; i < 6; i++)
+        OUT16(GD_DATA, (uint16_t)(cdb[2 * i] | (cdb[2 * i + 1] << 8)));
+    t_dma = now_us();
+    OUT32(G1_DMA_STATUS, 1);        /* start */
+
+    /* wait for the DMA engine to go idle and for the drive to complete (interrupt, BSY clear) */
+    for (;;) {
+        uint64_t t = now_us();
+        if (!dma_idle && !(IN32(G1_DMA_STATUS) & 1u)) {
+            dma_idle = 1;
+            t_idle = t;
+            d->done = 1;
+            d->us_dma = (uint32_t)(t - t_dma);
+            if (!d->first) d->first = 'd';
+        }
+        if (!gd_irq && (IN32(GD_EXT_INT_STAT) & 1u)) {
+            gd_irq = 1;
+            t_irq = t;
+            if (!d->first) d->first = 'g';
+        }
+        if (dma_idle && gd_irq && !(IN8(GD_ALTSTATUS) & SR_BSY)) { finished = 1; break; }
+        if (dma_idle && t - t_idle >= DMA_GRACE_US && !(IN8(GD_ALTSTATUS) & SR_BSY)) { finished = 1; break; } /* no irq */
+        if (gd_irq && t - t_irq >= DMA_GRACE_US && !(IN8(GD_ALTSTATUS) & SR_BSY)) { finished = 1; break; }   /* DMA never idle */
+        if (t >= deadline)
+            break;
+    }
+    if (!dma_idle)
+        d->aborted = 1;             /* the engine is still waiting for data (or never got any): stopped below */
+done:
+    /* always: stop the engine, then look at what it left */
+    OUT32(G1_DMA_STATUS, 0);
+    d->dma_st_end = (uint8_t)IN32(G1_DMA_STATUS);
+    d->len_left = IN32(G1_DMA_LENGTH);
+    d->addr_after = IN32(G1_DMA_ADDRESS);
+    OUT32(G1_DMA_ENABLE, 0);
+    {
+        uint32_t nrm = IN32(ASIC_IRQ_NRM), er = IN32(ASIC_IRQ_ERR);
+        d->asic_nrm = (uint8_t)((nrm & ASIC_GD_DMA_END) ? 1 : 0);
+        d->asic_err = (uint8_t)(((er & ASIC_GD_OVERRUN) ? 1 : 0) | ((er & ASIC_GD_ILLADDR) ? 2 : 0));
+        OUT32(ASIC_IRQ_NRM, ASIC_GD_DMA_END);
+        OUT32(ASIC_IRQ_ERR, ASIC_GD_OVERRUN | ASIC_GD_ILLADDR);
+    }
+    dcache_inval_range((uintptr_t)buf, buflen);
+    if (r->rc == GD_OK && finished) {
+        st = IN8(GD_STATUS);        /* also clears the interrupt */
+        r->status = st;
+        if (st & SR_ERR) {
+            r->error = IN8(GD_ERROR);
+            r->rc = GD_CHECK;
+        } else if (st & SR_DRQ) {
+            /* the drive wants PIO after all: drain it (bounded) so that it is idle again */
+            uint32_t n = IN8(GD_LBA_MID) | ((uint32_t)IN8(GD_LBA_HIGH) << 8), w;
+            while ((st & SR_DRQ) && n && total_drain < MAX_TOTAL) {
+                for (w = 0; w < (n + 1) / 2; w++)
+                    (void)IN16(GD_DATA);
+                total_drain += n;
+                if (!wait_irq(now_us() + 200000u) || !wait_clear(SR_BSY, now_us() + 200000u))
+                    break;
+                st = IN8(GD_STATUS);
+                n = IN8(GD_LBA_MID) | ((uint32_t)IN8(GD_LBA_HIGH) << 8);
+            }
+            d->drain = total_drain;
+            r->status = st;
+            r->rc = GD_PROTO;
+        } else if (!dma_idle) {
+            r->rc = GD_PROTO;       /* the drive completed without error but the DMA never ran / finished */
+        }
+    } else if (r->rc == GD_OK) {
+        /* no completion before the deadline: a last bounded chance for the drive to go idle, nothing else */
+        r->rc = GD_TIMEOUT;
+        r->status = IN8(GD_ALTSTATUS);
+        (void)wait_clear(SR_BSY, now_us() + 200000u);
+        (void)IN32(GD_STATUS);
+    }
+    d->bcl = IN8(GD_LBA_MID);
+    d->bch = IN8(GD_LBA_HIGH);
+    r->irr = IN8(GD_IRQ_REASON);
+    r->secnr = IN8(GD_SECNR);
+    r->has_secnr = 1;
+    r->us = now_us() - t0;
+    OUT8(GD_FEATURES, 0);           /* leave the feature register in PIO mode */
+    bus_unlock();
+    return r->rc;
+}
+
 /* Busy-wait on the CPU timer only: no bus access. */
 static void op_spin(void *ctx, uint32_t us)
 {
@@ -370,4 +537,5 @@ void gdraw_get_ops(gd_ops *ops)
     ops->regs = gd_regs_op;
     ops->ata_reset = gd_ata_reset;
     ops->spin_us = op_spin;
+    ops->packet_dma = gd_packet_dma;
 }

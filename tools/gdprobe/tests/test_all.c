@@ -352,6 +352,10 @@ typedef struct {
     /* seq 24: on this folder a multi-sector read that starts readable and runs past the readable end sends the
      * readable sectors and then never completes (stock at XEND, record 23): the drive stays stuck */
     int hang_folder;
+    /* seq 25: DMA model. 0 = writes min(bytes, dma_len); 1 = drops the tail of an unaligned length (multiple of 32);
+     * 2 = an unaligned length never completes; 3 = corrupts one byte; 4 = no DMA ever completes */
+    int dma_model, dma_calls, dma_nonread, no_dma;
+    uint32_t dma_max_len;
 } fake;
 
 static int f_edge(const fake *f) { return f->mounted && (f->mounted == f->cdi_folder || f->mounted == f->gdi_folder); }
@@ -630,6 +634,43 @@ static int f_reset(void *ctx, uint32_t timeout_ms, gd_regs *after, uint32_t *us,
     f_regs(ctx, after);
     return GD_OK;
 }
+static int f_dma(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t buflen, uint32_t dma_len, uint32_t timeout_ms,
+                 gd_result *r, gd_dma *d)
+{
+    fake *f = ctx;
+    static uint8_t tmp[40000];
+    uint32_t w;
+    memset(d, 0, sizeof(*d));
+    d->req_len = dma_len; d->len_left = 0xFFFFFFFFu;
+    CHECK(((uintptr_t)buf & 31u) == 0 && (buflen & 31u) == 0 && dma_len <= buflen);
+    if (cdb[0] != 0x30) {
+        f->dma_nonread++;
+        memset(r, 0, sizeof(*r)); r->rc = GD_REFUSED;
+        return r->rc;
+    }
+    f->dma_calls++;
+    if (dma_len > f->dma_max_len) f->dma_max_len = dma_len;
+    f_packet(ctx, cdb, tmp, sizeof(tmp), timeout_ms, r);
+    if (r->rc != GD_OK)
+        return r->rc;
+    if (f->dma_model == 4 || (f->dma_model == 2 && (dma_len % 32))) {
+        f->now += (uint64_t)timeout_ms * 1000u;
+        r->rc = GD_TIMEOUT; r->us = (uint64_t)timeout_ms * 1000u; r->status = 0x58;
+        d->aborted = 1; d->first = 'g'; d->dma_st_end = 1; d->len_left = dma_len;
+        r->total = r->stored = 0;
+        return r->rc;
+    }
+    w = r->total < dma_len ? r->total : dma_len;
+    if (f->dma_model == 1 && (dma_len % 32))
+        w &= ~31u;
+    memcpy(buf, tmp, w);
+    if (f->dma_model == 3 && w)
+        buf[w / 2] ^= 0x5A;
+    d->done = 1; d->first = 'd'; d->us_dma = 1000 + w / 8; d->len_left = dma_len - w; d->prot_ok = 1; d->asic_nrm = 1;
+    d->addr_after = 0x0C100000u + w; d->bcl = 0; d->bch = 8;
+    r->total = r->stored = 0;
+    return r->rc;
+}
 static void f_spin(void *ctx, uint32_t us) { fake *f = ctx; if (!f->frozen_clock) f->now += us; }
 static uint64_t f_now(void *ctx) { return ((fake *)ctx)->now; }
 static void f_sleep(void *ctx, uint32_t ms) { ((fake *)ctx)->now += (uint64_t)ms * 1000u; }
@@ -650,7 +691,8 @@ static void s_sync(void *ctx) { (void)ctx; g_syncs++; }
 
 static int run_fake(fake *f, const gp_config *cfg)
 {
-    gd_ops ops = { f, f_packet, f_identify, f_now, f_sleep, NULL, f_regs, f_reset, f_spin };
+    gd_ops ops = { f, f_packet, f_identify, f_now, f_sleep, NULL, f_regs, f_reset, f_spin, f_dma };
+    if (f->no_dma) ops.packet_dma = NULL;
     if (f->no_r148_ops) { ops.regs = NULL; ops.ata_reset = NULL; ops.spin_us = NULL; }
     gp_sink sink = { NULL, s_line, s_sync };
     g_rec_len = 0; g_rec[0] = 0; g_syncs = 0; g_hash_lines = 0;
@@ -1964,6 +2006,187 @@ static void test_runner_seq24(void)
     CHECK(run_fake(&f, &c) == 0 && find_line("img=4 probe=GP_XEND ") && !find_line("GP_RISKY"));
 }
 
+/* ------------------------------------------------------- seq 25: DMA reads */
+static void test_runner_seq25(void)
+{
+    static fake f;
+    gp_config c;
+    uint8_t cdb[12];
+    const char *l;
+    int op, i;
+
+    /* config */
+    gp_config_defaults(&c);
+    CHECK(!c.dma_probe && c.dma_data && !c.dma_audio && c.n_dma_counts == 4 && c.dma_counts[3] == 16 && c.n_dma_modes == 2);
+    CHECK(c.dma_mode_list[0] == GP_DMA_PAD && c.dma_mode_list[1] == GP_DMA_EXACT && c.dma_flags == 0x20 && c.dma_pio_ref);
+    CHECK(c.dma_timeout_ms == 3000 && c.dma_late_ms == 300 && c.dma_scd && !c.dma_throughput && c.dma_tp_batches == 64);
+    gp_config_parse(&c, "dma_probe=on\ndma_audio=on\ndma_counts=7, 3\ndma_modes=exact\ndma_flags=0x29\ndma_timeout_ms=1\n"
+                        "dma_late_ms=99999\ndma_throughput=on\ndma_tp_batches=999\ndma_tp_max_ms=5\ndma_pio_ref=off\ndma_data=off\n");
+    CHECK(c.dma_probe && c.dma_audio && !c.dma_data && c.n_dma_counts == 2 && c.dma_counts[0] == 7 && c.dma_counts[1] == 3);
+    CHECK(c.n_dma_modes == 1 && c.dma_mode_list[0] == GP_DMA_EXACT && c.dma_flags == 0x28 && c.dma_timeout_ms == 200);
+    CHECK(c.dma_late_ms == 5000 && c.dma_throughput && c.dma_tp_batches == 256 && c.dma_tp_max_ms == 1000 && !c.dma_pio_ref);
+    CHECK(c.unknown_keys == 0);
+    gp_config_parse(&c, "dma_modes=pad,pad\ndma_modes=fast\ndma_counts=17\ndma_probe=maybe\n");
+    CHECK(c.n_dma_modes == 1 && c.unknown_keys == 4);
+    gp_config_parse(&c, "dma_modes=exact,pad\n");
+    CHECK(c.n_dma_modes == 2 && c.dma_mode_list[0] == GP_DMA_EXACT && c.dma_mode_list[1] == GP_DMA_PAD);
+
+    /* whitelist: the DMA feature is for CD_READ only */
+    memset(cdb, 0, 12); cdb[0] = 0x30; cdb[1] = 0x20; cdb[3] = 0xB0; cdb[10] = 7;
+    CHECK(wl_check_dma(cdb, 0, 0x24) && wl_check_cfg(cdb, 0, 0x24));
+    cdb[10] = 16; CHECK(wl_check_dma(cdb, 0, 0x24));
+    cdb[10] = 17; CHECK(wl_check_cfg(cdb, 0, 0x24) && !wl_check_dma(cdb, 0, 0x24));   /* 64 sectors pass PIO, not DMA */
+    cdb[10] = 0; CHECK(!wl_check_dma(cdb, 0, 0x24));
+    cdb[10] = 7; cdb[1] = 0x30; CHECK(!wl_check_dma(cdb, 0, 0x24));
+    cdb[1] = 0x21; CHECK(!wl_check_dma(cdb, 0, 0x24));
+    for (op = 0; op < 256; op++) {
+        for (i = 0; i < 4; i++) {
+            memset(cdb, 0, 12);
+            cdb[0] = (uint8_t)op; cdb[1] = (i & 1) ? 0x82 : 0x20; cdb[2] = 1; cdb[3] = (i & 2) ? 1 : 0; cdb[4] = 10; cdb[10] = 7;
+            if (op != 0x30)
+                CHECK(!wl_check_dma(cdb, 1, 0x24));
+        }
+    }
+    for (i = 0; i < wl_count; i++)
+        CHECK((wl_table[i].opcode == 0x30) == (wl_table[i].dma_ok != 0));
+
+    /* GDI image 3 (data 45150.., audio track 2 at 906..1506), a drive that DMAs like PIO */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.gdi_folder = 3;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_audio=on\ndma_counts=1,7,16\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0 && f.dma_nonread == 0);
+    CHECK(find_line("img=3 probe=DM_START data_fad=45150 data_end=65150 audio_fad=906 audio_end=1506 data_cases=1 audio_cases=1 flags=0x20"));
+    CHECK(find_line("img=3 probe=DM_BASE_POS "));
+    /* data: 1, 7, 16 sectors are multiples of 32 bytes (2048 each): one run, mode al */
+    l = line_of("img=3 probe=DM_D7_al ");
+    CHECK(strstr(l, "kind=data flags=0x20 fad=") && strstr(l, "count=7 mode=al exp=14336 dma_len=14336 extent=14336 ext_ok=1 pad_written=0 over=0 sense=none dma_done=1"));
+    CHECK(strstr(l, "rc=ok") && strstr(l, " bytes=14336 ") && strstr(l, " scrc=") && !find_line("DM_D7_pad") && !find_line("DM_D7_exact"));
+    l = line_of("img=3 probe=DM_D7_al_PIO ");
+    CHECK(strstr(l, "ref=pio") && strstr(l, "same=1") && strstr(l, " crc="));
+    CHECK(strstr(line_of("img=3 probe=DM_D7_al_POS "), "stat_rc=ok st=pause trk=3") && strstr(line_of("img=3 probe=DM_D7_al_POS "), "d_start=+7 d_end=+0"));
+    CHECK(find_line("img=3 probe=DM_D7_al_PIO_POS ") > find_line("img=3 probe=DM_D7_al_PIO "));
+    /* audio: 1 and 7 sectors are not multiples of 32 (2352 = 73.5 x 32): pad then exact; 16 sectors are */
+    l = line_of("img=3 probe=DM_A7_pad ");
+    CHECK(strstr(l, "kind=audio flags=0x20") && strstr(l, "count=7 mode=pad exp=16464 dma_len=16480 extent=16464 ext_ok=1 pad_written=0 over=0"));
+    l = line_of("img=3 probe=DM_A7_exact ");
+    CHECK(strstr(l, "mode=exact exp=16464 dma_len=16464 extent=16464 ext_ok=1") && strstr(l, " bytes=16464 ") && strstr(l, "dma_done=1"));
+    CHECK(strstr(line_of("img=3 probe=DM_A7_exact_PIO "), "same=1"));
+    CHECK(strstr(line_of("img=3 probe=DM_A1_pad "), "exp=2352 dma_len=2368") && find_line("img=3 probe=DM_A1_exact "));
+    CHECK(strstr(line_of("img=3 probe=DM_A16_al "), "dma_len=37632 extent=37632") && !find_line("DM_A16_pad") && !find_line("DM_A16_exact"));
+    CHECK(strstr(line_of("img=3 probe=DM_A7_pad_POS "), "trk=2") && !find_line("DM_STOP") && find_line("probe=END abort=0"));
+    CHECK(f.dma_calls == 8 && f.dma_max_len == 37632);   /* data 1,7,16 once each; audio 1 and 7 twice, 16 once */
+    /* no DMA probe lines when it is off */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.gdi_folder = 3;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && !find_line("probe=DM_") && f.dma_calls == 0);
+
+    /* a drive that truncates an unaligned DMA to a multiple of 32 bytes: the extent shows it, nothing is stopped */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.gdi_folder = 3; f.dma_model = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_data=off\ndma_audio=on\ndma_counts=7\ndma_modes=exact\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0);
+    l = line_of("img=3 probe=DM_A7_exact ");
+    CHECK(strstr(l, "dma_len=16464 extent=16448 ext_ok=0") && strstr(line_of("img=3 probe=DM_A7_exact_PIO "), "same=0"));
+
+    /* a drive whose unaligned DMA never completes: timeout, stop, later DMA cases skipped, REQ_STAT still asked */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.gdi_folder = 3; f.dma_model = 2;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_data=off\ndma_audio=on\ndma_counts=7,2\ndma_modes=pad,exact\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(strstr(line_of("img=3 probe=DM_A7_exact "), "rc=timeout") && strstr(line_of("img=3 probe=DM_A7_exact "), "dma_done=0") &&
+          strstr(line_of("img=3 probe=DM_A7_exact "), "aborted=1"));
+    CHECK(find_line("img=3 probe=DM_STOP reason=dma-incomplete rc=timeout done=0 aborted=1") && count_of("probe=DM_STOP") == 1);
+    CHECK(find_line("img=3 probe=DM_A7_exact_POS ") && find_line("img=3 probe=DM_A2_al_SKIP reason=dma-stopped") && !find_line("DM_A2_al "));
+    CHECK(f.dma_calls == 2 && find_line("probe=END abort=0"));
+
+    /* a drive that answers a DMA read with CHECK (no DMA ran): recorded, DMA goes on */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.gdi_folder = 3; f.cd_no_raw = 0;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_data=off\ndma_audio=on\ndma_counts=2\ndma_flags=0x28\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x28\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(strstr(line_of("img=3 probe=DM_A2_al "), "rc=check") && strstr(line_of("img=3 probe=DM_A2_al "), "sense=5/64/00") && !find_line("DM_STOP"));
+    CHECK(!find_line("DM_A2_al_PIO "));
+
+    /* refused: flags outside the whitelist, and a transport without DMA */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.gdi_folder = 3;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_flags=0x30\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.dma_calls == 0 && strstr(line_of("img=3 probe=DM_D1_pad "), "rc=refused"));   /* 0x30 has bit 4: 2352-byte sectors, not a multiple of 32 */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.gdi_folder = 3; f.no_dma = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && find_line("img=3 probe=DM_SKIP reason=transport-has-no-dma") && !find_line("DM_D1"));
+
+    /* throughput: DMA batches, PIO batches, CRCs equal */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.gdi_folder = 3;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_counts=1\ndma_throughput=on\ndma_tp_batches=8\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(find_line("img=3 probe=DM_TP_START fad=45150 count=16 dma_len=32768 batches=8 max_ms=10000"));
+    CHECK(find_line("img=3 probe=DM_TP_007 fad=45262 rc=ok done=1 extent=32768"));
+    l = line_of("img=3 probe=DM_TP_SUMMARY ");
+    CHECK(strstr(l, "ok=8 bytes=262144 us=") && strstr(l, " kib_s=") && strstr(l, " kib_s_dma="));
+    l = line_of("img=3 probe=DM_TPP_SUMMARY ");
+    CHECK(strstr(l, "ok=8 bytes=262144") && strstr(l, "crc_mismatch=0"));
+    /* a throughput that is cut by the time limit: virtual clock, 20+16 ms per batch */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.gdi_folder = 3;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_data=off\ndma_throughput=on\ndma_tp_batches=256\ndma_tp_max_ms=1000\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0);
+    l = line_of("img=3 probe=DM_TP_SUMMARY ");
+    CHECK(l && !strstr(l, "ok=256 ") && !strstr(l, "ok=0 "));
+    /* DMA corrupts one batch: the PIO pass reports it */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.gdi_folder = 3; f.dma_model = 3;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\ndma_probe=on\ndma_data=off\ndma_throughput=on\ndma_tp_batches=4\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(strstr(line_of("img=3 probe=DM_TPP_SUMMARY "), "crc_mismatch=4"));
+
+    /* a drive whose DMA never completes at all (even aligned): one timeout stops the DMA probes, the run goes on */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.dma_model = 4;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\ndma_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.dma_calls == 1 && find_line("img=0 probe=DM_STOP reason=dma-incomplete") && find_line("probe=END abort=0"));
+}
+
+static void test_seq25_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    FILE *in = fopen("../gdprobe.cfg.seq25.example", "rb");
+    CHECK(in != NULL);
+    if (!in) return;
+    n = fread(text, 1, sizeof(text) - 1, in);
+    fclose(in);
+    text[n] = 0;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, text);
+    CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == 25);
+    CHECK(c.do_switch && c.n_images == 3 && c.images[0] == 3 && c.images[1] == 4 && c.images[2] == 11 && c.return_to == 2);
+    CHECK(c.dma_probe && c.dma_data && c.dma_audio && c.dma_throughput && c.n_dma_counts == 4 && c.n_dma_modes == 2);
+    CHECK(c.dma_mode_list[0] == GP_DMA_PAD && c.dma_flags == 0x20 && c.dma_pio_ref && c.dma_tp_batches == 64);
+    CHECK(!c.swap_regpoll && !c.swap_devreset && !c.head_probe && !c.gap_probe && !c.pregap_probe && !c.ctl_probe);
+    CHECK(!c.do_cdread_flags && !c.do_throughput && !c.do_seek && !c.do_identify && c.cdread_flags == 0x20);
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.audio_only_folder = 11; f.passive = 1; f.head_model = 1;
+    f.cdi_folder = 4; f.gdi_folder = 3;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 0 && f.n_mounts == 3 + 1 && f.dma_nonread == 0);
+    CHECK(count_of("probe=DM_START ") == 3 && count_of("probe=DM_TP_SUMMARY ") == 2 && !find_line("probe=DM_STOP"));
+    CHECK(find_line("img=11 probe=DM_START data_fad=0 data_end=0 audio_fad=150 audio_end=752 data_cases=0 audio_cases=1"));
+    CHECK(find_line("img=3 probe=DM_A7_exact ") && find_line("img=4 probe=DM_A7_exact ") && find_line("img=11 probe=DM_A7_exact_PIO "));
+    CHECK(find_line("probe=END abort=0") && f.now < 300ull * 1000000u);
+}
+
 static void test_seq24_example_cfg(void)
 {
     static fake f;
@@ -2030,6 +2253,8 @@ int main(void)
     test_ctl_regions();
     test_runner_seq24();
     test_seq24_example_cfg();
+    test_runner_seq25();
+    test_seq25_example_cfg();
     printf("OK: %d checks passed\n", g_checks);
     return 0;
 }
