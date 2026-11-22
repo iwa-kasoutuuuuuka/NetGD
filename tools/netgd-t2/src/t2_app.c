@@ -9,8 +9,6 @@
 #include "ngfs.h"
 #include "ng_plat.h"
 
-void (*t2_net_log)(const char *line);
-uint32_t t2_net_rcvbuf = 20480;     /* R178: a 16 KiB frame and its headers fit; 14 segments, what the BBA took without loss */
 
 #define CONFIRM_HOLD_MS 1000
 #define CONFIRM_MAX_MS  30000
@@ -69,7 +67,7 @@ static void draw(t2_app_t *a)
         snprintf(l, sizeof l, "IP %s  port %u  code %04u", a->ip, (unsigned)a->cfg.port, (unsigned)a->srv.code);
         nm_screen_row(s, 2, l, NM_ATTR_NORMAL);
     }
-    snprintf(l, sizeof l, "WANT %u B x %d  rcvbuf %u", (unsigned)a->srv.want_max, a->srv.depth, (unsigned)t2_net_rcvbuf);
+    snprintf(l, sizeof l, "WANT %u B x %d  rcvbuf %u", (unsigned)a->srv.want_max, a->srv.depth, (unsigned)nm_net_rcvbuf);
     nm_screen_row(s, 3, l, NM_ATTR_DIM);
     nm_screen_row(s, 4, state_text(a), a->state == T2_S_FAILED ? NM_ATTR_WARN : NM_ATTR_NORMAL);
     if (!a->cfg.drive) snprintf(l, sizeof l, "drive: not used (T2_NO_DRIVE build): no writes");

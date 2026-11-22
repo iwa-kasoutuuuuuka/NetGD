@@ -18,6 +18,11 @@
 #ifndef NM_SHOW_SLOT1
 #define NM_SHOW_SLOT1 0
 #endif
+/* 1: the patched net_tcp.c (tools/kos-patches) is linked in (make tcpfix): the NGTP window is 64 KiB x 2, else 16 KiB x 1
+   (stock KOS 2.3 TCP: a frame bigger than the receive window nearly stalls, R178).  As netgd-t2's T2_TCPFIX. */
+#ifndef NM_TCPFIX
+#define NM_TCPFIX 0
+#endif
 
 typedef enum {
     NM_S_BOOT = 0,
@@ -58,7 +63,7 @@ typedef struct {
     ng_fwstack_t stack;                 /* E0 09, read on entering the info screen (FW_CAP_STACK only) ... */
     int stack_ok;                       /* ... 1 when it answered */
     int handoff_mode;
-    char why[96];                       /* NOSD: the reason */
+    char why[96];                       /* NOSD / NOFW: the reason */
 
     char msg[NM_COLS + 1];              /* a one-line message in the status row ... */
     uint32_t msg_until;                 /* ... until this time (ms) */
@@ -67,6 +72,10 @@ typedef struct {
     char ip[24];
     uint16_t code;
     uint32_t idle_ms;                   /* leave the transfer screen after this long without a request (session open) */
+    int tcpfix;                         /* the window below is the tcpfix one (nm_ui_set_tcpfix) */
+    uint32_t want_bytes;                /* the NGTP window: the largest WANT ... */
+    int depth;                          /* ... and how many are outstanding (ngtp_srv_set_window) */
+    int net_log_row;                    /* the next row of the bring-up steps on the "Starting network" screen */
     char log[5][NM_COLS + 1];           /* the last NGD: lines worth showing */
     int nlog;
     ng_ui_t prog;                       /* the last progress report ... */
@@ -90,6 +99,9 @@ typedef struct {
 } nm_ui_t;
 
 void nm_ui_init(nm_ui_t *ui);
+/* the NGTP window for stock KOS TCP (0: NGTP_WANT_STOCK x NGTP_DEPTH_STOCK) or the patched one (1: NGTP_WANT_TCPFIX x
+   NGTP_DEPTH_TCPFIX); nm_ui_init calls it with NM_TCPFIX.  Used from the next network start. */
+void nm_ui_set_tcpfix(nm_ui_t *ui, int tcpfix);
 void nm_ui_step(nm_ui_t *ui);
 
 /* the 4-digit pass code a seed gives (0000..9999) */

@@ -1,7 +1,7 @@
 /* netgd-t2: the standalone T2 receiver (NGTP over KOS TCP, docs/design/menu-app.md 8, bba-sd-write.md T2).
    The PC (tools/netgd-send push / remote) sends files; the receive core of netgd-recv writes them to the NetGD SD
    card through the firmware's write session, exactly as T1 does.  This is the host-testable core: the state machine,
-   the screen and the write gate.  The KOS layer (main_kos.c, net_kos.c) only draws, reads the pad and talks to the BBA.
+   the screen and the write gate.  The KOS layer (main_kos.c, ../netgd-menu/src/net_kos.c) only draws, reads the pad and talks to the BBA.
    NOT run on hardware.  NetGD is not on the hardware yet: the write gate refuses every drive that does not identify
    as NetGD (VERSION "OGDM" with FW_CAP_SESSION and FW_CAP_CHECKSUM), and the build T2_NO_DRIVE=1 never talks to the
    drive at all. */
@@ -62,8 +62,8 @@ void t2_log(t2_app_t *a, const char *text);
 /* the write gate on its own (host tests): 1 = the drive is NetGD with a write session; why gets the reason otherwise */
 int t2_gate(t2_app_t *a, char *why, size_t whyn);
 
-/* Set by the KOS layer before nm_net_up (net_kos.c): progress of the BBA bring-up, one line per step.  NULL is fine. */
-extern void (*t2_net_log)(const char *line);
-extern uint32_t t2_net_rcvbuf;      /* SO_RCVBUF of the listener (accepted sockets inherit it: the TCP window) */
+/* The BBA bring-up and the receive window are netgd-menu's (nm_net.h: nm_net_log, nm_net_rcvbuf, nm_net_static_ip; the KOS
+   code is ../netgd-menu/src/net_kos.c, shared with the menu).  R178: SO_RCVBUF 20480, a 16 KiB frame and its headers fit;
+   14 segments, what the BBA took without loss. */
 
 #endif

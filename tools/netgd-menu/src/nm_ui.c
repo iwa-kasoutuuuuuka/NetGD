@@ -31,11 +31,19 @@ void nm_ui_init(nm_ui_t *ui)
     ui->state = NM_S_BOOT;
     ui->handoff_mode = NM_HANDOFF_DEFAULT;
     ui->idle_ms = 300000;
+    nm_ui_set_tcpfix(ui, NM_TCPFIX);
     ui->controller = 1;
     nm_input_init(&ui->in);
     nm_art_init(&ui->art);
     nm_ini_defaults(&ui->ini);
     nm_screen_clear(&ui->scr);
+}
+
+void nm_ui_set_tcpfix(nm_ui_t *ui, int tcpfix)
+{
+    ui->tcpfix = tcpfix ? 1 : 0;
+    ui->want_bytes = tcpfix ? NGTP_WANT_TCPFIX : NGTP_WANT_STOCK;
+    ui->depth = tcpfix ? NGTP_DEPTH_TCPFIX : NGTP_DEPTH_STOCK;
 }
 
 /* ---- drawing helpers ---- */
@@ -122,7 +130,9 @@ static void draw_list(nm_ui_t *ui)
     }
     if (ui->list.count == 0 && ui->scan.state == NM_SCAN_DONE)
         nm_screen_put(&ui->scr, LIST_ROW0 + 1, 2, "No game folders on the card.", NM_ATTR_NORMAL);
-    draw_frame(ui, "A:Start  X:Info  Y:Network  START:BIOS menu", "Up/Down:Select  Left/Right, L/R:Page");
+    /* no Y when the network failed for good (KOS: no second net_init, nm_net.h) */
+    draw_frame(ui, nm_net_final() ? "A:Start  X:Info  START:BIOS menu" : "A:Start  X:Info  Y:Network  START:BIOS menu",
+               "Up/Down:Select  Left/Right, L/R:Page");
     draw_status(ui, NM_ATTR_NORMAL);
 }
 
@@ -224,15 +234,27 @@ static void start_scan(nm_ui_t *ui)
     ui->state = NM_S_LIST;
 }
 
+/* The stock-safe gate (as netgd-t2's t2_gate): 52 00 GDEMU_VERSION first, byte for byte the CDB the stock record has, and
+   E0 03 VERSION only when 52 00 reports NetGD's 5.20.0 (fw_probe_netgd, fwctl.h).  A stock GDEMU gets 52 00 and nothing else
+   from the menu: no E0 packet (VERSION, session, mount by name), no SD access.  START then only hands over to the BIOS. */
 static void boot_work(nm_ui_t *ui)
 {
     uint32_t boot = 0, fwv = 0;
     char why[96];
-    if (fw_version(&ui->fw) != 0) { ui->state = NM_S_NOFW; return; }
+    int r = fw_probe_netgd(&ui->fw, &boot, &fwv);
+    ui->gdemu_fw = r == FW_PROBE_NOANSWER ? 0 : fwv;
+    if (r != FW_PROBE_NETGD) {
+        if (r == FW_PROBE_NOANSWER) snprintf(ui->why, sizeof ui->why, "The drive did not answer 52 00 (GDEMU version).");
+        else if (r == FW_PROBE_OTHER)
+            snprintf(ui->why, sizeof ui->why, "GDEMU %x.%02x.%x is not NetGD: no NetGD command sent.", (unsigned)(fwv >> 24) & 0xFF,
+                     (unsigned)(fwv >> 16) & 0xFF, (unsigned)(fwv >> 8) & 0xFF);
+        else snprintf(ui->why, sizeof ui->why, "GDEMU 5.20.0, but no OGDM answer to E0 03.");
+        ui->state = NM_S_NOFW;
+        return;
+    }
     if (ngdev_init() != 0) { to_nosd(ui, "no disk"); return; }
     if (ngfs_mount_light(why, sizeof why) != NG_OK) { to_nosd(ui, why); return; }
     ui->sd_mounted = 1;
-    if (fw_gdemu_version(&boot, &fwv) == 0) ui->gdemu_fw = fwv;
     start_scan(ui);
 }
 
@@ -320,6 +342,8 @@ static void draw_net(nm_ui_t *ui)
     else if (!ui->srv.hello) snprintf(line, sizeof line, "client connected");
     else snprintf(line, sizeof line, "client %.20s%s", ui->srv.client, ui->srv.session ? "  session open" : "");
     nm_screen_put(&ui->scr, 3, 1, line, NM_ATTR_NORMAL);
+    nm_screen_printf(&ui->scr, 4, 1, NM_ATTR_DIM, "window %u KiB x %d (%s)", (unsigned)(ui->srv.want_max / 1024), ui->srv.depth,
+                     ui->tcpfix ? "tcpfix" : "stock tcp");
     if (ui->prog_valid) {
         int pct = u->total ? (int)(u->cum * 100 / u->total) : 0;
         nm_screen_printf(&ui->scr, 5, 1, NM_ATTR_NORMAL, "%s %d/%d", ui->prog_op, u->fi, u->fn);
@@ -354,8 +378,8 @@ static void draw_state(nm_ui_t *ui)
     case NM_S_LIST: draw_list(ui); break;
     case NM_S_INFO: draw_info(ui); break;
     case NM_S_NOFW:
-        draw_text_screen(ui, "NetGD firmware not found", "This menu works with the NetGD firmware only.",
-                         "The console did not answer as a NetGD board", "(a stock GDEMU is not supported).", "Nothing was read from the SD card.");
+        draw_text_screen(ui, "NetGD firmware not found", ui->why, "This menu works with the NetGD firmware only",
+                         "(a stock GDEMU is not supported).", "Nothing was read from the SD card.");
         break;
     case NM_S_NOSD: {
         char w[120];
@@ -520,21 +544,53 @@ uint16_t nm_ui_code_from_seed(uint32_t seed)
     return (uint16_t)((seed >> 8) % 10000u);
 }
 
+/* the bring-up steps (nm_net_log) while nm_net_up runs: one row each, shown at once (the call blocks the frames) */
+static nm_ui_t *net_log_ui;
+static void net_log_line(const char *line)
+{
+    nm_ui_t *ui = net_log_ui;
+    if (!ui) return;
+    if (ui->net_log_row > HINT_ROW - 1) {           /* full: scroll the step rows up by one */
+        for (int r = 7; r < HINT_ROW - 1; r++) {
+            char t[NM_COLS + 1];
+            nm_screen_row_text(&ui->scr, r + 1, t);
+            nm_screen_row(&ui->scr, r, t, NM_ATTR_DIM);
+        }
+        nm_screen_row(&ui->scr, HINT_ROW - 1, "", NM_ATTR_DIM);
+        ui->net_log_row = HINT_ROW - 1;
+    }
+    nm_screen_printf(&ui->scr, ui->net_log_row++, 2, NM_ATTR_DIM, "%.50s", line);
+    nm_plat_present(&ui->scr);
+}
+
 static void net_start(nm_ui_t *ui)
 {
     ngtp_hooks_t hk;
     int r;
+    const char *why;
     if (nm_plat_dcload()) { set_msg(ui, "Started from dcload: use netgd-recv", 4000); return; }
-    /* net_dhcp_request can block for a long time: say so before it starts (R104 finding 1) */
+    if (nm_net_final()) {                                           /* Y does nothing but say why again: never a second start */
+        why = nm_net_error();
+        set_msg(ui, why[0] ? why : "No network: restart the console", 6000);
+        return;
+    }
+    /* the bring-up can block for up to about 40 s without a link: say so before it starts (R104 finding 1) */
     nm_screen_clear(&ui->scr);
     draw_frame(ui, "", "");
     nm_screen_put(&ui->scr, 3, 2, "Starting network ...", NM_ATTR_NORMAL);
-    nm_screen_put(&ui->scr, 5, 2, "(getting an IP address by DHCP; this can take up to a minute)", NM_ATTR_DIM);
+    nm_screen_put(&ui->scr, 5, 2, "(static IP, no DHCP; up to 40 s without a link)", NM_ATTR_DIM);
     nm_plat_set_art(NULL);
     nm_plat_present(&ui->scr);
+    ui->net_log_row = 7;
+    net_log_ui = ui;
+    nm_net_log = net_log_line;
     r = nm_net_up(ui->ip, sizeof ui->ip);
-    if (r == NM_NET_NODEV) { set_msg(ui, "BBA not found", 3000); return; }
-    if (r != 0) { set_msg(ui, "No IP address (Y: try again)", 3000); return; }
+    nm_net_log = NULL;
+    net_log_ui = NULL;
+    why = nm_net_error();
+    if (r == NM_NET_NODEV) { set_msg(ui, why[0] ? why : "BBA not found", 6000); return; }
+    if (r == NM_NET_NOLINK) { set_msg(ui, why[0] ? why : NM_NETUP_MSG_FINAL, 6000); return; }
+    if (r != 0) { set_msg(ui, why[0] ? why : "No IP address", 6000); return; }
     if (nm_net_listen(NGTP_PORT) != 0) { set_msg(ui, "Cannot listen on the port", 3000); return; }
     nm_net_udp_listen(NGTP_PORT);                                   /* discovery is optional: no message when it fails */
     nm_art_cancel(&ui->art);
@@ -544,6 +600,7 @@ static void net_start(nm_ui_t *ui)
     hk.ctx = ui; hk.line = hk_line; hk.progress = hk_progress; hk.stop = hk_stop; hk.confirm = hk_confirm;
     hk.busy = hk_busy; hk.idle = hk_idle; hk.millis = hk_millis; hk.before_session = hk_before_session;
     ngtp_srv_init(&ui->srv, &hk, &ui->fw, ui->code);
+    ngtp_srv_set_window(&ui->srv, ui->want_bytes, ui->depth);      /* 16 KiB x 1 on stock KOS TCP (R178), 64 KiB x 2 tcpfix */
     ui->nlog = 0;
     ui->prog_valid = 0;
     ui->msg[0] = 0;
