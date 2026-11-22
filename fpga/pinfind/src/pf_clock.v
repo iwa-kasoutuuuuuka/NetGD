@@ -17,9 +17,14 @@
 //              once its source is known.
 //
 // PF_CLKCTRL   Put the clock on a global network through an explicit
-//              cycloneive_clkctrl with ena = 1 (a second-hand report says
-//              Yosys otherwise inserts one with enable tied low, which af
-//              rejects).
+//              alta_gclksw (Supra's own global clock switch) with ena = 1.
+//              Off by default (gen.py --clkctrl on): with Supra 2026.03.b0
+//              on AG16K, af_run says "u_clk|u_gclk has no corresponding
+//              resource in the device" and then crashes; cycloneive_clkctrl
+//              (the earlier choice) is not known to its af_map at all (only
+//              a blackbox under NO_ALTA_GCLKSW). Without any cell af_run
+//              creates the GCLK by itself ("Created GCLK cell for net clk",
+//              Global Signals 1/20).
 module pf_clock #(parameter STAGES = 31) (
     input  pin,
     output clk
@@ -53,8 +58,9 @@ module pf_clock #(parameter STAGES = 31) (
 `endif
 
 `ifdef PF_CLKCTRL
-    cycloneive_clkctrl u_gclk (
-        .inclk({3'b000, raw}), .clkselect(2'b00), .ena(1'b1), .outclk(clk)
+    alta_gclksw u_gclk (
+        .resetn(1'b1), .ena(1'b1), .clkin0(raw), .clkin1(1'b0),
+        .clkin2(1'b0), .clkin3(1'b0), .select(2'b00), .clkout(clk)
     );
 `else
     assign clk = raw;

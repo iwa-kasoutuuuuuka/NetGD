@@ -103,7 +103,10 @@ FPGA 側（`hw/pinfind.py`）がボール `k` ごとにすること：
 - **`ball:` のクロックには残るリスクがある**：MCU が止まる（デバッガで止める、CPU が固まる）と FPGA のクロックも止まり、フレームの途中の 1 本が Low のまま固定される。
   ファームは 500 ms 以上 Low のままの線を見つけると止める（§6）が、MCU 自体が止まった場合は何もできない。`osc`・`ring` が使えない場合の最後の手段にする。
 - `ball:PIN_xx`（G1 以外。例：方法 1 で分かった 11.2896 MHz のボール）では DCLK は振らない。そのボールは一覧の hold か clock にある必要がある。
-- `--clkctrl`（`osc`・`ring` では既定でオン）はクロックを明示的な `cycloneive_clkctrl`（`ena` = 1）経由でグローバル網に載せる。
+- `--clkctrl`（既定はオフ）はクロックを明示的な `alta_gclksw`（`ena` = 1）経由でグローバル網に載せる。**Supra 2026.03.b0 では使えない**：
+  `cycloneive_clkctrl` は af_map が知らない（`NO_ALTA_GCLKSW` のときだけの blackbox）、`alta_gclksw` は af_run が「no corresponding resource」と言って落ちる。
+  付けなくても af_run が自分で GCLK を作る（`Created GCLK cell for net clk`、Global Signals 1/20）。
+- 最初の Supra のビルド（2026-11-22）で `osc`（`alta_osc` がマップ後・配置配線後のネットリストに残る、Supra の推定 Fmax 70〜76 MHz。Supra は `alta_osc` を 1 MHz と仮定して解析する）と `ring`（31 段が配置配線後も残る）はどちらも最後まで通った。周波数・極性は実機でしか分からない。
 
 ティック（`--prescale`）の既定：`osc` 10、`ring` 12、`ball` 6（R143：オープンドレインの立ち上がりのため **T ≥ 20 µs**。
 `osc` が 51 MHz 以下、`ring` が 204 MHz 以下、`ball:PIN_G1` ではファームのループが毎秒 320 万回以下なら満たす）。
@@ -115,7 +118,7 @@ FPGA 側（`hw/pinfind.py`）がボール `k` ごとにすること：
 | ファイル | 中身 |
 |----------|------|
 | `hw/pinfind.py` | 本体（Amaranth）：LISTEN / FRAME / NEXT の順序回路、フレームの符号器、クロックプローブ、駆動の見張り |
-| `src/pf_clock.v` | クロック源（`alta_osc` / リング / ボール）と `cycloneive_clkctrl` |
+| `src/pf_clock.v` | クロック源（`alta_osc` / リング / ボール）と、任意の `alta_gclksw`（Supra 2026.03.b0 では不可） |
 | `portmap.py` | 「どのボールをどのポートに置くか」の規則。`gen.py` と `checkpnr.py` が共有する |
 | `gen.py` | ボール一覧から上位 Verilog・コア・`.asf`・`.sdc`・`params.txt` を `build/` に出す |
 | `build.sh` | WSL で Supra を動かしてビットストリームを作り、配置配線の結果を検査する |
@@ -191,13 +194,20 @@ SUPRA_HOME=$HOME/supra-linux/x/Supra-2026.03.b0 fpga/pinfind/build.sh
 | ゲートレベル（任意） | `--gate-sim`：配置配線後のネットリストを Supra のモデルでシミュレーションし、「同時に Low のパッドは 1 本以下（段階 0 は 0 本）」「X にならない」「指定時間内に 1 回は駆動する」 |
 | そのほか | `osc` で `alta_osc` が、`ring` で LUT セルがマップ後のネットリストに無い／`fixio.py` でまとめた入出力の数が drive の本数と違う |
 
-**実際の配置の読み取りについて（いちばん大事な未確認点）**：Supra の報告の形式を、このスクリプトの作者は知らない。`checkpnr.py` が自分で探すのは
-Quartus の `.pin` 風の表（`<ポート> : <ボール> : …`）と、配置後ネットリストの `// Location: PIN_xx` だけで、**どちらも Supra が出すかは未確認**。
-見つからなければ「配置は確認されていない。このビットストリームを使うな」で止まる。そのときは人が `build/supra/` の中（`run.out`・`alta_db/`・`PinFind_routed.v`）から
-**各 I/O が実際に置かれたボール**を書いた報告を探し、その行に合う正規表現（`(?P<port>…)` と `(?P<ball>…)` の名前付きグループ）を付けて `build.sh` をもう一度走らせる。
+**実際の配置の読み取りについて**（Supra 2026.03.b0 の最初のビルドで確認、2026-11-22）：
+- ボール名で「ポート → ボール」を書いた Supra の出力は **`alta_db/io.asf`** だけ（af_run が `place_pseudo -place_io` の後、ロジックの配置の前に書く I/O 配置のデータベース。
+  ポートは逆順、括弧なし、各ポートに IO_STANDARD の行）。`.asf` の書式だが**要求ではなく Supra の結果**：`.asf` を読む前の段階のログは「Place virtual pin HOLD[0] at PIN_T16」と言い、
+  io.asf は G1 と言う。要求から `P[5]`（C4）の割り当てを外した実験では、Supra は `Warn: IO P[5] is not assigned, placed at pin DDR_DM1.` と出して
+  （`build.sh` はここで止まる）、io.asf にも `P[5] DDR_DM1` と Supra の選んだ場所が出た。ネットリストの座標（45, 29, 1）もほかのビルドのどのボールとも違った。
+  `checkpnr.py` は io.asf を既定で読む（`--placement` は不要）。PIN_ でない場所（DDR_・NC_PIN_）もそのまま不一致として報告する。
+- 配置配線後のネットリスト `PinFind_routed.v` にボール名は無く、各パッドのセルにダイ上の座標（`coord_x/y/z`）があるだけ。座標 → ボールの表は Supra の暗号化されたアーキテクチャのファイルの中で読めない。
+  そこで `checkpnr.py` は、全ポートにパッドのセルがちょうど 1 つ、2 つのポートが同じ座標に無い、ほかのパッドのセルが無い、を確かめ、座標を `output/pinfind_ag16k.sites` に残す。
+  `--sites-ref 前の.sites` を付けると、同じボールが同じ座標にあることを別のビルドと比べる（`osc`・`ring`・本番の NetGD のビルドの 66 本で一致を確認）。
+- 読み取れなければ（Supra の版が変わったなど）「配置は確認されていない。このビットストリームを使うな」で止まる。そのときは人が作業フォルダの中（`run.out`・`alta_db/`・`PinFind_routed.v`）から
+  **各 I/O が実際に置かれたボール**を書いた報告を探し、その行に合う正規表現（`(?P<port>…)` と `(?P<ball>…)` の名前付きグループ）を付けて `build.sh` をもう一度走らせる。
 例：`--placement build/supra/alta_db/io.rpt --placement-regex '^\s*(?P<port>\S+)\s+.*\b(?P<ball>PIN_[A-T][0-9]+)\b'`（形式は仮の例）。
 **`.asf`・`.qsf`・Tcl や、制約をなぞっただけの報告を指定してはいけない**（要求を「確認」してしまう）。`set_location_assignment` を含む行は読まない。
-配置後ネットリストが座標しか持たない場合、座標とボールの対応表（Supra のアーキテクチャのデータ）が要る。そのときは別に作業を起こす（Supra のファイルはリポジトリに写さない）。
+**io.asf も Supra の自己申告**であることは変わらない。シリコン上でそのボールに出ることは、段階 0〜1 の実機（ロジアナ）でしか確かめられない。
 
 **未使用のボールについて**：Supra が未使用ピンをどう扱うか（入力か、GND を出す出力か）は分からない。だから確認する代わりに、ユーザー I/O になりうるボールを**全部設計に入れる**（drive か hold）。
 Supra がどれかの割り当てを拒んだら（Error）、そのボールは `mklist.py --leave-out`（DDR なら `--no-hold-ddr`）で外し、
@@ -323,7 +333,7 @@ MCU からは見えないので、ロジックアナライザで読む（`g1-ag1
 
 ## 8. 確かめたこと（この PC で）
 
-- `test_pinfind.py`（Amaranth 0.5.8 のシミュレーションとツール、14 件）：走査順と波形のティック単位の一致、prescale 0、Low のボールを飛ばす、
+- `test_pinfind.py`（Amaranth 0.5.8 のシミュレーションとツール、15 件）：走査順と波形のティック単位の一致、prescale 0、Low のボールを飛ばす、
   `max_loops` で止まって以後出力しない、大きな番号、クロックプローブのカウント、`max_loops` の範囲（0・9 を断る）、駆動の見張り（上限で出力が切れて止まる／既定の上限では切れない）、
   `gen.py` の出力（全ポートにボールが 1 つずつ・`.asf` が `portmap.py` と一致・pinmap のユーザー I/O になりうるボールが全部入る・G1/G2/C1/D2/DDR が hold・
   DCLK を振るのは `ball:PIN_G1` だけ・既定値）、段階 0 の設計に出力が無いこと、危ない組み合わせを断ること、
@@ -334,7 +344,12 @@ MCU からは見えないので、ロジックアナライザで読む（`g1-ag1
 - `tools/pinfind/tests`（`python -m unittest`、14 件）：作り物の pinmap で一覧、除外、hold の中身、pinmap の全ボールが設計に入ること、`--no-hold-ddr`・`--leave-out`、`pins2asf.py`。
 - ファーム：`--no-default-features --features pinfind` がビルドできる（ビットストリーム無し、および中身が無意味な 552,352 B のファイルと `.params` を一時的に置いて
   `osc`・`ball:PIN_G1`・段階 0 の 3 通り。`.params` の cksum が合わないとビルドが止まることも確認）。通常のファームは、2E の 3 構成（`sam3u2e`・`sam3u2e,resident,sd-fast` の release-z・`board-v60`）がこの変更の前とロードされる中身でバイト一致。4E（ログあり）は defmt の文字列番号の 13 B だけ違い、`DEFMT_LOG=off` で作ると一致（ソースの位置が変わると defmt の番号の並びが変わるため）。
-- 確かめていないこと：Verilog の上位（`PinFind.v`）を Yosys や Supra に通すこと、`build.sh`・`checkpnr.py`・`gatesim.py` を本物の Supra の出力で動かすこと、ビットストリーム、実機のすべて。
+- `test_pinfind.py` の 15 件目：Supra 2026.03.b0 の形の作業フォルダ（`alta_db/io.asf`・座標つきの `PinFind_routed.v`、中身は作り物）で、通る／入れ替わり・NC_PIN・欠け・余分な I/O・同じ座標・ネットリスト無し・`--sites-ref` の不一致で止まる。
+- **本物の Supra（2026.03.b0、WSL、2026-11-22）**：`mklist.py` → `gen.py` → `build.sh` が最後まで通った（`osc` 既定・`ring`）。`.rbf` 552,352 B、LZMA 約 14 KB、ピン 169/251、
+  `placed at pin` なし、`checkpnr.py` が io.asf を読んで 169 本すべて一致、ネットリストの座標 169 個がすべて別、pinmap のユーザー I/O になりうるボールで設計に無いものは 0 本。
+  hold（G1・G2・C1・D2・特別な機能・DDR の F10/M10/L11/M11・クロックボール）の割り当ても Supra は受け付けた（hold のパッドは `.oe(gnd)`）。
+  `.asf` を読む前の「locatiion is not assigned」の Error は hold の 37 本ぶん出る（既知の種類で、`build.sh` は除外している）。
+- 確かめていないこと：`gatesim.py`（WSL に Icarus Verilog が無い）、Supra の報告どおりにシリコンが動くこと、`alta_osc` の周波数・極性、実機のすべて。
 
 ## 9. 設計メモ：逆向きの探し方（R143 の 9。未実装・要判断）
 
