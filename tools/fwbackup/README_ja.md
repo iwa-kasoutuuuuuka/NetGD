@@ -15,6 +15,16 @@ GDEMU 6.0 (クローン) の MCU (ATSAM3U2E、フラッシュ 128 KB) の純正�
 - NetGD は dump の中身を使いません (流用しません)。目的は「純正に戻せる保険」だけです。
 - Claude に送るのは **`check` の出力だけ**です。dump ファイルは送らないでください。
 
+## 6.0 の現状（LOG R177、2026-11-22 の判断）
+
+**6.0 の MCU はロック済みとみなします。純正ファームのバックアップはできない前提です。**
+実機（Pico + debugprobe v2.3.1、probe-rs 0.32.0、正しい配線・電源）では DP がまったく応答せず、`check` は `NO_TARGET`（終了コード 12）でした（R177）。
+
+- **ロックされた 6.0 では `NO_TARGET` が想定どおりの結果**です。配線不良とは区別できませんが、すでに導通・電圧は確認済みです。
+- **再試行を繰り返さないでください。** 周波数や電源の順番を変えて何度も `check` を回しても結果は変わりません。
+- **ERASE には触りません。** 行うかどうかはユーザーの判断で、今は行いません。ERASE すると純正ファームと純正の更新経路が永久に失われます（INSTALL.md §6）。
+- 6.0 の別個体が `UNLOCKED_2E` になったときだけ、下の手順で `dump` に進めます。
+
 ## 事前準備
 
 - Raspberry Pi Pico に debugprobe (**2.2.3 以上**、CMSIS-DAP v2) が入っていること。
@@ -75,7 +85,7 @@ python fwbackup.py inspect <file> --strings    # 自分の解析用 (共有し�
 | `UNLOCKED_2E` | 0 | CIDR が `0x281A0761`。読める。`dump` でバックアップを取る。 |
 | `UNLOCKED_OTHER` | 10 | 別の SAM3U (例: 4E = `0x28100961`) か別の MCU。`dump` は拒否。出力を Claude に送る。 |
 | `LOCKED_OR_NO_ACCESS` | 11 | SWD の DP は見えるが読めない = セキュリティビット (GPNVM0) の可能性大。**ここで止める。** |
-| `NO_TARGET` | 12 | 何も応答しない。Dreamcast の電源、GND/SWDIO/SWCLK、JTAGSEL (ローであること)、他ソフトがプローブを掴んでいないか。**配線も電源も確実に正しいのにこの結果なら、セキュリティビットで SWD 自体が無効になっている可能性もある (配線不良と区別できない)。ERASE には触らず、出力を Claude に送る。** |
+| `NO_TARGET` | 12 | **ロックされた 6.0 では想定どおりの結果（R177）。再試行を繰り返さない。** 何も応答しない。Dreamcast の電源、GND/SWDIO/SWCLK、JTAGSEL (ローであること)、他ソフトがプローブを掴んでいないか。**配線も電源も確実に正しいのにこの結果なら、セキュリティビットで SWD 自体が無効になっている可能性もある (配線不良と区別できない)。ERASE には触らず、出力を Claude に送る。** |
 | `NO_PROBE` / `NO_PROBE_RS` / `MULTIPLE_PROBES` / `BAD_CHIP_NAME` | 2 | プローブ未検出 (すべて `(inaccessible)` の場合を含む。WinUSB ドライバを確認)、probe-rs 無し、プローブ複数 (`--probe` 指定)、チップ名が古い probe-rs に無い。 |
 | `OLD_PROBE_RS` | 2 | probe-rs が `unexpected argument` 等でオプションを拒否した。0.32.0 を入れる。 |
 | `UNREVIEWED_PROBE_RS` | 2 | 0.32.0 以外。安全確認済みなのは 0.32.0 だけ。ちょうど 0.32.0 を入れる。 |

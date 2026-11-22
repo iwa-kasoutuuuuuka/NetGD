@@ -21,7 +21,7 @@ A fork of [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski
 
 | # | 目標 | Goal | 状況 / Status |
 |---|------|------|---------------|
-| **G1** | **GDEMU 6.0 基板で動く**（上流は v5.5 / v5.15b クローンのみ） | **Run on GDEMU 6.0 boards** (upstream targets v5.5 / v5.15b clones only) | 基板を調査済み：MCU は ATSAM3U2E、FPGA は **AGM AG16KDDF256**（v5.5 は Cyclone II）。FPGA の移植が本体 / Board surveyed: ATSAM3U2E MCU and an **AGM AG16KDDF256** FPGA instead of Cyclone II; the FPGA port is the main work |
+| **G1** | **GDEMU 6.0 基板で動く**（上流は v5.5 / v5.15b クローンのみ） | **Run on GDEMU 6.0 boards** (upstream targets v5.5 / v5.15b clones only) | 基板を調査済み：MCU は ATSAM3U2E、FPGA は **AGM AG16KDDF256**（v5.5 は Cyclone II）。FPGA の移植が本体。**6.0 への書き込みは未成功**：MCU はロック済みとみなし（SWD 無応答、LOG R177）、純正のバックアップは不可、ERASE は未実施 / **No 6.0 install has worked yet: the MCU is treated as locked (SWD silent, LOG R177), no stock backup is possible, ERASE has not been done.** Board surveyed: ATSAM3U2E MCU and an **AGM AG16KDDF256** FPGA instead of Cyclone II; the FPGA port is the main work |
 | **G2** | **ブロードバンドアダプタ（BBA）経由で SD カードにゲームイメージを書き込む**（本家 GDEMU では不可） | **Write game images to the SD card over the Broadband Adapter** (the original GDEMU cannot) | 設計済み。ファーム側の修正（F1〜F8）は実装済み、PC 側ツール netgd-send は実装済み、Dreamcast 側のコンソールアプリは作業中（いずれも実機未検証） / Designed; firmware fixes F1–F8 are in, the PC tool netgd-send is done, the console app is in progress (none hardware-tested yet) |
 | **G3** | **本家 GDEMU と同等の機能を持ち、より高性能** | **Match the original GDEMU's features, with better performance** | 番号フォルダ方式、GDmenu / openMenu の切替コマンド `0x52`、`GDEMU.INI` を実装（実機未検証） / Numbered folders, the GDmenu / openMenu image command `0x52`, and `GDEMU.INI` are in (not yet hardware-tested) |
 

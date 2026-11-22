@@ -101,7 +101,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - `tools/gdprobe`：純正 GDEMU と NetGD に読み取り系コマンドだけを送る KOS 製プローブ。PC 側の `compare.py` で比較（R19、R22、R31）。純正での記録は R117〜R124 で 8 回取得し、R155・R159 で記録 15・16（レジスタのポーリング・DEVICE RESET・同じフォルダへの再切替）を追加。
 - `tools/mksdcard`：調査用 SD（`03`〜`06`）を決定的に生成（R28）。
 - `tools/netgd-expect`：NetGD が純正と同じ形式で返すはずの記録を出す。純正の記録と `compare.py --only-common` で比べる（R55）。
-- `tools/fwbackup`：SWD で 6.0 の純正フラッシュを読む（`check` / `dump` / `inspect`。probe-rs 0.32.0 のみ）（R33、R40、R43）。実機では未実行。
+- `tools/fwbackup`：SWD で 6.0 の純正フラッシュを読む（`check` / `dump` / `inspect`。probe-rs 0.32.0 のみ）（R33、R40、R43）。実機の 6.0 では `check` が `NO_TARGET`（R177）。ロック前提のため `dump` は使えない見込み。
 - `tools/fwimage`：自己更新用の OGFW イメージを作る。形式 2（今の基板）と形式 3（常駐部、feature `resident`）（R46、R60）。
 - `tools/netgd-send`：PC 側の送信（`prepare` / `collect` / `status`）（R30）。
 - `tools/netgd-recv`：Dreamcast 側の受信（KOS + FatFs、チェックポイント、FNV-1a 照合）（R48、R62）。
@@ -111,7 +111,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 - 純正ファームの 6.0 での調査（P5.5）と導通確認は済み（R115〜R124）。NetGD を書き込んだ実機の検証はまだ（G1〜G3 とも P6 待ち）。
 - GDEMU 6.0 は MCU が ATSAM3U2E、FPGA が AGM AG16KDDF256（型番末尾に「M」なし、外付けフラッシュなし）。MCU から FPGA をパッシブシリアルで起動する方式がほぼ確実（R6、R41、R49）。PS のタイミングは公開されていない（R49）。
 - SWD には Raspberry Pi Pico（Debug Probe）を使う。ESP32 は不可（R42）。6.0 のヘッダは穴だけでピンが無いので、はんだ付けが要る（R44）。SAM3U2E の CHIPID の期待値は `0x281A0761`（R24）。
-- オーナーの作業：純正 GDEMU での gdprobe 試験（**済**、R117〜R124・R155・R159）、SWD の導通確認（**済**、R115・R116。UART・ERASE パッド・PA23/24/25・PB1/2 は未）、SWD で CHIPID を読み、ロックが無ければ `fwbackup dump`（**待ち**、アダプタの入手後。R29、R43）。
+- オーナーの作業：純正 GDEMU での gdprobe 試験（**済**、R117〜R124・R155・R159）、SWD の導通確認（**済**、R115・R116。UART・ERASE パッド・PA23/24/25・PB1/2 は未）、SWD で CHIPID を読み、ロックが無ければ `fwbackup dump`（**不可**：R177 で SWD が無応答。2026-11-22 の判断で 6.0 はロック済みとみなす）。
 
 **次の山場は実機**：SWD で CHIPID を読みバックアップ → NetGD を書き込み → G2 のファームと `netgd-recv` の実機試験、gdprobe で純正の記録と比較（差分テスト）。G1 は分岐 A の確認（PA23/24/25・PB1/2 の導通）と PS のタイミング。
 
@@ -164,6 +164,10 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - **G1-3 移植** — 進行中。ボード差分を Cargo feature（`board-v55` / `board-v60`）で切り替え、FPGA ローダーは `common/psload` に切り出し済み（R57、ホストのみ）。FIFO のブロック RAM 対応は実装済み（R39）。
   AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。**R99：Supra 2026.03（Linux 版、ネットワークなし）でビルドできた**。M9K 14 個、ロジック 13 %、LZMA 後 37,727 B。手順は `docs/research/ag16k-supra-build.md`（inout の後処理 `fixio.py` が必須、PLL は `alta_pllve`）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作れる。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。ピン探し（設計 2-4 の方法 2）の準備中（Supra の環境は R158 で動いた。`pinfind` の初回の Supra ビルドは未実施）。公開資料にはボール表・BSDL・PS のタイミングが無いが、Supra に `alta_osc` というプリミティブがあり、クロック源に使える可能性がある（周波数は不明、R136）。
 - **G1-4 実機起動** — 未。P5 の手順で書き込み → UART ログ → IDE バス動作確認。
+- **ロック前提（R177、2026-11-22 の判断）**：6.0 の MCU はロック済みで、純正のバックアップは不可。ERASE は今は行わない（ユーザーの判断事項）。
+  - **SWD が要る段階は止まっている**：G1-2 の SWD での CHIPID 確認とバックアップ、G1-4 の書き込み・UART ログ・IDE バス確認（ERASE をするまで SWD が使えない）。
+  - **ハードウェア無しで進める分**：AG16K のビットストリームと `board-v60` ローダーのホスト側の検証・シミュレーション、ピン探し（`fpga/pinfind`）の準備、ファームの容量見積もり、NetGD のホストテスト、G2・G3 の PC 側ツール。
+  - **ERASE をするなら先に**：純正の更新経路が永久に失われる、実ピンの AG16K ビットストリームが動くまで基板は使えない、予備の基板を推奨（INSTALL.md §6）。
 
 ### G2：BBA 経由の SD 書き込み
 - **G2-1 設計** — 済：`docs/design/bba-sd-write.md`（Fable 設計、Opus がファーム側の指摘 F1・F2・F4 をコードで確認。R8）。
