@@ -2323,6 +2323,67 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
   - テスト：`common/discimg` 151 件、`test_expect.py` 13 件（1 件スキップ）。2E `release-z` の `resident,sd-fast` は 118,684 B（`b664e29b` から +508 B、上限 122,368 B まで残り 3,684 B）、bss は −4 B。
 - 関連：R126、R130、R134、R141、R144。
 
+### R149 C のツールのテストが Windows で通らなかった原因（R146 の訂正）（Fable）
+
+- 担当：Fable（サブエージェント）。ブランチ `fix/ctests-windows`、コミット `b54c43f0`。未取り込み。
+- 原因：このPCで最初に見つかる `python` は DreamSDK の MSYS 版（`C:\DreamSDK\usr\bin\python.exe`、`sys.platform=cygwin`）。テストは `os.name` で `.exe` の有無を決め、`tempfile` の POSIX パス（`/tmp/...`）を渡すので、MSYS が `/` で始まる引数を書き換えて、ネイティブの gcc（scoop の mingw-w64）で作ったテストが別の場所を見る（例：`/02/DISC.GDI` → `C:/DreamSDK/02/DISC.GDI`）。C のコードとテストの不具合ではない。
+- 確認：ネイティブの Python（`py -3`）なら、変更なしの main で netgd-recv 53 件・netgd-menu 77 件がすべて通過（メインでも recv を再確認、exit 0）。
+- R146 の「Windows の環境で失敗する」は、この原因だった。
+- 修正：両方の `run_tests.py` の先頭に、MSYS / Cygwin の Python とネイティブの gcc の組み合わせなら「`py -3` で実行して」と言って止まる確認を入れた（Linux とネイティブの Python は素通り）。README の `python …` はそのまま。
+- 信頼度：確認済み（このPC）。Linux での無害さは CI で確認する。
+- 関連：R146。
+
+### R150 バスリセットのあとの SECNR と、SECNR の読み→書きの隙間（R148 のレビューへの対応）（Opus）
+
+- 担当：Opus（サブエージェント）。ブランチ `fix/secnr-reset`、コミット `237130e6`（親は main `6ef6dc87`）。未取り込み。指摘は比較のセッションのレビュー。
+- バスリセット（SRST・RSTn）のあと、窓の外でディスクが無いと SECNR が 0x01（EJECT のあとは旧形式|1）になっていた。純正どおり 0x07 にした（`discimg::atapi::reset_secnr`、`reassert_disc_format` と `cancel_swap_window` の両方）。
+- ディスクがあるときは従来どおり、形式と FPGA が戻した状態ニブル 1 のまま。`rest_secnr` を使うと初回切替前が待機 0x_2 になるが、純正の記録が無いので使わない。
+- FPGA のスロット 6 は MCU の書き込みで lba_low と lba_mid を同時に書く（バイトレーン無し、`ide_device.py` 1121〜1131 行）。lba_mid はホストが BYCTLLO を書く場所なので、`set_secnr` の読み→書きの間にホストが書くと値が消える（窓のタイマーと CDDA 終了の経路。コマンド処理中はホストが BSY を待つので起きない）。
+- ファームでは読み→書きを割り込み禁止にして隙間を縮め、タイマーは値が同じなら書かない。完全に直すには FPGA でスロット 6 を下位バイトだけ書けるようにする（スロット 5 と同じ）。次のビットストリームの候補。
+- テスト：`common/discimg` 152 件（1 件追加）、4 種類のビルドが成功、2E release-z は +8 B。実機は未確認。
+- 関連：R126、R148。
+
+### R151 D14：Form 2 のセクタを 2,324 B で返す（feature `form2-sectors`）（比較のセッション）
+
+- ブランチ `feat/form2-sectors`、コミット `b7b3b578`（main `6ef6dc87` に付け直し済み）。既定はオフ。
+- CDI の 2,336 B 格納の Mode 2 トラックで、読むセクタがすべて Form 2（サブモードのビット 5）のとき、`0x20` で 2,324 B／セクタ（[8:2332]）を返す。Form 1 と混ざる読み、`0x28`、5 セクタを超える読み、写像の無いトラックは 2,048 B のまま。サブヘッダは SD の 1 回の読みで確かめ、Form 2 でなければ通常の 2,048 B のキャッシュに使う。
+- 予測と記録 05（イメージ 4・5）の差は 8 → 4 件（SEEK_01 の 2,324 B と crc が一致）。大きさは既定で 2E release-z +20 B、機能ありで +532 B。テストは先に書いて失敗を確認。実機は未確認。
+
+### R152 純正の記録と予測の全面比較・容量の内訳・予測の cdbst / secnr（比較のセッション）
+
+- ブランチ `docs/stock-audit`（`52910f65`、`docs/research/stock-diff-audit.md`）、`feat/expect-cdbst-secnr`（`f4498c46`、`docs/stock-audit` から）。
+- 比べられる記録 13 本の差は、既定で 102 件、`--raw-sectors --form2-sectors` で 75 件。残りは D15（GDEMU_VERSION、27 行、承知の上）と D11（純正がマウントしない形の GDI、48 行。今の動きのままにする）。予測の誤りは無し。
+- 予測が `cdbst=`（直前が CHECK なら 0x18、そうでなければ 0x58。gdprobe が記録しない CHECK のあとの REQ_ERROR と切替のポーリングも数える）と `secnr=` を出すようにした。記録 13・14 ですべて一致。
+- 容量（2E release-z の `resident,sd-fast`）：c8d2cb02 から +1,016 B で、上限まで残り 3,664 B。大きいのは `handle_packet` 8,956 B・`main_task` 4,332 B・`sweep` 4,236 B・`load_image` 3,764 B・embedded_sdmmc 計 6.6 KB。削る案は A（めったに使わないコマンドを分ける）・B（`sweep` の展開）・C（名前をバイトで扱う）・D（embedded_sdmmc の置き換え）。LZMA の辞書を大きくしても −99〜−554 B だけ。
+
+### R153 名前と INI の読み取りをバイトで扱う（R152 の案 C）（比較のセッション実装、Fable レビュー）
+
+- ブランチ `perf/name-bytes`、コミット `e5732b62`（main `6ef6dc87` から）。`common/gamecfg`・`common/fatmap`（lfn.rs）・`mcu/netgd/src/gdi.rs` を `&str` からバイト列に。2E の像から `core::str`・`core::char` が消えた。
+- 大きさ（text）：4E −2,428 B、2E −3,380 B、2E release-z の `resident,sd-fast` −2,556 B（115,968 B、上限まで残り 6,240 B）、v60 −3,384 B。
+- テスト：gamecfg 37・fatmap 52・discimg 151 件。旧（`&str`）と新の結果を約 40 万の生成入力（CRLF・タブ・VT/FF・BOM・Shift-JIS・不正な UTF-8・長すぎる値）で比べるテストを追加。
+- Fable のレビュー：挙動の違い・新しい panic の経路は無し。`widened_eq` は 300 万組で旧と一致（使い捨てのテスト）。指摘は小さなものだけ（`widened_eq`・`mounted_number` のホストテストが無い、`fit` の unsafe の前提、gdi.rs の `trim_ascii` が VT を空白として扱わない（main と同じ））。実機は未確認。
+
+### R154 gdprobe：切替中のレジスタのポーリング・窓の中の DEVICE RESET・音声だけの CDI（R148 の確認用）（Opus）
+
+- ブランチ `feat/gdprobe-r148`、コミット `d615fa63`。記録の形式は 2。
+- `swap_regpoll`：`52 82 n` のあと 1,000 ms はパケットを送らず、ALTSTATUS・ERROR・割り込み理由・SECNR を 2 ms ごとに読み、変化を `SW_REGPOLL` で記録（STATUS は読まないので割り込みは消さない）。
+- `swap_devreset`：同じイメージにもう一度切り替え、50 ms・200 ms 後に ATA DEVICE RESET（0x08）を送り、署名レジスタと SECNR を `R<ms>_SW_DEVRESET` で記録。ATA のホワイトリストを新設（0x08 と 0xA1 だけ）。
+- mksdcard のイメージ 11：音声トラック 2 本だけの CDI（データトラック無し）。データトラックが無いときは `NO_DATA_TRACK` を記録して IP_READ・速度・シークを飛ばす。
+- テスト：gdprobe 57,668 件、compare 27 件、mksdcard 23 件。カードの中身は `H:\NetGD_probe_sd_v4`（`11/disc.cdi` MD5 `34f49644…`）。実機の実行はこれから。
+
+### R155 純正の切替中のレジスタ（コマンドなし）・窓の中の DEVICE RESET・音声だけの CDI（R154 の実機実行）（Opus）
+
+- 担当：Opus。gdprobe は `feat/gdprobe-r148`（`d615fa63`）。試験用 SD に `11`（音声だけの CDI）を追加し MD5 で照合。GDEMU.ini は元の内容（150 / 150 / 1）。
+- 記録：`docs/research/probe-records/stock_20261122_15_regpoll-devreset.txt`（`images=4,3,11,7`、`return_to=2`、`abort=0`）。`compare.py --manifest` は 547 件一致・不一致 0（イメージ 11 の 2 件も一致）。
+- 結論：
+  - **コマンドを送らなくても SECNR は時間で進む**：`52 82 n` の約 3 ms 後に `0x06`、150 ms で `0x00`、300 ms で形式|1（CDI 04 = 0x21、GDI 03 = 0x81、音声だけの CDI 11 = 0x11）、空フォルダ 07 は `0x07`。**NetGD の `f0dccd36`（窓のタイマーで SECNR を書き直す）は純正と同じ**。ALTSTATUS はこの間 0x50 のまま。
+  - **窓の中の DEVICE RESET（0x08）**：50 ms・200 ms のどちらでも、BSY のあと ALTSTATUS `0x00`・ERROR `0x01`・割り込み理由 `0x01`・署名 `14 EB`、SECNR は**すぐに `0x00`**、そして**リセットから約 150 ms 後に最終の値**（0x21 / 0x81 / 0x11 / 0x07）。最初の `0x06` には戻らない。ALTSTATUS は次のコマンドまで `0x00`（DRDY = 0）。そのあとの TUR の流れ・UA・REQ_STAT は通常と同じ。
+    **NetGD（R148 の `f0dccd36`）は窓の中の DEVICE RESET で窓の値（open 中なら `0x06`）を書くだけで、純正と違う**。純正は「DEVICE RESET で検出の段階（150 ms、`detect_time` と同じ値なので区別はまだ）をやり直す」ように見える。
+  - **音声だけの CDI のディスク形式は 1（CD-ROM）**：SECNR `0x11`、REQ_STAT `01 1f 01 01 01 00 00 96`。**NetGD（R148）の推測 0（Flycast）は違う**。TOC は音声 2 本、REQ_SES(2) は CHECK。音声の CD_READ は R148 の規則どおり（0x20・0x10 は 2,352 B、0x24・0x28 は 5/64/00）。
+- 対応：音声だけの CDI のディスク形式を 1 にする。窓の中の DEVICE RESET は SECNR `0x00` にして、リセットから検出の段階をやり直す。DEVICE RESET のあとの ALTSTATUS（0x00）を NetGD でも確かめる。
+- 信頼度：確認済み（実機）。
+- 関連：R126、R144、R148、R154。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
