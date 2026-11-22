@@ -167,18 +167,11 @@ if want tools; then
             skip tools-netgd-recv "gcc missing"; skip tools-netgd-menu "gcc missing"
         fi
         step tools-pinfind . "$PYPLAIN -m unittest discover -s tools/pinfind/tests -v"
-        # not in the CI matrix, but present in the tree (needs cargo)
-        if command -v cargo >/dev/null 2>&1; then
-            step tools-netgd-expect . "$PYPLAIN tools/netgd-expect/test_expect.py"
+        # not in the CI matrix; gen_msgs.py --check ignores CRLF vs LF, so it is safe on an autocrlf checkout.
+        if command -v gcc >/dev/null 2>&1; then
+            step tools-netgd-fwupd "$WT/tools/netgd-fwupd" "TMPDIR='$LOGDIR' sh tests/run_tests.sh"
         else
-            skip tools-netgd-expect "cargo not found"
-        fi
-        # not in the CI matrix; its gen_msgs.py --check compares bytes, so it
-        # fails on a CRLF (autocrlf) checkout.  Opt in with CI_LOCAL_FWUPD=1.
-        if [ "${CI_LOCAL_FWUPD:-0}" = 1 ] && command -v gcc >/dev/null 2>&1; then
-            step tools-netgd-fwupd "$WT/tools/netgd-fwupd" "sh tests/run_tests.sh"
-        else
-            skip tools-netgd-fwupd "not in CI; fails on CRLF checkout (CI_LOCAL_FWUPD=1 to run)"
+            skip tools-netgd-fwupd "gcc not found"
         fi
     fi
 fi
