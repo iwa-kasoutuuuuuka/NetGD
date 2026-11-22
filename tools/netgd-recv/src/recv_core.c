@@ -151,6 +151,13 @@ ng_err_t ng_session_open(const ng_sink_t *sk)
     ngfs_statfs(&fr, &tot, NULL);
     ng_emitf(sk, 0, "NGD:HELLO app=%s fw=OGDM/%d caps=%d free=%llu total=%llu", NG_APP_VERSION, g_fw.proto, g_fw.caps,
              (unsigned long long)fr, (unsigned long long)tot);
+    if (g_fw.caps & FW_CAP_STACK) {             /* a stack-hw firmware: its stack high-water mark (PLAN A-1) */
+        ng_fwstack_t st;
+        if (fw_stack(&st) == 0)
+            ng_emitf(sk, 0, "NGD:STACK fmt=%u reserved=%u used=%u free=%u unpainted=%u", st.format, (unsigned)st.reserved,
+                     (unsigned)st.used, (unsigned)(st.reserved - (st.used < st.reserved ? st.used : st.reserved)),
+                     (unsigned)st.unpainted);
+    }
     return NG_OK;
 }
 

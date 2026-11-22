@@ -9,6 +9,7 @@
      6 WSESSION_BEGIN [2..6] = "NGWS"
      7 WSESSION_END   [2] = 0 leave empty / 1 load_media / 2 mount the staged name
      8 STATUS    [3..=4] = allocation length                   -> 48 bytes (see fwctl.h)
+     9 STACK     [3..=4] = allocation length                   -> 20 bytes "NGSK" (common/stackmark)
    Nothing here has run on hardware. */
 #include <string.h>
 #include <stdint.h>
@@ -102,6 +103,19 @@ int fw_status(ng_fwstatus_t *out)
     out->last_count = LE32(20);
     out->last_fnv = LE32(24);
     out->part_lba = LE32(28);
+    return 0;
+}
+
+int fw_stack(ng_fwstack_t *out)
+{
+    uint8_t b[20];
+    uint32_t got = 0;
+    memset(b, 0, sizeof b);
+    if (ctl(9, 0, 0, 20, b, 20, &got) != 0 || got < 16 || memcmp(b, "NGSK", 4) || b[4] < 1) return -1;
+    out->format = b[4];
+    out->reserved = LE32(8);
+    out->used = LE32(12);
+    out->unpainted = got >= 20 ? LE32(16) : 0;
     return 0;
 }
 

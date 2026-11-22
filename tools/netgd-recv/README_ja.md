@@ -57,7 +57,7 @@ BBA（ブロードバンドアダプタ）経由で、PC から送られたゲ�
 
 ## 結果ファイル `result.ngr`
 
-`tools/netgd-send/README_ja.md` の「結果ファイル」と同じ行（`HELLO` `PUT` `RESUME` `FILE` `DONE` `ERROR` `FINISH` `END`）に加えて、`netgd-send collect` が無視する行を出す：`NGD:MOUNT pct=NN`（マウント時の FAT 走査中、1 秒に 1 行以下）と `NGD:MOUNT pct=100 fat_sectors=… ms=…`（走査の終わりに必ず 1 行。`NGD:HELLO` の直前）、`NGD:STATFS free=… total=… cluster=…`、`NGD:LIST <complete|partial|other> <パス>`（サブフォルダは 16 件ずつ読み直して**打ち切らない**）、`NGD:READBACK <番号> file=i/n bytes=…/…`（読み戻し中、1 秒に 1 行以下。`/pc/` に動きを出して dc_auto に生きていると伝える）、`NGD:NOTE …`、`NGD:VERIFY "<フォルダ>" ok|fail …`、`NGD:DELETE "<フォルダ>" ok`、`NGD:STOP <番号>`。`NGD:ERROR` の `msg="…"` は人間向けの説明。
+`tools/netgd-send/README_ja.md` の「結果ファイル」と同じ行（`HELLO` `PUT` `RESUME` `FILE` `DONE` `ERROR` `FINISH` `END`）に加えて、`netgd-send collect` が無視する行を出す：`NGD:MOUNT pct=NN`（マウント時の FAT 走査中、1 秒に 1 行以下）と `NGD:MOUNT pct=100 fat_sectors=… ms=…`（走査の終わりに必ず 1 行。`NGD:HELLO` の直前）、`NGD:STATFS free=… total=… cluster=…`、`NGD:STACK fmt=1 reserved=… used=… free=… unpainted=…`（ファームの VERSION の機能 bit 3 = `stack-hw` のビルドのときだけ、`NGD:HELLO` の直後に 1 行。ファームのスタックの最高水位。読み方は `tools/netgd-menu/README_ja.md` の「スタックの最高水位を読む」）、`NGD:LIST <complete|partial|other> <パス>`（サブフォルダは 16 件ずつ読み直して**打ち切らない**）、`NGD:READBACK <番号> file=i/n bytes=…/…`（読み戻し中、1 秒に 1 行以下。`/pc/` に動きを出して dc_auto に生きていると伝える）、`NGD:NOTE …`、`NGD:VERIFY "<フォルダ>" ok|fail …`、`NGD:DELETE "<フォルダ>" ok`、`NGD:STOP <番号>`。`NGD:ERROR` の `msg="…"` は人間向けの説明。
 
 エラーコード：設計 5.4 の一覧に加えて、**`EFS`**（第 1 パーティションが FAT32 でない。設計に名前が無いので追加）、`EJOB`（job.ngj が読めない）、`ESRC`（`/pc/` の元ファイルが読めない）。
 

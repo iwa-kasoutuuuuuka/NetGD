@@ -144,6 +144,9 @@ static void draw_info(nm_ui_t *ui)
     nm_screen_printf(&ui->scr, 6, 1, NM_ATTR_NORMAL, "%.51s", buf);
     nm_screen_printf(&ui->scr, 7, 1, NM_ATTR_NORMAL, "Default image %.37s", def);
     nm_screen_printf(&ui->scr, 8, 1, NM_ATTR_NORMAL, "Games         %d", ui->list.count);
+    if (ui->stack_ok)                   /* a stack-hw firmware: high-water mark since its reset (PLAN A-1) */
+        nm_screen_printf(&ui->scr, 9, 1, NM_ATTR_NORMAL, "Stack         %u of %u bytes used%s", (unsigned)ui->stack.used,
+                         (unsigned)ui->stack.reserved, ui->stack.used >= ui->stack.reserved ? " OVERRUN" : "");
     nm_screen_printf(&ui->scr, 10, 1, NM_ATTR_NORMAL, "Hand-off      %s",
                      ui->handoff_mode == NM_HANDOFF_REBOOT ? "restart the console" : "BIOS menu");
     draw_status(ui, NM_ATTR_NORMAL);
@@ -642,7 +645,11 @@ void nm_ui_step(nm_ui_t *ui)
            moves only when no transition was asked for. */
         if (ui->events & NM_BTN_A) begin_launch(ui);
         else if (ui->events & NM_BTN_Y) net_start(ui);
-        else if (ui->events & NM_BTN_X) ui->state = NM_S_INFO;
+        else if (ui->events & NM_BTN_X) {
+            ui->state = NM_S_INFO;
+            /* read once per visit: one 20-byte data-in, only from a firmware that announces it */
+            ui->stack_ok = (ui->fw.caps & FW_CAP_STACK) && fw_stack(&ui->stack) == 0;
+        }
         else if (ui->events & NM_BTN_START) ui->state = NM_S_CONFIRM_BIOS;
         else {
             if (ui->events & NM_BTN_UP) move_cursor(ui, -1, 0);

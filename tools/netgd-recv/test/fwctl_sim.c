@@ -27,6 +27,8 @@ int sim_fw_dead;
 int sim_mount_in_session;
 int sim_tur_calls;
 uint32_t sim_fw_version = 0x05200000u;     /* 5.20.0: bytes 00 00 20 05 */
+uint32_t sim_stack_reserved = 7128, sim_stack_used = 4816, sim_stack_unpainted = 96;   /* STACK (E0 09), with FW_CAP_STACK */
+int sim_stack_calls;
 static int notready_left;
 
 static char staged[128];
@@ -172,6 +174,18 @@ int fw_xfer(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, ui
         v = sim_last_n;    memcpy(b + 20, &v, 4);
         v = sim_last_fnv;  memcpy(b + 24, &v, 4);
         v = sim_protect_lba; memcpy(b + 28, &v, 4);
+        return copy_out(b, sizeof b, data, alloc, got);
+    }
+    case 9: {                                   /* STACK (firmware feature stack-hw) */
+        uint8_t b[20];
+        sim_stack_calls++;
+        if (!(sim_caps & FW_CAP_STACK)) { *err = 0x50; return -1; }
+        memset(b, 0, sizeof b);
+        memcpy(b, "NGSK", 4);
+        b[4] = 1;
+        memcpy(b + 8, &sim_stack_reserved, 4);
+        memcpy(b + 12, &sim_stack_used, 4);
+        memcpy(b + 16, &sim_stack_unpainted, 4);
         return copy_out(b, sizeof b, data, alloc, got);
     }
     default:

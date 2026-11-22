@@ -344,6 +344,19 @@ class TestListAndInfo(UiBase):
         self.assertIn("Hand-off      restart the console", "\n".join(run.screens[0][1]))
         self.assertEqual(run.screens[1][0]["state"], "3")
 
+    def test_info_screen_stack_line(self):
+        # A stack-hw firmware (VERSION caps bit3): X reads E0 09 once and the info screen shows the high-water mark.
+        img = self.card({"/02/DISC.GDI": GDI3})
+        run = self.ui(img, "scan X dump B X dump", "--slots", "2", "--caps", "15")
+        for head, rows in run.screens:
+            self.assertEqual(head["state"], "4")
+            self.assertEqual(rows[9].rstrip(), " Stack         4816 of 7128 bytes used", "\n".join(rows))
+        self.assertEqual(sum(1 for p in run.packets if p.startswith("E0 09")), 2, run.text)   # once per visit
+        # Any other firmware: no line, and E0 09 is never sent (it would be ILLEGAL REQUEST).
+        run = self.ui(self.card({"/02/DISC.GDI": GDI3}, "b.img"), "scan X dump", "--slots", "2")
+        self.assertNotIn("Stack", "\n".join(run.rows))
+        self.assertFalse([p for p in run.packets if p.startswith("E0 09")], run.text)
+
     def test_no_controller_is_reported(self):
         img = self.card({"/02/DISC.GDI": GDI3})
         run = self.ui(img, "scan dump", "--slots", "2", "--nocontroller")

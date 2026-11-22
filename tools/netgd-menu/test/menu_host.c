@@ -1,6 +1,6 @@
 /* Host test driver for netgd-menu's core.  Driven by test/run_tests.py.
      menu_host selftest                 pure functions (design 11.2 U1..U7; U8 is in the frame tests)
-     menu_host ui <img> <sectors> --script "<events>" [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--noimg]
+     menu_host ui <img> <sectors> --script "<events>" [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--caps C] [--noimg]
                   [--rflip K] [--rflip-all] [--nocontroller] [--names A|B]
         events: U D L R A B X Y S LT RT (press and release), hold:A:1200, t:500, scan, step, dump, rflipall, ua,
                 nocontroller, controller
@@ -384,7 +384,7 @@ static void run_event(char *ev)
     frame();
 }
 
-/* menu_host ui <img> <sectors> --script "..." [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--noimg] [--rflip K] [--rflip-all] */
+/* menu_host ui <img> <sectors> --script "..." [--slots 2,3,5] [--ua] [--notready N] [--nofw] [--caps C] [--noimg] [--rflip K] [--rflip-all] */
 static int ui_cmd(int argc, char **argv)
 {
     const char *script = "";
@@ -401,6 +401,7 @@ static int ui_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
         else if (!strcmp(argv[i], "--notready") && i + 1 < argc) sim_notready_polls = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nofw")) sim_fw_dead = 1;
+        else if (!strcmp(argv[i], "--caps") && i + 1 < argc) sim_caps = (uint8_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--noimg")) noimg = 1;
         else if (!strcmp(argv[i], "--rflip") && i + 1 < argc) sim_rflip_cmd = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
