@@ -163,6 +163,34 @@ pub fn trim(s: &str) -> &str {
     unsafe { core::str::from_utf8_unchecked(t) }
 }
 
+/// `data` without a trailing UTF-8 character that was cut off.
+///
+/// For a buffer that holds only the start of a longer file: a multi-byte
+/// character split at the end would fail validation for the whole buffer, so
+/// the complete characters before it are kept instead. Only a trailing lead
+/// byte followed by too few continuation bytes is dropped; anything else
+/// (including invalid bytes earlier in the data) is returned unchanged, so
+/// [`Meta::parse_bytes`] still gives the defaults for it.
+pub fn complete_utf8_prefix(data: &[u8]) -> &[u8] {
+    let n = data.len();
+    // The lead byte of the last character is among the last four bytes.
+    let mut back = 1;
+    while back <= 4 && back <= n {
+        let b = data[n - back];
+        if b & 0xC0 != 0x80 {
+            let need = match b {
+                0xC2..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF4 => 4,
+                _ => return data,
+            };
+            return if back < need { &data[..n - back] } else { data };
+        }
+        back += 1;
+    }
+    data
+}
+
 /// [`trim`] on bytes: the same six ASCII whitespace bytes from both ends.
 /// The one copy the parsers here and the firmware share.
 #[inline(never)]

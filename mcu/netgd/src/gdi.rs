@@ -470,9 +470,19 @@ where
     // Small on purpose. These files hold a handful of keys, and this part has
     // about two kilobytes of RAM to spare in total -- a 1 KB buffer here was
     // a quarter of it.
-    static mut CFG_BUF: [u8; 256] = [0; 256];
+    //
+    // One byte more than is parsed: reading 257 tells a file of exactly 256
+    // bytes (parsed as is, as before) from a longer one, which is cut at 256
+    // and then back to the last complete UTF-8 character, so a character split
+    // by the cut does not discard the valid lines before it.
+    static mut CFG_BUF: [u8; 257] = [0; 257];
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG_BUF) };
     let got = f.read(buf).unwrap_or(0);
+    let got = if got > 256 {
+        gamecfg::complete_utf8_prefix(&buf[..256]).len()
+    } else {
+        got
+    };
     // Not UTF-8 as a whole: the defaults, as `from_utf8(..).unwrap_or("")`
     // gave before (`parse_bytes` checks).
     gamecfg::Meta::parse_bytes(&buf[..got])
@@ -496,15 +506,15 @@ pub fn configured_name(num_blocks: u32) -> Option<String<MAX_NAME_CHARS>> {
     let len = read_file_to_buf(&root, &name, buf).ok()?;
 
     for line in buf[..len].split(|c| *c == b'\n') {
-        let line = trim_ascii(line);
+        let line = gamecfg::trim_bytes(line);
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
         // Split at the first `=`; a line without one ends the search, as
         // `splitn(2, ..)` returning no second part did.
         let eq = line.iter().position(|c| *c == b'=')?;
-        let key = trim_ascii(&line[..eq]);
-        let val = trim_ascii(&line[eq + 1..]);
+        let key = gamecfg::trim_bytes(&line[..eq]);
+        let val = gamecfg::trim_bytes(&line[eq + 1..]);
         if !key.eq_ignore_ascii_case(b"image") {
             continue;
         }
@@ -518,16 +528,6 @@ pub fn configured_name(num_blocks: u32) -> Option<String<MAX_NAME_CHARS>> {
         return Some(out);
     }
     None
-}
-
-fn trim_ascii(mut s: &[u8]) -> &[u8] {
-    while let Some((f, rest)) = s.split_first() {
-        if f.is_ascii_whitespace() { s = rest; } else { break; }
-    }
-    while let Some((l, rest)) = s.split_last() {
-        if l.is_ascii_whitespace() { s = rest; } else { break; }
-    }
-    s
 }
 
 /// The enumerated images, and which one is mounted.
