@@ -11,3 +11,9 @@ defmt = ["dep:defmt"]
 
 [dependencies]
 defmt = { version = "0.3", optional = true }
+
+[dev-dependencies]
+# The FAT reader the firmware links today (mcu/netgd/Cargo.toml), used by the
+# host tests as the oracle for this crate's reader. Not a dependency of the
+# library.
+embedded-sdmmc = { version = "=0.9.0", default-features = false }
