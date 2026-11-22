@@ -177,13 +177,13 @@ def run(host, out_dir, wait_s, port=TCP_PORT, udp_port=UDP_PORT, log=print, g2x_
     fout.flush()
     log("[g2n_send] result file (written as lines arrive): %s" % path)
     try:
-        return _run(cli, fout, src, lines, host, path, udp_port, log)
+        return _run(cli, fout, src, lines, host, path, udp_port, log, g2x_drop)
     finally:
         fout.close()            # also when a failure escapes before the normal close (close() twice is harmless)
         cli.close()
 
 
-def _run(cli, fout, src, lines, host, path, udp_port, log):
+def _run(cli, fout, src, lines, host, path, udp_port, log, g2x_drop=None):
     with cli:
         info = cli.hello(0)
         log("[g2n_send] HELLO_OK app=%s max_data=%d" % (info.app, info.max_data))
