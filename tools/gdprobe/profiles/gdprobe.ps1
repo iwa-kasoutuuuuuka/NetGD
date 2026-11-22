@@ -16,7 +16,7 @@ $preset_gd = if ($PSCommandPath) { Split-Path -Parent (Split-Path -Parent $PSCom
     BuildDir  = $preset_gd
     # build.ps1 also creates host\ and passes HOST_DIR_REL, so it replaces a plain make
     Build     = { & (Join-Path $preset_gd 'build.ps1') -BbaTools $DevkitRoot }
-    Watch     = @((Join-Path $preset_gd 'main.c'), (Join-Path $preset_gd 'probes.c'), (Join-Path $preset_gd 'gdraw.c'), (Join-Path $preset_gd 'Makefile'))
+    Watch     = @((Join-Path $preset_gd 'main.c'), (Join-Path $preset_gd 'probes.c'), (Join-Path $preset_gd 'gdraw.c'), (Join-Path $preset_gd 'toc.c'), (Join-Path $preset_gd 'Makefile'))
     # one Dreamcast, one drive: never run two probes at the same time
     Exclusive = 'gdprobe'
     # (no ReloadReq: the program ends by itself and returns to dcload)

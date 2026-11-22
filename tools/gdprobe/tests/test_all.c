@@ -10,6 +10,7 @@
 #include "../pcout.h"
 #include "../probes.h"
 #include "../record.h"
+#include "../toc.h"
 #include "../whitelist.h"
 
 static int g_checks;
@@ -341,10 +342,30 @@ typedef struct {
     int head_model;
     uint32_t head;
     int head_cmds[256];      /* commands seen per opcode */
+    /* seq 22 edge images (stock head rule: a read leaves the head at start + count, a refused one at its start):
+     * cdi_folder = CDI like images 4 / 10: track 1 audio at 150 (data 150..451), track 2 data at 11852, lead-out
+     *              15854, area 1 a copy of area 0; gdi_folder = GDI like image 3: track 1 data 150 (readable
+     *              150..755), track 2 audio 906, LD lead-out 1506, track 3 at 45150, HD lead-out 65150 */
+    int cdi_folder, gdi_folder;
 } fake;
+
+static int f_edge(const fake *f) { return f->mounted && (f->mounted == f->cdi_folder || f->mounted == f->gdi_folder); }
+/* sector size at fad on an edge image, 0 = not readable (5/21/00) */
+static uint32_t f_edge_ssz(const fake *f, uint32_t fad)
+{
+    if (f->mounted == f->cdi_folder)
+        return (fad >= 150 && fad <= 451) ? 2352 : (fad >= 11852 && fad < 15854) ? 2048 : 0;
+    return (fad >= 150 && fad <= 755) ? 2048 : (fad >= 906 && fad < 1506) ? 2352 : (fad >= 45150 && fad < 65150) ? 2048 : 0;
+}
+static void put_toc(uint8_t *toc, int t, uint8_t ctl, uint32_t fad)
+{
+    toc[4 * t] = ctl; toc[4 * t + 1] = (uint8_t)(fad >> 16); toc[4 * t + 2] = (uint8_t)(fad >> 8); toc[4 * t + 3] = (uint8_t)fad;
+}
 
 static int f_trk(const fake *f, uint32_t fad)
 {
+    if (f->mounted && f->mounted == f->cdi_folder) return fad < 452 ? 1 : 2;
+    if (f->mounted && f->mounted == f->gdi_folder) return fad < 756 ? 1 : fad < 1506 ? 2 : 3;
     if (f->mounted == f->audio_only_folder) return fad >= 752 ? 2 : 1;
     return fad >= (f->toc_fad ? f->toc_fad : 45150) ? 3 : 1;
 }
@@ -423,6 +444,18 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         {
             static uint8_t toc[408];
             memset(toc, 0xFF, sizeof(toc));
+            if (f_edge(f)) {
+                if (f->mounted == f->cdi_folder) {
+                    put_toc(toc, 0, 0x01, 150); put_toc(toc, 1, 0x41, 11852); put_toc(toc, 101, 0x41, 15854);
+                } else if (cdb[1] == 0) {
+                    put_toc(toc, 0, 0x41, 150); put_toc(toc, 1, 0x01, 906); put_toc(toc, 101, 0x01, 1506);
+                } else {
+                    put_toc(toc, 2, 0x41, 45150); put_toc(toc, 101, 0x41, 65150);
+                }
+                for (i = 0; i < 408 && i < cap; i++) buf[i] = toc[i];
+                r->total = 408; r->stored = cap < 408 ? cap : 408;
+                return r->rc;
+            }
             if (f->mounted == f->audio_only_folder) {
                 /* single-session audio CD: SD area = track 1 at 150, track 2 at 752 (both ctrl 0x01); no HD area */
                 if (cdb[1] == 0) {
@@ -444,7 +477,7 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     case 0x15:
         if (f->ses_fail && cdb[2] == 2) { r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50; return r->rc; }
         len = 6; d[0] = 1; d[2] = (uint8_t)(cdb[2] + 1);
-        { uint32_t fad = cdb[2] == 2 ? 45150 : 150; d[3] = (uint8_t)(fad >> 16); d[4] = (uint8_t)(fad >> 8); d[5] = (uint8_t)fad; }
+        { uint32_t fad = cdb[2] == 2 ? (f->mounted && f->mounted == f->cdi_folder ? 11852 : 45150) : 150; d[3] = (uint8_t)(fad >> 16); d[4] = (uint8_t)(fad >> 8); d[5] = (uint8_t)fad; }
         break;
     case 0x40:
         len = cdb[1] ? 14 : 100; d[1] = 0x15;
@@ -461,6 +494,21 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         f->cd_reads[cdb[1]]++;
         f->now += 20000 + (uint64_t)cnt * 1000;
         r->us = 21500 + (uint64_t)cnt * 1000;
+        if (f_edge(f)) {
+            uint32_t z = f_edge_ssz(f, fad), k;
+            int bad = !z || !cnt;
+            for (k = 1; k < cnt && !bad; k++) bad = f_edge_ssz(f, fad + k) != z;
+            if (bad || (z == 2352 && (cdb[1] & 0x0E))) {
+                r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50;
+                f->pend_sk = 5; f->pend_asc = bad ? 0x21 : 0x64; f->pend_ascq = 0;
+                if (f->head_model) f->head = fad;
+                return r->rc;
+            }
+            if (f->head_model) f->head = fad + cnt;
+            for (s = 0; s < cnt * z && s < cap; s++) buf[s] = (uint8_t)(fad + s);
+            r->total = cnt * z; r->stored = r->total < cap ? r->total : cap;
+            return r->rc;
+        }
         if (f->mounted == f->audio_only_folder) {
             /* stock on audio (R144): 0x24 / 0x28 = 5/64/00, 0x20 / 0x10 = 2352-byte PCM */
             if (cdb[1] & 0x0E) {
@@ -1429,6 +1477,219 @@ static void test_seq21_example_cfg(void)
     CHECK(f.now < 120ull * 1000000u);
 }
 
+/* seq 22: TOC parsing, the FAD plan and the gap search */
+static void mk_toc(uint8_t *toc, const uint8_t *ctl, const uint32_t *fad, const int *tno, int n, uint8_t lo_ctl, uint32_t lo)
+{
+    int i;
+    memset(toc, 0xFF, 408);
+    for (i = 0; i < n; i++) put_toc(toc, tno[i] - 1, ctl[i], fad[i]);
+    if (lo) put_toc(toc, 101, lo_ctl, lo);
+}
+
+static void test_toc_plan(void)
+{
+    uint8_t t0[408], t1[408];
+    gp_toc_area a[2];
+    gp_gap_plan p;
+    uint32_t lo, hi, x;
+    int n;
+
+    /* CDI (images 4 / 10): audio track 1, data track 2, area 1 = copy */
+    {
+        static const uint8_t ctl[2] = { 0x01, 0x41 };
+        static const uint32_t fad[2] = { 150, 11852 };
+        static const int tno[2] = { 1, 2 };
+        mk_toc(t0, ctl, fad, tno, 2, 0x41, 15854);
+    }
+    CHECK(gp_toc_parse(t0, &a[0]) && a[0].n == 2 && a[0].num[1] == 2 && a[0].ctl[0] == 0x01 && a[0].fad[1] == 11852 && a[0].leadout == 15854);
+    CHECK(gp_toc_parse(t0, &a[1]));
+    gp_gap_plan_make(a, &p);
+    CHECK(p.trk_ok && p.a_num == 1 && p.a_fad == 150 && p.a_ctl == 0x01 && p.b_num == 2 && p.b_fad == 11852 && p.b_ctl == 0x41);
+    CHECK(p.lo_ok && p.leadout == 15854 && p.last_fad == 11852 && p.last_num == 2);
+    CHECK(!p.hd_ok && !strcmp(p.hd_why, "no_hd_area") && p.ref_fad == 11868);
+
+    /* GDI (image 3): area 0 = tracks 1 / 2 + lead-out 1506, area 1 = track 3 at 45150 + lead-out 65150 */
+    {
+        static const uint8_t c0[2] = { 0x41, 0x01 }, c1[1] = { 0x41 };
+        static const uint32_t f0[2] = { 150, 906 }, f1[1] = { 45150 };
+        static const int n0[2] = { 1, 2 }, n1[1] = { 3 };
+        mk_toc(t0, c0, f0, n0, 2, 0x01, 1506);
+        mk_toc(t1, c1, f1, n1, 1, 0x41, 65150);
+    }
+    gp_toc_parse(t0, &a[0]);
+    CHECK(gp_toc_parse(t1, &a[1]) && a[1].n == 1 && a[1].num[0] == 3);
+    gp_gap_plan_make(a, &p);
+    CHECK(p.trk_ok && p.a_fad == 150 && p.b_fad == 906 && p.b_num == 2);
+    CHECK(p.lo_ok && p.leadout == 65150 && p.last_fad == 45150 && p.last_num == 3);
+    CHECK(p.hd_ok && p.ld_leadout == 1506 && p.hd_fad == 45150 && p.hd_num == 3 && p.ref_fad == 166);
+
+    /* audio-only CDI (image 11): two audio tracks, area 1 copy; reference = first track + 16 */
+    {
+        static const uint8_t ctl[2] = { 0x01, 0x01 };
+        static const uint32_t fad[2] = { 150, 602 };
+        static const int tno[2] = { 1, 2 };
+        mk_toc(t0, ctl, fad, tno, 2, 0x01, 1004);
+    }
+    gp_toc_parse(t0, &a[0]); gp_toc_parse(t0, &a[1]);
+    gp_gap_plan_make(a, &p);
+    CHECK(p.trk_ok && p.b_fad == 602 && p.lo_ok && p.leadout == 1004 && p.last_fad == 602 && !p.hd_ok && p.ref_fad == 166);
+
+    /* one track, no lead-out, area 1 unreadable */
+    {
+        static const uint8_t ctl[1] = { 0x41 };
+        static const uint32_t fad[1] = { 150 };
+        static const int tno[1] = { 1 };
+        mk_toc(t0, ctl, fad, tno, 1, 0, 0);
+    }
+    gp_toc_parse(t0, &a[0]);
+    memset(t1, 0xFF, sizeof(t1));
+    CHECK(!gp_toc_parse(t1, &a[1]));
+    gp_gap_plan_make(a, &p);
+    CHECK(!p.trk_ok && !strcmp(p.trk_why, "one_track") && !p.lo_ok && !strcmp(p.lo_why, "no_leadout"));
+    CHECK(!p.hd_ok && !strcmp(p.hd_why, "no_hd_area") && p.ref_fad == 150);
+    /* nothing at all */
+    memset(a, 0, sizeof(a));
+    gp_gap_plan_make(a, &p);
+    CHECK(!p.trk_ok && !strcmp(p.trk_why, "no_toc") && !p.lo_ok && !p.hd_ok && p.ref_fad == 0);
+
+    /* the search: last readable 451 in 150..11851 */
+    lo = 150; hi = 11851; n = 0;
+    while ((x = gp_bsearch_next(lo, hi)) != 0) { if (x <= 451) lo = x; else hi = x; n++; }
+    CHECK(lo == 451 && hi == 452 && n <= 14);
+    CHECK(gp_bsearch_next(10, 11) == 0 && gp_bsearch_next(10, 12) == 11 && gp_bsearch_next(10, 10) == 0);
+}
+
+static void test_runner_seq22(void)
+{
+    static fake f;
+    gp_config c;
+    const char *l;
+
+    gp_config_defaults(&c);
+    CHECK(!c.gap_probe && c.gap_flags == 0x20 && c.gap_late_ms == 300 && c.gap_scd && c.gap_track_end == 0 && c.gap_count0);
+    CHECK(c.n_gap_leadout == 3 && c.gap_leadout[2] == 100 && c.n_gap_low == 2 && c.gap_low[1] == 100);
+    gp_config_parse(&c, "gap_probe=on\ngap_flags=0x25\ngap_late_ms=9000\ngap_scd=off\ngap_track_end=452\ngap_leadout=5\ngap_low=0,149\ngap_count0=off\n");
+    CHECK(c.gap_probe && c.gap_flags == 0x24 && c.gap_late_ms == 5000 && !c.gap_scd && c.gap_track_end == 452 && !c.gap_count0);
+    CHECK(c.n_gap_leadout == 1 && c.gap_leadout[0] == 5 && c.n_gap_low == 2 && c.gap_low[1] == 149 && c.unknown_keys == 0);
+    gp_config_parse(&c, "gap_low=150\ngap_leadout=1,2,3,4,5\ngap_track_end=-1\ngap_probe=sometimes\n");
+    CHECK(c.n_gap_low == 2 && c.n_gap_leadout == 1 && c.gap_track_end == 452 && c.unknown_keys == 4);
+
+    /* CDI 4 + GDI 3 with the stock head rule */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.cdi_folder = 4; f.gdi_folder = 3;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4,3\nreturn_to=2\ngap_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0 && find_line("probe=END abort=0"));
+    CHECK(f.head_cmds[0x20] == 0 && f.head_cmds[0x21] == 0 && f.head_cmds[0x22] == 0 && f.head_cmds[0x12] == 0);
+    CHECK(!find_line("probe=HD_"));
+    CHECK(find_line("img=4 probe=GP_START toc0=2/15854 toc1=2/15854 trk_a=1/150/0x01 trk_b=2/11852/0x41 leadout=15854 last=2/11852 "
+                    "ld_leadout=0 hd=0/0 ref=11868 trk=ok lo=ok hdg=no_hd_area"));
+    l = line_of("img=4 probe=GP_BASE_POS ");
+    CHECK(strstr(l, "stat_rc=ok st=pause trk=2 idx=1 pos=11859 ctl=0x41 moved=- scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=11859 scd_ctl=0x41 scd_rel=0 late_rc=ok"));
+    CHECK(find_line("img=4 probe=GP_SCAN_R n=1 flags=0x20 fad=150 count=1 ssz=2352 sense=none"));
+    CHECK(find_line("img=4 probe=GP_SCAN_R n=2 flags=0x20 fad=11851 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=4 probe=GP_SCAN a_fad=150 b_fad=11852 last_ok=451 gap_lo=452 gap_hi=11851 gap_len=11400 gap_mid=6151 src=scan reads="));
+    CHECK(field_of("img=4 probe=GP_SCAN ", "reads") >= 3 && field_of("img=4 probe=GP_SCAN ", "reads") <= 16);
+    CHECK(find_line("img=4 probe=GP_TRK_T1 flags=0x20 fad=200 count=1 ssz=2352 sense=none"));
+    CHECK(strstr(line_of("img=4 probe=GP_TRK_T1_POS "), "trk=1 idx=1 pos=201 ctl=0x41 d_start=+1 d_end=+0 moved=1"));
+    CHECK(find_line("img=4 probe=GP_TRK_GAPMID flags=0x20 fad=6151 count=1 ssz=- sense=5/21/00"));
+    CHECK(strstr(line_of("img=4 probe=GP_TRK_GAPMID_POS "), "trk=2 idx=1 pos=6151 ctl=0x41 d_start=+0 d_end=-1 moved=1"));
+    CHECK(find_line("img=4 probe=GP_TRK_T1END flags=0x20 fad=451 count=1 ssz=2352"));
+    CHECK(find_line("img=4 probe=GP_TRK_GAPLO flags=0x20 fad=452 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=4 probe=GP_TRK_T2 flags=0x20 fad=11868 count=1 ssz=2048"));
+    CHECK(find_line("img=4 probe=GP_TRK_GAPHI flags=0x20 fad=11851 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=4 probe=GP_TRK_T2B flags=0x20 fad=11884") && find_line("img=4 probe=GP_TRK_GAPMID2 flags=0x20 fad=6151"));
+    CHECK(find_line("img=4 probe=GP_LO_REF flags=0x20 fad=15852 count=1 ssz=2048"));
+    CHECK(find_line("img=4 probe=GP_LO_0 flags=0x20 fad=15854 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=4 probe=GP_LO_1 flags=0x20 fad=15855") && find_line("img=4 probe=GP_LO_100 flags=0x20 fad=15954"));
+    CHECK(strstr(line_of("img=4 probe=GP_LO_100_POS "), "pos=15954 ctl=0x41 d_start=+0 d_end=-1 moved=1"));
+    CHECK(find_line("img=4 probe=GP_HDG_SKIP reason=no_hd_area") && !find_line("img=4 probe=GP_HDG_REF"));
+    CHECK(find_line("img=4 probe=GP_LOW_REF flags=0x20 fad=11868 count=1 ssz=2048"));
+    CHECK(find_line("img=4 probe=GP_LOW_0 flags=0x20 fad=0 count=1 ssz=- sense=5/21/00 cdb=302000000000000000000100"));
+    CHECK(find_line("img=4 probe=GP_LOW_100 flags=0x20 fad=100 count=1"));
+    CHECK(find_line("img=4 probe=GP_CNT0_SKIP fad=11868 cdb=3020002e5c00000000000000 reason=whitelist_count_1_64"));
+    CHECK(!find_line("probe=GP_CNT0 ") && f.cd_reads[0x20] > 0);
+    /* GDI */
+    CHECK(find_line("img=3 probe=GP_START toc0=2/1506 toc1=1/65150 trk_a=1/150/0x41 trk_b=2/906/0x01 leadout=65150 last=3/45150 "
+                    "ld_leadout=1506 hd=3/45150 ref=166 trk=ok lo=ok hdg=ok"));
+    CHECK(find_line("img=3 probe=GP_SCAN a_fad=150 b_fad=906 last_ok=755 gap_lo=756 gap_hi=905 gap_len=150 gap_mid=830 src=scan"));
+    CHECK(strstr(line_of("img=3 probe=GP_TRK_GAPMID_POS "), "trk=2 idx=1 pos=830"));
+    CHECK(find_line("img=3 probe=GP_HDG ld_leadout=1506 hd_fad=45150 gap_lo=1506 gap_hi=45149 gap_mid=23328"));
+    CHECK(find_line("img=3 probe=GP_HDG_REF flags=0x20 fad=1505 count=1 ssz=2352 sense=none"));
+    CHECK(find_line("img=3 probe=GP_HDG_L0 flags=0x20 fad=1506 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=3 probe=GP_HDG_MID flags=0x20 fad=23328") && find_line("img=3 probe=GP_HDG_HI flags=0x20 fad=45149"));
+    CHECK(find_line("img=3 probe=GP_HDG_HD flags=0x20 fad=45166 count=1 ssz=2048") && find_line("img=3 probe=GP_HDG_MID2 flags=0x20 fad=23328"));
+    CHECK(strstr(line_of("img=3 probe=GP_HDG_MID_POS "), "trk=3 idx=1 pos=23328"));
+    CHECK(find_line("img=3 probe=GP_LO_REF flags=0x20 fad=65148") && find_line("img=3 probe=GP_LO_0 flags=0x20 fad=65150"));
+    CHECK(find_line("img=3 probe=GP_LOW_REF flags=0x20 fad=166 count=1 ssz=2048"));
+    CHECK(count_of("probe=GP_START ") == 2 && !find_line("img=2 probe=GP_") && !find_line("img=0 probe=GP_"));
+
+    /* gap_track_end from the cfg (no scan); no scd / late; one lead-out offset; audio-only image: no gap -> skip */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1; f.cdi_folder = 4; f.audio_only_folder = 11;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4,11\ngap_probe=on\ngap_track_end=1000\ngap_scd=off\ngap_late_ms=0\ngap_leadout=7\n"
+                        "gap_count0=off\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(!find_line("img=4 probe=GP_SCAN_R") && find_line("img=4 probe=GP_SCAN a_fad=150 b_fad=11852 last_ok=999 gap_lo=1000 gap_hi=11851"));
+    CHECK(find_line("src=cfg reads=0") && !find_line("scd_rc=") && !find_line("late_rc="));
+    CHECK(find_line("img=4 probe=GP_LO_7 flags=0x20 fad=15861") && !find_line("img=4 probe=GP_LO_0 ") && !find_line("GP_CNT0"));
+    /* image 11 with gap_track_end=1000: outside track 1..2 (602) */
+    CHECK(find_line("img=11 probe=GP_TRK_SKIP a_fad=150 b_fad=752 src=cfg reads=0 reason=gap_track_end_outside"));
+    CHECK(find_line("img=11 probe=GP_HDG_SKIP reason=no_hd_area"));
+
+    /* audio-only with the search: the whole track is readable -> no_gap */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1; f.audio_only_folder = 11;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=11\ngap_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0);
+    CHECK(find_line("img=11 probe=GP_TRK_SKIP a_fad=150 b_fad=752 src=scan reads=2 reason=no_gap"));
+    CHECK(find_line("img=11 probe=GP_LO_REF flags=0x20 fad=1534"));
+
+    /* gap_probe off: no GP_ lines; a drive that stops answering: no GP_ cases */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "throughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0 && !find_line("probe=GP_"));
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.stuck = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "gap_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 1 && !find_line("probe=GP_START"));
+    /* switch=off: on the mounted (fake default) image, after head_probe */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "head_probe=on\nhead_idle_ms=0\ngap_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.sent_bad == 0 && find_line("img=0 probe=GP_START") > find_line("img=0 probe=HD_SES_POS"));
+}
+
+/* The shipped seq 22 run configuration, end to end against the fake drive */
+static void test_seq22_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    FILE *in = fopen("../gdprobe.cfg.seq22.example", "rb");
+    CHECK(in != NULL);
+    if (!in) return;
+    n = fread(text, 1, sizeof(text) - 1, in);
+    fclose(in);
+    text[n] = 0;
+    CHECK(n < 2048);   /* main.c reads at most cfgbuf - 1 bytes */
+    gp_config_defaults(&c);
+    gp_config_parse(&c, text);
+    CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == 22);
+    CHECK(c.do_switch && c.n_images == 3 && c.images[0] == 4 && c.images[1] == 3 && c.images[2] == 10 && c.return_to == 2);
+    CHECK(c.gap_probe && c.gap_flags == 0x20 && c.gap_late_ms == 300 && c.gap_scd && !c.gap_track_end && c.gap_count0);
+    CHECK(c.n_gap_leadout == 3 && c.n_gap_low == 2 && !c.head_probe);
+    CHECK(!c.swap_regpoll && !c.swap_devreset && !c.swap_reswitch && !c.devreset_only && !c.devreset_cmd);
+    CHECK(!c.do_cdread_flags && !c.do_throughput && !c.do_seek && !c.do_identify && c.cdread_flags == 0x20);
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.cdi_folder = 4; f.gdi_folder = 3;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 0 && f.n_mounts == 3 + 1 && find_line("probe=END abort=0"));
+    CHECK(count_of("probe=GP_START ") == 3 && count_of("probe=GP_SCAN ") == 2 && count_of("probe=GP_HDG ") == 1);
+    CHECK(count_of("probe=GP_CNT0_SKIP ") == 3 && count_of("probe=GP_LO_100_POS ") == 3);
+    CHECK(f.now < 180ull * 1000000u);
+}
+
 int main(void)
 {
     g_rec = malloc(8u << 20);
@@ -1457,6 +1718,9 @@ int main(void)
     test_r148_example_cfg();
     test_runner_seq21();
     test_seq21_example_cfg();
+    test_toc_plan();
+    test_runner_seq22();
+    test_seq22_example_cfg();
     printf("OK: %d checks passed\n", g_checks);
     return 0;
 }

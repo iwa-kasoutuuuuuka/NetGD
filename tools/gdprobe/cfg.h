@@ -58,6 +58,19 @@
  *   head_late_ms=300       second REQ_STAT this long after each case (0 = none; 0..5000)
  *   head_idle_ms=2000      last case: no command for this long, then REQ_STAT (0 = skip; 0..10000)
  *   head_scd=on            GET_SCD format 1 after each case's first REQ_STAT
+ *
+ * seq 22 probe (default off; runs after head_probe, on the same images): reads at the edges of the TOC, FADs computed
+ * from the image's TOC at run time (GP_* lines; every case prints its FADs, a case the image lacks prints GP_<case>_SKIP)
+ *   gap_probe=off          on = the cases below; after each case REQ_STAT, GET_SCD(1), late REQ_STAT (like HD_*_POS,
+ *                          plus ctl / scd_ctl / scd_rel)
+ *   gap_flags=0x20         CD_READ byte 1 of every gap-probe read (bit 0 forced 0; must pass the whitelist)
+ *   gap_late_ms=300        second REQ_STAT this long after each case (0 = none; 0..5000)
+ *   gap_scd=on             GET_SCD format 1 after each case's first REQ_STAT
+ *   gap_track_end=0        TRK cases: first FAD of the gap after track 1 (0 = find it: 1-sector reads, binary search
+ *                          for the last readable sector between track 1 and track 2, GP_SCAN_R lines)
+ *   gap_leadout=0,1,100    LO cases: offsets from the lead-out FAD (up to 4 values, 0..10000)
+ *   gap_low=0,100          LOW cases: FADs below 150 (up to 4 values, 0..149)
+ *   gap_count0=on          CNT0 case: CD_READ with count 0 (the whitelist allows 1..64, so this prints GP_CNT0_SKIP)
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
@@ -66,6 +79,7 @@
 #define GP_MAX_IMAGES 32
 #define GP_MAX_DEVRESET 4
 #define GP_MAX_HEADCNT 6
+#define GP_MAX_GAPLIST 4
 
 typedef struct {
     char label[32];
@@ -106,6 +120,16 @@ typedef struct {
     uint32_t head_late_ms;
     uint32_t head_idle_ms;
     int head_scd;
+    int gap_probe;        /* seq 22: reads at the TOC's edges (GP_) */
+    uint8_t gap_flags;
+    uint32_t gap_late_ms;
+    int gap_scd;
+    uint32_t gap_track_end;
+    int gap_leadout[GP_MAX_GAPLIST];
+    int n_gap_leadout;
+    int gap_low[GP_MAX_GAPLIST];
+    int n_gap_low;
+    int gap_count0;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 

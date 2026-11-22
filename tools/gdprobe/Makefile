@@ -7,7 +7,7 @@
 
 TARGET = gdprobe.elf
 
-OBJS = main.o gdraw.o probes.o record.o pcout.o hash.o cfg.o whitelist.o
+OBJS = main.o gdraw.o probes.o record.o pcout.o hash.o cfg.o whitelist.o toc.o
 
 KOS_CFLAGS += -Wall -Wextra -Wno-unused-parameter
 

@@ -37,6 +37,17 @@ void gp_config_defaults(gp_config *c)
     c->head_late_ms = 300;
     c->head_idle_ms = 2000;
     c->head_scd = 1;
+    c->gap_flags = 0x20;
+    c->gap_late_ms = 300;
+    c->gap_scd = 1;
+    c->gap_leadout[0] = 0;
+    c->gap_leadout[1] = 1;
+    c->gap_leadout[2] = 100;
+    c->n_gap_leadout = 3;
+    c->gap_low[0] = 0;
+    c->gap_low[1] = 100;
+    c->n_gap_low = 2;
+    c->gap_count0 = 1;
 }
 
 static int parse_bool(const char *v, int *out)
@@ -163,6 +174,14 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "head_late_ms")) { n = parse_num(v, &ok); if (ok) c->head_late_ms = (uint32_t)clampi(n, 0, 5000);
     } else if (!strcmp(k, "head_idle_ms")) { n = parse_num(v, &ok); if (ok) c->head_idle_ms = (uint32_t)clampi(n, 0, 10000);
     } else if (!strcmp(k, "head_scd")) { if (parse_bool(v, &b)) c->head_scd = b; else ok = 0;
+    } else if (!strcmp(k, "gap_probe")) { if (parse_bool(v, &b)) c->gap_probe = b; else ok = 0;
+    } else if (!strcmp(k, "gap_flags")) { n = parse_num(v, &ok); if (ok) c->gap_flags = (uint8_t)(n & 0xFE);
+    } else if (!strcmp(k, "gap_late_ms")) { n = parse_num(v, &ok); if (ok) c->gap_late_ms = (uint32_t)clampi(n, 0, 5000);
+    } else if (!strcmp(k, "gap_scd")) { if (parse_bool(v, &b)) c->gap_scd = b; else ok = 0;
+    } else if (!strcmp(k, "gap_track_end")) { n = parse_num(v, &ok); if (ok && (n < 0 || n >= 0x00F00000)) ok = 0; if (ok) c->gap_track_end = (uint32_t)n;
+    } else if (!strcmp(k, "gap_leadout")) { ok = parse_list(c->gap_leadout, &c->n_gap_leadout, v, GP_MAX_GAPLIST, 0, 10000);
+    } else if (!strcmp(k, "gap_low")) { ok = parse_list(c->gap_low, &c->n_gap_low, v, GP_MAX_GAPLIST, 0, 149);
+    } else if (!strcmp(k, "gap_count0")) { if (parse_bool(v, &b)) c->gap_count0 = b; else ok = 0;
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

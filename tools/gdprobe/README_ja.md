@@ -129,6 +129,14 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 | `head_late_ms` | 300 | **seq 21**。各ケースの 2 回目の REQ_STAT までの待ち（0 = 送らない、0〜5000） |
 | `head_idle_ms` | 2000 | **seq 21**。最後の `IDLE` ケースの待ち（0 = 省略、0〜10000） |
 | `head_scd` | `on` | **seq 21**。各ケースで GET_SCD 形式 1 も読む |
+| `gap_probe` | `off` | **seq 22**。`on` で、各イメージの試験一式（と `head_probe`）のあと、TOC の端の読み出し試験（下記「seq 22 の実行計画」、`GP_*` 行） |
+| `gap_flags` | `0x20` | **seq 22**。この試験の CD_READ バイト1（bit 0 は 0 に強制。許可リストを通らない値は `rc=refused`） |
+| `gap_late_ms` | 300 | **seq 22**。各ケースの 2 回目の REQ_STAT までの待ち（0 = 送らない、0〜5000） |
+| `gap_scd` | `on` | **seq 22**。各ケースで GET_SCD 形式 1 も読む |
+| `gap_track_end` | 0 | **seq 22**。トラック 1 のあとの隙間の最初の FAD（0 = 1 セクタ読みの二分探索で探す、`GP_SCAN_R` 行） |
+| `gap_leadout` | `0,1,100` | **seq 22**。リードアウトからのずれ（最大 4 個、0〜10000） |
+| `gap_low` | `0,100` | **seq 22**。150 未満の FAD（最大 4 個、0〜149） |
+| `gap_count0` | `on` | **seq 22**。件数 0 の CD_READ。許可リストは 1〜64 なので送らずに `GP_CNT0_SKIP` を書く |
 
 ### 実行の流れ
 
@@ -476,3 +484,26 @@ SEEK の効果は「読み出しで動いた位置」から推定する。**DMA 
 すべて読み取り専用・時間制限つき、3 回続けてタイムアウトしたら中止。照合は `compare.py`（`pos`・`moved`・`d_*`・`st`・`stat` などは差分、`us`・`idle_ms` は時間の注記だけ）。
 
 記録のヘッダには `# config cdread_flags_test=.. seek_span=.. switch_timeout_ms=..` と `# config head_probe=.. head_flags=.. ...` の 2 行が増えた（それ以前の記録には無い。`compare.py` はヘッダを読まない）。
+
+## seq 22 の実行計画（TOC の端の読み出しで、純正はヘッド位置をどう報告するか）
+
+**状態：用意しただけ。実機では未実行。** 記録 21（LOG R172）の続き：隙間で REQ_STAT がトラック 2 を返したのは「次のトラック」か「直前の保持」か、
+リードアウト・GD-ROM の領域の間・FAD 150 未満・件数 0 での動き。FAD はすべて実行時に各イメージの TOC（両領域）から計算し（`toc.c`）、行に書く。
+
+`gap_probe=on` のとき、各イメージの試験一式（と `head_probe`）のあと、`GP_START`（TOC の要約と各ケース群の可否）と `GP_BASE_POS` に続いて：
+
+| ケース | 送るもの |
+|---|---|
+| `TRK_*` (1) | トラック 1（A）と次のトラック（B）の間の隙間。`GP_SCAN_R`（1 セクタ読みで A の最後の読めるセクタを二分探索、約 15 回）→ `GP_SCAN`（`last_ok`・`gap_lo`・`gap_hi`・`gap_mid`）。そのあと `T1`（A+50）→ `GAPMID`、`T1END`（最後の読めるセクタ）→ `GAPLO`、`T2`（B+16）→ `GAPHI`（B−1）、`T2B`（B+32）→ `GAPMID2` |
+| `LO_*` (2) | `LO_REF`（リードアウト − 2）、`LO_<o>`（リードアウト + o、`gap_leadout`） |
+| `HDG_*` (3) | GD-ROM だけ：`GP_HDG`（範囲）、`HDG_REF`（LD リードアウト − 1）、`HDG_L0`（LD リードアウト）、`HDG_MID`、`HDG_HI`（45150 − 1）、`HDG_HD`（45150 + 16）、`HDG_MID2` |
+| `LOW_*` (4) | `LOW_REF`（最初のデータトラック + 16）、`LOW_<f>`（`gap_low`） |
+| `CNT0` (5) | 件数 0。許可リスト（1〜64）を変えていないので `GP_CNT0_SKIP ... reason=whitelist_count_1_64`（何も送らない） |
+
+読み出しはすべて 1 セクタ・`gap_flags`。各ケースのあと seq 21 と同じ `GP_<ケース>_POS`（REQ_STAT、GET_SCD 形式 1、`gap_late_ms` 後の REQ_STAT）に、
+`ctl`（REQ_STAT バイト 2 = CTRL/ADR）、`scd_ctl`（GET_SCD バイト 4）、`scd_rel`（バイト 7〜9 の相対位置）が増える。センスは CHECK のときすぐ REQ_ERROR で読む（`sense=5/21/00` など）。
+その領域が無いイメージは `GP_TRK_SKIP`・`GP_LO_SKIP`・`GP_HDG_SKIP` に理由（`no_gap`・`one_track`・`no_hd_area` など）を書く。
+
+準備と実行：`gdprobe.cfg.seq22.example` を `host\gdprobe.cfg` にコピー（`images=4,3,10`、11 はコメント）、`dc_auto.ps1 -Preset <このフォルダ>\profiles\gdprobe.ps1` を 1 回。
+所要は約 1 分（各イメージ：約 15 回の探索 + 約 20 ケース × 約 0.35 秒）。新しく送るコマンドは無い（既存の許可リストの CD_READ・REQ_STAT・GET_SCD・REQ_ERROR）。
+記録のヘッダに `# config gap_probe=.. gap_flags=.. ... gap_leadout=.. gap_low=..` の行が増えた。

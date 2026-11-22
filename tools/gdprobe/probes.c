@@ -4,6 +4,7 @@
 #include <string.h>
 #include "hash.h"
 #include "record.h"
+#include "toc.h"
 #include "whitelist.h"
 
 #define BUFSZ 40000   /* 16 sectors of 2352 = 37632 */
@@ -22,6 +23,7 @@ typedef struct {
     uint32_t toc_ip_end;     /* seq 21: start of the track after toc_ip in that area, else its lead-out (0 = unknown) */
     uint32_t toc_audio_end;  /* seq 21: the same for toc_audio */
     uint32_t leadout;
+    gp_toc_area toc[2];  /* seq 22: both GET_TOC areas of the battery */
     char line[REC_LINE_MAX];
     char extra[160];
     uint8_t buf[BUFSZ];
@@ -287,6 +289,7 @@ static void battery_info(runner *r, int ready)
         do_cmd(r, nm, NULL, c, 408, r->cfg->timeout_ms, 1, &res);
         if (res.rc == GD_OK && res.stored >= 408) {
             uint32_t lo = fad3(r->buf + 405), area_lo = 0;
+            gp_toc_parse(r->buf, &r->toc[s]);
             if (r->buf[404] != 0xFF && lo && lo != 0xFFFFFF)
                 r->leadout = area_lo = lo;
             {   /* first data track (control bit 2) of this area, for the IP_READ fallback */
@@ -437,6 +440,7 @@ static int battery(runner *r, int full)
     r->toc_ip_end = 0;
     r->toc_audio_end = 0;
     r->leadout = 0;
+    memset(r->toc, 0, sizeof(r->toc));
     ready = warmup(r);
     event(r, "WARMUP", "ready=%d", ready);
     battery_info(r, ready);
@@ -889,6 +893,10 @@ typedef struct {
     int have_prev;
     uint32_t prev;       /* pos of the previous HD_*_POS line */
     int abort_noted;
+    const char *pfx;     /* line name prefix: "HD" (seq 21) or "GP" (seq 22) */
+    uint32_t late_ms;    /* head_late_ms / gap_late_ms */
+    int scd;             /* head_scd / gap_scd */
+    int ext;             /* seq 22: also ctl (REQ_STAT byte 2), scd_ctl, scd_rel (GET_SCD bytes 4, 7..9) */
 } hp_state;
 
 static void hp_note_abort(runner *r, hp_state *s)
@@ -918,7 +926,7 @@ static void hp_pos(runner *r, hp_state *s, const char *label, int is_read, uint3
     if (r->abort)
         return;
     st_ok = hp_req_stat(r, st, &st_rc);
-    if (r->cfg->head_scd && !r->abort) {
+    if (s->scd && !r->abort) {
         uint8_t c[12];
         gd_result res;
         cdb_be16(c, 0x40, 1, 14);
@@ -929,8 +937,8 @@ static void hp_pos(runner *r, hp_state *s, const char *label, int is_read, uint3
             scd_ok = 1;
         }
     }
-    if (r->cfg->head_late_ms && !r->abort) {
-        r->ops->sleep_ms(r->ops->ctx, r->cfg->head_late_ms);
+    if (s->late_ms && !r->abort) {
+        r->ops->sleep_ms(r->ops->ctx, s->late_ms);
         late_ok = hp_req_stat(r, late, &late_rc);
     }
 
@@ -942,6 +950,8 @@ static void hp_pos(runner *r, hp_state *s, const char *label, int is_read, uint3
         pos = fad3(st + 5);
         fmt_st(sn, sizeof(sn), st[0]);
         HP_ADD(" st=%s trk=%u idx=%u pos=%lu", sn, st[3], st[4], (unsigned long)pos);
+        if (s->ext)
+            HP_ADD(" ctl=0x%02x", st[2]);
         if (is_read)
             HP_ADD(" d_start=%+ld d_end=%+ld", (long)pos - (long)fad, (long)pos - (long)(fad + count));
         if (s->have_prev)
@@ -949,16 +959,20 @@ static void hp_pos(runner *r, hp_state *s, const char *label, int is_read, uint3
         else
             HP_ADD(" moved=-");
     } else {
-        HP_ADD(" st=- trk=- idx=- pos=-%s moved=-", is_read ? " d_start=- d_end=-" : "");
+        HP_ADD(" st=- trk=- idx=- pos=-%s%s moved=-", s->ext ? " ctl=-" : "", is_read ? " d_start=- d_end=-" : "");
     }
-    if (r->cfg->head_scd) {
+    if (s->scd) {
         HP_ADD(" scd_rc=%s", rec_rc_name(scd_rc));
         if (scd_ok)
             HP_ADD(" scd_trk=%u scd_idx=%u scd_pos=%lu", scd[5], scd[6], (unsigned long)fad3(scd + 11));
         else
             HP_ADD(" scd_trk=- scd_idx=- scd_pos=-");
+        if (s->ext && scd_ok)
+            HP_ADD(" scd_ctl=0x%02x scd_rel=%lu", scd[4], (unsigned long)fad3(scd + 7));
+        else if (s->ext)
+            HP_ADD(" scd_ctl=- scd_rel=-");
     }
-    if (r->cfg->head_late_ms) {
+    if (s->late_ms) {
         HP_ADD(" late_rc=%s", rec_rc_name(late_rc));
         if (late_ok) {
             fmt_st(sn, sizeof(sn), late[0]);
@@ -980,26 +994,28 @@ static void hp_pos(runner *r, hp_state *s, const char *label, int is_read, uint3
         s->prev = pos;
         s->have_prev = 1;
     }
-    snprintf(nm, sizeof(nm), "HD_%s_POS", label);
+    snprintf(nm, sizeof(nm), "%s_%s_POS", s->pfx, label);
     out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
     hp_note_abort(r, s);
 }
 
 /* One CD_READ case: the read (sense from REQ_ERROR at once if it is a CHECK), its line, then hp_pos.
  *   img=3 probe=HD_R7 flags=0x20 fad=76650 count=7 ssz=2048 sense=none cdb=.. rc=ok ... bytes=14336 us=.. */
-static void hp_read(runner *r, hp_state *s, const char *label, uint8_t flags, uint32_t fad, uint32_t count)
+/* The read and its line only (name = full line name, pre = optional leading fields); returns rc. */
+static int hp_read_line(runner *r, hp_state *s, const char *nm, const char *pre, uint8_t flags, uint32_t fad,
+                        uint32_t count)
 {
     uint8_t c[12];
     gd_result res;
     rec_probe p;
-    char ex[120], sn[24], ssz[16], nm[32];
+    char ex[160], sn[24], ssz[16];
     if (r->abort)
-        return;
+        return GD_REFUSED;
     cdb_read(c, flags, fad, count);
     send_cmd(r, c, BUFSZ, read_timeout(r), &res);
     strcpy(ssz, "-");
     strcpy(sn, "none");
-    if (res.rc == GD_OK && res.total && res.total % count == 0)
+    if (res.rc == GD_OK && res.total && count && res.total % count == 0)
         snprintf(ssz, sizeof(ssz), "%lu", (unsigned long)(res.total / count));
     else if (res.rc == GD_CHECK && !r->abort) {
         uint8_t sc[12];
@@ -1009,12 +1025,21 @@ static void hp_read(runner *r, hp_state *s, const char *label, uint8_t flags, ui
         if (sr.rc == GD_OK && sr.stored >= 10)
             snprintf(sn, sizeof(sn), "%d/%02x/%02x", r->buf[2] & 0x0F, r->buf[8], r->buf[9]);
     }
-    snprintf(nm, sizeof(nm), "HD_%s", label);
-    snprintf(ex, sizeof(ex), "flags=0x%02x fad=%lu count=%lu ssz=%s sense=%s", flags, (unsigned long)fad,
-             (unsigned long)count, ssz, sn);
+    snprintf(ex, sizeof(ex), "%s%sflags=0x%02x fad=%lu count=%lu ssz=%s sense=%s", pre ? pre : "", pre ? " " : "",
+             flags, (unsigned long)fad, (unsigned long)count, ssz, sn);
     p.img = r->img; p.name = nm; p.extra = ex; p.cdb = c; p.res = &res; p.data = NULL;
     out_line(r, rec_probe_line(r->line, sizeof(r->line), &p), 0);
     hp_note_abort(r, s);
+    return res.rc;
+}
+
+static void hp_read(runner *r, hp_state *s, const char *label, uint8_t flags, uint32_t fad, uint32_t count)
+{
+    char nm[40];
+    if (r->abort)
+        return;
+    snprintf(nm, sizeof(nm), "%s_%s", s->pfx, label);
+    hp_read_line(r, s, nm, NULL, flags, fad, count);
     hp_pos(r, s, label, 1, fad, count, NULL);
 }
 
@@ -1025,7 +1050,7 @@ static void hp_cmd(runner *r, hp_state *s, const char *label, const uint8_t c[12
     char nm[32];
     if (r->abort)
         return;
-    snprintf(nm, sizeof(nm), "HD_%s", label);
+    snprintf(nm, sizeof(nm), "%s_%s", s->pfx, label);
     send_cmd(r, c, cap, r->cfg->timeout_ms, &res);
     {
         rec_probe p;
@@ -1057,6 +1082,9 @@ static void head_probe(runner *r)
     int data_ok, aud_ok, i;
 
     memset(&s, 0, sizeof(s));
+    s.pfx = "HD";
+    s.late_ms = r->cfg->head_late_ms;
+    s.scd = r->cfg->head_scd;
     if (r->abort)
         return;
     data_ok = d && e > d && e - d >= 256;
@@ -1103,6 +1131,196 @@ static void head_probe(runner *r)
     sync_out(r);
 }
 
+/* ---- seq 22: reads at the edges of the TOC -------------------------------- */
+
+static void gp_skip(runner *r, const char *label, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+static void gp_skip(runner *r, const char *label, const char *fmt, ...)
+{
+    char f[200], nm[40];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(f, sizeof(f), fmt, ap);
+    va_end(ap);
+    snprintf(nm, sizeof(nm), "GP_%s_SKIP", label);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+}
+
+/* (1) the last readable sector of track A before track B: 1-sector reads (GP_SCAN_R lines), binary search.
+ * Returns the first gap FAD (= last readable + 1), or 0 with *why set (no gap, unreadable start, abort). */
+static uint32_t gp_find_gap(runner *r, hp_state *s, const gp_gap_plan *p, int *reads, const char **why)
+{
+    uint8_t fl = r->cfg->gap_flags;
+    uint32_t lo = p->a_fad, hi = p->b_fad - 1, t;
+    char pre[24];
+    int rc;
+    *reads = 0;
+    snprintf(pre, sizeof(pre), "n=%d", ++*reads);
+    rc = hp_read_line(r, s, "GP_SCAN_R", pre, fl, lo, 1);
+    if (rc != GD_OK) {
+        *why = r->abort ? "abort" : "track_start_unreadable";
+        return 0;
+    }
+    snprintf(pre, sizeof(pre), "n=%d", ++*reads);
+    rc = hp_read_line(r, s, "GP_SCAN_R", pre, fl, hi, 1);
+    if (rc == GD_OK) {
+        *why = "no_gap";
+        return 0;
+    }
+    if (rc != GD_CHECK) {
+        *why = r->abort ? "abort" : "scan_error";
+        return 0;
+    }
+    while ((t = gp_bsearch_next(lo, hi)) != 0 && *reads < 48) {
+        snprintf(pre, sizeof(pre), "n=%d", ++*reads);
+        rc = hp_read_line(r, s, "GP_SCAN_R", pre, fl, t, 1);
+        if (rc == GD_OK)
+            lo = t;
+        else if (rc == GD_CHECK)
+            hi = t;
+        else {
+            *why = r->abort ? "abort" : "scan_error";
+            return 0;
+        }
+    }
+    if (gp_bsearch_next(lo, hi)) {
+        *why = "scan_too_long";
+        return 0;
+    }
+    return lo + 1;
+}
+
+/* The seq 22 case list, after the image's battery (and head_probe), FADs from both GET_TOC areas (toc.c):
+ *   BASE                       no command, only the position queries
+ *   TRK_*   (1) gap after track 1 (A) before the next track (B): GP_SCAN (+ GP_SCAN_R reads) finds the gap G..B-1,
+ *           then T1 (A+50) -> GAPMID, T1END (G-1) -> GAPLO (G), T2 (B+16) -> GAPHI (B-1), T2B (B+32) -> GAPMID2
+ *   LO_*    (2) REF (lead-out - 2), then LO_<o> at lead-out + o for o in gap_leadout
+ *   HDG_*   (3) GD-ROM: REF (LD lead-out - 1), L0 (LD lead-out), MID, HI (HD start - 1), HD (HD start + 16), MID2
+ *   LOW_*   (4) REF (reference FAD), then LOW_<f> at f for f in gap_low
+ *   CNT0    (5) count 0 at the reference FAD: the whitelist allows 1..64, so normally GP_CNT0_SKIP (nothing sent);
+ *           if it ever passes: CNT0_REF (reference + 8), then CNT0
+ * Every read is 1 sector with gap_flags; after each one, REQ_STAT / GET_SCD(1) / late REQ_STAT (GP_<case>_POS). */
+static void gap_probe(runner *r)
+{
+    hp_state s;
+    gp_gap_plan p;
+    uint8_t fl = r->cfg->gap_flags;
+    char f[300], lb[24];
+    int i;
+
+    memset(&s, 0, sizeof(s));
+    s.pfx = "GP";
+    s.late_ms = r->cfg->gap_late_ms;
+    s.scd = r->cfg->gap_scd;
+    s.ext = 1;
+    if (r->abort)
+        return;
+    say(r, "TOC edge probe...");
+    gp_gap_plan_make(r->toc, &p);
+    snprintf(f, sizeof(f), "toc0=%d/%lu toc1=%d/%lu trk_a=%lu/%lu/0x%02lx trk_b=%lu/%lu/0x%02lx leadout=%lu last=%lu/%lu "
+             "ld_leadout=%lu hd=%lu/%lu ref=%lu trk=%s lo=%s hdg=%s",
+             r->toc[0].n, (unsigned long)r->toc[0].leadout, r->toc[1].n, (unsigned long)r->toc[1].leadout,
+             (unsigned long)p.a_num, (unsigned long)p.a_fad, (unsigned long)p.a_ctl,
+             (unsigned long)p.b_num, (unsigned long)p.b_fad, (unsigned long)p.b_ctl,
+             (unsigned long)p.leadout, (unsigned long)p.last_num, (unsigned long)p.last_fad,
+             (unsigned long)p.ld_leadout, (unsigned long)p.hd_num, (unsigned long)p.hd_fad, (unsigned long)p.ref_fad,
+             p.trk_ok ? "ok" : p.trk_why, p.lo_ok ? "ok" : p.lo_why, p.hd_ok ? "ok" : p.hd_why);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_START", f), 0);
+    hp_pos(r, &s, "BASE", 0, 0, 0, NULL);
+
+    /* (1) */
+    if (!p.trk_ok) {
+        gp_skip(r, "TRK", "reason=%s", p.trk_why);
+    } else if (!r->abort) {
+        uint32_t g = 0;
+        int reads = 0;
+        const char *why = "-", *src = "scan";
+        if (r->cfg->gap_track_end) {
+            src = "cfg";
+            g = r->cfg->gap_track_end;
+            if (g <= p.a_fad || g >= p.b_fad) {
+                why = "gap_track_end_outside";
+                g = 0;
+            }
+        } else {
+            g = gp_find_gap(r, &s, &p, &reads, &why);
+        }
+        if (!g) {
+            if (!r->abort)
+                gp_skip(r, "TRK", "a_fad=%lu b_fad=%lu src=%s reads=%d reason=%s", (unsigned long)p.a_fad,
+                        (unsigned long)p.b_fad, src, reads, why);
+        } else {
+            uint32_t gh = p.b_fad - 1, mid = g + (gh - g) / 2, t1 = (p.a_fad + 50 < g) ? p.a_fad + 50 : p.a_fad;
+            snprintf(f, sizeof(f), "a_fad=%lu b_fad=%lu last_ok=%lu gap_lo=%lu gap_hi=%lu gap_len=%lu gap_mid=%lu src=%s reads=%d",
+                     (unsigned long)p.a_fad, (unsigned long)p.b_fad, (unsigned long)(g - 1), (unsigned long)g,
+                     (unsigned long)gh, (unsigned long)(gh - g + 1), (unsigned long)mid, src, reads);
+            out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_SCAN", f), 0);
+            hp_read(r, &s, "TRK_T1", fl, t1, 1);
+            hp_read(r, &s, "TRK_GAPMID", fl, mid, 1);
+            hp_read(r, &s, "TRK_T1END", fl, g - 1, 1);
+            hp_read(r, &s, "TRK_GAPLO", fl, g, 1);
+            hp_read(r, &s, "TRK_T2", fl, p.b_fad + 16, 1);
+            hp_read(r, &s, "TRK_GAPHI", fl, gh, 1);
+            hp_read(r, &s, "TRK_T2B", fl, p.b_fad + 32, 1);
+            hp_read(r, &s, "TRK_GAPMID2", fl, mid, 1);
+        }
+    }
+
+    /* (2) */
+    if (!p.lo_ok) {
+        gp_skip(r, "LO", "leadout=%lu reason=%s", (unsigned long)p.leadout, p.lo_why);
+    } else {
+        hp_read(r, &s, "LO_REF", fl, p.leadout - 2, 1);
+        for (i = 0; i < r->cfg->n_gap_leadout && !r->abort; i++) {
+            snprintf(lb, sizeof(lb), "LO_%d", r->cfg->gap_leadout[i]);
+            hp_read(r, &s, lb, fl, p.leadout + (uint32_t)r->cfg->gap_leadout[i], 1);
+        }
+    }
+
+    /* (3) */
+    if (!p.hd_ok) {
+        gp_skip(r, "HDG", "reason=%s", p.hd_why);
+    } else {
+        uint32_t mid = p.ld_leadout + (p.hd_fad - p.ld_leadout) / 2;
+        snprintf(f, sizeof(f), "ld_leadout=%lu hd_fad=%lu gap_lo=%lu gap_hi=%lu gap_mid=%lu", (unsigned long)p.ld_leadout,
+                 (unsigned long)p.hd_fad, (unsigned long)p.ld_leadout, (unsigned long)(p.hd_fad - 1), (unsigned long)mid);
+        out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_HDG", f), 0);
+        hp_read(r, &s, "HDG_REF", fl, p.ld_leadout - 1, 1);
+        hp_read(r, &s, "HDG_L0", fl, p.ld_leadout, 1);
+        hp_read(r, &s, "HDG_MID", fl, mid, 1);
+        hp_read(r, &s, "HDG_HI", fl, p.hd_fad - 1, 1);
+        hp_read(r, &s, "HDG_HD", fl, p.hd_fad + 16, 1);
+        hp_read(r, &s, "HDG_MID2", fl, mid, 1);
+    }
+
+    /* (4) */
+    if (!p.ref_fad) {
+        gp_skip(r, "LOW", "reason=no_toc");
+    } else if (r->cfg->n_gap_low) {
+        hp_read(r, &s, "LOW_REF", fl, p.ref_fad, 1);
+        for (i = 0; i < r->cfg->n_gap_low && !r->abort; i++) {
+            snprintf(lb, sizeof(lb), "LOW_%d", r->cfg->gap_low[i]);
+            hp_read(r, &s, lb, fl, (uint32_t)r->cfg->gap_low[i], 1);
+        }
+    }
+
+    /* (5) */
+    if (r->cfg->gap_count0 && !r->abort) {
+        uint8_t c[12];
+        cdb_read(c, fl, p.ref_fad, 0);
+        if (!p.ref_fad) {
+            gp_skip(r, "CNT0", "reason=no_toc");
+        } else if (!wl_check_cfg(c, r->cfg->do_switch, r->cfg->cdread_flags)) {
+            char hx[30];
+            rec_hex(hx, c, 12);
+            gp_skip(r, "CNT0", "fad=%lu cdb=%s reason=whitelist_count_1_64", (unsigned long)p.ref_fad, hx);
+        } else {
+            hp_read(r, &s, "CNT0_REF", fl, p.ref_fad + 8, 1);
+            hp_read(r, &s, "CNT0", fl, p.ref_fad, 0);
+        }
+    }
+    sync_out(r);
+}
+
 /* ---- entry --------------------------------------------------------------- */
 
 int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
@@ -1136,8 +1354,13 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
             snprintf(msg, sizeof(msg), "probing image %d%s...", n, ready ? "" : " (not ready)");
             say(r, msg);
             /* seq 21: the head-position cases, right after the battery (needs a READY image) */
-            if (battery(r, 1) && cfg->head_probe && !r->abort)
-                head_probe(r);
+            if (battery(r, 1) && !r->abort) {
+                if (cfg->head_probe)
+                    head_probe(r);
+                /* seq 22: reads at the TOC's edges */
+                if (cfg->gap_probe && !r->abort)
+                    gap_probe(r);
+            }
             /* R148: the same image again, once per delay, with a DEVICE RESET inside the window */
             for (j = 0; cfg->swap_devreset && j < cfg->n_devreset && !r->abort; j++)
                 switch_to(r, n, n, 1, cfg->devreset_ms[j], SK_NORMAL);
@@ -1155,8 +1378,12 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
     } else {
         r->img = 0;
         say(r, "probing the mounted image...");
-        if (battery(r, 1) && cfg->head_probe && !r->abort)
-            head_probe(r);
+        if (battery(r, 1) && !r->abort) {
+            if (cfg->head_probe)
+                head_probe(r);
+            if (cfg->gap_probe && !r->abort)
+                gap_probe(r);
+        }
     }
     event(r, "END", "abort=%d", r->abort);
     sync_out(r);
