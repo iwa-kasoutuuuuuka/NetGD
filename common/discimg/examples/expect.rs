@@ -959,8 +959,8 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) -> HeadT
                     data = Some(raw);
                 }
             }
-            let mismatch = atapi::track_of_start(&d.tracks, ip)
-                .map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode));
+            let mismatch = !atapi::cd_read_start_outside(&d.tracks, ip)
+                && atapi::track_of_start(&d.tracks, ip).map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode));
             let (ssz, crc, sense) = match &data {
                 Some(dd) => (dd.len().to_string(), format!("{:08x}", crc32(dd)), "none"),
                 None if mismatch => ("-".to_string(), "-".to_string(), "5/64/00"), // illegal mode for this track
@@ -1027,10 +1027,11 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) -> HeadT
 /// an audio track not stored as whole sectors).
 fn refusal_sense(d: &Disc, flags: u8, fad: u32) -> &'static str {
     let t = atapi::track_of_start(&d.tracks, fad);
-    if t.map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode)) {
-        "5/64/00"
-    } else if atapi::cd_read_start_outside(&d.tracks, fad) {
+    // The range check first: a typed read from a gap is 5/21/00 like an untyped one (unmeasured on stock).
+    if atapi::cd_read_start_outside(&d.tracks, fad) {
         "5/21/00"
+    } else if t.map_or(false, |t| atapi::cd_read_type_mismatch(flags, t.mode)) {
+        "5/64/00"
     } else {
         "5/00/00"
     }

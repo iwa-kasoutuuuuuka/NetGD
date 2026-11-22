@@ -1640,17 +1640,33 @@ fn form2_compaction_matches_a_copy_for_every_alignment() {
 /// not refused there.
 fn start_refusal(tracks: &[TrackDesc], flags: u8, fad: u32, count: u32) -> Option<&'static str> {
     let t = track_of_start(tracks, fad);
-    if t.map_or(false, |t| cd_read_type_mismatch(flags, t.mode)) {
-        return Some("5/64/00");
-    }
     if cd_read_start_outside(tracks, fad) {
         return Some("5/21/00");
+    }
+    if t.map_or(false, |t| cd_read_type_mismatch(flags, t.mode)) {
+        return Some("5/64/00");
     }
     let t = t.unwrap();
     if count > start_sectors_left(t, fad) || (fad < 150 && pregap_read(tracks, fad, count).is_none()) {
         return Some("5/00/00");
     }
     None
+}
+
+#[test]
+fn a_typed_read_from_a_gap_is_5_21_00_not_5_64_00() {
+    // Unmeasured on stock: follows the untyped rule. GDI 03: gap 750..755
+    // after data track 1 (Mode 1), 1506..44999 after audio track 2.
+    let g = stock_gdi03();
+    for fad in [750u32, 755, 1506, 44999, 65150] {
+        for flags in [0x20u8, 0x24, 0x28, 0x10] {
+            assert_eq!(start_refusal(&g, flags, fad, 1), Some("5/21/00"), "fad {} flags {:#x}", fad, flags);
+        }
+    }
+    // On a track the type still decides: Mode 2 Form 1 on Mode 1 track 1.
+    assert_eq!(start_refusal(&g, 0x28, 150, 1), Some("5/64/00"));
+    // In a pregap: the next track's type, as before.
+    assert_eq!(start_refusal(&g, 0x24, 900, 1), Some("5/64/00"));
 }
 
 #[test]
@@ -1691,7 +1707,7 @@ fn a_start_in_a_pregap_belongs_to_the_next_track() {
     assert_eq!(start_refusal(&g, 0x24, 700, 100), Some("5/00/00")); // past track 1's end
     assert_eq!(start_refusal(&g, 0x24, 700, 50), None);
     assert_eq!(start_refusal(&g, 0x24, 750, 1), Some("5/21/00"));
-    assert_eq!(start_refusal(&g, 0x28, 750, 1), Some("5/64/00")); // by track 1, as before
+    assert_eq!(start_refusal(&g, 0x28, 750, 1), Some("5/21/00")); // a gap: the range check first, not 5/64/00 by track 1 (unmeasured on stock)
     assert_eq!(start_refusal(&g, 0x20, 1506, 1), Some("5/21/00"));
     // CDI 04: track 2 (Mode 2) 11852..15853, pregap 11702..11851; GP_XPRE2
     // reads, a start in the pregap running past track 2's end does not.

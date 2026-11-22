@@ -2402,6 +2402,16 @@ async fn handle_cd_read(
     if head_start.is_some() {
         set_last_read_fad(head_start);
     }
+    // A start no track holds, nor its pregap (a gap, the lead-out): LBA out of
+    // range, 5/21/00 -- checked BEFORE the sector type, so a typed read there
+    // answers as the untyped rule does, not 5/64/00 by the previous track's
+    // mode. Unmeasured on stock: it follows the untyped rule.
+    if discimg::atapi::cd_read_start_outside(gdi.tracks(), starting_fad) {
+        warn!("{}: CD_READ from FAD {} outside every track", label, starting_fad);
+        clear_out_layout();
+        finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, discimg::atapi::ASC_LBA_OUT_OF_RANGE);
+        return;
+    }
     if let Some(t) = track {
         if discimg::atapi::cd_read_type_mismatch(packet[1], t.mode()) {
             warn!("{}: CD_READ type {=u8:#x} does not fit the track", label, packet[1]);
@@ -2449,6 +2459,11 @@ async fn handle_cd_read(
             // The track's own part (if any) as Form 2 only if it all is.
             Some((_, zeros)) => zeros == count || (may && form2_request(gdi, t, t.start_lba, count - zeros)),
             None if in_pregap => false,
+            // Relies on PREGAP_OUT not being set yet here (it is set only
+            // further down, for this request): `form2_request` sizes its
+            // check with `stage_sectors_for`, which then counts by the
+            // track's own sector size (the 5-sector cap of a 2,336-byte
+            // track), not by a pregap read's larger zero sectors.
             None => form2_request(gdi, t, lba, count),
         };
         if may && form2 {
@@ -2700,6 +2715,7 @@ fn clear_out_layout() {
     unsafe {
         RAW_OUT = false;
         FORM2_OUT = false;
+        PREGAP_ZERO_BYTES = 2048;
     }
 }
 
