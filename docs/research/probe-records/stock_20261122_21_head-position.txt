@@ -1,0 +1,268 @@
+# gdprobe version=2 kos=2.3.0 label=stock stamp=seq00021 seq=21 dcload=1
+# config switch=1 identify=0 throughput=0 tp=64x16 seek=0/16 ip_fad=0 cdread_flags=0x20 timeout_ms=3000 return_to=2 images=4,3,10,11
+# config swap_regpoll=0 regpoll_ms=1000 regpoll_interval_ms=2 swap_devreset=0 devreset_ms=50,200
+# config swap_reswitch=0 reswitch_wait_ms=1000 devreset_only=0 devreset_only_wait_ms=1000
+# config devreset_cmd=0 devreset_cmd_ms=10,50,100
+# config cdread_flags_test=0 seek_span=50000 switch_timeout_ms=5000
+# config head_probe=1 head_flags=0x20 head_late_ms=300 head_idle_ms=2000 head_scd=1 head_counts=1,2,7,16
+# g1bus prot_before=0 prot_after=3 bios_read=2097152 us=551366 altstatus_before=0x30 altstatus_after=0x51
+img=0 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=17
+img=0 probe=WARMUP ready=1
+img=0 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=21
+img=0 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=012f41020105017a0000 us=30
+img=0 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=0000000000b419000008 us=23
+img=0 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=52657620362e3432 us=25
+img=0 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x21 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=35
+img=0 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=f0000000000000000000 us=24
+img=0 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01010000410200004105017c us=171
+img=0 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01010000410200004105017c us=169
+img=0 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=01000205017c us=24
+img=0 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010001000096 us=25
+img=0 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010002002e4c us=25
+img=0 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=22
+img=0 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x21 data=00150064004000000000004000000000000040000000000000000040004040400000000000000040004040000000000000404000000000000000000000404040000040000040004000400000000000004000000000400000400000004000000040404000 us=81
+img=0 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x21 data=0015000e41020104d32e0005017a us=24595
+img=0 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=0000050200052005 us=25
+img=4 probe=SW_CMD n=4 cdb=528204000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=21
+img=4 probe=SW_POLL t_ms=0 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x06
+img=4 probe=SW_POLL t_ms=164 poll=9 rc=check status=0x11 err=0x20 sense=2/04/01 secnr=0x00
+img=4 probe=SW_POLL t_ms=314 poll=16 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x21
+img=4 probe=SW_POLL t_ms=344 poll=17 rc=ok status=0x50 err=0x00 sense=none secnr=0x21
+img=4 probe=SW_RESULT n=4 rc=ok t_ms=345 polls=17 changes=4
+img=4 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=18
+img=4 probe=WARMUP ready=1
+img=4 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=18
+img=4 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=012f0101010000960000 us=30
+img=4 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=0000000000b419000008 us=27
+img=4 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=52657620362e3432 us=23
+img=4 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x21 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=31
+img=4 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=f0000000000000000000 us=23
+img=4 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010100004102000041003dee us=169
+img=4 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010100004102000041003dee us=169
+img=4 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010002003dee us=25
+img=4 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010001000096 us=24
+img=4 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010002002e4c us=23
+img=4 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=19
+img=4 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x21 data=00150064000000000000004000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000400040400040000000400040000000 us=83
+img=4 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x21 data=0015000e01010100000000000096 us=24218
+img=4 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=0000050200052005 us=22
+img=4 probe=IP_READ fad=11852 count=7 cdb=3020002e4c00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x21 data=5345474120534547414b4154414e41205345474120454e544552505249534553303030302047442d524f4d312f3120204a554520202020204530303046313020542d4e4554474420202056312e303030323032363031303120202020202020203153545f524541442e42494e202020204e4554474420202020202020202020204e455447442050524f42452030342020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020204e455447442d50524f424520696d673d30342074726b3d32206c62613d3030303131373032207019f34b241c452d4a158a967c4324312f615d7ed598ed935b7ca14ccca21af9564149496de7df9fa8673c7cb202e219d5122e50fe2f023dec5fd0a77f2c57e6ea584c63c6fb79170b039500848bd6e5fff32a7c7ec0c97c578a8126d0be1e7b9b2d6204c99a23695d42332f14a3416b9bd1b6fd8ad7f54f15c5beaccb07bf7c00c6612fe6526762615228f081651d7c408074143eeba76b5241ff1ac9481ec4cf2e1475d18da34fa81b58abdfe7a89f9781838566d5f0a5cefdb3a460d4830dc11e44d443fcb87a08f67e1952d0ff82f49c34b03a90cb80cf6b us=7238
+img=4 probe=HASH fad=11852 ssz=2048 crc=411ae202
+img=4 probe=HASH fad=11853 ssz=2048 crc=aa415efb
+img=4 probe=HASH fad=11854 ssz=2048 crc=f3656974
+img=4 probe=HASH fad=11855 ssz=2048 crc=8b426fa0
+img=4 probe=HASH fad=11856 ssz=2048 crc=3aa61aee
+img=4 probe=HASH fad=11857 ssz=2048 crc=64e27a4a
+img=4 probe=HASH fad=11858 ssz=2048 crc=34625c97
+img=4 probe=HD_START data_fad=11852 data_end=15854 audio_fad=150 audio_end=11852 data_cases=1 audio_cases=1
+img=4 probe=HD_BASE_POS stat_rc=ok st=pause trk=2 idx=1 pos=11859 moved=- scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=11859 late_rc=ok late_st=pause late_pos=11859 stat=012f410201002e530000 scd=0015000e41020100000700002e53
+img=4 probe=HD_R1 flags=0x20 fad=12102 count=1 ssz=2048 sense=none cdb=3020002f4600000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x21 us=2684
+img=4 probe=HD_R1_POS stat_rc=ok st=pause trk=2 idx=1 pos=12103 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12103 late_rc=ok late_st=pause late_pos=12103 stat=012f410201002f470000 scd=0015000e4102010000fb00002f47
+img=4 probe=HD_R2 flags=0x20 fad=12352 count=2 ssz=2048 sense=none cdb=302000304000000000000200 rc=ok status=0x50 err=0x00 irr=0x03 bytes=4096 cdbst=0x58 secnr=0x21 us=2375
+img=4 probe=HD_R2_POS stat_rc=ok st=pause trk=2 idx=1 pos=12354 d_start=+2 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12354 late_rc=ok late_st=pause late_pos=12354 stat=012f4102010030420000 scd=0015000e4102010001f600003042
+img=4 probe=HD_R7 flags=0x20 fad=12602 count=7 ssz=2048 sense=none cdb=302000313a00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x21 us=8035
+img=4 probe=HD_R7_POS stat_rc=ok st=pause trk=2 idx=1 pos=12609 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12609 late_rc=ok late_st=pause late_pos=12609 stat=012f4102010031410000 scd=0015000e4102010002f500003141
+img=4 probe=HD_R16 flags=0x20 fad=12852 count=16 ssz=2048 sense=none cdb=302000323400000000001000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32768 cdbst=0x58 secnr=0x21 us=14993
+img=4 probe=HD_R16_POS stat_rc=ok st=pause trk=2 idx=1 pos=12868 d_start=+16 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12868 late_rc=ok late_st=pause late_pos=12868 stat=012f4102010032440000 scd=0015000e4102010003f800003244
+img=4 probe=HD_HIT flags=0x20 fad=12860 count=1 ssz=2048 sense=none cdb=302000323c00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x21 us=1382
+img=4 probe=HD_HIT_POS stat_rc=ok st=pause trk=2 idx=1 pos=12861 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12861 late_rc=ok late_st=pause late_pos=12861 stat=012f41020100323d0000 scd=0015000e4102010003f10000323d
+img=4 probe=HD_MID7 flags=0x20 fad=13853 count=7 ssz=2048 sense=none cdb=302000361d00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x21 us=8316
+img=4 probe=HD_MID7_POS stat_rc=ok st=pause trk=2 idx=1 pos=13860 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=13860 late_rc=ok late_st=pause late_pos=13860 stat=012f4102010036240000 scd=0015000e4102010007d800003624
+img=4 probe=HD_END7 flags=0x20 fad=15814 count=7 ssz=2048 sense=none cdb=3020003dc600000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x21 us=7451
+img=4 probe=HD_END7_POS stat_rc=ok st=pause trk=2 idx=1 pos=15821 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=15821 late_rc=ok late_st=pause late_pos=15821 stat=012f410201003dcd0000 scd=0015000e410201000f8100003dcd
+img=4 probe=HD_END1 flags=0x20 fad=15852 count=1 ssz=2324 sense=none cdb=3020003dec00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2324 cdbst=0x58 secnr=0x21 us=1429
+img=4 probe=HD_END1_POS stat_rc=ok st=pause trk=2 idx=1 pos=15853 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=15853 late_rc=ok late_st=pause late_pos=15853 stat=012f410201003ded0000 scd=0015000e410201000fa100003ded
+img=4 probe=HD_START7 flags=0x20 fad=11852 count=7 ssz=2048 sense=none cdb=3020002e4c00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x21 us=7546
+img=4 probe=HD_START7_POS stat_rc=ok st=pause trk=2 idx=1 pos=11859 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=11859 late_rc=ok late_st=pause late_pos=11859 stat=012f410201002e530000 scd=0015000e41020100000700002e53
+img=4 probe=HD_CHK24 flags=0x24 fad=14353 count=7 ssz=- sense=5/64/00 cdb=302400381100000000000700 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=2304
+img=4 probe=HD_CHK24_POS stat_rc=ok st=pause trk=2 idx=1 pos=14353 d_start=+0 d_end=-7 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14353 late_rc=ok late_st=pause late_pos=14353 stat=012f4102010038110000 scd=0015000e4102010009c500003811
+img=4 probe=HD_CHK28 flags=0x28 fad=14853 count=7 ssz=2048 sense=none cdb=3028003a0500000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x21 us=7563
+img=4 probe=HD_CHK28_POS stat_rc=ok st=pause trk=2 idx=1 pos=14860 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14860 late_rc=ok late_st=pause late_pos=14860 stat=012f410201003a0c0000 scd=0015000e410201000bc000003a0c
+img=4 probe=HD_TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=19
+img=4 probe=HD_TUR_POS stat_rc=ok st=pause trk=2 idx=1 pos=14860 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14860 late_rc=ok late_st=pause late_pos=14860 stat=012f410201003a0c0000 scd=0015000e410201000bc000003a0c
+img=4 probe=HD_TOC cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 us=170
+img=4 probe=HD_TOC_POS stat_rc=ok st=pause trk=2 idx=1 pos=14860 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14860 late_rc=ok late_st=pause late_pos=14860 stat=012f410201003a0c0000 scd=0015000e410201000bc000003a0c
+img=4 probe=HD_SES cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 us=25
+img=4 probe=HD_SES_POS stat_rc=ok st=pause trk=2 idx=1 pos=14860 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14860 late_rc=ok late_st=pause late_pos=14860 stat=012f410201003a0c0000 scd=0015000e410201000bc000003a0c
+img=4 probe=HD_AUD1 flags=0x20 fad=3075 count=1 ssz=- sense=5/21/00 cdb=3020000c0300000000000100 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=26
+img=4 probe=HD_AUD1_POS stat_rc=ok st=pause trk=2 idx=1 pos=3075 d_start=+0 d_end=-1 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=3075 late_rc=ok late_st=pause late_pos=3075 stat=012f410201000c030000 scd=0015000e41020107d67c00000c03
+img=4 probe=HD_AUD7 flags=0x20 fad=6001 count=7 ssz=- sense=5/21/00 cdb=302000177100000000000700 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=25
+img=4 probe=HD_AUD7_POS stat_rc=ok st=pause trk=2 idx=1 pos=6001 d_start=+0 d_end=-7 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=6001 late_rc=ok late_st=pause late_pos=6001 stat=012f4102010017710000 scd=0015000e41020107d67c00001771
+img=4 probe=HD_IDLE_POS idle_ms=2000 stat_rc=ok st=pause trk=2 idx=1 pos=6001 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=6001 late_rc=ok late_st=pause late_pos=6001 stat=012f4102010017710000 scd=0015000e41020107d67c00001771
+img=3 probe=SW_CMD n=3 cdb=528203000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=19
+img=3 probe=SW_POLL t_ms=1 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x06
+img=3 probe=SW_POLL t_ms=165 poll=9 rc=check status=0x11 err=0x20 sense=2/04/01 secnr=0x00
+img=3 probe=SW_POLL t_ms=315 poll=15 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x81
+img=3 probe=SW_POLL t_ms=345 poll=16 rc=ok status=0x50 err=0x00 sense=none secnr=0x81
+img=3 probe=SW_RESULT n=3 rc=ok t_ms=346 polls=16 changes=4
+img=3 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=21
+img=3 probe=WARMUP ready=1
+img=3 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=17
+img=3 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=018f41030100b05e0000 us=30
+img=3 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=0000000000b419000008 us=23
+img=3 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x81 data=52657620362e3432 us=26
+img=3 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x81 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=33
+img=3 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=f0000000000000000000 us=25
+img=3 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x81 data=410000960100038affffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff4101000001020000010005e2 us=170
+img=3 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x81 data=ffffffffffffffff4100b05effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff41030000410300004100fe7e us=169
+img=3 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x81 data=01000100fe7e us=23
+img=3 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x81 data=010001000096 us=28
+img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=21
+img=3 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x18 secnr=0x81 us=22
+img=3 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x81 data=00150064004000000000004000000000000040400000000000000040000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000004000000000000000000040004000404000400000404000404000 us=80
+img=3 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x81 data=0015000e4103010000000000b05e us=24412
+img=3 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x81 data=0000050200052005 us=23
+img=3 probe=IP_READ fad=45150 count=7 cdb=302000b05e00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x81 data=5345474120534547414b4154414e41205345474120454e544552505249534553303030302047442d524f4d312f3120204a554520202020204530303046313020542d4e4554474420202056312e303030323032363031303120202020202020203153545f524541442e42494e202020204e4554474420202020202020202020204e455447442050524f42452030332020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020204e455447442d50524f424520696d673d30332074726b3d33206c62613d3030303435303030204e1fce7c87ceffee04c67cb08f658c54241143f7d3ebc78cf4b75b841537f3b231892628c81801312f21dc547494838c7a27b3891268ade1efb07295252de81663dd69eb8f16a7b34dc72ec27d575396d59adb9b05cf0c05990ba31aa882c99ea3dee924dc78ce60ac1cfdb6b4de2c21d5028921351667f93123a2bcb657ea224da6cf1acc14f01ec3307dd49d6f565417aeefa07329581d8f3f5e1621607bb49065043776c568614824805fbd1a4981a539f4f29b787921aa5efb158996520994a72f6d38c2fd15a3f7a362f85d650442ad4253636906be94a1 us=7263
+img=3 probe=HASH fad=45150 ssz=2048 crc=62d4cf63
+img=3 probe=HASH fad=45151 ssz=2048 crc=77c923a4
+img=3 probe=HASH fad=45152 ssz=2048 crc=b9d16dc1
+img=3 probe=HASH fad=45153 ssz=2048 crc=0d3bf321
+img=3 probe=HASH fad=45154 ssz=2048 crc=6f5887e8
+img=3 probe=HASH fad=45155 ssz=2048 crc=ef682ddb
+img=3 probe=HASH fad=45156 ssz=2048 crc=dee01194
+img=3 probe=HD_START data_fad=45150 data_end=65150 audio_fad=906 audio_end=1506 data_cases=1 audio_cases=1
+img=3 probe=HD_BASE_POS stat_rc=ok st=pause trk=3 idx=1 pos=45157 moved=- scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=45157 late_rc=ok late_st=pause late_pos=45157 stat=018f41030100b0650000 scd=0015000e4103010000070000b065
+img=3 probe=HD_R1 flags=0x20 fad=46400 count=1 ssz=2048 sense=none cdb=302000b54000000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x81 us=2993
+img=3 probe=HD_R1_POS stat_rc=ok st=pause trk=3 idx=1 pos=46401 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=46401 late_rc=ok late_st=pause late_pos=46401 stat=018f41030100b5410000 scd=0015000e4103010004e30000b541
+img=3 probe=HD_R2 flags=0x20 fad=47650 count=2 ssz=2048 sense=none cdb=302000ba2200000000000200 rc=ok status=0x50 err=0x00 irr=0x03 bytes=4096 cdbst=0x58 secnr=0x81 us=2336
+img=3 probe=HD_R2_POS stat_rc=ok st=pause trk=3 idx=1 pos=47652 d_start=+2 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=47652 late_rc=ok late_st=pause late_pos=47652 stat=018f41030100ba240000 scd=0015000e4103010009c60000ba24
+img=3 probe=HD_R7 flags=0x20 fad=48900 count=7 ssz=2048 sense=none cdb=302000bf0400000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x81 us=7185
+img=3 probe=HD_R7_POS stat_rc=ok st=pause trk=3 idx=1 pos=48907 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=48907 late_rc=ok late_st=pause late_pos=48907 stat=018f41030100bf0b0000 scd=0015000e410301000ead0000bf0b
+img=3 probe=HD_R16 flags=0x20 fad=50150 count=16 ssz=2048 sense=none cdb=302000c3e600000000001000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32768 cdbst=0x58 secnr=0x81 us=15744
+img=3 probe=HD_R16_POS stat_rc=ok st=pause trk=3 idx=1 pos=50166 d_start=+16 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=50166 late_rc=ok late_st=pause late_pos=50166 stat=018f41030100c3f60000 scd=0015000e4103010013980000c3f6
+img=3 probe=HD_HIT flags=0x20 fad=50158 count=1 ssz=2048 sense=none cdb=302000c3ee00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x81 us=1374
+img=3 probe=HD_HIT_POS stat_rc=ok st=pause trk=3 idx=1 pos=50159 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=50159 late_rc=ok late_st=pause late_pos=50159 stat=018f41030100c3ef0000 scd=0015000e4103010013910000c3ef
+img=3 probe=HD_MID7 flags=0x20 fad=55150 count=7 ssz=2048 sense=none cdb=302000d76e00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x81 us=7751
+img=3 probe=HD_MID7_POS stat_rc=ok st=pause trk=3 idx=1 pos=55157 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=55157 late_rc=ok late_st=pause late_pos=55157 stat=018f41030100d7750000 scd=0015000e4103010027170000d775
+img=3 probe=HD_END7 flags=0x20 fad=65110 count=7 ssz=2048 sense=none cdb=302000fe5600000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x81 us=7655
+img=3 probe=HD_END7_POS stat_rc=ok st=pause trk=3 idx=1 pos=65117 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=65117 late_rc=ok late_st=pause late_pos=65117 stat=018f41030100fe5d0000 scd=0015000e410301004dff0000fe5d
+img=3 probe=HD_END1 flags=0x20 fad=65148 count=1 ssz=2048 sense=none cdb=302000fe7c00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x81 us=1369
+img=3 probe=HD_END1_POS stat_rc=ok st=pause trk=3 idx=1 pos=65149 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=65149 late_rc=ok late_st=pause late_pos=65149 stat=018f41030100fe7d0000 scd=0015000e410301004e1f0000fe7d
+img=3 probe=HD_START7 flags=0x20 fad=45150 count=7 ssz=2048 sense=none cdb=302000b05e00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x81 us=7076
+img=3 probe=HD_START7_POS stat_rc=ok st=pause trk=3 idx=1 pos=45157 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=45157 late_rc=ok late_st=pause late_pos=45157 stat=018f41030100b0650000 scd=0015000e4103010000070000b065
+img=3 probe=HD_CHK24 flags=0x24 fad=57650 count=7 ssz=2048 sense=none cdb=302400e13200000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x81 us=8768
+img=3 probe=HD_CHK24_POS stat_rc=ok st=pause trk=3 idx=1 pos=57657 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=57657 late_rc=ok late_st=pause late_pos=57657 stat=018f41030100e1390000 scd=0015000e4103010030db0000e139
+img=3 probe=HD_CHK28 flags=0x28 fad=60150 count=7 ssz=- sense=5/64/00 cdb=302800eaf600000000000700 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=519
+img=3 probe=HD_CHK28_POS stat_rc=ok st=pause trk=3 idx=1 pos=60150 d_start=+0 d_end=-7 moved=1 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=60150 late_rc=ok late_st=pause late_pos=60150 stat=018f41030100eaf60000 scd=0015000e410301003a980000eaf6
+img=3 probe=HD_TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=21
+img=3 probe=HD_TUR_POS stat_rc=ok st=pause trk=3 idx=1 pos=60150 moved=0 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=60150 late_rc=ok late_st=pause late_pos=60150 stat=018f41030100eaf60000 scd=0015000e410301003a980000eaf6
+img=3 probe=HD_TOC cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x81 us=167
+img=3 probe=HD_TOC_POS stat_rc=ok st=pause trk=3 idx=1 pos=60150 moved=0 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=60150 late_rc=ok late_st=pause late_pos=60150 stat=018f41030100eaf60000 scd=0015000e410301003a980000eaf6
+img=3 probe=HD_SES cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x81 us=26
+img=3 probe=HD_SES_POS stat_rc=ok st=pause trk=3 idx=1 pos=60150 moved=0 scd_rc=ok scd_trk=3 scd_idx=1 scd_pos=60150 late_rc=ok late_st=pause late_pos=60150 stat=018f41030100eaf60000 scd=0015000e410301003a980000eaf6
+img=3 probe=HD_AUD1 flags=0x20 fad=1056 count=1 ssz=2352 sense=none cdb=302000042000000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2352 cdbst=0x58 secnr=0x81 us=3490
+img=3 probe=HD_AUD1_POS stat_rc=ok st=pause trk=2 idx=1 pos=1057 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=1057 late_rc=ok late_st=pause late_pos=1057 stat=018f0102010004210000 scd=0015000e01020100009700000421
+img=3 probe=HD_AUD7 flags=0x20 fad=1206 count=7 ssz=2352 sense=none cdb=30200004b600000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=16464 cdbst=0x58 secnr=0x81 us=9114
+img=3 probe=HD_AUD7_POS stat_rc=ok st=pause trk=2 idx=1 pos=1213 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=1213 late_rc=ok late_st=pause late_pos=1213 stat=018f0102010004bd0000 scd=0015000e010201000133000004bd
+img=3 probe=HD_IDLE_POS idle_ms=2000 stat_rc=ok st=pause trk=2 idx=1 pos=1213 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=1213 late_rc=ok late_st=pause late_pos=1213 stat=018f0102010004bd0000 scd=0015000e010201000133000004bd
+img=10 probe=SW_CMD n=10 cdb=52820a000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=18
+img=10 probe=SW_POLL t_ms=0 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x06
+img=10 probe=SW_POLL t_ms=165 poll=9 rc=check status=0x11 err=0x20 sense=2/04/01 secnr=0x00
+img=10 probe=SW_POLL t_ms=315 poll=16 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x11
+img=10 probe=SW_POLL t_ms=345 poll=17 rc=ok status=0x50 err=0x00 sense=none secnr=0x11
+img=10 probe=SW_RESULT n=10 rc=ok t_ms=346 polls=17 changes=4
+img=10 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=19
+img=10 probe=WARMUP ready=1
+img=10 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=17
+img=10 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x11 data=011f0101010000960000 us=28
+img=10 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x11 data=0000000000b419000008 us=26
+img=10 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x11 data=52657620362e3432 us=26
+img=10 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x11 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=34
+img=10 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x11 data=f0000000000000000000 us=25
+img=10 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x11 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010100004102000041003dee us=168
+img=10 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x11 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010100004102000041003dee us=168
+img=10 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x11 data=010002003dee us=24
+img=10 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x11 data=010001000096 us=26
+img=10 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x11 data=010002002e4c us=23
+img=10 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=19
+img=10 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x11 data=00150064000000000000004000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000400040400040000000400040000000 us=80
+img=10 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x11 data=0015000e01010100000000000096 us=24453
+img=10 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x11 data=0000050200052005 us=27
+img=10 probe=IP_READ fad=11852 count=7 cdb=3020002e4c00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x11 data=5345474120534547414b4154414e41205345474120454e544552505249534553303030302047442d524f4d312f3120204a554520202020204530303046313020542d4e4554474420202056312e303030323032363031303120202020202020203153545f524541442e42494e202020204e4554474420202020202020202020204e455447442050524f42452031302020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020204e455447442d50524f424520696d673d31302074726b3d32206c62613d303030313137303220293acc1f4dba8596d3ff46a0282618337b4fc1fc5f1be8f3d25eca923d3052fddd709cfd163e2748739efad7bdff099f6ff73bc1ef508aa0baaa4cff242dfb94b7136451ea9f849e91b0ad4212947dcdd47495743c3d2b604cb25cefeecce64496e8ee91a7cb56ace041b8397da75826e8271eb41f98d2c65da86dadf51bec1cc676573d77a41eb32b51a3475f22a9273bc0558d85d51e864b7cea4c9b76d9163f4057cfa20fc4640de7143603ce5f511064ad873b3e70bd27437151a5ae04200f9bdd51022c1333e914cc8c0b097f23bd8edcf2b2b5928ceb18 us=7528
+img=10 probe=HASH fad=11852 ssz=2048 crc=304f278c
+img=10 probe=HASH fad=11853 ssz=2048 crc=c9fce51a
+img=10 probe=HASH fad=11854 ssz=2048 crc=4ace8f15
+img=10 probe=HASH fad=11855 ssz=2048 crc=86beb666
+img=10 probe=HASH fad=11856 ssz=2048 crc=8e697287
+img=10 probe=HASH fad=11857 ssz=2048 crc=37df9d43
+img=10 probe=HASH fad=11858 ssz=2048 crc=adb5b300
+img=10 probe=HD_START data_fad=11852 data_end=15854 audio_fad=150 audio_end=11852 data_cases=1 audio_cases=1
+img=10 probe=HD_BASE_POS stat_rc=ok st=pause trk=2 idx=1 pos=11859 moved=- scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=11859 late_rc=ok late_st=pause late_pos=11859 stat=011f410201002e530000 scd=0015000e41020100000700002e53
+img=10 probe=HD_R1 flags=0x20 fad=12102 count=1 ssz=2048 sense=none cdb=3020002f4600000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x11 us=1326
+img=10 probe=HD_R1_POS stat_rc=ok st=pause trk=2 idx=1 pos=12103 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12103 late_rc=ok late_st=pause late_pos=12103 stat=011f410201002f470000 scd=0015000e4102010000fb00002f47
+img=10 probe=HD_R2 flags=0x20 fad=12352 count=2 ssz=2048 sense=none cdb=302000304000000000000200 rc=ok status=0x50 err=0x00 irr=0x03 bytes=4096 cdbst=0x58 secnr=0x11 us=2735
+img=10 probe=HD_R2_POS stat_rc=ok st=pause trk=2 idx=1 pos=12354 d_start=+2 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12354 late_rc=ok late_st=pause late_pos=12354 stat=011f4102010030420000 scd=0015000e4102010001f600003042
+img=10 probe=HD_R7 flags=0x20 fad=12602 count=7 ssz=2048 sense=none cdb=302000313a00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x11 us=7534
+img=10 probe=HD_R7_POS stat_rc=ok st=pause trk=2 idx=1 pos=12609 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12609 late_rc=ok late_st=pause late_pos=12609 stat=011f4102010031410000 scd=0015000e4102010002f500003141
+img=10 probe=HD_R16 flags=0x20 fad=12852 count=16 ssz=2048 sense=none cdb=302000323400000000001000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32768 cdbst=0x58 secnr=0x11 us=14249
+img=10 probe=HD_R16_POS stat_rc=ok st=pause trk=2 idx=1 pos=12868 d_start=+16 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12868 late_rc=ok late_st=pause late_pos=12868 stat=011f4102010032440000 scd=0015000e4102010003f800003244
+img=10 probe=HD_HIT flags=0x20 fad=12860 count=1 ssz=2048 sense=none cdb=302000323c00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x11 us=1334
+img=10 probe=HD_HIT_POS stat_rc=ok st=pause trk=2 idx=1 pos=12861 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=12861 late_rc=ok late_st=pause late_pos=12861 stat=011f41020100323d0000 scd=0015000e4102010003f10000323d
+img=10 probe=HD_MID7 flags=0x20 fad=13853 count=7 ssz=2048 sense=none cdb=302000361d00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x11 us=7461
+img=10 probe=HD_MID7_POS stat_rc=ok st=pause trk=2 idx=1 pos=13860 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=13860 late_rc=ok late_st=pause late_pos=13860 stat=011f4102010036240000 scd=0015000e4102010007d800003624
+img=10 probe=HD_END7 flags=0x20 fad=15814 count=7 ssz=2048 sense=none cdb=3020003dc600000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x11 us=7858
+img=10 probe=HD_END7_POS stat_rc=ok st=pause trk=2 idx=1 pos=15821 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=15821 late_rc=ok late_st=pause late_pos=15821 stat=011f410201003dcd0000 scd=0015000e410201000f8100003dcd
+img=10 probe=HD_END1 flags=0x20 fad=15852 count=1 ssz=2048 sense=none cdb=3020003dec00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 cdbst=0x58 secnr=0x11 us=1316
+img=10 probe=HD_END1_POS stat_rc=ok st=pause trk=2 idx=1 pos=15853 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=15853 late_rc=ok late_st=pause late_pos=15853 stat=011f410201003ded0000 scd=0015000e410201000fa100003ded
+img=10 probe=HD_START7 flags=0x20 fad=11852 count=7 ssz=2048 sense=none cdb=3020002e4c00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x11 us=7465
+img=10 probe=HD_START7_POS stat_rc=ok st=pause trk=2 idx=1 pos=11859 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=11859 late_rc=ok late_st=pause late_pos=11859 stat=011f410201002e530000 scd=0015000e41020100000700002e53
+img=10 probe=HD_CHK24 flags=0x24 fad=14353 count=7 ssz=2048 sense=none cdb=302400381100000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x11 us=7393
+img=10 probe=HD_CHK24_POS stat_rc=ok st=pause trk=2 idx=1 pos=14360 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14360 late_rc=ok late_st=pause late_pos=14360 stat=011f4102010038180000 scd=0015000e4102010009cc00003818
+img=10 probe=HD_CHK28 flags=0x28 fad=14853 count=7 ssz=- sense=5/64/00 cdb=3028003a0500000000000700 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=1048
+img=10 probe=HD_CHK28_POS stat_rc=ok st=pause trk=2 idx=1 pos=14853 d_start=+0 d_end=-7 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14853 late_rc=ok late_st=pause late_pos=14853 stat=011f410201003a050000 scd=0015000e410201000bb900003a05
+img=10 probe=HD_TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=21
+img=10 probe=HD_TUR_POS stat_rc=ok st=pause trk=2 idx=1 pos=14853 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14853 late_rc=ok late_st=pause late_pos=14853 stat=011f410201003a050000 scd=0015000e410201000bb900003a05
+img=10 probe=HD_TOC cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x11 us=172
+img=10 probe=HD_TOC_POS stat_rc=ok st=pause trk=2 idx=1 pos=14853 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14853 late_rc=ok late_st=pause late_pos=14853 stat=011f410201003a050000 scd=0015000e410201000bb900003a05
+img=10 probe=HD_SES cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x11 us=24
+img=10 probe=HD_SES_POS stat_rc=ok st=pause trk=2 idx=1 pos=14853 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=14853 late_rc=ok late_st=pause late_pos=14853 stat=011f410201003a050000 scd=0015000e410201000bb900003a05
+img=10 probe=HD_AUD1 flags=0x20 fad=3075 count=1 ssz=- sense=5/21/00 cdb=3020000c0300000000000100 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=25
+img=10 probe=HD_AUD1_POS stat_rc=ok st=pause trk=2 idx=1 pos=3075 d_start=+0 d_end=-1 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=3075 late_rc=ok late_st=pause late_pos=3075 stat=011f410201000c030000 scd=0015000e41020107d67c00000c03
+img=10 probe=HD_AUD7 flags=0x20 fad=6001 count=7 ssz=- sense=5/21/00 cdb=302000177100000000000700 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=27
+img=10 probe=HD_AUD7_POS stat_rc=ok st=pause trk=2 idx=1 pos=6001 d_start=+0 d_end=-7 moved=1 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=6001 late_rc=ok late_st=pause late_pos=6001 stat=011f4102010017710000 scd=0015000e41020107d67c00001771
+img=10 probe=HD_IDLE_POS idle_ms=2000 stat_rc=ok st=pause trk=2 idx=1 pos=6001 moved=0 scd_rc=ok scd_trk=2 scd_idx=1 scd_pos=6001 late_rc=ok late_st=pause late_pos=6001 stat=011f4102010017710000 scd=0015000e41020107d67c00001771
+img=11 probe=SW_CMD n=11 cdb=52820b000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=17
+img=11 probe=SW_POLL t_ms=0 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x06
+img=11 probe=SW_POLL t_ms=165 poll=9 rc=check status=0x11 err=0x20 sense=2/04/01 secnr=0x00
+img=11 probe=SW_POLL t_ms=315 poll=15 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x11
+img=11 probe=SW_POLL t_ms=345 poll=16 rc=ok status=0x50 err=0x00 sense=none secnr=0x11
+img=11 probe=SW_RESULT n=11 rc=ok t_ms=346 polls=16 changes=4
+img=11 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=21
+img=11 probe=WARMUP ready=1
+img=11 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=18
+img=11 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x11 data=011f0101010000960000 us=27
+img=11 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x11 data=0000000000b419000008 us=26
+img=11 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x11 data=52657620362e3432 us=25
+img=11 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x11 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=32
+img=11 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x11 data=f0000000000000000000 us=26
+img=11 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x11 data=010000960100025affffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0101000001020000010003ec us=171
+img=11 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x11 data=010000960100025affffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0101000001020000010003ec us=171
+img=11 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x11 data=0100010003ec us=25
+img=11 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x11 data=010001000096 us=25
+img=11 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=17
+img=11 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x18 secnr=0x11 us=19
+img=11 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x11 data=00150064000000000000004000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000400040400040000000400040000000 us=83
+img=11 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x11 data=0015000e01010100000000000096 us=24501
+img=11 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x11 data=0000050200052005 us=27
+img=11 probe=NO_DATA_TRACK audio_fad=150 reads=skipped
+img=11 probe=HD_START data_fad=0 data_end=0 audio_fad=150 audio_end=602 data_cases=0 audio_cases=1
+img=11 probe=HD_BASE_POS stat_rc=ok st=pause trk=1 idx=1 pos=150 moved=- scd_rc=ok scd_trk=1 scd_idx=1 scd_pos=150 late_rc=ok late_st=pause late_pos=150 stat=011f0101010000960000 scd=0015000e01010100000000000096
+img=11 probe=HD_TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=19
+img=11 probe=HD_TUR_POS stat_rc=ok st=pause trk=1 idx=1 pos=150 moved=0 scd_rc=ok scd_trk=1 scd_idx=1 scd_pos=150 late_rc=ok late_st=pause late_pos=150 stat=011f0101010000960000 scd=0015000e01010100000000000096
+img=11 probe=HD_TOC cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x11 us=168
+img=11 probe=HD_TOC_POS stat_rc=ok st=pause trk=1 idx=1 pos=150 moved=0 scd_rc=ok scd_trk=1 scd_idx=1 scd_pos=150 late_rc=ok late_st=pause late_pos=150 stat=011f0101010000960000 scd=0015000e01010100000000000096
+img=11 probe=HD_SES cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x11 us=24
+img=11 probe=HD_SES_POS stat_rc=ok st=pause trk=1 idx=1 pos=150 moved=0 scd_rc=ok scd_trk=1 scd_idx=1 scd_pos=150 late_rc=ok late_st=pause late_pos=150 stat=011f0101010000960000 scd=0015000e01010100000000000096
+img=11 probe=HD_AUD1 flags=0x20 fad=263 count=1 ssz=2352 sense=none cdb=302000010700000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2352 cdbst=0x58 secnr=0x11 us=2280
+img=11 probe=HD_AUD1_POS stat_rc=ok st=pause trk=1 idx=1 pos=264 d_start=+1 d_end=+0 moved=1 scd_rc=ok scd_trk=1 scd_idx=1 scd_pos=264 late_rc=ok late_st=pause late_pos=264 stat=011f0101010001080000 scd=0015000e01010100007200000108
+img=11 probe=HD_AUD7 flags=0x20 fad=376 count=7 ssz=2352 sense=none cdb=302000017800000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=16464 cdbst=0x58 secnr=0x11 us=8012
+img=11 probe=HD_AUD7_POS stat_rc=ok st=pause trk=1 idx=1 pos=383 d_start=+7 d_end=+0 moved=1 scd_rc=ok scd_trk=1 scd_idx=1 scd_pos=383 late_rc=ok late_st=pause late_pos=383 stat=011f01010100017f0000 scd=0015000e0101010000e90000017f
+img=11 probe=HD_IDLE_POS idle_ms=2000 stat_rc=ok st=pause trk=1 idx=1 pos=383 moved=0 scd_rc=ok scd_trk=1 scd_idx=1 scd_pos=383 late_rc=ok late_st=pause late_pos=383 stat=011f01010100017f0000 scd=0015000e0101010000e90000017f
+img=2 probe=SW_CMD n=2 cdb=528202000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x11 us=21
+img=2 probe=SW_POLL t_ms=0 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x06
+img=2 probe=SW_POLL t_ms=157 poll=6 rc=check status=0x11 err=0x20 sense=2/04/01 secnr=0x00
+img=2 probe=SW_POLL t_ms=307 poll=13 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x21
+img=2 probe=SW_POLL t_ms=329 poll=14 rc=ok status=0x50 err=0x00 sense=none secnr=0x21
+img=2 probe=SW_RESULT n=2 rc=ok t_ms=330 polls=14 changes=4
+img=2 probe=END abort=0
+# done abort=0 bytes_written=51953
