@@ -30,7 +30,8 @@
 use defmt::{info, warn, Format};
 use embassy_atsam3::hsmci;
 use embedded_sdmmc::ShortFileName;
-use fatmap::extent::{ClusterGeom, Cursor, Walk};
+use fatmap::extent::Walk;
+use fatmap::geom::{looks_like_bpb, parse_fat32, BpbError};
 #[cfg(feature = "lazy-extents")]
 use fatmap::extent::Window;
 use fatmap::lfn::{Feed, LfnMatcher};
@@ -47,33 +48,10 @@ pub use fatmap::extent::Extent;
 /// (`lazy_add`) rather than the filesystem.
 pub const MAX_EXTENTS: usize = 96;
 
-/// Volume geometry, everything in 512-byte blocks.
-#[derive(Clone, Copy, Format)]
-pub struct Geometry {
-    fat_lba: u32,
-    sectors_per_fat: u32,
-    data_lba: u32,
-    blocks_per_cluster: u32,
-    pub root_cluster: u32,
-    /// Data clusters on the volume: valid cluster numbers are `2..clusters + 2`.
-    /// Bounded by the volume's size and by what one FAT can hold.
-    clusters: u32,
-}
-
-impl Geometry {
-    /// First block of `cluster`, `None` outside the volume (a damaged FAT
-    /// value must not become a block number).
-    pub fn cluster_lba(&self, cluster: u32) -> Option<u32> {
-        if cluster < 2 || cluster - 2 >= self.clusters {
-            return None;
-        }
-        self.cluster_geom().checked_cluster_lba(cluster)
-    }
-
-    fn cluster_geom(&self) -> ClusterGeom {
-        ClusterGeom { data_lba: self.data_lba, blocks_per_cluster: self.blocks_per_cluster }
-    }
-}
+/// Volume geometry, everything in 512-byte blocks. The arithmetic (boot
+/// sector, cluster checks, directory bound) lives in `fatmap::geom`, where
+/// the host tests reach it with crafted boot sectors.
+pub use fatmap::geom::Geometry;
 
 /// A directory entry we care about.
 #[derive(Clone, Copy, Format)]
@@ -95,10 +73,6 @@ fn rd32(b: &[u8], off: usize) -> u32 {
 
 fn read_block(lba: u32, buf: &mut [u8; 512]) -> Result<(), ()> {
     unsafe { hsmci::read_block(lba, buf) }.map_err(|_| ())
-}
-
-fn looks_like_bpb(s: &[u8; 512]) -> bool {
-    (s[0] == 0xEB || s[0] == 0xE9) && rd16(s, 0x0B) == 512 && s[0x0D] != 0
 }
 
 /// First partition's start LBA (F7's protected boundary), read as `probe`
@@ -131,42 +105,23 @@ pub fn probe() -> Option<Geometry> {
         }
         start
     };
-    let blocks_per_cluster = sec[0x0D] as u32;
-    let total16 = rd16(&sec, 0x13);
-    let total = if total16 != 0 { total16 } else { rd32(&sec, 0x20) };
-    let reserved = rd16(&sec, 0x0E);
-    let num_fats = sec[0x10] as u32;
-    let root_entries = rd16(&sec, 0x11);
-    let spf16 = rd16(&sec, 0x16);
-    let spf32 = rd32(&sec, 0x24);
-    let root_cluster = rd32(&sec, 0x2C);
-    if root_entries != 0 || spf16 != 0 || spf32 == 0 || num_fats == 0 || root_cluster < 2 {
-        warn!("fat: volume at {} is not FAT32", base);
-        return None;
-    }
-    // Cluster count: what the volume holds after the metadata, and no more
-    // than the FAT has entries for (a BPB that claims more is damaged, and the
-    // smaller number is the safe one).
-    let meta = reserved.checked_add(num_fats.checked_mul(spf32)?)?;
-    if blocks_per_cluster == 0 || total <= meta {
-        warn!("fat: volume at {} has a bad BPB", base);
-        return None;
-    }
-    let clusters = ((total - meta) / blocks_per_cluster).min(spf32.saturating_mul(128).saturating_sub(2));
-    if root_cluster - 2 >= clusters {
-        warn!("fat: volume at {} has its root outside the data area", base);
-        return None;
-    }
-    let g = Geometry {
-        fat_lba: base + reserved,
-        sectors_per_fat: spf32,
-        data_lba: base + meta,
-        blocks_per_cluster,
-        root_cluster,
-        clusters,
+    let g = match parse_fat32(&sec, base) {
+        Ok(g) => g,
+        Err(BpbError::NotFat32) => {
+            warn!("fat: volume at {} is not FAT32", base);
+            return None;
+        }
+        Err(BpbError::BadBpb) => {
+            warn!("fat: volume at {} has a bad BPB", base);
+            return None;
+        }
+        Err(BpbError::RootOutside) => {
+            warn!("fat: volume at {} has its root outside the data area", base);
+            return None;
+        }
     };
     info!("fat: FAT32 at {}, {} blocks/cluster, fat@{} data@{}",
-          base, blocks_per_cluster, g.fat_lba, g.data_lba);
+          base, g.blocks_per_cluster, g.fat_lba, g.data_lba);
     Some(g)
 }
 
@@ -186,16 +141,9 @@ fn fat_next(g: &Geometry, cluster: u32, cached: &mut u32, buf: &mut [u8; 512]) -
         read_block(g.fat_lba + sector, buf)?;
         *cached = sector + 1;
     }
-    let v = rd32(buf, (cluster % 128) as usize * 4) & 0x0FFF_FFFF;
-    if v >= 0x0FFF_FFF8 {
-        Ok(None)
-    } else if v < 2 || v - 2 >= g.clusters {
-        // Free, reserved, bad (0x0FFFFFF7) or past the end of the volume: the
-        // chain is damaged, and the value must never reach `cluster_lba`.
-        Err(())
-    } else {
-        Ok(Some(v))
-    }
+    // Free, reserved, bad (0x0FFFFFF7) or past the end of the volume is an
+    // error: the value must never reach `cluster_lba`.
+    g.link(rd32(buf, (cluster % 128) as usize * 4))
 }
 
 /// Compare an on-disk 11-byte name with a `ShortFileName`.
@@ -249,7 +197,7 @@ pub fn lookup(g: &Geometry, dir_cluster: u32, key: &Key<'_>, buf: &mut [u8; 512]
     let mut hops = 0u32;
     loop {
         hops += 1;
-        if hops > g.clusters {
+        if hops > g.dir_max_hops() {
             return None;
         }
         let base = g.cluster_lba(cluster)?;
@@ -343,7 +291,7 @@ pub fn map_extents<const N: usize>(
     entry: &Entry,
     out: &mut Vec<Extent, N>,
 ) -> Result<usize, MapError> {
-    let Some(cur) = Cursor::start(entry.first_cluster, entry.size) else {
+    let Some(cur) = g.start(entry.first_cluster, entry.size) else {
         return Err(MapError::Unmappable);
     };
     let start_len = out.len();
@@ -436,8 +384,7 @@ pub fn lazy_reset(geom: Option<Geometry>) {
 #[cfg(feature = "lazy-extents")]
 pub fn lazy_add(entry: &Entry) -> Option<u8> {
     let l = lazy();
-    l.geom?;
-    Cursor::start(entry.first_cluster, entry.size)?;
+    l.geom?.start(entry.first_cluster, entry.size)?;
     l.files
         .push(LazyFile { first_cluster: entry.first_cluster, size: entry.size })
         .ok()?;
