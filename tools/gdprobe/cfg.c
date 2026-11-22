@@ -59,8 +59,8 @@ void gp_config_defaults(gp_config *c)
     c->dma_data = 1;
     c->dma_counts[0] = 1; c->dma_counts[1] = 2; c->dma_counts[2] = 7; c->dma_counts[3] = 16;
     c->n_dma_counts = 4;
-    c->dma_mode_list[0] = GP_DMA_PAD; c->dma_mode_list[1] = GP_DMA_EXACT;
-    c->n_dma_modes = 2;
+    c->dma_mode_list[0] = GP_DMA_EXACT; c->dma_mode_list[1] = GP_DMA_FLOOR; c->dma_mode_list[2] = GP_DMA_PAD;
+    c->n_dma_modes = 3;
     c->dma_flags = 0x20;
     c->dma_pio_ref = 1;
     c->dma_timeout_ms = 3000;
@@ -218,20 +218,23 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "dma_audio")) { if (parse_bool(v, &b)) c->dma_audio = b; else ok = 0;
     } else if (!strcmp(k, "dma_counts")) { ok = parse_list(c->dma_counts, &c->n_dma_counts, v, GP_MAX_DMACNT, 1, 16);
     } else if (!strcmp(k, "dma_modes")) {
-        int m[2], nm = 0;
+        int m[3], nm = 0, q;
         char *tok = v, *next;
         while (tok && ok) {
             next = strchr(tok, ',');
             if (next) *next++ = 0;
             while (isspace((unsigned char)*tok)) tok++;
             trim(tok);
-            if (nm >= 2) ok = 0;
+            if (nm >= 3) ok = 0;
             else if (!strcmp(tok, "pad")) m[nm++] = GP_DMA_PAD;
             else if (!strcmp(tok, "exact")) m[nm++] = GP_DMA_EXACT;
+            else if (!strcmp(tok, "floor")) m[nm++] = GP_DMA_FLOOR;
             else ok = 0;
             tok = next;
         }
-        if (ok && nm && (nm < 2 || m[0] != m[1])) { memcpy(c->dma_mode_list, m, sizeof(m)); c->n_dma_modes = nm; } else ok = 0;
+        for (q = 1; ok && q < nm; q++)
+            if (m[q] == m[0] || (q == 2 && m[2] == m[1])) ok = 0;
+        if (ok && nm) { memcpy(c->dma_mode_list, m, sizeof(int) * (size_t)nm); c->n_dma_modes = nm; } else ok = 0;
     } else if (!strcmp(k, "dma_flags")) { n = parse_num(v, &ok); if (ok) c->dma_flags = (uint8_t)(n & 0xFE);
     } else if (!strcmp(k, "dma_pio_ref")) { if (parse_bool(v, &b)) c->dma_pio_ref = b; else ok = 0;
     } else if (!strcmp(k, "dma_timeout_ms")) { n = parse_num(v, &ok); if (ok) c->dma_timeout_ms = (uint32_t)clampi(n, 200, 10000);

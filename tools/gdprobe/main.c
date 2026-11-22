@@ -169,7 +169,7 @@ int main(int argc, char **argv)
                          (unsigned long)cfg.dma_timeout_ms, (unsigned long)cfg.dma_late_ms, cfg.dma_scd,
                          cfg.dma_throughput, cfg.dma_tp_batches, (unsigned long)cfg.dma_tp_max_ms);
     for (i = 0; i < cfg.n_dma_modes; i++)
-        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%s", i ? "," : "", cfg.dma_mode_list[i] == GP_DMA_PAD ? "pad" : "exact");
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%s", i ? "," : "", cfg.dma_mode_list[i] == GP_DMA_PAD ? "pad" : cfg.dma_mode_list[i] == GP_DMA_FLOOR ? "floor" : "exact");
     n += (size_t)snprintf(h + n, sizeof(h) - n, " dma_counts=");
     for (i = 0; i < cfg.n_dma_counts && n < sizeof(h) - 8; i++)
         n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.dma_counts[i]);

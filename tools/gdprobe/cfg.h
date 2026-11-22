@@ -99,9 +99,13 @@
  *                          and, with dma_pio_ref, the SAME range read by PIO (..._PIO, CRC compared) and its _POS line
  *   dma_data=on            data-track cases      dma_audio=off   audio-track cases (7 x 2352 = 16464 is not a multiple of 32)
  *   dma_counts=1,2,7,16    sector counts (up to 6 values, 1..16)
- *   dma_modes=pad,exact    DMA length programmed: pad = bytes rounded up to a multiple of 32 (the G1 DMA unit),
- *                          exact = the sector bytes as they are (only differs when they are not a multiple of 32);
- *                          tried in this order; the first DMA that does not complete stops all further DMA cases
+ *   dma_modes=exact,floor,pad   DMA length programmed (only differs when the sector bytes are not a multiple of 32):
+ *                          exact = the sector bytes as they are, floor = rounded DOWN to 32 (the drive keeps the rest:
+ *                          it is drained by PIO and recorded, drain= / tail= / tail_ok=), pad = rounded UP to 32
+ *                          (stock's drive sends no more than the sector, so the engine may wait forever, seq 25 record).
+ *                          Tried in this order. A DMA that does not complete stops only its own (data|audio, mode) kind
+ *                          (DM_STOP slot=..), not the other modes, kinds or the data throughput; 6 incomplete DMAs
+ *                          in one run stop all DMA cases (seq 25b)
  *   dma_flags=0x20         CD_READ byte 1 of the DMA reads (bit 0 forced 0; must pass the whitelist)
  *   dma_pio_ref=on         PIO re-read of the same range after each DMA read (crc / same= compare)
  *   dma_timeout_ms=3000    wait for the DMA to finish (200..10000)
@@ -126,6 +130,7 @@
 #define GP_MAX_DMACNT 6
 #define GP_DMA_PAD 1
 #define GP_DMA_EXACT 2
+#define GP_DMA_FLOOR 4
 
 typedef struct {
     char label[32];
@@ -190,7 +195,7 @@ typedef struct {
     int dma_audio;
     int dma_counts[GP_MAX_DMACNT];
     int n_dma_counts;
-    int dma_mode_list[2]; /* GP_DMA_PAD / GP_DMA_EXACT in the order to run */
+    int dma_mode_list[3]; /* GP_DMA_PAD / GP_DMA_EXACT / GP_DMA_FLOOR in the order to run */
     int n_dma_modes;
     uint8_t dma_flags;
     int dma_pio_ref;

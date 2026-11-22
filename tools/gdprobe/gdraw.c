@@ -480,9 +480,18 @@ done:
         } else if (st & SR_DRQ) {
             /* the drive wants PIO after all: drain it (bounded) so that it is idle again */
             uint32_t n = IN8(GD_LBA_MID) | ((uint32_t)IN8(GD_LBA_HIGH) << 8), w;
+            d->drq = 1;
+            d->drq_bc = (uint16_t)n;
             while ((st & SR_DRQ) && n && total_drain < MAX_TOTAL) {
-                for (w = 0; w < (n + 1) / 2; w++)
-                    (void)IN16(GD_DATA);
+                for (w = 0; w < (n + 1) / 2; w++) {
+                    uint16_t v = IN16(GD_DATA);
+                    uint32_t off = total_drain + 2 * w;
+                    if (off + 1 < sizeof(d->tail)) {
+                        d->tail[off] = (uint8_t)v;
+                        d->tail[off + 1] = (uint8_t)(v >> 8);
+                        d->tail_n = (uint8_t)(off + 2);
+                    }
+                }
                 total_drain += n;
                 if (!wait_irq(now_us() + 200000u) || !wait_clear(SR_BSY, now_us() + 200000u))
                     break;
@@ -490,8 +499,10 @@ done:
                 n = IN8(GD_LBA_MID) | ((uint32_t)IN8(GD_LBA_HIGH) << 8);
             }
             d->drain = total_drain;
+            d->st_after = IN8(GD_ALTSTATUS);
             r->status = st;
-            r->rc = GD_PROTO;
+            /* the DMA itself finished: the bytes left in the drive are an observation, not a failure */
+            r->rc = dma_idle ? GD_OK : GD_PROTO;
         } else if (!dma_idle) {
             r->rc = GD_PROTO;       /* the drive completed without error but the DMA never ran / finished */
         }

@@ -30,7 +30,8 @@ typedef struct {
     char line[REC_LINE_MAX];
     char extra[160];
     uint8_t buf[BUFSZ];
-    int dma_stop;        /* seq 25: a DMA did not complete: no more DMA reads in this run */
+    uint8_t dma_stop[8]; /* seq 25b: per (kind, mode) slot: a DMA of this kind did not complete: no more of it */
+    int dma_fails;       /* incomplete DMAs in this run (6 stop all DMA) */
     uint32_t tpcrc[256]; /* seq 25: per-batch CRC of the DMA throughput reads */
     uint8_t dbuf[DBUFSZ] __attribute__((aligned(32)));   /* DMA target: 32-byte aligned (G1 DMA, cache ops) */
 } runner;
@@ -1192,13 +1193,18 @@ static uint32_t dma_extent(const runner *r)
 
 /* One DMA CD_READ (whitelist: CD_READ only, 1..16 sectors) with its accounting (3 timeouts in a row abort the run).
  * *dl = the transport's DMA report. Nothing is sent, rc = GD_REFUSED, if the whitelist or the transport says no.
- * The first DMA that does not complete sets dma_stop: no further DMA reads in this run. */
-static int send_dma(runner *r, const uint8_t cdb[12], uint32_t dma_len, uint32_t timeout_ms, gd_result *res, gd_dma *dl)
+ * `slot` = kind * 4 + mode index (0 al, 1 pad, 2 exact, 3 floor; kind 0 data, 1 audio). A DMA that does not complete
+ * sets dma_stop[slot] (no more DMA of that kind and mode); dma_fails reaching 6 stops everything. */
+#define DMA_SLOT(kind, mi) ((kind) * 4 + (mi))
+static const char *const dma_mode_names[4] = { "al", "pad", "exact", "floor" };
+static int dma_all_stopped(const runner *r) { return r->dma_fails >= 6; }
+static int send_dma(runner *r, const uint8_t cdb[12], uint32_t dma_len, uint32_t timeout_ms, gd_result *res, gd_dma *dl,
+                    int slot)
 {
     memset(res, 0, sizeof(*res));
     memset(dl, 0, sizeof(*dl));
     dl->len_left = 0xFFFFFFFFu;
-    if (r->abort || r->dma_stop || !r->ops->packet_dma || dma_len == 0 || dma_len > DMA_MAXLEN ||
+    if (r->abort || r->dma_stop[slot] || dma_all_stopped(r) || !r->ops->packet_dma || dma_len == 0 || dma_len > DMA_MAXLEN ||
         !wl_check_dma(cdb, r->cfg->do_switch, r->cfg->cdread_flags)) {
         res->rc = GD_REFUSED;
         return GD_REFUSED;
@@ -1214,9 +1220,11 @@ static int send_dma(runner *r, const uint8_t cdb[12], uint32_t dma_len, uint32_t
     /* a CHECK (the drive refused the read, no DMA ran) leaves everything idle: go on; anything else that is not a
      * completed DMA stops the DMA probes */
     if (res->rc != GD_CHECK && (res->rc != GD_OK || !dl->done)) {
-        r->dma_stop = 1;
-        event(r, "DM_STOP", "reason=dma-%s rc=%s done=%d aborted=%d (no further DMA reads)",
-              dl->done ? "check" : "incomplete", rec_rc_name(res->rc), dl->done, dl->aborted);
+        r->dma_stop[slot] = 1;
+        r->dma_fails++;
+        event(r, "DM_STOP", "reason=dma-%s rc=%s done=%d aborted=%d slot=%s_%s fails=%d (no further DMA of this kind and mode)",
+              dl->done ? "check" : "incomplete", rec_rc_name(res->rc), dl->done, dl->aborted,
+              slot >= 4 ? "audio" : "data", dma_mode_names[slot & 3], r->dma_fails);
     }
     return res->rc;
 }
@@ -1228,9 +1236,17 @@ static void dma_fields(char *out, size_t cap, const gd_dma *d)
         strcpy(left, "-");
     else
         snprintf(left, sizeof(left), "%lu", (unsigned long)d->len_left);
-    snprintf(out, cap, "dma_done=%d dma_us=%lu dma_st=0x%02x left=%s addr_d=%lu first=%c asic=%u aerr=%u bc=%02x%02x drain=%lu aborted=%d prot=%d",
+    char tl[2 * 64 + 8];
+    size_t n = 0;
+    tl[0] = 0;
+    if (d->tail_n)
+        n += (size_t)snprintf(tl, sizeof(tl), " tail=");
+    if (d->tail_n)
+        rec_hex(tl + n, d->tail, d->tail_n);
+    snprintf(out, cap, "dma_done=%d dma_us=%lu dma_st=0x%02x left=%s addr_d=%lu first=%c asic=%u aerr=%u bc=%02x%02x drq=%d drq_bc=%u drain=%lu st_after=0x%02x aborted=%d prot=%d%s",
              d->done, (unsigned long)d->us_dma, d->dma_st_end, left, (unsigned long)d->addr_after, d->first ? d->first : '-',
-             d->asic_nrm, d->asic_err, d->bch, d->bcl, (unsigned long)d->drain, d->aborted, d->prot_ok);
+             d->asic_nrm, d->asic_err, d->bch, d->bcl, d->drq, d->drq_bc, (unsigned long)d->drain, d->st_after,
+             d->aborted, d->prot_ok, tl);
 }
 
 static void crc_fields(char *cr, size_t cap, const uint8_t *p, uint32_t got, uint32_t count, uint32_t ssz)
@@ -1262,22 +1278,24 @@ static void dma_case(runner *r, hp_state *s, char kind, uint8_t flags, uint32_t 
     rec_probe p;
     uint32_t ssz = (kind == 'A' || (flags & 0x10)) ? 2352u : 2048u;
     uint32_t exp = count * ssz, dlen, ext;
-    const char *mn = (exp % 32 == 0) ? "al" : (mode == GP_DMA_PAD ? "pad" : "exact");
-    char nm[48], lb[40], ex[900], df[240], cr[260], sn[24];
+    int mi = (exp % 32 == 0) ? 0 : (mode == GP_DMA_PAD ? 1 : mode == GP_DMA_FLOOR ? 3 : 2);
+    int slot = DMA_SLOT(kind == 'A' ? 1 : 0, mi);
+    const char *mn = dma_mode_names[mi];
+    char nm[48], lb[40], ex[1100], df[560], cr[260], sn[24];
     int ok;
     if (r->abort)
         return;
-    dlen = (mode == GP_DMA_PAD) ? ((exp + 31u) & ~31u) : exp;
+    dlen = (mode == GP_DMA_PAD) ? ((exp + 31u) & ~31u) : (mode == GP_DMA_FLOOR) ? (exp & ~31u) : exp;
     snprintf(lb, sizeof(lb), "%c%lu_%s", kind, (unsigned long)count, mn);
     snprintf(nm, sizeof(nm), "DM_%s", lb);
     cdb_read(c, flags, fad, count);
-    if (r->dma_stop) {
+    if (r->dma_stop[slot] || dma_all_stopped(r)) {
         snprintf(ex, sizeof(ex), "reason=dma-stopped fad=%lu count=%lu", (unsigned long)fad, (unsigned long)count);
         snprintf(nm, sizeof(nm), "DM_%s_SKIP", lb);
         out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, ex), 0);
         return;
     }
-    send_dma(r, c, dlen, r->cfg->dma_timeout_ms, &res, &dl);
+    send_dma(r, c, dlen, r->cfg->dma_timeout_ms, &res, &dl, slot);
     ext = dma_extent(r);
     ok = res.rc == GD_OK && dl.done;
     strcpy(sn, "none");
@@ -1308,9 +1326,14 @@ static void dma_case(runner *r, hp_state *s, char kind, uint8_t flags, uint32_t 
         send_cmd(r, c, BUFSZ, read_timeout(r), &pr);
         got = pr.stored < pr.total ? pr.stored : pr.total;
         crc_fields(cr, sizeof(cr), r->buf, got < exp ? got : exp, count, ssz);
-        snprintf(ex, sizeof(ex), "ref=pio kind=%s flags=0x%02x fad=%lu count=%lu exp=%lu same=%d%s",
-                 kind == 'A' ? "audio" : "data", flags, (unsigned long)fad, (unsigned long)count, (unsigned long)exp,
-                 pr.rc == GD_OK && got >= exp && ext >= exp && !memcmp(r->dbuf, r->buf, exp), cr);
+        {
+            uint32_t cmp = ext < exp ? ext : exp;
+            int tail_ok = dl.tail_n && pr.rc == GD_OK && got >= dlen + dl.tail_n && !memcmp(dl.tail, r->buf + dlen, dl.tail_n);
+            snprintf(ex, sizeof(ex), "ref=pio kind=%s flags=0x%02x fad=%lu count=%lu exp=%lu cmp_n=%lu same=%d tail_ok=%s%s",
+                     kind == 'A' ? "audio" : "data", flags, (unsigned long)fad, (unsigned long)count, (unsigned long)exp,
+                     (unsigned long)cmp, pr.rc == GD_OK && got >= cmp && !memcmp(r->dbuf, r->buf, cmp),
+                     dl.tail_n ? (tail_ok ? "1" : "0") : "-", cr);
+        }
         snprintf(pn, sizeof(pn), "DM_%s_PIO", lb);
         p.name = pn; p.extra = ex; p.res = &pr;
         out_line(r, rec_probe_line(r->line, sizeof(r->line), &p), 0);
@@ -1334,7 +1357,7 @@ static void dma_throughput(runner *r, uint32_t ip, uint32_t lim)
     int b, ok = 0, mism = 0;
     event(r, "DM_TP_START", "fad=%lu count=%lu dma_len=%lu batches=%d max_ms=%lu", (unsigned long)ip, (unsigned long)n,
           (unsigned long)dlen, r->cfg->dma_tp_batches, (unsigned long)r->cfg->dma_tp_max_ms);
-    for (b = 0; b < r->cfg->dma_tp_batches && !r->abort && !r->dma_stop; b++) {
+    for (b = 0; b < r->cfg->dma_tp_batches && !r->abort && !r->dma_stop[DMA_SLOT(0, 0)] && !dma_all_stopped(r); b++) {
         uint32_t fad = ip + (uint32_t)b * n, ext;
         char nm[24];
         if (r->ops->now_us(r->ops->ctx) - t0 > (uint64_t)r->cfg->dma_tp_max_ms * 1000u)
@@ -1342,7 +1365,7 @@ static void dma_throughput(runner *r, uint32_t ip, uint32_t lim)
         if (lim && fad + n > lim)
             break;
         cdb_read(c, r->cfg->dma_flags, fad, n);
-        send_dma(r, c, dlen, r->cfg->dma_timeout_ms, &res, &dl);
+        send_dma(r, c, dlen, r->cfg->dma_timeout_ms, &res, &dl, DMA_SLOT(0, 0));
         ext = dma_extent(r);
         r->tpcrc[b] = crc32_calc(r->dbuf, ext < exp ? ext : exp);
         nb++;
@@ -1439,7 +1462,7 @@ static void dma_probe(runner *r)
             }
         }
     }
-    if (r->cfg->dma_throughput && !r->abort && !r->dma_stop) {
+    if (r->cfg->dma_throughput && !r->abort && !r->dma_stop[DMA_SLOT(0, 0)] && !dma_all_stopped(r)) {
         uint32_t ip = r->cfg->ip_fad ? r->cfg->ip_fad : (r->ip_fad ? r->ip_fad : d);
         if (d && ip)
             dma_throughput(r, ip, e);

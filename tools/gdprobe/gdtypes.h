@@ -64,6 +64,11 @@ typedef struct {
     uint8_t first;        /* which came first: 'd' DMA idle, 'g' GD-ROM interrupt, '-' neither */
     uint8_t bcl, bch;     /* byte-count registers at the end */
     uint8_t prot_ok;      /* G1_ATA_DMA_PROTECTION read back as the system-memory unlock value */
+    uint8_t drq;          /* 1 = the drive still had DRQ up when the command completed (bytes left in the drive) */
+    uint16_t drq_bc;      /* byte-count registers when that DRQ was first seen */
+    uint8_t st_after;     /* ALTSTATUS after the drain */
+    uint8_t tail_n;       /* first bytes of what was drained (tail[0..tail_n)) */
+    uint8_t tail[64];
 } gd_dma;
 
 /* The transport the runner uses. gdraw.c implements it on real hardware; the
