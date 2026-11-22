@@ -2,7 +2,7 @@
 .SYNOPSIS  Builds g2bench.elf with the DreamSDK toolchain and creates host\ with the 32 MiB input file.
 .EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools
 #>
-param([string]$BbaTools = $env:BBA_TOOLS)
+param([string]$BbaTools = $env:BBA_TOOLS, [int]$MaxBs = $(if ($env:G2BENCH_MAXBS) { [int]$env:G2BENCH_MAXBS } else { 65536 }))
 if (-not $BbaTools -or -not (Test-Path (Join-Path $BbaTools 'scripts\_common.ps1'))) {
     throw 'Set $env:BBA_TOOLS (or -BbaTools) to the Dreamcast-Dev-Tools-for-BBA folder.'
 }
@@ -20,5 +20,5 @@ if (-not (Test-Path $data) -or (Get-Item $data).Length -ne 32MB) {
 $rel = ConvertTo-PcPath $hostDir
 # Stop MSYS2 from rewriting "/pc/..." into "C:/DreamSDK/pc/..." when kos-cc (a Windows exe) is called.
 $env:MSYS2_ARG_CONV_EXCL = '-DHOST_DIR_RAW='
-Invoke-DreamSdkBash "make clean >/dev/null; make HOST_DIR_REL='$rel'" $PSScriptRoot
+Invoke-DreamSdkBash "make clean >/dev/null; make HOST_DIR_REL='$rel' G2B_MAX_BS=$MaxBs" $PSScriptRoot
 Write-Host "Built $(Join-Path $PSScriptRoot 'g2bench.elf')  (results go to /pc$rel, i.e. $hostDir)"

@@ -42,6 +42,11 @@ int main(void)
         }
     }
 
+    CHECK(g2b_expected_crc_bytes(2u * G2B_BLOCK) == g2b_expected_crc(2));
+    g2b_gen_block(0, a); g2b_gen_block(1, b);
+    CHECK(g2b_expected_crc_bytes(G2B_BLOCK + 4096) == ng_crc32(ng_crc32(0, a, sizeof a), b, 4096));
+    CHECK(g2b_expected_crc_bytes(0) == 0);
+
     /* rate */
     CHECK(g2b_kbps(32u << 20, 1000000) == 32768);
     CHECK(g2b_kbps(1, 0) == 0);

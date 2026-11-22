@@ -7,6 +7,10 @@ ifneq ($(HOST_DIR_REL),)
   KOS_CFLAGS += -DHOST_DIR_RAW=/pc$(HOST_DIR_REL)
 endif
 
+ifneq ($(G2B_MAX_BS),)
+  KOS_CFLAGS += -DG2B_MAX_BS=$(G2B_MAX_BS)
+endif
+
 all: rm-elf $(TARGET)
 
 include $(KOS_BASE)/Makefile.rules

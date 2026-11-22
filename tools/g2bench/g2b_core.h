@@ -14,6 +14,9 @@ void g2b_gen_block(uint32_t k, uint8_t *out /* G2B_BLOCK bytes */);
 /* CRC-32 (zlib) of the first `blocks` blocks of the file. */
 uint32_t g2b_expected_crc(uint32_t blocks);
 
+/* Same, for the first n bytes (n need not be a multiple of the block size). */
+uint32_t g2b_expected_crc_bytes(uint64_t n);
+
 /* KB/s (1 KB = 1024 B) from bytes and microseconds; 0 when us == 0. */
 uint64_t g2b_kbps(uint64_t bytes, uint64_t us);
 

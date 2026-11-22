@@ -29,6 +29,17 @@ uint32_t g2b_expected_crc(uint32_t blocks)
     return crc;
 }
 
+uint32_t g2b_expected_crc_bytes(uint64_t n)
+{
+    static uint8_t b[G2B_BLOCK];
+    uint32_t crc = 0;
+    for (uint32_t k = 0; n; k++) {
+        size_t take = n < G2B_BLOCK ? (size_t)n : G2B_BLOCK;
+        g2b_gen_block(k, b); crc = ng_crc32(crc, b, take); n -= take;
+    }
+    return crc;
+}
+
 uint64_t g2b_kbps(uint64_t bytes, uint64_t us)
 {
     if (!us) return 0;
