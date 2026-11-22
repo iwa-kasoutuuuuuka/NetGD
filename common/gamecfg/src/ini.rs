@@ -257,8 +257,8 @@ mod tests {
         assert_eq!((i.open_time, i.detect_time), (500, 250));
         assert!(i.image_tests && !i.high_speed);
         assert_eq!((i.reset_goto, i.read_limit), (0, 0));
-        // Unset keys: the caller's defaults (the firmware passes the stock
-        // GDEMU 6.0 measurement, 150 + 150 ms), not the documented 500/250.
+        // Unset keys: the caller's defaults. The firmware passes 500 + 250 ms
+        // (R135); 150 + 150 is just a different pair for the test.
         assert_eq!(i.swap_window_ms(150, 150), (150, 150), "unset keys take the defaults");
     }
 
