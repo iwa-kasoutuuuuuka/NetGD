@@ -423,7 +423,7 @@ async def tb_packet_write_opens_cdb_phase(ctx, dut):
     irr = await ide_read(ctx, dut, CSN_CMD, ADDR_SECTOR_COUNT) & 0xFF
     assert irr == 0x01, f"IRR should be C/D=1, got {irr:#04x}"
     er = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF
-    assert er == 0x00, f"Error should be cleared, got {er:#04x}"
+    assert er == 0x24, f"Error should be kept (stock: sticky until the next CHECK), got {er:#04x}"
     assert (await mcu_read(ctx, dut, MCU_HW_INFO)) & 0x2, "command should be pending for the MCU"
     assert ctx.get(dut.ide_intrq) == 0, "no INTRQ for the CDB phase"
 
@@ -1470,7 +1470,7 @@ async def tb_slot32_host_write_during_secnr_update(ctx, dut):
 
 async def tb_error_low_bits(ctx, dut):
     """ERROR bits 0-1 are MCU-owned: stored, mirrored in slot 3, visible to
-    the host, cleared by a hardware reset and by the PACKET write; old
+    the host, cleared by a hardware reset (not by the PACKET write); old
     firmware's writes (bits 0-1 = 0) behave exactly as before."""
     await release_reset(ctx, dut)
     # Old-style write: ABRT + sense key, bits 0-1 zero.
@@ -1494,11 +1494,43 @@ async def tb_error_low_bits(ctx, dut):
     await mcu_write(ctx, dut, MCU_ERROR, 0x0F)
     val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
     assert val & 0xFF == 0x07, f"bit 3 must read 0, got {val:#06x}"
-    # A host PACKET write clears the MCU-owned bits with the sense key.
+    # A host PACKET write keeps all of it (stock's sticky ERROR).
     await mcu_write(ctx, dut, MCU_ERROR, 0x53)
     await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, 0xA0)
     val = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR)
-    assert val & 0xFF == 0x00, f"PACKET write should clear ERROR, got {val:#06x}"
+    assert val & 0xFF == 0x53, f"PACKET write must keep ERROR, got {val:#06x}"
+
+
+async def tb_error_sticky_across_commands(ctx, dut):
+    """Stock GDEMU 6.0 keeps the last CHECK's ERROR (0x50, 0x60 ...) through
+    the commands that succeed after it, until the next CHECK or a reset
+    (seq 15-17 register polls). The FPGA only stores it: PACKET and other
+    Command writes clear the ERR status bit, never the ERROR register."""
+    await release_reset(ctx, dut)
+    await ide_write(ctx, dut, CSN_CMD, ADDR_DEVICE, 0x00)
+    # A CHECK: status 0x11, error = key << 4.
+    await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+    await mcu_write(ctx, dut, MCU_ERROR, 0x50)
+    await mcu_write(ctx, dut, MCU_STATUS, 0x11)
+    assert (await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF) == 0x11
+    for cmd in (0xA0, 0x00, 0xA1, 0xEF):
+        await ide_write(ctx, dut, CSN_CMD, ADDR_COMMAND, cmd)
+        for _ in range(3):
+            await ctx.tick()
+        st = await ide_read(ctx, dut, CSN_CTRL, ADDR_ALT_STATUS) & 0xFF
+        assert not (st & 0x01), f"cmd {cmd:#04x}: the Command write must clear ERR, got {st:#04x}"
+        er = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF
+        assert er == 0x50, f"cmd {cmd:#04x}: ERROR must stay 0x50, got {er:#04x}"
+        # The firmware completes it without touching ERROR.
+        await mcu_write(ctx, dut, MCU_HW_INFO, 0x0000)
+        await mcu_write(ctx, dut, MCU_STATUS, 0x50)
+        er = await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF
+        assert er == 0x50, f"cmd {cmd:#04x}: ERROR after completion, got {er:#04x}"
+    # The next CHECK replaces it; an MCU write of 0 (old firmware) clears it.
+    await mcu_write(ctx, dut, MCU_ERROR, 0x60)
+    assert (await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF) == 0x60
+    await mcu_write(ctx, dut, MCU_ERROR, 0x00)
+    assert (await ide_read(ctx, dut, CSN_CMD, ADDR_ERROR) & 0xFF) == 0x00
 
 
 async def tb_error_low_bits_cleared_by_reset(ctx, dut):
@@ -1634,6 +1666,7 @@ TESTBENCHES = [
     ("slot32_host_write_during_secnr_update", tb_slot32_host_write_during_secnr_update, True),
     ("error_low_bits", tb_error_low_bits, True),
     ("error_low_bits_cleared_by_reset", tb_error_low_bits_cleared_by_reset, True),
+    ("error_sticky_across_commands", tb_error_sticky_across_commands, True),
 ]
 
 

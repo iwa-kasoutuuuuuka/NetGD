@@ -223,8 +223,9 @@ class IDEDevice(Elaboratable):
         sense_key = Signal(4)
         # ERROR bits 0 and 1, which the MCU can set but the FPGA never does
         # (a stock drive shows ERROR 0x01 after DEVICE RESET). Stored like
-        # the sense key and cleared with it. Old firmware writes them as 0,
-        # so a bitstream with these bits behaves as before for it.
+        # the sense key: only an MCU write or a reset changes them (the
+        # PACKET write no longer clears ERROR). Old firmware writes them as
+        # 0, so a bitstream with these bits behaves as before for it.
         err_lo = Signal(2)
         # Device Control bits.
         hob = Signal()
@@ -647,10 +648,14 @@ class IDEDevice(Elaboratable):
                         drq.eq(1),
                         pkt_phase.eq(1),
                         sector_count[:8].eq(0x01),
-                        abrt.eq(0),
-                        sense_key.eq(0),
-                        err_lo.eq(0),
                     ]
+                    # ERROR (ABRT, sense key, bits 0-1) is left alone: stock
+                    # GDEMU 6.0 keeps the last CHECK's value (0x50, 0x60 ...)
+                    # through every command that succeeds, until the next
+                    # CHECK or a reset (seq 15-17 register polls). The ERR
+                    # bit cleared above is what tells the host the register
+                    # means nothing now (ATA: ERROR is only valid with ERR).
+                    # A bitstream before this cleared all three here.
             # Reset both FIFOs on every new IDE command — a fresh command
             # always starts a fresh transfer, and stale bytes from a
             # previous response/packet would otherwise corrupt it.
