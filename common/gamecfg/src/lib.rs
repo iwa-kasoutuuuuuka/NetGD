@@ -163,6 +163,29 @@ pub fn trim(s: &str) -> &str {
     unsafe { core::str::from_utf8_unchecked(t) }
 }
 
+/// The whole lines of a file that was read only in part.
+///
+/// `probe` is the first `N + 1` bytes of a file longer than `N` bytes (`N` =
+/// `probe.len() - 1`). Returns the first `N` bytes cut back to the last LF
+/// in them, dropping the final line, which the cut may have broken (a quoted
+/// value without its closing quote, a bare value cut short, a multi-byte
+/// character split in two). If byte `N` is itself LF the cut is already on
+/// a line end and all `N` bytes are kept. With no LF at all there is no
+/// whole line to fall back to, and the first `N` bytes are returned as they
+/// are (what was parsed before this existed).
+pub fn complete_lines(probe: &[u8]) -> &[u8] {
+    let Some((&next, head)) = probe.split_last() else {
+        return probe;
+    };
+    if next == b'\n' {
+        return head;
+    }
+    match head.iter().rposition(|&b| b == b'\n') {
+        Some(i) => &head[..=i],
+        None => head,
+    }
+}
+
 /// [`trim`] on bytes: the same six ASCII whitespace bytes from both ends.
 /// The one copy the parsers here and the firmware share.
 #[inline(never)]
