@@ -10,7 +10,12 @@ a 1 us power-up window in which the unclocked registers may still be X):
     * at most one drive pad is low at any time (stage 0: none ever);
     * no drive pad is ever X (an unknown level may be a low);
     * (not stage 0) at least one pad was driven low in the simulated time,
-      so the check did not pass merely because nothing ran.
+      so the check did not pass merely because nothing ran;
+    * (--expect-done, a fast design only) the scan ran to its end: every pad
+      was driven low at some point and no pad changed in the last 10 % of the
+      simulated time. This is what caught af_map's RETIMING step clearing the
+      ball counter at the last ball (the scan never stopped; build.sh now
+      switches that step off, README_ja.md).
 
 This is what catches an inverted output enable after fixio.py (R143 item 1:
 every scanned ball low at once) if Supra's models describe the silicon.
@@ -20,8 +25,12 @@ inputs are held high; CLKIN (a `ball:` clock) is a 1 MHz square wave.
 alta_osc is simulated with its own model (OSC_DEL 20 ns = 25 MHz). A
 zero-delay LUT ring does not oscillate in simulation, so for `--clock ring`
 the derived copy of LUT models (alta_slice, cycloneive_lcell_comb) get a 0.4 ns delay (--lcell-delay):
-a test clock override for gate-sim only (an X on a slice LUT input also gives 0
-there, so the ring can start; that hides power-up X in a ring build).
+a test clock override for gate-sim only. A ring of inverters that starts at X
+stays X, so the slice of the first ring stage (`u_clk|stage[0].inv`, found in
+the netlist) takes an X LUT output as 0 (a parameter set by the testbench):
+one edge then runs round the ring. Resolving X in every slice instead makes
+all 31 stages start equal and flip together every LUT delay (a false
+1.25 GHz clock: nothing works). Only that one slice is changed.
 
 The real prescale-10 / start-256 design needs ~1.2 s of simulated time per loop
 (hours under Icarus). For gate-sim, generate a second design with a small
@@ -110,11 +119,18 @@ def needed_models(models, netlist, out_path, lcell_delay=None, clk2q=None):
                         "alta_slice": "assign LutOut ="}.get(n)
             if lcell_delay and lut_line:
                 # TEST OVERRIDE (ring clock only): a LUT delay so the ring oscillates.
-                new = src.replace(lut_line, lut_line.replace("assign ", f"assign #{lcell_delay} ", 1), 1)
                 if n == "alta_slice":
-                    # a ring of inverters starting at X stays X: resolve an unknown LUT input to 0
-                    new = new.replace("assign #%s LutOut =" % lcell_delay,
-                                      "assign #%s LutOut = (^{A, B, D, pinC} === 1'bx) ? 1'b0 :" % lcell_delay, 1)
+                    # A ring of inverters starting at X stays X: the slice whose GATESIM_XRES the
+                    # testbench sets (the first ring stage only) takes an unknown LUT OUTPUT as 0.
+                    # (Not "any input X": unconnected LUT inputs are Z, and not every slice: see the
+                    # module docstring.)
+                    new = re.sub(r"assign LutOut =(.*?);",
+                                 lambda mm: f"parameter GATESIM_XRES = 1'b0;\nwire lut_raw_ ={mm.group(1)};\n"
+                                            f"assign #{lcell_delay} LutOut = (GATESIM_XRES && "
+                                            "(lut_raw_ === 1'bx || lut_raw_ === 1'bz)) ? 1'b0 : lut_raw_;",
+                                 src, count=1, flags=re.S)
+                else:
+                    new = src.replace(lut_line, lut_line.replace("assign ", f"assign #{lcell_delay} ", 1), 1)
                 if new == src:
                     raise SystemExit(f"gatesim: cannot add a delay to {n} (model changed?)")
                 src = new
@@ -156,7 +172,13 @@ def bit_ref(ports, name, k):
 SETTLE_NS = 1000
 
 
-def testbench(p, ports, ms):
+def ring_seed(netlist):
+    """Instance names (as written in the netlist) of the first ring stage's slice."""
+    text = open(netlist, encoding="utf-8", errors="replace").read()
+    return sorted(set(re.findall(r"^\s*alta_slice\s+(\\\S*u_clk\|stage\[0\]\.inv\S*)\s*\(", text, re.M)))
+
+
+def testbench(p, ports, ms, expect_done=False, xres=()):
     nd, nh, nc = int(p["n_drive"]), int(p["n_hold"]), int(p["n_probe"])
     stage0 = p.get("stage0") == "1"
     ball_clock = p.get("clock", "").startswith("ball:")
@@ -177,6 +199,15 @@ def testbench(p, ports, ms):
     if ball_clock:
         decls.append("    reg clkin = 1'b0; always #500 clkin = ~clkin;   // 1 MHz (1 ns units)")
         conns.append("        .CLKIN(clkin)")
+    for inst in xres:
+        decls.append(f"    defparam dut.{inst} .GATESIM_XRES = 1'b1;   // ring start (test override)")
+    done = ""
+    if expect_done:
+        done = f"""
+            if (n_ever == {nd} && t_last < {ms} * 900000.0)
+                $display("GATESIM DONE: every pad driven, idle from %0.1f us to the end ({ms} ms)", t_last / 1000.0);
+            else
+                $display("GATESIM NOT DONE: %0d of {nd} pads driven, last change at %0.1f us of {ms} ms (the scan did not run to its end)", n_ever, t_last / 1000.0);"""
     return f"""`timescale 1ns/1ps
 // Generated by fpga/pinfind/gatesim.py for one build; not committed.
 module tb;
@@ -217,7 +248,7 @@ module tb;
         end else begin
             n_ever = 0;
             for (k = 0; k < {nd}; k = k + 1) if (ever[k]) n_ever = n_ever + 1;
-            $display("GATESIM PASS: max %0d pad(s) low at once over {ms} ms (%0d pad changes after {SETTLE_NS} ns; %0d of {nd} pads were driven low; last change at %0.1f us)", max_lows, n_edges, n_ever, t_last / 1000.0);
+            $display("GATESIM PASS: max %0d pad(s) low at once over {ms} ms (%0d pad changes after {SETTLE_NS} ns; %0d of {nd} pads were driven low; last change at %0.1f us)", max_lows, n_edges, n_ever, t_last / 1000.0);{done}
         end
         $finish;
     end
@@ -233,6 +264,8 @@ def main(argv=None):
     ap.add_argument("--models", nargs="*", help="model files (default: found under --supra)")
     ap.add_argument("--ms", type=int, default=300, help="simulated time in ms (default 300)")
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--expect-done", action="store_true",
+                    help="also require that every pad was driven and the scan stopped (fast design only)")
     ap.add_argument("--clk-to-q", type=float, help="ns of clock-to-Q delay added to every flop model (test override)")
     ap.add_argument("--lcell-delay", type=float,
                     help="ns added to every LUT model (default 0.4 for --clock ring, else none)")
@@ -253,9 +286,14 @@ def main(argv=None):
         if not os.path.abspath(m).startswith(os.path.abspath(a.supra) + os.sep) and not a.models:
             raise SystemExit("gatesim: model outside SUPRA_HOME")
     ports = top_ports(net)
+    xres = ()
+    if lcell_delay and p.get("clock") == "ring":
+        xres = ring_seed(net)
+        if len(xres) != 1:
+            raise SystemExit(f"gatesim: expected one u_clk|stage[0].inv slice in {net}, found {len(xres)}")
     tb = os.path.join(a.work, "gatesim_tb.v")
     with open(tb, "w", encoding="utf-8", newline="\n") as f:
-        f.write(testbench(p, ports, a.ms))
+        f.write(testbench(p, ports, a.ms, a.expect_done and p.get("stage0") != "1", xres))
     exe = os.path.join(a.work, "gatesim.vvp")
     lib = os.path.join(a.work, "gatesim_models.v")
     used = needed_models(models, net, lib, lcell_delay, a.clk_to_q)
@@ -275,8 +313,10 @@ def main(argv=None):
         f.write(out)
     result = [l for l in out.splitlines() if l.startswith("GATESIM")]
     print("\n".join(result) or out[-2000:])
-    if not result or not result[-1].startswith("GATESIM PASS"):
+    if not any(l.startswith("GATESIM PASS") for l in result):
         raise SystemExit("gatesim: gate-level check did not pass (gatesim.out)")
+    if a.expect_done and p.get("stage0") != "1" and not any(l.startswith("GATESIM DONE") for l in result):
+        raise SystemExit("gatesim: the scan did not run to its end (gatesim.out)")
     return 0
 
 

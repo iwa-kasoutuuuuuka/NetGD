@@ -21,6 +21,11 @@
 #   --gate-sim             also simulate the routed netlist with Supra's models
 #                          (Icarus Verilog): at most one pad low at any time
 #   --gate-sim-ms N        simulated time for --gate-sim (default 300)
+#   --gate-sim-done        with --gate-sim: also require that the scan ran to the end
+#                          (every pad driven, then no pad change for the last 10 %;
+#                          only for a fast design, gen.py --prescale 1 --start 8)
+#   --supra-retiming       leave af_map's RETIMING step (Yosys `abc -dff`) on; for
+#                          testing only (it mis-maps enable-gated sync resets, README_ja.md)
 #
 # Output: fpga/pinfind/output/pinfind_ag16k.rbf (the name the `pinfind`
 # firmware build embeds), pinfind_ag16k.params (params.txt + the bitstream's
@@ -30,6 +35,11 @@
 # bitstream behind.
 #
 # What this script checks, and stops on (R143 item 1):
+#   - that af_map's RETIMING step (`abc -dff` before dfflegalize) did not run:
+#     Yosys 0.61 there turns a sync reset that only acts while the enable is on
+#     into one that always acts (gate-level simulation: the last ball was never
+#     driven, DONE never reached). It is switched off through
+#     PinFind.pre_map.asf, which af_map.tcl sources after its own default;
 #   - the .rbf size and header; Supra errors other than the known pre-.asf
 #     "location is not assigned" ones;
 #   - any automatic placement ("placed at pin") in Supra's log;
@@ -67,6 +77,8 @@ SITES_REF=
 UNUSED_OK=()
 GATE_SIM=0
 GATE_MS=300
+GATE_DONE=
+RETIME=0
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -82,7 +94,9 @@ while [ $# -gt 0 ]; do
         --unused-ok) UNUSED_OK+=(--unused-ok "$2"); shift 2 ;;
         --gate-sim) GATE_SIM=1; shift ;;
         --gate-sim-ms) GATE_MS=$2; shift 2 ;;
-        -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
+        --gate-sim-done) GATE_DONE=--expect-done; shift ;;
+        --supra-retiming) RETIME=1; shift ;;
+        -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -148,9 +162,31 @@ echo "== af_setup"
 # shellcheck disable=SC2086
 ns af_setup --design $DESIGN --device $DEVICE --verilog $VERILOG >setup.out 2>&1 ||
     { tail -20 setup.out >&2; die "af_setup failed (setup.out)"; }
+# af_map's RETIMING step (`abc -markgroups -dff` before dfflegalize) mis-maps
+# $sdffce (sync reset gated by the enable) as $sdffe (reset always active):
+# Yosys 0.61 abc -dff keeps clk/en/srst but drops which one wins. af_map.tcl
+# sources $DESIGN.pre_map.asf after setting its default RETIMING ("100").
+[ -f $DESIGN.pre_map.asf ] || die "af_setup wrote no $DESIGN.pre_map.asf (Supra changed?)"
+[ -s $DESIGN.pre_map.asf ] && die "$DESIGN.pre_map.asf from af_setup is not empty (Supra changed?)"
+grep -q 'RETIMING != "None"' af_map.tcl && grep -q 'source .*pre_map.asf' af_map.tcl ||
+    die "af_map.tcl has no RETIMING switch / pre_map.asf hook (Supra changed?): cannot turn the step off"
+if [ "$RETIME" = 0 ]; then
+    echo 'set RETIMING "None"' >$DESIGN.pre_map.asf
+fi
 echo "== af_map"
 ns af_map -TQd -v 1 -L map.log -c af_map.tcl >map.out 2>&1 ||
     { tail -20 map.out >&2; die "af_map failed (map.out, map.log)"; }
+# Was the RETIMING `abc -dff` run? It is the only ABC pass before DFFLEGALIZE.
+first_abc=$(grep -n 'Executing ABC pass' map.log | head -1 | cut -d: -f1)
+legalize=$(grep -n 'Executing DFFLEGALIZE pass' map.log | head -1 | cut -d: -f1)
+[ -n "$first_abc" ] && [ -n "$legalize" ] || die "map.log: ABC / DFFLEGALIZE pass not found (Supra changed?)"
+if [ "$first_abc" -lt "$legalize" ]; then
+    RETIMED=on
+    [ "$RETIME" = 1 ] || die "af_map ran its RETIMING abc -dff although it was switched off (map.log)"
+else
+    RETIMED=off
+    [ "$RETIME" = 0 ] || die "--supra-retiming given but af_map did not run the RETIMING step (map.log)"
+fi
 # Each scanned ball is an inout (the core listens before it drives): merge
 # the ibuf + obuf pair into one alta_io, as for the real core. Stage 0 has none.
 python3 -I "$AGM/fixio.py" $DESIGN.vqm $DESIGN.fixed.vqm --expect "$N_INOUT"
@@ -199,9 +235,9 @@ python3 -I "$HERE/checkpnr.py" --gen "$GEN" --work "$WORK" --pinmap "$PINMAP" \
 GATE="not run (build.sh --gate-sim)"
 if [ "$GATE_SIM" = 1 ]; then
     echo "== gatesim (routed netlist, Supra's models)"
-    python3 -I "$HERE/gatesim.py" --gen "$GEN" --work "$WORK" --supra "$SUPRA_HOME" --ms "$GATE_MS" ||
+    python3 -I "$HERE/gatesim.py" --gen "$GEN" --work "$WORK" --supra "$SUPRA_HOME" --ms "$GATE_MS" $GATE_DONE ||
         die "gate-level check failed or could not run (gatesim.out)"
-    GATE=$(grep '^GATESIM' gatesim.out | tail -1)
+    GATE=$(grep '^GATESIM' gatesim.out | paste -sd ' ')
 fi
 
 lzma=$(xz --format=raw --lzma1=$XZ_FILTER -c "$RBF" | wc -c)
@@ -229,6 +265,7 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
     echo "lzma        $lzma bytes"
     echo "supra       $(ns af_cmd --version 2>/dev/null | head -1)"
     echo "seed        ${SEED:-default}"
+    echo "retiming    $RETIMED (af_map abc -dff before dfflegalize; must be off, README_ja.md)"
     echo "top         sha256 $(sha PinFind.v)  asf $(sha $DESIGN.asf)"
     echo
     echo "--- checks passed by build.sh"

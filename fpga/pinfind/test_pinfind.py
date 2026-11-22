@@ -579,6 +579,9 @@ def test_gatesim_testbench_reads_both_port_styles():
         tb = gatesim.testbench(p, gatesim.top_ports(a), 5)
         assert ".P(pad)" in tb and ".HOLD({2{1'b1}})" in tb and ".CLKIN(clkin)" in tb, tb
         assert "pads low at once" in tb and "lows > 1" in tb
+        assert "GATESIM DONE" not in tb
+        tb = gatesim.testbench(p, gatesim.top_ports(a), 5, expect_done=True)
+        assert "GATESIM DONE" in tb and "n_ever == 3" in tb and "5 * 900000.0" in tb, tb
         b = os.path.join(tmp, "b.v")
         open(b, "w").write("module PinFind (\\P[0] , \\P[1] , \\P[2] , \\HOLD[0] , \\HOLD[1] , CLKIN);\n"
                            " inout \\P[0] ;\n inout \\P[1] ;\n inout \\P[2] ;\n"
@@ -588,6 +591,13 @@ def test_gatesim_testbench_reads_both_port_styles():
         p0 = dict(p, stage0="1", clock="none")
         tb = gatesim.testbench(p0, gatesim.top_ports(a), 5)
         assert "lows > 0" in tb and "clkin" not in tb
+        r = os.path.join(tmp, "r.v")
+        open(r, "w").write("module PinFind (P);\n alta_slice \\u_clk|stage[0].inv (\n .A(vcc));\n"
+                           " alta_slice \\u_clk|stage[1].inv (\n .A(vcc));\nendmodule\n")
+        seed = gatesim.ring_seed(r)
+        assert seed == ["\\u_clk|stage[0].inv"], seed
+        tb = gatesim.testbench(dict(p, clock="ring"), gatesim.top_ports(a), 5, xres=seed)
+        assert "defparam dut.\\u_clk|stage[0].inv .GATESIM_XRES = 1'b1;" in tb, tb
 
 
 def write_golden():
