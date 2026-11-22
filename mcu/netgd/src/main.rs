@@ -26,6 +26,8 @@ mod fwupdate;
 mod gdi;
 mod ide;
 mod sdcard;
+#[cfg(feature = "pinfind")]
+mod pinfind;
 #[cfg(feature = "resident")]
 mod resident;
 
@@ -86,7 +88,14 @@ async fn blink_stamp_mismatch(led: &mut Output<'static, embassy_atsam3::peripher
 }
 
 #[embassy_executor::task]
+// `pinfind` never comes back from `pinfind::run`: the rest is dead code there.
+#[cfg_attr(feature = "pinfind", allow(unreachable_code, unused_variables, unused_mut))]
 async fn main_task(spawner: Spawner, p: UserPeripherals) {
+    // Pin-finder build: every non-PS MCU line back to input + pull-up before
+    // the FPGA comes up (src/pinfind.rs).
+    #[cfg(feature = "pinfind")]
+    pinfind::prepare_pins();
+
     // Load the FPGA first. When the GDEMU board is powered by the DC
     // every millisecond between MCU power-on and an alive FPGA is one
     // more millisecond the DC sees a dead GD-ROM bus and CDCLK silent.
@@ -170,6 +179,11 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
         stats.attempts,
         stats.early_done
     );
+
+    // Pin-finder build: listen for ball numbers instead of starting the IDE
+    // side. Never returns.
+    #[cfg(feature = "pinfind")]
+    pinfind::run(&mut fpga);
 
     // Cyclone II runs internal init after CONF_DONE rises before user
     // logic is live. Without this slack, the post-load probe floats and

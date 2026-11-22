@@ -36,6 +36,10 @@ const RBF_V55: &str = "../../fpga/Quartus/output_files/OpenGDEMU.rbf";
 /// not the `.bin` -- see `ps-msb-first` in Cargo.toml.
 const RBF_V60: &str = "../../fpga/agm/output/OpenGDEMU_ag16k.rbf";
 
+/// `pinfind` (implies board-v60): the AG16K pin-finder bitstream instead of
+/// the NetGD core (fpga/pinfind/build.sh). Optional like `RBF_V60`.
+const RBF_PINFIND: &str = "../../fpga/pinfind/output/pinfind_ag16k.rbf";
+
 /// The one target both this firmware and the updater are built for.
 const TARGET: &str = "thumbv7m-none-eabi";
 
@@ -47,7 +51,14 @@ fn main() {
     select_linker_script(&out_dir);
 
     let v60 = std::env::var_os("CARGO_FEATURE_BOARD_V60").is_some();
-    let rbf = if v60 { RBF_V60 } else { RBF_V55 };
+    let pinfind = std::env::var_os("CARGO_FEATURE_PINFIND").is_some();
+    let rbf = if pinfind {
+        RBF_PINFIND
+    } else if v60 {
+        RBF_V60
+    } else {
+        RBF_V55
+    };
     // Also for a file that does not exist (yet): cargo then reruns this
     // script on every build, which is how the AG16K bitstream gets picked up
     // the moment it appears.
@@ -85,7 +96,7 @@ fn main() {
         }
         None => {
             println!(
-                "cargo:warning=board-v60: no FPGA bitstream at {RBF_V60}; building a firmware that reports `NoBitstream` at boot (LED: 5 blinks) instead of configuring the FPGA"
+                "cargo:warning=board-v60: no FPGA bitstream at {rbf}; building a firmware that reports `NoBitstream` at boot (LED: 5 blinks) instead of configuring the FPGA"
             );
             (Vec::new(), 0)
         }
@@ -147,7 +158,11 @@ fn select_linker_script(out_dir: &Path) {
     // defmt's formatting is not free on a part with 28 KB less flash, and
     // DEFMT_LOG is read by defmt's own build script, so it cannot be set from
     // here -- it has to be in the environment of the whole build.
-    if part == "sam3u2e" && std::env::var("DEFMT_LOG").as_deref() != Ok("off") {
+    // The pin-finder reports over RTT only, and is small: keep its logging.
+    if part == "sam3u2e"
+        && std::env::var_os("CARGO_FEATURE_PINFIND").is_none()
+        && std::env::var("DEFMT_LOG").as_deref() != Ok("off")
+    {
         println!(
             "cargo:warning=sam3u2e: DEFMT_LOG is not `off`; \
              build with `DEFMT_LOG=off cargo build --release --features sam3u2e` \

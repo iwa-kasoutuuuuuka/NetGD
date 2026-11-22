@@ -80,8 +80,14 @@ jobs:
           DEFMT_LOG: "off"
         run: cargo build --release --features sam3u2e
 
+      # GDEMU 6.0 pin-finder (fpga/pinfind). No bitstream in CI, so this only
+      # checks that the feature compiles and links.
+      - name: Build netgd (pinfind)
+        working-directory: mcu/netgd
+        run: cargo build --release --no-default-features --features pinfind
+
   host-tests:
-    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, fwupdater)
+    name: Host tests (lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, pinfind, fwupdater)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -94,6 +100,7 @@ jobs:
           - crate: mcu/bootcore
           - crate: common/sdfast
           - crate: common/fatmap
+          - crate: common/pinfind
           # .cargo/config.toml defaults to thumbv7m-none-eabi, so the host
           # target has to be named explicitly.
           - crate: mcu/fwupdater
@@ -158,6 +165,10 @@ jobs:
           - tool: netgd-menu
             dir: .
             cmd: python tools/netgd-menu/test/run_tests.py
+          # Pin-finder host tools (mklist.py, pins2asf.py). Standard library only.
+          - tool: pinfind
+            dir: .
+            cmd: python -m unittest discover -s tools/pinfind/tests -v
     steps:
       - uses: actions/checkout@v4
 
@@ -224,6 +235,14 @@ jobs:
         env:
           AMARANTH_USE_YOSYS: builtin
         run: python test_fifo.py
+
+      # GDEMU 6.0 pin-finder core (fpga/pinfind): sequencer, line code, clock
+      # probes, gen.py. Its golden waveform is checked by common/pinfind.
+      - name: Pin-finder simulation
+        working-directory: fpga/pinfind
+        env:
+          AMARANTH_USE_YOSYS: builtin
+        run: python test_pinfind.py
 
       - name: Regenerate ag16k Verilog and check it is committed
         env:
