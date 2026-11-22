@@ -2436,6 +2436,18 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み（実機）。
 - 関連：R155、R156、R157。
 
+### R160 純正の「同じフォルダへの再切替だけ」と「DEVICE RESET だけ」（seq 17、R159 の 3 の答え）（Opus）
+
+- 担当：Opus。gdprobe は `feat/gdprobe-seq17`（`6c548f3b`、新しい設定 `swap_reswitch`・`devreset_only`）。記録：`docs/research/probe-records/stock_20261122_17_reswitch-only-devreset-only.txt`（`images=4,3,7`、`abort=0`）。GDEMU.ini は元の内容（150 / 150 / 1）。
+- 結論：
+  - **同じフォルダへの再切替だけ（リセットなし）は、実質なにもしない**：窓なし、SECNR・ALTSTATUS は 1,000 ms 変わらず、次の TUR はすぐ READY で **UA なし**（`ua_28=0`）。REQ_STAT も前の状態・位置のまま（例：`01 2f 41 02 01 00 2e 4c`）。
+  - **DEVICE RESET だけ（500 ms 待ってから、切替なし）**：SECNR はすぐ `0x00`、ALTSTATUS `0x00`・ERROR `0x01`、約 150 ms 後に最終の値、次の TUR は **6/28/00（UA）**、その次は READY（空フォルダは 2/3A/00、UA なし）。**REQ_STAT はトラック 1・FAD 150 に戻る**（`01 2f 01 01 01 00 00 96`）＝ DEVICE RESET は再生・ヘッドの位置も新しくマウントしたときと同じに戻す。
+  - → 記録 15・16 の UA は DEVICE RESET から来ていた。
+- 対応（NetGD、`fix/r159-devreset` の担当に伝えた）：同じフォルダへの再切替は何もしない（窓・UA なし）。DEVICE RESET は SECNR 0x00・status 0x00（次のコマンドまで）・ERROR 0x01・約 150 ms 後に最終の値・UA・ヘッドの位置をトラック 1 / FAD 150 に戻す。
+- 残り：150 ms が detect_time か（seq 18、GDEMU.ini の `detect_time = 400`）。
+- 信頼度：確認済み（実機）。
+- 関連：R155〜R159。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
