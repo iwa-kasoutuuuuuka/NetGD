@@ -143,6 +143,17 @@ sd-fast = ["sd-multiblock", "sd-highspeed", "fast-complete"]
 # before (R72). Check it with gdprobe (label=netgd) before making it default.
 raw-sectors = []
 
+# CD_READ 0x20 over a CDI's Mode 2 Form 2 sectors (the postgap mkdcdisc
+# writes after the data track) returns their 2,324 data bytes each, as stock
+# GDEMU 6.0 does (D14, docs/research/d10-d14-raw-sectors.md). Only a request
+# that fits one staging round of a mapped track and whose sectors are all
+# Form 2 (the subheaders are read first); a read mixing Form 1 and Form 2,
+# 0x28, and unmapped tracks keep 2,048 bytes (stock's answer not recorded).
+# Off by default and not run on hardware: 2,324-byte transfers, like
+# raw-sectors' 2,352, are not multiples of 2,048 (R72). gdprobe's seek test
+# hits the postgap of images 04/05.
+form2-sectors = []
+
 # SD throughput benchmark at boot. Off by default: it takes ~6 s, which
 # delays the IDE task spawn past the point the DC starts issuing ATAPI
 # commands, and the console times out with a CDB-DRQ error.

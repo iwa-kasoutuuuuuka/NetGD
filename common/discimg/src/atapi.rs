@@ -466,6 +466,52 @@ pub fn expand_raw_in_place(buf: &mut [u8], head: usize, sec_size: usize, lba: u3
     count * RAW
 }
 
+/// Bytes of a Mode 2 Form 2 sector's user data: what stock GDEMU 6.0 sends
+/// for each Form 2 sector a `0x20` read covers (D14).
+pub const FORM2_SECTOR_BYTES: usize = 2324;
+/// Where those bytes start in a 2,336-byte stored sector: after the 8-byte
+/// subheader (the 4-byte Form 2 EDC at the end is left out).
+pub const FORM2_DATA_OFFSET: usize = 8;
+
+/// Is a 2,336-byte stored Mode 2 sector Form 2? The subheader's submode
+/// byte (offset 2) carries the Form bit, 0x20 (mkdcdisc's postgap: `00 00 20
+/// 00 00 00 20 00`).
+pub fn stored_is_form2(stored: &[u8]) -> bool {
+    stored.len() > 2 && stored[2] & 0x20 != 0
+}
+
+/// Could a CD_READ with byte 1 `flags` get Form 2 payloads (feature
+/// `form2-sectors`, D14)? Data select `0x2_` with no expected type, on a
+/// Mode 2 track stored 2,336 bytes a sector (a CDI's data) -- the case the
+/// stock records show (record 05, `0x20` on the postgap). The firmware then
+/// looks at each sector's submode ([`all_form2`]).
+pub fn cd_read_may_be_form2(flags: u8, track_mode: u8, sector_size: u32) -> bool {
+    flags & 0xF0 == 0x20
+        && (flags >> 1) & 0x07 == CD_READ_TYPE_ANY
+        && track_mode == TRACK_MODE2
+        && sector_size == 2336
+}
+
+/// Are all `count` 2,336-byte stored sectors in `buf`, the first `head`
+/// bytes in, Form 2 ([`stored_is_form2`])? A read mixing Form 1 and Form 2
+/// is not in the stock records, so the firmware keeps 2,048 B for it.
+pub fn all_form2(buf: &[u8], head: usize, count: usize) -> bool {
+    (0..count).all(|s| stored_is_form2(&buf[head + s * 2336..]))
+}
+
+/// In place: take `len` bytes from offset `off` of each of `count` stored
+/// sectors of `sec_size` bytes (the first `head` bytes into `buf`) and pack
+/// them from the front, `len` apart. Returns `count * len`. Needs
+/// `len <= sec_size`, so every copy moves towards lower addresses.
+pub fn compact_in_place(buf: &mut [u8], head: usize, sec_size: usize, count: usize, off: usize, len: usize) -> usize {
+    debug_assert!(off + len <= sec_size);
+    for s in 0..count {
+        let src = head + s * sec_size + off;
+        buf.copy_within(src..src + len, s * len);
+    }
+    count * len
+}
+
 /// Sense keys NetGD reports.
 pub const SENSE_NOT_READY: u8 = 0x02;
 pub const SENSE_MEDIUM_ERROR: u8 = 0x03;

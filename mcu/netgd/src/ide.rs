@@ -2153,6 +2153,17 @@ async fn handle_cd_read(
         }
         unsafe { RAW_OUT = raw };
     }
+    // Feature `form2-sectors` (D14): a `0x20` read of a CDI's Form 2 sectors
+    // (the postgap) sends their 2,324 data bytes each, as stock does.
+    #[cfg(feature = "form2-sectors")]
+    if let Some(t) = track {
+        if !raw_out()
+            && discimg::atapi::cd_read_may_be_form2(packet[1], t.mode(), t.sector_size as u32)
+            && form2_request(gdi, t, lba, count)
+        {
+            unsafe { FORM2_OUT = true };
+        }
+    }
     let total = (count as usize).saturating_mul(out_sector_bytes());
     // No upper bound on the request size any more: stream_from_sd stages the
     // transfer a chunk at a time rather than buffering it whole, so a request
@@ -2172,7 +2183,7 @@ async fn handle_cd_read(
             "{}: CD_READ rejected: {} sectors from LBA {} ({} available in track)",
             label, count, lba, available
         );
-        unsafe { RAW_OUT = false };
+        clear_out_layout();
         finish_illegal(dev, state);
         return;
     }
@@ -2187,7 +2198,7 @@ async fn handle_cd_read(
         // What is staged is laid out 2,352 apart: not a cache entry, and no
         // read-ahead (it would stage 2,048-byte payloads for the next raw read).
         invalidate_cd_read_cache();
-        unsafe { RAW_OUT = false };
+        clear_out_layout();
         return;
     }
     // Only after a transfer that went all the way through (see `STREAM_OK`).
@@ -2291,14 +2302,61 @@ static mut RAW_OUT: bool = false;
 /// Without it only audio tracks are sent whole.
 const RAW_DATA: bool = cfg!(feature = "raw-sectors");
 
-/// Bytes each sector takes in CD_READ_BUF and on the bus: 2,048, or 2,352
-/// during a raw read ([`RAW_OUT`]).
+/// Feature `form2-sectors`: the CD_READ in flight covers only Form 2
+/// sectors of a CDI track and sends their 2,324 data bytes each (D14). Set
+/// by `handle_cd_read` for one request, like [`RAW_OUT`].
+static mut FORM2_OUT: bool = false;
+
+/// Back to 2,048-byte payloads once a request is over.
+fn clear_out_layout() {
+    unsafe {
+        RAW_OUT = false;
+        FORM2_OUT = false;
+    }
+}
+
+/// Bytes each sector takes in CD_READ_BUF and on the bus: 2,048, 2,352
+/// during a raw read ([`RAW_OUT`]), or 2,324 during a Form 2 read
+/// ([`FORM2_OUT`]).
 #[inline(always)]
 fn out_sector_bytes() -> usize {
     if unsafe { RAW_OUT } {
         return discimg::atapi::RAW_SECTOR_BYTES;
     }
+    #[cfg(feature = "form2-sectors")]
+    if unsafe { FORM2_OUT } {
+        return discimg::atapi::FORM2_SECTOR_BYTES;
+    }
     2048
+}
+
+/// Feature `form2-sectors`: are all `count` sectors from `lba` Form 2? Only
+/// for a request that fits one staging round of a mapped track (a postgap
+/// read is one or two sectors); anything else keeps 2,048-byte payloads.
+/// The stored sectors are read here to see their subheaders. When they are
+/// not all Form 2 they are packed into the usual 2,048-byte cache entry, so
+/// the stream that follows finds them staged and does not read them again.
+#[cfg(feature = "form2-sectors")]
+fn form2_request(gdi: &crate::gdi::Gdi, track: &crate::gdi::Track, lba: u32, count: u32) -> bool {
+    let available = track.sector_count.saturating_sub(lba.saturating_sub(track.start_lba));
+    if count == 0 || count > available || count > stage_sectors_for(gdi, lba) || !track.is_mapped() {
+        return false;
+    }
+    invalidate_cd_read_cache();
+    let Some(head) = read_stored_sectors(track, lba, count) else {
+        return false;
+    };
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CD_READ_BUF) };
+    if discimg::atapi::all_form2(buf, head, count as usize) {
+        // Staged again with the 2,324-byte layout by the stream.
+        return true;
+    }
+    let len = discimg::atapi::compact_in_place(buf, head, track.sector_size as usize, count as usize, track.user_data_offset(), 2048);
+    unsafe {
+        CD_READ_BUF_LBA = lba;
+        CD_READ_BUF_LEN = len;
+    }
+    false
 }
 
 #[inline(always)]
@@ -2357,6 +2415,34 @@ fn fill_cd_read_buf_raw(
     count: u32,
 ) -> Option<usize> {
     let sec_size = track.sector_size as usize;
+    let head = read_stored_sectors(track, start_lba, count)?;
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CD_READ_BUF) };
+    if RAW_DATA && unsafe { RAW_OUT } {
+        return Some(discimg::atapi::expand_raw_in_place(buf, head, sec_size, start_lba, count as usize));
+    }
+    // A whole sector (without `raw-sectors` only an audio track's, stored
+    // 2,352 bytes: a straight copy), a Form 2 sector's 2,324 data bytes
+    // (`form2-sectors`), or the 2,048-byte payload.
+    let (uoff, len) = if unsafe { RAW_OUT } {
+        (0, discimg::atapi::RAW_SECTOR_BYTES)
+    } else if out_sector_bytes() == discimg::atapi::FORM2_SECTOR_BYTES {
+        (discimg::atapi::FORM2_DATA_OFFSET, discimg::atapi::FORM2_SECTOR_BYTES)
+    } else {
+        (track.user_data_offset(), 2048)
+    };
+    Some(discimg::atapi::compact_in_place(buf, head, sec_size, count as usize, uoff, len))
+}
+
+/// Read the whole 512-byte blocks holding `count` stored sectors from
+/// `start_lba` of a mapped track into CD_READ_BUF, by multi-block reads
+/// over the extent map. Returns where the first sector starts in the buffer
+/// (`head`, under 512). `None`: unmapped, too big, or the card read failed.
+fn read_stored_sectors(
+    track: &crate::gdi::Track,
+    start_lba: u32,
+    count: u32,
+) -> Option<usize> {
+    let sec_size = track.sector_size as usize;
     let byte0 = track.byte_offset_of(start_lba)?;
     let head = (byte0 % 512) as usize;
     let raw_len = head + count as usize * sec_size;
@@ -2379,17 +2465,7 @@ fn fill_cd_read_buf_raw(
         }
         done += n;
     }
-    if RAW_DATA && raw_out() {
-        return Some(discimg::atapi::expand_raw_in_place(buf, head, sec_size, start_lba, count as usize));
-    }
-    // A whole sector (without `raw-sectors` only an audio track's, stored
-    // 2,352 bytes: a straight copy), or the 2,048-byte payload.
-    let (uoff, len) = if raw_out() { (0, discimg::atapi::RAW_SECTOR_BYTES) } else { (track.user_data_offset(), 2048) };
-    for s in 0..count as usize {
-        let src = head + s * sec_size + uoff;
-        buf.copy_within(src..src + len, s * len);
-    }
-    Some(count as usize * len)
+    Some(head)
 }
 
 /// Read `count` sectors starting at `start_lba` into CD_READ_BUF.
@@ -2452,13 +2528,17 @@ async fn fill_cd_read_buf_from_sd(
         // first 2048 bytes there would hand the host the subheader and shift
         // every sector by 8. 2048 is already cooked.
         let dst = (s as usize) * osz;
-        if RAW_DATA && raw_out() {
+        if RAW_DATA && unsafe { RAW_OUT } {
             discimg::atapi::raw_sector(&sector_buf[..sec_size], start_lba + s, &mut buf[dst..dst + osz]);
             continue;
         }
         let payload: &[u8] = match sec_size {
             // Without `raw-sectors` a raw read is an audio track's 2,352 bytes.
-            _ if raw_out() => &sector_buf[..],
+            _ if unsafe { RAW_OUT } => &sector_buf[..],
+            // `form2-sectors`: a Form 2 sector's data, between subheader and EDC.
+            _ if osz == discimg::atapi::FORM2_SECTOR_BYTES => {
+                &sector_buf[discimg::atapi::FORM2_DATA_OFFSET..discimg::atapi::FORM2_DATA_OFFSET + osz]
+            }
             2352 => &sector_buf[16..16 + 2048],
             2336 => &sector_buf[8..8 + 2048],
             _ => &sector_buf[..2048.min(sec_size)],

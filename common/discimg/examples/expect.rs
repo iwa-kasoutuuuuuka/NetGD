@@ -57,6 +57,8 @@ struct Opts {
     flags_test: bool,
     /// Predict the firmware built with feature `raw-sectors` (D10).
     raw_sectors: bool,
+    /// Predict the firmware built with feature `form2-sectors` (D14).
+    form2_sectors: bool,
     throughput: bool,
     tp_batches: u32,
     tp_sectors: u32,
@@ -101,6 +103,7 @@ fn parse_args() -> Opts {
         cdread_flags: 0x24,
         flags_test: true,
         raw_sectors: false,
+        form2_sectors: false,
         throughput: true,
         tp_batches: 64,
         tp_sectors: 16,
@@ -128,6 +131,7 @@ fn parse_args() -> Opts {
             "--cdread-flags" => o.cdread_flags = num(&val()) as u8,
             "--no-flags-test" => o.flags_test = false,
             "--raw-sectors" => o.raw_sectors = true,
+            "--form2-sectors" => o.form2_sectors = true,
             "--no-throughput" => o.throughput = false,
             "--tp-batches" => o.tp_batches = num(&val()),
             "--tp-sectors" => o.tp_sectors = num(&val()).clamp(1, 16),
@@ -182,6 +186,8 @@ struct Disc {
     /// GDI: the directory of the track files. CDI: the image file itself.
     dir: PathBuf,
     cdi_file: Option<PathBuf>,
+    /// Feature `form2-sectors` (set from the options after loading).
+    form2_sectors: bool,
 }
 
 fn load_disc(path: &Path) -> Result<Disc, String> {
@@ -198,7 +204,7 @@ fn load_disc(path: &Path) -> Result<Disc, String> {
         }
         // gdi.rs `parse`: HDA = first track numbered 3 or above, else 45000; one session.
         let boot = atapi::gdi_boot_area_lba(&tracks[..]);
-        Ok(Disc { tracks, is_cdi: false, boot_area_lba: boot, sessions: 1, dir, cdi_file: None })
+        Ok(Disc { tracks, is_cdi: false, boot_area_lba: boot, sessions: 1, dir, cdi_file: None, form2_sectors: false })
     } else if lower.ends_with(".cdi") {
         let mut f = File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
         let len = f.metadata().map_err(|e| e.to_string())?.len() as u32;
@@ -214,7 +220,7 @@ fn load_disc(path: &Path) -> Result<Disc, String> {
         .map_err(|e| format!("cdi parse error: {:?}", e))?;
         let tracks: Vec<TrackDesc> = sink.0.iter().cloned().collect();
         let boot = atapi::cdi_boot_area_lba(&tracks[..], info.boot_track);
-        Ok(Disc { tracks, is_cdi: true, boot_area_lba: boot, sessions: info.sessions, dir, cdi_file: Some(path.to_path_buf()) })
+        Ok(Disc { tracks, is_cdi: true, boot_area_lba: boot, sessions: info.sessions, dir, cdi_file: Some(path.to_path_buf()), form2_sectors: false })
     } else {
         Err("unknown extension (want .gdi or .cdi)".into())
     }
@@ -263,6 +269,35 @@ impl Disc {
 
     /// `count` whole 2,352-byte sectors from `fad` (an audio track's PCM, or a raw data read), or None
     /// = ILLEGAL REQUEST (the track does not store them, or the request runs past it).
+    /// Feature `form2-sectors` (`form2_request` + staging): `count` sectors at `fad` as 2,324-byte
+    /// Form 2 data, if they are all Form 2 and fit one staging round (5 sectors of a mapped 2,336-byte
+    /// track, `stage_sectors_for`); None = the usual 2,048-byte read.
+    fn cd_read_form2(&self, fad: u32, count: u32) -> Option<Vec<u8>> {
+        let lba = fad.saturating_sub(FAD_OFFSET);
+        let t = self.track_for_lba(lba)?;
+        let available = t.sector_count.saturating_sub(lba - t.start_lba);
+        if count == 0 || count > 5 || count > available {
+            return None;
+        }
+        let path = match &self.cdi_file {
+            Some(p) => p.clone(),
+            None => self.dir.join(t.filename.as_str()),
+        };
+        let mut f = File::open(path).ok()?;
+        let mut stored = vec![0u8; t.sector_size as usize];
+        let mut out = Vec::with_capacity(atapi::FORM2_SECTOR_BYTES * count as usize);
+        for s in 0..count {
+            let at = t.file_offset as u64 + (lba + s - t.start_lba) as u64 * t.sector_size as u64;
+            f.seek(SeekFrom::Start(at)).ok()?;
+            f.read_exact(&mut stored).ok()?;
+            if !atapi::stored_is_form2(&stored) {
+                return None;
+            }
+            out.extend_from_slice(&stored[atapi::FORM2_DATA_OFFSET..atapi::FORM2_DATA_OFFSET + atapi::FORM2_SECTOR_BYTES]);
+        }
+        Some(out)
+    }
+
     fn cd_read_raw_n(&self, fad: u32, count: u32) -> Option<Vec<u8>> {
         let lba = fad.saturating_sub(FAD_OFFSET);
         let t = self.track_for_lba(lba)?;
@@ -450,6 +485,11 @@ fn read_res(d: &Disc, flags: u8, fad: u32, count: u32) -> (Res, Option<Vec<u8>>)
                 Some(data) => (Res::ok_big(data.len(), &data[..data.len().min(REC_DATA_MAX)]), Some(data)),
                 None => (Res::illegal(), None),
             };
+        }
+        if d.form2_sectors && atapi::cd_read_may_be_form2(flags, t.mode, t.sector_size as u32) {
+            if let Some(data) = d.cd_read_form2(fad, count) {
+                return (Res::ok_big(data.len(), &data[..data.len().min(REC_DATA_MAX)]), Some(data));
+            }
         }
     }
     match d.cd_read(fad, count) {
@@ -755,7 +795,10 @@ fn main() {
 
     let disc = match &opt.image {
         Some(p) => match load_disc(p) {
-            Ok(d) => Some(d),
+            Ok(mut d) => {
+                d.form2_sectors = opt.form2_sectors;
+                Some(d)
+            }
             Err(e) => {
                 eprintln!("expect: {}", e);
                 std::process::exit(1);
