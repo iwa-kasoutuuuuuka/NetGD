@@ -7,6 +7,8 @@
 //!   from the GDI, so the directory has to be searched by long name.
 //! * [`extent`]: turn a cluster chain into contiguous block runs, either all
 //!   at once or a window at a time.
+//! * [`geom`]: a FAT32 volume's geometry from its boot sector, cluster
+//!   range checks and the directory-walk bound (the firmware's `fat::probe`).
 //!
 //! * [`vol`], [`dir`], [`sfn`]: a small read-only FAT32 reader (volume,
 //!   directory listing with long names, look-up, file reading with seek, 8.3
@@ -21,6 +23,7 @@
 #[cfg(feature = "reader")]
 pub mod dir;
 pub mod extent;
+pub mod geom;
 pub mod lfn;
 #[cfg(feature = "reader")]
 pub mod sfn;
