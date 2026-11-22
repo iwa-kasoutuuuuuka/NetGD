@@ -57,6 +57,8 @@ prebuilt firmware `.elf`, a host flashing tool, and a prepared SD card with
 > CMSIS-DAP version and `probe-rs` refuses it with *"the firmware on the probe
 > is outdated"*. Use `debugprobe.uf2` from the link above.
 
+> **Tiny RP2040 (GDEMU 6.0, not yet tested on hardware):** a Waveshare RP2040-Tiny or Pimoroni Tiny 2040 is expected to work with `debugprobe_on_pico.uf2` (the plain Pico build, not the Pico 2 one), wired to GP2, GP3 and GND as in §3. Its status LED may stay dark; that alone is not a failure.
+
 ---
 
 ## 3. Wiring
@@ -92,6 +94,31 @@ On the **official Raspberry Pi Debug Probe**, use the labelled 3-pin SWD cable
 (SWCLK / GND / SWDIO) and the separate UART cable (its TX to H4 pin 1, its RX
 to H4 pin 2, GND to H4 pin 3) instead of the GPIO numbers above.
 
+### GDEMU 6.0 — SWD (7-hole header)
+
+On the 6.0 board the SWD header is a vertical row of seven **holes only** next to
+the SD slot; there are no pins in it. Solder in a 1×7, 2.54 mm pin header with
+the board unpowered and off the Dreamcast. Cut the legs that stick out
+underneath, and check that the header does not touch the cover or any metal
+when the board is back in the Dreamcast.
+
+| 6.0 header pin | Signal | Status | Pico pin (Pico / Tiny RP2040 running debugprobe) |
+|----------------|--------|--------|--------------------------------------------------|
+| 1 | 3V3 | inferred | **leave unconnected** |
+| 2 | TDI | inferred | leave unconnected |
+| 3 | TDO | inferred | leave unconnected |
+| 4 | **SWDIO** | confirmed (MCU pin 7 via R2) | GP3 |
+| 5 | **SWCLK** | confirmed (MCU pin 9 via R1) | GP2 |
+| 6 | NRST | inferred | **leave unconnected** |
+| 7 | **GND** | confirmed (continuity to the SD slot's metal shell) | any GND |
+
+Connect only GND, SWCLK and SWDIO. R1 and R2 are already in the signal lines,
+so direct wiring is fine.
+
+Which end of the row is pin 7 was not recorded. Before wiring, check continuity
+between the SD slot's metal shell and each end hole; the end that connects is
+pin 7. Count 6, then 5 (SWCLK), then 4 (SWDIO) from there.
+
 ---
 
 ## 4. Power — read this before plugging anything in
@@ -109,6 +136,22 @@ connection usually just means the console is off.
 
 Sequence: connect the probe wires with everything off → plug the Pico into the
 host → power on the Dreamcast → flash.
+
+### GDEMU 6.0
+
+The 6.0 board is also powered by the Dreamcast. Its order is:
+
+1. With the Dreamcast off, fit the GDEMU board. Route the three jumper wires out
+   of the shell. The top cover stays open.
+2. Connect the jumper wires to the probe in this order: **GND, then SWCLK, then
+   SWDIO**.
+3. Plug the probe into the PC's USB and check that `probe-rs list` shows it.
+4. Power the Dreamcast on **last**. For `fwbackup`, stop at the BIOS menu so no
+   disc is read.
+
+Because the top cover is open while powered, keep away from the mains power
+supply section. Do not plug or unplug wires while the power is on. Do not touch
+any MCU pin while powered, and ERASE (pin 137) in particular.
 
 ---
 
@@ -149,6 +192,11 @@ rev 1:
 ```
 400e0740: 28100961
 ```
+
+> **GDEMU 6.0:** use `--chip ATSAM3U2E` instead of `ATSAM3U4E` in the commands in
+> this section. The expected CHIPID is `0x281A0761`. Before flashing anything to a
+> 6.0 board, back up the stock firmware with `tools/fwbackup` (see its README),
+> because it cannot be restored otherwise.
 
 > **Don't use `probe-rs info` as the "is it working" test.** It only ever
 > auto-detects the target from its chip registry, and it cannot auto-detect
@@ -206,6 +254,12 @@ pad next to the MCU** (it is not on any header).
 > completely, and nobody has a dump of it. Once you do this the board runs
 > NetGD or nothing.
 
+> **GDEMU 6.0:** this procedure is written for v5.5 boards (H1 pin 1 and the bare
+> ERASE pad). The 6.0 docs say ERASE wipes the whole flash and the stock firmware
+> cannot be recovered afterwards. Do not touch ERASE on a 6.0 board until you have
+> decided to give up the stock firmware. If `fwbackup` can still read the board,
+> back it up first.
+
 ### Procedure
 
 1. Power the board down completely (Dreamcast off).
@@ -236,6 +290,9 @@ You should now get a CHIPID back (`400e0740: 28100961`) instead of a lock
 error. The flash is
 empty at this point — the MCU is running nothing, which is expected. Go to §7.
 
+> **GDEMU 6.0:** use `--chip ATSAM3U2E` instead of `ATSAM3U4E` (expected CHIPID
+> `0x281A0761`).
+
 Do this once per board. Re-flashing later needs no erase: NetGD does not
 set the security bit, so the debug port stays open.
 
@@ -244,6 +301,13 @@ set the security bit, so the debug port stays open.
 ## 7. Flash the firmware
 
 ### With probe-rs
+
+> **GDEMU 6.0:** use `--chip ATSAM3U2E` instead of `ATSAM3U4E` in every command
+> below. Before the first flash to a 6.0 board, back up the stock firmware with
+> `tools/fwbackup` (see its README), because it cannot be restored otherwise. The
+> 6.0 uses a different FPGA (AGM AG16K, not the Cyclone II), and the board docs say
+> the 6.0 port still needs work, so do not assume the v5.5 flow below is verified
+> on 6.0.
 
 ```sh
 probe-rs download --chip ATSAM3U4E --protocol swd --binary-format elf netgd.elf

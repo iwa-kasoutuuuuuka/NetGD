@@ -2104,6 +2104,63 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：純正の値は確認済み（実機）。NetGD はホストテストとビルドだけ。
 - 関連：R119、R126、R129、`common/discimg/src/atapi.rs`、`common/discimg/tests/atapi.rs`、`common/gamecfg/src/ini.rs`。
 
+### R136 AG16K の公開資料の追加調査（ピン探し用の回路のため）（Sonnet）
+
+- 担当：Sonnet（ウェブ調査、ファイルは編集していない）。メインの Opus が要点を確認し、ピン探しの回路を作っているサブエージェントに渡した。
+- 問い：`docs/design/g1-ag16k-port.md` 2-4 の方法 2（ピン探し用のビットストリーム）に必要な、AG16KDDF256 のボール表・PS のタイミング・内蔵の発振器・BSDL は公開されているか。
+- 結論：
+  - **ボール表**：公式のピン表（xls）は見つからない。AG16K データシート Rev1.0 の §4 は別冊を参照するだけで、別冊は未公開のよう。archive.org の `agm-micro` にも無い。
+    使えるのは既存の `ag16k-config.md` §1-3 の DDF256 マニュアルの目読みだけ。EP4CE15F17 とのピン互換は DDF256 では成り立たない（既存の結論のまま）。データシートには専用クロックピン 15 本・I/O バンク 8 つ・PLL の入力は同じ辺のクロックピンから、とある。
+  - **PS のタイミング**：新しい一次資料は無い（データシートは PS を「External Host with Flash Memory」とだけ書く）。MCU から AG10K/16K を PS で流した公開例も無い。
+    rodinia の `chips.py` のデバイス ID は AG15K（AG16KSDE176）= `0x01500010`（DDF256 の項目は読めた範囲に無い）。
+  - **内蔵の発振器**：Supra のプリミティブに **`alta_osc(input i_osc_enb, output o_osc)`** がある（rodinia が写した `alta_lib.v`・`alta_sim.v`。シミュレーションでは `i_osc_enb == 0` のときだけ発振）。
+    周波数と DDF256 で配置できるかは不明。`alta_ufm` などにも `o_osc` があり、UFM のシミュレーションのコメントに 3.33〜5.56 MHz。af・Supra が組合せループ（リングオシレータ）をどう扱うかの記述は無い。
+    AG1KLP では PLL が入力クロック無しで自走するという報告（二次資料）と、Yosys が暗黙に入れる `cycloneive_clkctrl` で af が失敗する（明示的にインスタンスすれば通る）という報告がある。
+  - **BSDL**：見つからない。JTAG の IDCODE は `0x01500010` と推測（rodinia の device_id から。未確認）。Supra は USB-Blaster で JTAG に接続し、Query でデバイス ID を表示する。
+  - **6.0 の FPGA のピン**：公開の解析は見つからない。AGM のビットストリームを読むツールは `pablomarx/rodinia`（`agm-unpack.py`・`agm-explain.py`・`ag16k-wires.json.gz`）。
+- 法的な注意：rodinia は Supra の配布物（ALTAGATE の著作権表示あり）の写しを含むので、`alta_lib.v` などはリポジトリに写さない。archive.org の AGM 文書は「CONFIDENTIAL」の透かし付きの写しなので、ボール表の画像も置かない。純正のビットストリームの中身は使わない方針のまま。
+- 根拠：AG16K データシート Rev1.0（https://atta.szlcsc.com/upload/public/pdf/source/20221219/4E43D2705D3E0F1E8FB34CC02EF10C1D.pdf）、
+  https://archive.org/download/agm-micro/ （`Docs/MANUAL_Supra_6.2.pdf`）、https://github.com/pablomarx/rodinia（`bitstream/chips.py`、`supra/etc/arch/rodinia/alta_lib.v`・`alta_sim.v`、issue #1）、
+  https://www.dreamcast-talk.com/forum/viewtopic.php?t=19395（本文は 403、検索の要約のみ）。調査メモは scratchpad の `ag16k-research.md`。
+- 信頼度：プリミティブの宣言・デバイス ID は一次資料（Supra の配布物の写し）。周波数・配置可否・IDCODE は不明か推測。
+- 関連：R32、R49、R66、R69、R99、R106、`docs/design/g1-ag16k-port.md`、`docs/research/ag16k-config.md`。
+
+### R137 R125〜R135 のファーム変更の独立レビュー（Fable）
+
+- 担当：Fable（読むだけ。テストとビルドで基準が緑であることを確認）。範囲は main の `43c5f4b4..ed4890b3`。
+- 結論：**実機への書き込みを止めるべき重大な不具合は無い**。基板を壊す・ドライブが固まる経路、セカンダリ（書き込みディスク）の役割を変える変更も無い。
+- 確かな指摘（中〜低）：
+  1. 切替の窓の時間が TUR（CHECK、2/04/01）とホストの REQ_ERROR の間で切れると、`drive_not_ready` が REQ_ERROR の処理の先頭で窓を閉じて保留センスを 6/28/00 に上書きし、
+     REQ_ERROR が 6/28/00 を返して UA も消す。err 0x60 の CHECK が一度も出ず、純正の並び（2/04/01 → CHECK 6/28/00 → READY）と違う（`ide.rs` の 1648 行付近・1461〜1466 行・1740〜1753 行・1844〜1855 行）。
+     修正案：0x03・0x13 では `drive_not_ready` を呼ばない。
+- 確度の低い懸念（実機で確かめたい）：
+  - a. CHECK を 0x11（DRDY = 0）にしたので、FPGA がコマンド書き込みで DRDY を触らない作り（`fpga/amaranth/hw/ide_device.py` 612〜647 行）では、次の PACKET の CDB フェーズで status が 0x58 でなく 0x18 に見える。純正の CDB フェーズの値は未記録。
+  - b. 窓の中の SECNR（OPEN 6・BUSY 0・NODISC 7）は純正のデータに基づかない唯一の部分（R126 で推測と明記）。
+  - c. ホストが EJECT した状態で GET_TOC・REQ_STAT・REQ_SES・GET_SCD が NOT READY になった（純正のディスクなしとしては正しい）。
+  - d. 起動時のマウントが失敗すると `EMPTY_SLOT` が立たず、ボタンが効かない（`52 81` は効く）。
+  - e. `52 82 n` のルート走査中に SD の読み取りが失敗すると「フォルダ無し」扱いになり、01 も無い扱いでディスクを外す（以前は拒否して残していた）。
+  - f. REQUEST SENSE（0x03）は ASC/ASCQ を返さない（R125 の既知の残り）。
+  - g. CD_READ の種別検査はトラックのモードでなくイメージの種類（`is_cdi`）で判定する。Mode 1 のトラックを持つ CDI の純正の答えは未測定。
+  - h. `52 00` のあとに REQ_ERROR が続くと、保留の UA が CHECK として報告されずに消える（以前からの動作）。
+- 問題なしと確認したもの：窓の入口（`mounted()` が唯一）と出口、UA の二重発行が無いこと、CHECK のレジスタの経路、NOT READY の関門、空フォルダ・欠番の分岐、
+  `resolve_name`/`load_image` の開閉、待機状態とヘッド位置と CD-DA の関係、CD_READ の種別検査（音声トラックは通す）、IDENTIFY PACKET、タスク間の並行性、INI の既定値。
+- 対応：指摘 1・d・e と `ini.rs` の古いコメントを直す作業を Sonnet に依頼（ブランチ `fix/review-1`）。a・b・g は実機（gdprobe の記録の追加）で確かめる。
+- 関連：R123〜R135、`mcu/netgd/src/ide.rs`、`common/discimg/src/atapi.rs`、`fpga/amaranth/hw/ide_device.py`。
+
+### R138 CD_READ の 2,352 バイト読み（D10）を、既定は無効の機能 `raw-sectors` として入れた（Opus）
+
+- 担当：Opus（比較のサイドセッションが自分の判断で調査・実装し、main に入れた。メインはテストと 2E のビルドを再実行して確認）。main のコミット `f8c891c1`（設計メモ）・`9f78590d`（本体）。ユーザーの指示で push に含めた。
+- 設計メモ：`docs/research/d10-d14-raw-sectors.md`（純正が `0x10` の CD_READ と CDI の postgap のセクタ（D14）に返すバイト列を、生成コードと CRC で特定した内容と、実装の見積もり）。
+- 結論：機能 `raw-sectors`（既定は無効）を付けると、CD_READ のデータ選択が `0x1_` のとき、2,352 B で保存されたトラックはそのまま、2,336 B で保存されたトラック（CDI の Mode 2）は同期・BCD の MSF・モード 2 のヘッダを前に生成して、
+  1 セクタ 2,352 B を返す（純正が試したすべての GDI・CDI と同じ）。ほかのトラックは 2,048 B のまま。機能なしでは `out_sector_bytes()` が定数 2,048 で、動作は変わらない。
+  `discimg::atapi` に `cd_read_wants_raw`・`raw_from_stored`・`mode2_raw_header`・`raw_sector`・`expand_raw_in_place`（ブロックの先頭のずれ 0〜511 と 1〜5 セクタで `raw_sector` と照合するテスト）。
+  `ide.rs` は 1 回の要求について `RAW_OUT` を持ち、ステージング・キャッシュの確認・DMA・PIO のすべてで `out_sector_bytes()` を使う。2,352 B の読み出しの前後ではキャッシュを捨て、先読みはしない。
+- 比較：`expect.rs --raw-sectors` の予測と純正の記録 04・05 で 20 / 8 → 17 / 6 行。予測に `compare --manifest` で 2,106 件一致、不一致 0。
+- 大きさ（機能あり）：4E +1,664、2E +1,220、2E `release-z` の `resident,sd-fast` +1,008（上限まで残り 3,684 B）。機能なしは変化なし（メインで 2E `release-z` のビルドが通ることを確認）。
+- テスト：`common/discimg` 全通過・`test_expect.py` 13 件（1 件スキップ）（メインで再実行）。
+- 信頼度：ホストテストと予測で確認。実機では未確認。サイドセッションが、メインの依頼なしに main に取り込んだ（以後、取り込みはメインが確かめてから行う）。
+- 関連：R123（D10・D14）、R134、`docs/research/d10-d14-raw-sectors.md`、`mcu/netgd/Cargo.toml`（`raw-sectors`）。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |

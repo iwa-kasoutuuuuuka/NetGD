@@ -4,6 +4,8 @@ Dreamcast（KallistiOS 2.3.0）上で動き、GD-ROM ドライブ（= **純正�
 **読み取り系のコマンドだけ**を送って、生の応答バイトと所要時間を記録し、BBA 経由（dcload-ip の `/pc/`）で PC に保存する。
 同じ試験を純正と NetGD の両方で走らせ、PC 側で比べる（`compare.py`）。
 
+**実機での使用実績**：純正 GDEMU 6.0 で 11 回実行済み（2026-11-21〜22）。記録は `docs/research/probe-records/`（`stock_20261121_01`〜`stock_20261122_11`）、結果は `docs/research/LOG.md` の R117〜R135。
+
 調べたいこと（`docs/research/LOG.md` R17・R11・R10・R13、`docs/research/stock-gdemu-flow.md`）：
 
 | 知りたいこと | 記録のどこか |
@@ -231,32 +233,40 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
    （`timer_us_gettime64`、`thd_sleep`、`dcload_type`、`KOS_VERSION_STRING`）。G1 バスの排他は `g1_ata_mutex_lock/unlock` ではなく
    `_g1_ata_sem` を `sem_wait` / `sem_signal` で直接使う（`g1_ata_mutex_unlock` は DEVICE_SELECT に書き込んでしまい、
    純正のもう一方のデバイスに触れうるため）。リンクで `_g1_ata_sem` が未定義になったら報告する。
+   - **実機（2026-11-21〜22）**：DreamSDK（KOS 2.3.0、gcc 13.2.0）でビルドが通り、`_g1_ata_sem` のリンクエラーは出なかった（R117）。
 2. **PACKET のシーケンス**：openMenu の `gdemu_sdk.c` と同じ手順（BSY/DRQ 待ち → 0xA0 → DRQ → 6 ワード → 割り込み → ステータス）に、
    タイムアウトと「実行前に STATUS を読んで古い割り込みを消す」を足した。割り込みの待ちは `EXT_INT_STAT` の bit 0。
    **最初の `TUR_W0` が `rc=timeout` なら、この待ちを疑う**（ALTSTATUS の BSY 待ちだけに変える案がある）。
+   - **実機（2026-11-21〜22）**：PACKET のシーケンスは動いた。最初の TUR は、G1 バスの保護を開けたあとで `rc=ok`（`us=17`）。1 回目の `rc=timeout`（STATUS・IRQ が `0xae`）の原因は割り込みの待ちではなく、バス保護が閉じていたこと（R117、項目 7 も参照）。
 3. **PIO のバイト数制限**：PACKET の前に LBA Mid/High = 0x0800 を書く（SPI 仕様どおり。BIOS も書く）。openMenu は書かないが、これは**意図的な違い**。純正が無視するか、1 セクタずつ DRQ を返すかは未確認。
    データ読み出しのループはどちらでも動く作りだが、`rc=proto` が出たらここ。
+   - **実機（2026-11-21〜22）**：11 件の記録のどれにも `rc=proto` は無く、IP_READ（7 セクタ、`bytes=14336`）や 16 セクタずつのスループット読みも `rc=ok`（R117・R119）。純正が LBA Mid/High を無視したのか、1 セクタずつ DRQ を返したのかは、記録からは不明。
 4. **CD_READ の CDB**：バイト1 = `0x24` は SPI 仕様で確認済み（bit 5 = Data、bit 3〜1 = 期待セクタ種別 `010` = Mode 1、bit 0 = FAD 指定）。
    `0x20` = データ・種別を問わない、`0x28` = Mode 2 Form 1（CDI / MIL-CD）。`switch=off` のときの dcload-ip の CDI は Mode 2 Form 1 なので、
    種別を検査するドライブでは `0x24` が `rc=check` を返しうる。その実行では `cdread_flags=0x20` を指定する。`cdread_flags` で変えられる。
    `IP_READ` が `rc=check` なら別の値を試す（`CDREAD_FLAGS` 行を見れば、4 つのフラグ値のうちどれが通るかが 1 回の実行で分かる）。返るバイト数（`bytes=`）が 2048 × 件数か、2352 × 件数かは、**記録を見て決まる**
    （`HASH` の `ssz` に反映される）。
+   - **実機（2026-11-21〜22）**：純正は期待セクタ種別を検査する。GDI（Mode 1）は `0x24` が通り `0x28` が CHECK（5/64/00）、CDI（Mode 2 Form 1）はその逆。`0x20` は両方通り、`0x10` は 2352 バイトを返す。そのため種別が混ざるイメージでは **`cdread_flags=0x20` が安全**（R119・R120）。`0x20` / `0x28` の CRC は同じ。
 5. **REQ_MODE の引数**：NetGD の `ide.rs` は (offset 18, len 8) と (0, 10) だけ受け付ける。純正が他の組を返すかを見るため `(0, 32)` も送る。
+   - **実機（2026-11-21〜22）**：`(0, 32)` は 32 バイトを返した。末尾は `...SE      Rev 6.42990316`（本物の GD-ROM ドライブと同じ文字列）。(0, 10)・(18, 8) も `rc=ok`（R117）。
 6. **IP.BIN の FAD 自動判定**：REQ_SES(2) の返事から取る。使える値が無ければ、GET_TOC の最後の有効な領域の最初のデータトラックの開始 FAD、それも無ければ 45150（tools/mksdcard の CDI 04/05 など GD-ROM 以外の像向け）。純正の GD-ROM では 45150 のはずだが、D-4 / D-1 の調査対象そのものなので、
    食い違うときは `ip_fad=45150` を指定して再実行する。
+   - **実機（2026-11-21〜22）**：CDI では REQ_SES(2) が使え（dcload-ip の CDI で FAD 11852、`IP_READ fad=11852`）、GD-ROM（03）では REQ_SES(2) が CHECK（純正の GD-ROM のセッションは 1 つ。R119）なので TOC からの判定になり、`IP_READ fad=45150` で `rc=ok`。`ip_fad` の指定は要らなかった。
 7. **KOS の cdrom ドライバ**：`main.c` は `KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM)` で、`cdrom_init` も `fs_iso9660` の vblank ポーリングも走らせない
    （純正ドライブに KOS が勝手にコマンドを送らない）。raw アクセスは `_g1_ata_sem` で直列化している。切替後に BIOS 経由の `/cd` を使うことはしていない。
    **実機で判明（LOG R117）**：`cdrom_init` を走らせないと G1 バスの保護が閉じたままで、ドライブのレジスタがすべて同じ値（`0xae`）に読める。
    そのため `gdraw_bus_prepare` が、プローブの前に `cdrom_init` と同じバスの確認（0x005F74E4 と BIOS の読み出し）だけを行う。結果は記録のヘッダ `# g1bus ...` に残る。
 8. **時計**：Dreamcast の RTC が正しければファイル名に日時が入る。無ければ `seq<番号>`。
+   - **実機（2026-11-21〜22）**：Dreamcast の RTC は未設定で、記録は `seq00000`〜`seq00010` のファイル名になった（日時は入らない）。
 9. **`/pc/` の書き込み**：4 KB 単位 + `fflush`（ホストテストで確認）。実機で固まったら `PCOUT_CHUNK` を 2048 に下げる。
+   - **実機（2026-11-21〜22）**：約 147 KB までの記録（最大 149,566 バイト）を 4 KB 単位で `/pc/` に書けた。固まらなかった（`PCOUT_CHUNK` は変更不要）。
 
 ### 初回の手順（チェックリスト）
 
-1. ビルドが通る → エラーは全文を渡す。
-2. **まず NetGD でも純正でもなく、`switch=off` で、いま入っているデバイスに対して**実行する（`label=` を正しく）。
-3. コンソールで `[gdprobe] record: ...` が出て、`TUR_W*` の行が出ること。`rc=timeout` / `busy` が並んで `ABORT` になったら、上の 2 を疑う（記録は `/pc/` にそこまで残る）。
-4. 記録ファイルを開き、`GET_TOC_1` の `bytes=408`、`REQ_SES_2` の `data=` の FAD（45150 = `00b05e`）、`IP_READ` の `rc=ok` を確認。
-5. `python compare.py --image <GDI> --img 0 rec.txt` で `hashes: N match, 0 mismatch`。
-6. ここまで良ければ `switch=on` と `images=` を有効にし、**最初は `images=3` だけ**で、`SW_RESULT` と READY までの時間を確認してから全フォルダ（`3,4,5,6,7`、`return_to=2`）に広げる。
-7. 純正での記録を、`docs/research/probe-records/` に置く（チャットに渡してもよい）。
+1. ビルドが通る → エラーは全文を渡す。 **［済：R117］**
+2. **まず NetGD でも純正でもなく、`switch=off` で、いま入っているデバイスに対して**実行する（`label=` を正しく）。 **［済：R117。1 回目は G1 バス保護で ABORT、`gdraw_bus_prepare` で修正した 2 回目が成功］**
+3. コンソールで `[gdprobe] record: ...` が出て、`TUR_W*` の行が出ること。`rc=timeout` / `busy` が並んで `ABORT` になったら、上の 2 を疑う（記録は `/pc/` にそこまで残る）。 **［済：R117］**
+4. 記録ファイルを開き、`GET_TOC_1` の `bytes=408`、`REQ_SES_2` の `data=` の FAD（45150 = `00b05e`）、`IP_READ` の `rc=ok` を確認。 **［済：R117。`GET_TOC_1` の `bytes=408`、`IP_READ` は `rc=ok`］**
+5. `python compare.py --image <GDI> --img 0 rec.txt` で `hashes: N match, 0 mismatch`。 **［済：R119・R120。`--manifest` で HASH 1,050 / 1,056 / 2,098 件が全一致、不一致 0］**
+6. ここまで良ければ `switch=on` と `images=` を有効にし、**最初は `images=3` だけ**で、`SW_RESULT` と READY までの時間を確認してから全フォルダ（`3,4,5,6,7`、`return_to=2`）に広げる。 **［済：R119（`images=3` → `3,4,5,6,7`）。READY までは約 0.33〜0.35 秒（`open_time`・`detect_time` が 150 / 150 のとき。R129・R135 で INI 依存と判明）］**
+7. 純正での記録を、`docs/research/probe-records/` に置く（チャットに渡してもよい）。 **［済：`stock_20261121_01`〜`stock_20261122_11`］**
