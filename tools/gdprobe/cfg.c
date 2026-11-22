@@ -22,6 +22,8 @@ void gp_config_defaults(gp_config *c)
     c->devreset_ms[0] = 50;
     c->devreset_ms[1] = 200;
     c->n_devreset = 2;
+    c->swap_reswitch_wait_ms = 1000;
+    c->devreset_only_wait_ms = 1000;
 }
 
 static int parse_bool(const char *v, int *out)
@@ -133,6 +135,10 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "swap_regpoll_interval_ms")) { n = parse_num(v, &ok); if (ok) c->swap_regpoll_interval_ms = (uint32_t)clampi(n, 1, 50);
     } else if (!strcmp(k, "swap_devreset")) { if (parse_bool(v, &b)) c->swap_devreset = b; else ok = 0;
     } else if (!strcmp(k, "swap_devreset_ms")) { ok = parse_delays(c, v);
+    } else if (!strcmp(k, "swap_reswitch")) { if (parse_bool(v, &b)) c->swap_reswitch = b; else ok = 0;
+    } else if (!strcmp(k, "swap_reswitch_wait_ms")) { n = parse_num(v, &ok); if (ok) c->swap_reswitch_wait_ms = (uint32_t)clampi(n, 100, 10000);
+    } else if (!strcmp(k, "devreset_only")) { if (parse_bool(v, &b)) c->devreset_only = b; else ok = 0;
+    } else if (!strcmp(k, "devreset_only_wait_ms")) { n = parse_num(v, &ok); if (ok) c->devreset_only_wait_ms = (uint32_t)clampi(n, 100, 10000);
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

@@ -182,6 +182,25 @@ class CompareTests(unittest.TestCase):
         rc, out, _ = run([old, a, '--only-common'])
         self.assertEqual(rc, 0, out)
 
+    SEQ17 = (
+        'img=3 probe=RS_SW_CMD n=3 cdb=528203000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 us=1500\n'
+        'img=3 probe=RS_SW_REGPOLL_END t_ms=1001 samples=500 changes=1 stop=time\n'
+        'img=3 probe=RS_SW_POLL t_ms=1001 poll=1 rc=check status=0x51 err=0x60 sense=6/28/00 secnr=0x21\n'
+        'img=3 probe=RS_SW_RESULT n=3 rc=ok t_ms=1002 polls=2 changes=2 ua_28=1\n'
+        'img=3 probe=DR_IDLE idle_ms=500\n'
+        'img=3 probe=DR_SW_DEVRESET delay_ms=0 t_ms=0 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x06 bcl=0x14 bch=0xeb\n'
+        'img=3 probe=DR_SW_RESULT n=3 rc=ok t_ms=1001 polls=2 changes=2 ua_28=0\n')
+
+    def test_seq17_lines(self):
+        a = self.write('a.txt', self.SEQ17)
+        t = (self.SEQ17.replace('idle_ms=500', 'idle_ms=503').replace('t_ms=1001 poll', 't_ms=1040 poll')
+             .replace('reset_us=2000', 'reset_us=4000').replace('samples=500', 'samples=480'))
+        rc, out, _ = run([a, self.write('b.txt', t), '--ignore-timing'])
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = run([a, self.write('c.txt', self.SEQ17.replace('ua_28=1', 'ua_28=0'))])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=3 RS_SW_RESULT: ua_28 1 vs 0', out)
+
     CDR_A = (
         'img=3 probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302000b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'
         'img=3 probe=CDREAD_FLAGS flags=0x24 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302400b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'

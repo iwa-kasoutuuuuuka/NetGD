@@ -446,7 +446,8 @@ static void swap_devreset(runner *r, const char *pfx, uint64_t t0, int delay_ms)
     memset(&g, 0, sizeof(g));
     if (r->abort) {
         rc = GD_REFUSED;
-    } else if (!r->ops->ata_reset || !wl_ata_check(0x08, r->cfg->do_identify, r->cfg->do_switch && r->cfg->swap_devreset)) {
+    } else if (!r->ops->ata_reset || !wl_ata_check(0x08, r->cfg->do_identify,
+                                                    r->cfg->do_switch && (r->cfg->swap_devreset || r->cfg->devreset_only))) {
         rc = GD_REFUSED;
     } else {
         rc = r->ops->ata_reset(r->ops->ctx, r->cfg->timeout_ms, &g, &us, &bsy);
@@ -529,41 +530,72 @@ static uint32_t swap_regpoll(runner *r, const char *pfx, uint64_t t0, uint32_t u
  * regpoll = 1: the command-free register poll (swap_regpoll) runs first.
  * reset_at_ms >= 0: the R148 DEVICE RESET variant; every line's probe name gets the prefix R<ms>_ and
  * the register poll always runs (before and after the reset). */
-static int switch_to(runner *r, int n, int tag, int regpoll, int reset_at_ms)
+#define SK_NORMAL 0
+#define SK_RESWITCH 1      /* seq 17: `52 82 n` for the folder already mounted, no reset (RS_) */
+#define SK_DEVRESET_ONLY 2 /* seq 17: no switch command, idle, DEVICE RESET (DR_) */
+
+static int switch_to(runner *r, int n, int tag, int regpoll, int reset_at_ms, int kind)
 {
     uint8_t c[12];
     gd_result res;
     char ex[96], pfx[16], nm[40];
     uint64_t t0, now;
     int ready = 0, polls = 0, changes = 0;
-    int last_secnr = -1;
+    int last_secnr = -1, saw_ua = 0;
     int last_rc = -1, last_st = -1, last_er = -1, last_sk = -1, last_asc = -1, last_ascq = -1;
     uint32_t timeout_ms_total;
     char msg[64];
 
     r->img = tag;
-    if (reset_at_ms >= 0)
+    if (kind == SK_RESWITCH)
+        strcpy(pfx, "RS_");
+    else if (kind == SK_DEVRESET_ONLY)
+        strcpy(pfx, "DR_");
+    else if (reset_at_ms >= 0)
         snprintf(pfx, sizeof(pfx), "R%d_", reset_at_ms);
     else
         pfx[0] = 0;
-    if (reset_at_ms >= 0)
+    if (kind == SK_RESWITCH)
+        snprintf(msg, sizeof(msg), "re-switch to image %d (no reset)...", n);
+    else if (kind == SK_DEVRESET_ONLY)
+        snprintf(msg, sizeof(msg), "DEVICE RESET only (image %d)...", n);
+    else if (reset_at_ms >= 0)
         snprintf(msg, sizeof(msg), "switch to image %d, DEVICE RESET at %d ms...", n, reset_at_ms);
     else
         snprintf(msg, sizeof(msg), "switch to image %d...", n);
     say(r, msg);
-    cdb_mount(c, n);
-    snprintf(ex, sizeof(ex), "n=%d", n);
-    snprintf(nm, sizeof(nm), "%sSW_CMD", pfx);
-    t0 = r->ops->now_us(r->ops->ctx);
-    do_cmd(r, nm, ex, c, 0, r->cfg->timeout_ms, 0, &res);
+    if (kind == SK_DEVRESET_ONLY) {
+        /* No switch command at all: 500 ms of silence first (recorded), then the reset at t = 0 */
+        char f[48];
+        r->ops->sleep_ms(r->ops->ctx, 500);
+        snprintf(nm, sizeof(nm), "%sIDLE", pfx);
+        snprintf(f, sizeof(f), "idle_ms=%d", 500);
+        out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+        memset(&res, 0, sizeof(res));
+        res.rc = GD_OK;
+        t0 = r->ops->now_us(r->ops->ctx);
+    } else {
+        cdb_mount(c, n);
+        snprintf(ex, sizeof(ex), "n=%d", n);
+        snprintf(nm, sizeof(nm), "%sSW_CMD", pfx);
+        t0 = r->ops->now_us(r->ops->ctx);
+        do_cmd(r, nm, ex, c, 0, r->cfg->timeout_ms, 0, &res);
+    }
 
     timeout_ms_total = r->cfg->switch_timeout_ms;
     /* Only after a switch command the drive accepted: never reset or sit silent after a refused/failed one. */
-    if (res.rc == GD_OK && !r->abort && (regpoll || reset_at_ms >= 0)) {
+    if (res.rc == GD_OK && !r->abort && (regpoll || reset_at_ms >= 0 || kind != SK_NORMAL)) {
         uint32_t until = r->cfg->swap_regpoll_ms;
-        if (reset_at_ms >= 0 && until < (uint32_t)reset_at_ms + 300u)
+        int rat = reset_at_ms;
+        if (kind == SK_RESWITCH) {
+            until = r->cfg->swap_reswitch_wait_ms;
+        } else if (kind == SK_DEVRESET_ONLY) {
+            until = r->cfg->devreset_only_wait_ms;
+            rat = 0;
+        } else if (reset_at_ms >= 0 && until < (uint32_t)reset_at_ms + 300u) {
             until = (uint32_t)reset_at_ms + 300u;
-        timeout_ms_total += swap_regpoll(r, pfx, t0, until, reset_at_ms);
+        }
+        timeout_ms_total += swap_regpoll(r, pfx, t0, until, rat);
     }
 
     snprintf(nm, sizeof(nm), "%sSW_POLL", pfx);
@@ -611,6 +643,8 @@ static int switch_to(runner *r, int n, int tag, int regpoll, int reset_at_ms)
                     secnr_changed = 1;
                 last_secnr = sn_now;
             }
+            if (sk == 6 && asc == 0x28 && ascq == 0)
+                saw_ua = 1;
             if (secnr_changed || tr.rc != last_rc || tr.status != last_st || tr.error != last_er || sk != last_sk ||
                 asc != last_asc || ascq != last_ascq) {
                 char f[140];
@@ -640,15 +674,17 @@ static int switch_to(runner *r, int n, int tag, int regpoll, int reset_at_ms)
     }
     now = r->ops->now_us(r->ops->ctx);
     {
-        char f[120];
+        char f[140];
         snprintf(nm, sizeof(nm), "%sSW_RESULT", pfx);
         snprintf(f, sizeof(f), "n=%d rc=%s t_ms=%lu polls=%d changes=%d", n, ready ? "ok" : (r->abort ? "abort" : "timeout"),
                  (unsigned long)((now - t0) / 1000u), polls, changes);
+        if (kind != SK_NORMAL)      /* did a UNIT ATTENTION 6/28/00 (medium may have changed) come? */
+            snprintf(f + strlen(f), sizeof(f) - strlen(f), " ua_28=%d", saw_ua);
         out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
     }
     /* After a reset switch: the drive's state block and sense once it is READY (did the reset change the
      * pause / standby state or the head position?). Read-only, like the battery. */
-    if (reset_at_ms >= 0 && !r->abort) {
+    if ((reset_at_ms >= 0 || kind != SK_NORMAL) && !r->abort) {
         cdb_simple(c, 0x10, 0, 0, 10);
         snprintf(nm, sizeof(nm), "%sREQ_STAT", pfx);
         do_cmd(r, nm, NULL, c, 10, r->cfg->timeout_ms, 1, &res);
@@ -689,16 +725,21 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
         battery(r, 0);
         for (i = 0; i < cfg->n_images && !r->abort; i++) {
             int n = cfg->images[i];
-            int ready = switch_to(r, n, n, cfg->swap_regpoll, -1);
+            int ready = switch_to(r, n, n, cfg->swap_regpoll, -1, SK_NORMAL);
             snprintf(msg, sizeof(msg), "probing image %d%s...", n, ready ? "" : " (not ready)");
             say(r, msg);
             battery(r, 1);
             /* R148: the same image again, once per delay, with a DEVICE RESET inside the window */
             for (j = 0; cfg->swap_devreset && j < cfg->n_devreset && !r->abort; j++)
-                switch_to(r, n, n, 1, cfg->devreset_ms[j]);
+                switch_to(r, n, n, 1, cfg->devreset_ms[j], SK_NORMAL);
+            /* seq 17: the same folder again with no reset, then a reset with no switch command */
+            if (cfg->swap_reswitch && !r->abort)
+                switch_to(r, n, n, 1, -1, SK_RESWITCH);
+            if (cfg->devreset_only && !r->abort)
+                switch_to(r, n, n, 1, -1, SK_DEVRESET_ONLY);
         }
         if (cfg->return_to > 0 && !r->abort)
-            switch_to(r, cfg->return_to, cfg->return_to, 0, -1);
+            switch_to(r, cfg->return_to, cfg->return_to, 0, -1, SK_NORMAL);
     } else {
         r->img = 0;
         say(r, "probing the mounted image...");
