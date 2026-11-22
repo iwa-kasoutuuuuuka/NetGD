@@ -250,7 +250,10 @@ class ExpectTest(unittest.TestCase):
                 polls = get(img, pfx + 'SW_REGPOLL')
                 self.assertEqual([e['secnr'] for e in polls], [final, '0x00', final])   # no 0x06: no window
                 self.assertEqual([e['altst'] for e in polls], ['0x50', '0x00', '0x00'])
-                self.assertEqual([e['err'] for e in polls], ['0x00', '0x01', '0x01'])
+                # ERROR is sticky: the last CHECK's (the battery's 0x50, or 2/3A/00's 0x20 with no medium, and in
+                # R200_ the UNIT ATTENTION 0x60 of R50_), then the reset's 0x01.
+                first = {('R50_', 7): '0x20', ('R200_', 7): '0x20', ('R50_', 3): '0x50', ('R50_', 4): '0x50'}
+                self.assertEqual([e['err'] for e in polls], [first.get((pfx, img), '0x60'), '0x01', '0x01'])
                 self.assertEqual([e['irr'] for e in polls], ['0x03', '0x01', '0x01'])
                 sw = get(img, pfx + 'SW_POLL')
                 self.assertEqual(sw[0]['sense'], '2/3a/00' if img == 7 else '6/28/00')
@@ -262,6 +265,27 @@ class ExpectTest(unittest.TestCase):
         old = expect_sd.predict(self.card, images=[4], return_to=0, devreset=(50,), passthrough=['--old-bitstream'])
         _, oe = compare.parse_record(old)
         self.assertEqual([e['err'] for e in oe if e['probe'] == 'R50_SW_DEVRESET'], ['0x00'])
+        # ... and clears ERROR on every PACKET write: 0x00 after the successful re-switch.
+        self.assertEqual([e['err'] for e in oe if e['probe'] == 'R50_SW_REGPOLL'], ['0x00', '0x00', '0x00'])
+
+    def test_head_follows_cd_read_and_sticky_error(self):
+        # Stock seq 17/18: after the battery's reads and a no-op re-switch REQ_STAT reports where the last CD_READ
+        # ended (GDI 03: IP_READ of 7 at 45150 -> 0xB065); a read refused for its type leaves the start FAD
+        # (CDI 04 at 0x2E4C); DEVICE RESET parks the head again. ERROR stays the last CHECK's.
+        text = expect_sd.predict(self.card, images=[3, 4], return_to=0, regpoll=True, reswitch=True,
+                                 devreset_only=True, passthrough=['--no-throughput', '--no-seek', '--no-flags-test'])
+        _, entries = compare.parse_record(text)
+        get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
+        self.assertEqual(get(3, 'RS_REQ_STAT')[0]['data'], '018f41030100b0650000')
+        self.assertEqual(get(3, 'DR_REQ_STAT')[0]['data'], '018f41030100b05e0000')
+        self.assertEqual(get(4, 'RS_REQ_STAT')[0]['data'], '012f410201002e4c0000')
+        self.assertEqual(get(4, 'DR_REQ_STAT')[0]['data'], '012f0101010000960000')
+        self.assertEqual(get(3, 'REQ_STAT')[0]['data'], '018f41030100b05e0000')     # before the reads
+        # The first switch: the img=0 battery's REQ_SES_3 CHECK (0x50); img=4's: DR_'s UNIT ATTENTION (0x60);
+        # RS_ after img=4's refused IP_READ: 0x50.
+        self.assertEqual({e['err'] for e in get(3, 'SW_REGPOLL')}, {'0x50'})
+        self.assertEqual({e['err'] for e in get(4, 'SW_REGPOLL')}, {'0x60'})
+        self.assertEqual([e['err'] for e in get(4, 'RS_SW_REGPOLL')], ['0x50'])
 
     def test_reswitch_and_devreset_only_as_netgd_answers(self):
         # gdprobe seq 17: RS_ (52 82 n for the mounted folder) is a no-op, no UNIT ATTENTION; DR_ (DEVICE RESET

@@ -204,6 +204,35 @@ pub fn idle_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool) -> u32
     150
 }
 
+/// Where a CD_READ from `start_fad` leaves the head (REQ_STAT / GET_SCD):
+/// just past the last of the `transferred` sectors. Stock GDEMU 6.0 (seq
+/// 17/18, `RS_REQ_STAT` after the IP_READ and a same-folder re-switch that
+/// changes nothing): 7 sectors from FAD 45150 of GDI 03 -> `01 8f 41 03 01
+/// 00 b0 65` (45157); the 7-sector read of CDI 04's Mode 2 track at 0x2E4C
+/// with type Mode 1, refused 5/64/00 before any sector, -> `01 2f 41 02 01
+/// 00 2e 4c` (the start: the head went there, nothing was read). The status
+/// stays pause; track, index and CTRL are those of the track the FAD is in
+/// ([`head_position`]).
+pub fn read_end_fad(start_fad: u32, transferred: u32) -> u32 {
+    start_fad.wrapping_add(transferred)
+}
+
+/// The head with no CD-DA started: the end of the last CD_READ since the
+/// mount (`last_read` from [`read_end_fad`], 0 = none) once the unit has
+/// switched, else [`idle_fad`]. Before any switch stock keeps standby at
+/// FAD 150 though the BIOS has read the boot disc (records 02/05/06/09/16/17
+/// img=0, a cold power-on); after a Dreamcast reset -- which remounts
+/// (reset_goto) like a switch -- and the BIOS's reads it shows pause, track
+/// 2, FAD 0x05017A, lead-out - 2 of the dcload CDI (records 03/07/08/10-15/
+/// 18/20 img=0, R130's open point). A mount or a DEVICE RESET (seq 17 `DR_`)
+/// starts again from the park position.
+pub fn rest_fad<T: TrackInfo>(tracks: &[T], is_cdi: bool, switched: bool, last_read: u32) -> u32 {
+    if switched && last_read != 0 {
+        return last_read;
+    }
+    idle_fad(tracks, is_cdi, switched)
+}
+
 /// Drive status codes (low nibble of SECNR, byte 0 of REQ_STAT / REQ_SES).
 pub const DRIVE_PAUSE: u8 = 0x01;
 pub const DRIVE_STANDBY: u8 = 0x02;

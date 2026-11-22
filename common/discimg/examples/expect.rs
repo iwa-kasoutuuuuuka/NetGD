@@ -65,6 +65,11 @@ struct Opts {
     /// was the last command before this section a CHECK, and the SECNR byte at rest before it.
     prev_check: bool,
     prev_secnr: Option<u8>,
+    /// The ERROR register carried over (`expect_sd.py`): stock and NetGD keep the last CHECK's value through the
+    /// commands that succeed (sticky, fix/head-pos-sticky-err); it shows in the register polls.
+    prev_err: u8,
+    /// Where the last CD_READ since the mount left the head (`atapi::read_end_fad`), 0 = none.
+    prev_head: u32,
     throughput: bool,
     tp_batches: u32,
     tp_sectors: u32,
@@ -83,8 +88,10 @@ struct Opts {
     reswitch: bool,
     /// gdprobe seq 17 `devreset_only`: a DEVICE RESET with no switch command (`DR_`). Replaces --switch.
     devreset_only: bool,
-    /// The bitstream keeps MCU-written ERROR bits 0-1 (feat/fpga-regs), so DEVICE RESET's ERROR 0x01 shows;
-    /// `--old-bitstream` predicts 0x00 there.
+    /// The bitstream keeps MCU-written ERROR bits 0-1 (feat/fpga-regs) and no longer clears ERROR on the PACKET
+    /// write (fix/head-pos-sticky-err), so DEVICE RESET's ERROR 0x01 shows and ERROR stays sticky.
+    /// `--old-bitstream` predicts a bitstream before both: 0x00 after DEVICE RESET, 0x00 after every packet command
+    /// that succeeds. (feat/fpga-regs alone -- 0x01, cleared on PACKET -- is not modelled.)
     err_lo: bool,
     /// The swap window's open / detect lengths (GDEMU.INI open_time / detect_time; the probe card's 150 / 150).
     /// The re-detect after DEVICE RESET lasts detect_time. The register poll assumes the window (and the
@@ -131,6 +138,8 @@ fn parse_args() -> Opts {
         form2_sectors: false,
         prev_check: false,
         prev_secnr: None,
+        prev_err: 0,
+        prev_head: 0,
         throughput: true,
         tp_batches: 64,
         tp_sectors: 16,
@@ -167,6 +176,8 @@ fn parse_args() -> Opts {
             "--form2-sectors" => o.form2_sectors = true,
             "--prev-check" => o.prev_check = num(&val()) != 0,
             "--prev-secnr" => o.prev_secnr = Some(num(&val()) as u8),
+            "--prev-err" => o.prev_err = num(&val()) as u8,
+            "--prev-head" => o.prev_head = num(&val()),
             "--no-throughput" => o.throughput = false,
             "--tp-batches" => o.tp_batches = num(&val()),
             "--tp-sectors" => o.tp_sectors = num(&val()).clamp(1, 16),
@@ -418,6 +429,12 @@ struct Out {
     secnr: Option<u8>,
     /// Probe-name prefix (gdprobe's `R<ms>_` for a DEVICE RESET switch), on probe and event lines.
     pfx: String,
+    /// The ERROR register as a register poll reads it: the last CHECK's value (sticky); with `old_bs` 0 after
+    /// any packet command that succeeds (that bitstream clears it on the PACKET write).
+    err_reg: u8,
+    old_bs: bool,
+    /// Where the last CD_READ since the mount left the head, 0 = none (ide.rs `LAST_READ_FAD`).
+    head: u32,
 }
 
 impl Out {
@@ -443,11 +460,28 @@ impl Out {
             let _ = write!(self.s, " secnr=0x{:02x}", v);
         }
         self.last_check = !r.ok;
+        self.packet_done(r.ok, r.err);
         if show_data && !r.data.is_empty() {
             let n = r.data.len().min(REC_DATA_MAX);
             let _ = write!(self.s, " data={}", hex(&r.data[..n]));
         }
         self.s.push_str(" us=-\n");
+    }
+
+    /// A packet command ended: a CHECK writes its ERROR; a success writes nothing (ide.rs `set_error`), but the
+    /// old bitstream has already cleared ERROR on the PACKET write.
+    fn packet_done(&mut self, ok: bool, err: u8) {
+        if !ok {
+            self.err_reg = err;
+        } else if self.old_bs {
+            self.err_reg = 0;
+        }
+    }
+
+    /// A CD_READ from `fad` (ide.rs `handle_cd_read`): the head goes to the start, and past the last sector when
+    /// the read went through (`atapi::read_end_fad`).
+    fn note_read(&mut self, ok: bool, fad: u32, count: u32) {
+        self.head = if ok { atapi::read_end_fad(fad, count) } else { fad };
     }
 
     fn event(&mut self, name: &str, fields: &str) {
@@ -590,7 +624,8 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
 
     // Nothing plays: the idle status and head (D2/D4) -- pause and the switch's park position after a
     // `52 82` (`switched`), standby at FAD 150 on a unit that has not switched since power-on (ide.rs
-    // `IDLE_STATUS` / `SWITCHED`). CD_READ moves neither, in the firmware or here.
+    // `IDLE_STATUS` / `SWITCHED`). The battery's reads come after this REQ_STAT; they move the head for the
+    // later sections (`o.head`, `state_lines`).
     let idle = if switched { atapi::DRIVE_PAUSE } else { atapi::DRIVE_STANDBY };
     let idle_fad = atapi::idle_fad(&d.tracks, d.is_cdi, switched);
     let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, idle_fad);
@@ -699,6 +734,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
         let c = cdb_read(opt.cdread_flags, ip, 7);
         let (r, data) = read_res(d, opt.cdread_flags, ip, 7);
         o.probe("IP_READ", Some(&format!("fad={} count=7", ip)), Some(&c), &r, true);
+        o.note_read(r.ok, ip, 7);
         hash_sectors(o, ip, 7, &data);
         ip
     };
@@ -725,9 +761,11 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             };
             let ex = format!("flags=0x{:02x} fad={} count=1 ssz={} crc={} sense={}", flags, ip, ssz, crc, sense);
             o.probe("CDREAD_FLAGS", Some(&ex), Some(&c), &r, false);
+            o.note_read(r.ok, ip, 1);
             if !r.ok {
                 // probes.c reads the sense with a REQ_ERROR that is not logged: the next CDB phase follows it.
                 o.last_check = false;
+                o.packet_done(true, 0);
             }
         }
     }
@@ -747,6 +785,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             let c = cdb_read(opt.cdread_flags, fad, n);
             let (r, data) = read_res(d, opt.cdread_flags, fad, n);
             o.probe(&format!("TP_{:03}", b), Some(&format!("fad={} count={}", fad, n)), Some(&c), &r, false);
+            o.note_read(r.ok, fad, n);
             if r.ok {
                 ok += 1;
                 bytes += r.total;
@@ -768,6 +807,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             let c = cdb_read(opt.cdread_flags, fad, 1);
             let (r, data) = read_res(d, opt.cdread_flags, fad, 1);
             o.probe(&format!("SEEK_{:02}", i), Some(&format!("fad={}", fad)), Some(&c), &r, false);
+            o.note_read(r.ok, fad, 1);
             hash_sectors(o, fad, 1, &data);
         }
     }
@@ -850,6 +890,10 @@ fn sw_poll(o: &mut Out, r: &Res, sense: &str, secnr: Option<u8>) {
     o.event("SW_POLL", &f);
     // A poll is a TUR, after a CHECK followed by a REQ_ERROR (both unlogged): it ends on a good status.
     o.last_check = false;
+    o.packet_done(r.ok, r.err);
+    if !r.ok {
+        o.packet_done(true, 0); // the REQ_ERROR
+    }
     o.secnr = secnr;
 }
 
@@ -869,17 +913,18 @@ fn regpoll_line(o: &mut Out, altst: u8, err: u8, irr: u8, secnr: Option<u8>) {
 }
 
 /// The register poll after an accepted `52 82 n` to another folder: one line per change. The registers are those
-/// `52 82` completed with (ALTSTATUS 0x50, ERROR 0x00 -- `finish_ok` --, IRR 3) and SECNR walks the window (ide.rs
+/// `52 82` completed with (ALTSTATUS 0x50, IRR 3, ERROR the last CHECK's -- sticky --) and SECNR walks the window (ide.rs
 /// `mounted`, then `ide_task`'s timer): the old byte, `0x06`, `0x00`, the final one. Ends with the window over.
 fn regpoll_lines(o: &mut Out, rp: &RegPoll, medium: bool, disc_format: u8) {
     use atapi::SwapPhase::*;
     let _ = (rp.open_ms, rp.detect_ms);
     let mut last = o.secnr;
-    regpoll_line(o, 0x50, 0, 0x03, last);
+    let err = o.err_reg;
+    regpoll_line(o, 0x50, err, 0x03, last);
     for phase in [Open, Detect, Done] {
         let v = Some(atapi::swap_secnr(phase, medium, disc_format));
         if v != last {
-            regpoll_line(o, 0x50, 0, 0x03, v);
+            regpoll_line(o, 0x50, err, 0x03, v);
             last = v;
         }
     }
@@ -910,18 +955,21 @@ fn devreset_lines(o: &mut Out, delay_ms: u32, detect_ms: u32, medium: bool, disc
     if done != busy {
         regpoll_line(o, st, err, irr, Some(done));
     }
+    // The reset's ERROR stays until the next CHECK; the head goes back to the park position (ide.rs).
+    o.err_reg = err;
+    o.head = 0;
     o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
     done
 }
 
 /// REQ_STAT and REQ_ERROR once a reset / re-switch section is READY (or not): read-only, like the battery.
-/// NetGD's head is the park position after a switch (`atapi::idle_fad`); it does not follow CD_READ.
+/// The head is where the last CD_READ since the mount ended, else the switch's park position (`atapi::rest_fad`).
 fn state_lines(o: &mut Out, disc: Option<&Disc>) {
     let rs = cdb_simple(0x10, 0, 0, 10);
     let re = cdb_simple(0x13, 0, 0, 10);
     match disc {
         Some(d) => {
-            let fad = atapi::idle_fad(&d.tracks, d.is_cdi, true);
+            let fad = atapi::rest_fad(&d.tracks, d.is_cdi, true, o.head);
             let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, fad);
             let stat = atapi::req_stat_reply(AudioState::Standby, atapi::DRIVE_PAUSE, atapi::disc_format(&d.tracks, d.is_cdi), 0, fad, track);
             o.probe("REQ_STAT", None, Some(&rs), &cut(&stat, 10), true);
@@ -1007,7 +1055,8 @@ fn same_folder_lines(o: &mut Out, n: u32, kind: Same, detect_ms: u32, disc_forma
         Same::ResetOnly => o.event("IDLE", "idle_ms=500"),
         _ => {
             o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&cdb_mount(n)), &Res::ok(&[]), false);
-            regpoll_line(o, 0x50, 0, 0x03, old);
+            let err = o.err_reg;
+            regpoll_line(o, 0x50, err, 0x03, old);
         }
     }
     let reset = match kind {
@@ -1042,7 +1091,18 @@ fn same_folder_lines(o: &mut Out, n: u32, kind: Same, detect_ms: u32, disc_forma
 
 fn main() {
     let opt = parse_args();
-    let mut o = Out { s: String::new(), img: opt.img, last_check: opt.prev_check, secnr: opt.prev_secnr, pfx: String::new() };
+    let mut o = Out {
+        s: String::new(),
+        img: opt.img,
+        last_check: opt.prev_check,
+        secnr: opt.prev_secnr,
+        pfx: String::new(),
+        err_reg: opt.prev_err,
+        old_bs: !opt.err_lo,
+        // A switch to another folder mounts afresh (ide.rs `mounted`): the head is parked again (a refused one
+        // keeps it).
+        head: if opt.switch && opt.devreset_ms.is_none() && !opt.missing_folder { 0 } else { opt.prev_head },
+    };
 
     let disc = match &opt.image {
         Some(p) => match load_disc(p) {
@@ -1118,7 +1178,7 @@ fn main() {
         o.event("END", "abort=0");
     }
     // Carried into the next section by expect_sd.py (and dropped from the record there).
-    o.s.push_str(&format!("# expect-state last_check={}", o.last_check as u8));
+    o.s.push_str(&format!("# expect-state last_check={} err=0x{:02x} head={}", o.last_check as u8, o.err_reg, o.head));
     if let Some(v) = o.secnr {
         o.s.push_str(&format!(" secnr=0x{:02x}", v));
     }

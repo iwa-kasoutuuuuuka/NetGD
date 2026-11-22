@@ -29,6 +29,9 @@ SW_CMD / SW_POLL / SW_RESULT, then the battery, all tagged img=<folder number>.
   * --reswitch / --devreset-only (gdprobe seq 17 swap_reswitch=1 / devreset_only=1): after the battery (and the
     R<ms>_ runs) the same folder again with no reset (RS_ lines, a no-op), then a DEVICE RESET with no switch
     command (DR_ lines).
+  * ERROR is sticky (fix/head-pos-sticky-err): the register polls show the last CHECK's value, 0x01 after DEVICE
+    RESET (--old-bitstream: 0x00 after every packet command that succeeds). REQ_STAT after the RS_ / R<ms>_ / DR_
+    lines reports where the battery's last CD_READ left the head (RS_), or the park position after a reset.
 Without --out the record goes to stdout. Everything not predictable (us, t_ms, polls, ...) is '-'.
 """
 import argparse
@@ -102,7 +105,11 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
              '# predicted by tools/netgd-expect (NetGD firmware logic); img=0 (boot disc) is not predicted; timings are "-"\n']
     mounted = None      # the image file currently mounted, None = unknown (the boot disc) or no medium
     last_img = 0
-    state = []          # --prev-check / --prev-secnr for the next section (cdbst= / secnr=)
+    # --prev-check / --prev-secnr / --prev-err / --prev-head for the next section (cdbst= / secnr= / the sticky
+    # ERROR in the register polls / where the last CD_READ left the head). Before the first section: ERROR 0x50,
+    # what the img=0 battery leaves (its REQ_SES_3 on the boot disc is ILLEGAL REQUEST in every record).
+    state = ['--prev-err', '0x50']
+    keys = {'last_check': '--prev-check', 'secnr': '--prev-secnr', 'err': '--prev-err', 'head': '--prev-head'}
 
     def run(args):
         nonlocal state
@@ -112,7 +119,7 @@ def predict(outdir, images=None, return_to=None, label='netgd-expected', binary=
             if line.startswith('# expect-state '):
                 for kv in line.split()[2:]:
                     k, v = kv.split('=', 1)
-                    state += ['--prev-check' if k == 'last_check' else '--prev-secnr', v]
+                    state += [keys[k], v]
             else:
                 keep.append(line)
         return ''.join(keep)
