@@ -97,6 +97,8 @@ CIDR が ATSAM3U2E と同系列 (`0x281A0760`〜`0x281A077F`) で `0x281A0761` �
 データシート 8.2.3.5 / 20.4.3.6: セキュリティビット (GPNVM bit 0) が立っていると、ICE (JTAG/SWD) からのフラッシュ・SRAM・コアレジスタ・内部周辺へのアクセスは**すべて禁止**です。
 解除は ERASE ピンでフラッシュ全体を消すしかなく、**純正ファームは二度と戻りません。** 純正を捨てると決めるまで ERASE には触らないでください。
 このツールは ERASE を一切行いません。`check` の出力を Claude に送ってください。
+ユーザーが ERASE を決めた場合の、その後の手順（SWD の確認・GPNVM・最初に書くファーム）は `docs/research/gdemu60-bringup.md`。
+ERASE の後の `check` は、CHIPID を読むだけの確認として使える（`UNLOCKED_2E` になるはず）。消えた後のフラッシュは全部 0xFF なので `dump` は要らない。
 
 ## 読み取り専用であること (安全策)
 
@@ -104,7 +106,7 @@ CIDR が ATSAM3U2E と同系列 (`0x281A0760`〜`0x281A077F`) で `0x281A0761` �
 次は実行前に拒否されます (ユニットテストあり): `download` `erase` `write` `run` `reset` `attach` `gdb` `serve` など他の全サブコマンド、`--connect-under-reset`、`--allow-erase-all`、`--cycle-power`、`-o/--output`、`--format`、`--chip-description-path`、SWD 以外のプロトコル、フラッシュ範囲と CHIPID レジスタ (`0x400E0740`〜`0x400E0747`) 以外へのアドレスの `read`。
 さらに、環境変数 `PROBE_RS_*` (`PROBE_RS_CONNECT_UNDER_RESET` など clap が環境変数から読むもの) は子プロセスに渡しません。
 probe-rs は `.probe-rs.{toml,json,yaml,yml}` をカレント・実行ファイルのフォルダ・ホームから読み、`[presets.default]` で黙ってオプションを足せます (環境変数の除去では防げない)。そのため、これらのファイルが 1 つでもあると**実行を拒否**し、さらに probe-rs は毎回新しい空の一時フォルダをカレントにして起動します。
-probe-rs の `download` / `erase` / `reset` などを**手で実行してはいけません**。`SAM3U.yaml` には `atsam3u_gpnvm` というフラッシュアルゴリズムまで入っており、GPNVM (セキュリティビット) を書き換えられてしまいます。
+**純正ファームが残っている間は**、probe-rs の `download` / `erase` / `reset` などを**手で実行してはいけません**（ERASE をした後の基板は `docs/research/gdemu60-bringup.md` §1-3 に従う）。`SAM3U.yaml` には `atsam3u_gpnvm` というフラッシュアルゴリズムまで入っており、GPNVM (セキュリティビット) を書き換えられてしまいます。
 `dump` は `<名前>.bin.part` に排他的に作って flush + fsync し、読み戻して SHA-256 を照合してから最終名へリネームします (既存ファイルは上書きされず、不一致なら `.part` を消して終了コード 3)。
 `dump` の `--chunk` は 4 の倍数で 256〜65536 (範囲外は終了コード 2)。
 **バックアップに含まれないもの**: GPNVM ビット、ユニーク ID、ユーザーシグネチャ (読むには EEFC コマンドが必要で、意図的に行っていません)。フラッシュの内容だけです。

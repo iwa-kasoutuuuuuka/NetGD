@@ -18,6 +18,8 @@ FPGA 自身にボールの番号を名乗らせて調べる。結果は `fpga/ag
 
 1. **純正ファームのバックアップ**：`tools/fwbackup/README_ja.md` のとおり `check` → `UNLOCKED_2E` なら `dump` → 照合。
    **`LOCKED` なら実行しない**（純正は戻せない。続けるかはユーザーの判断で、2 枚目の基板を勧める）。
+   ロックされた基板（R177、6.0 はロック前提）で、ユーザーが ERASE を決めた場合だけは、バックアップ無しで進む：
+   `FIRST_RUN_ja.md` の手順 B'、`docs/research/gdemu60-bringup.md`（ERASE の後は SWD の確認 → 何も駆動しない `census` → 段階 0）。
 2. **導通確認**（無通電、テスター）：PS の 5 本（PA23 = DATA0 = G2、PA24 = DCLK = G1、PA25 = nCONFIG = H3、PB1 = CONF_DONE = F16、PB2 = nSTATUS = F3）、
    MSEL1（F15）が PS の側（Low）に固定されていること、LED のピン（PB18）。今のファームは v5.5 の割り当てを仮定している（`cyclone::pinmap`）。
    **nCONFIG が PA25 でなければ、ファームは FPGA を止められない**ので、ここは必ず確かめる。

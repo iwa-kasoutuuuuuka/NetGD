@@ -26,6 +26,8 @@ sdfast = { path = "../../common/sdfast", optional = true }
 stackmark = { path = "../../common/stackmark", optional = true }
 # Frame decoder for the `pinfind` feature (pure, host-tested).
 pinfind = { path = "../../common/pinfind", optional = true, features = ["defmt"] }
+# Line classification for the `census` feature (pure, host-tested).
+pincensus = { path = "../../common/pincensus", optional = true, features = ["defmt"] }
 
 embassy-atsam3 = { path = "../embassy-atsam3", features = ["rt", "time-driver"] }
 # The resident boot region's pure logic. In the app: the clock constants
@@ -73,6 +75,19 @@ board-v60 = ["sam3u2e", "lazy-extents"]
 #   cargo build --release --no-default-features --features pinfind
 # Off by default; the other builds do not change. Not run on hardware.
 pinfind = ["board-v60", "dep:pinfind", "embassy-atsam3/no-board-io"]
+
+# GDEMU 6.0 pin census (docs/research/gdemu60-bringup.md 2-4). NOT a NetGD
+# firmware: the first thing to flash on an erased 6.0 board. It drives no
+# line at all -- every PIO line stays an input, only the internal pull-up is
+# switched off and on -- classifies each line (high / low / floating /
+# toggling, common/pincensus), checks the v5.5 PS-loader and button pins
+# against what an unconfigured FPGA should look like, and reports lines that
+# change while the button is pressed or the SD card goes in and out. No
+# bitstream is embedded and the FPGA is never configured; no SD, IDE, LED,
+# SMC, UART, PCK0 or HSMCI. Keep the logging on:
+#   cargo build --release --no-default-features --features census
+# Off by default; the other builds do not change. Not run on hardware.
+census = ["board-v60", "dep:pincensus", "embassy-atsam3/no-board-io"]
 
 # Read a track file that is too fragmented for the shared extent pool
 # through a small on-demand window over its cluster chain (fat.rs, `lazy_*`),
