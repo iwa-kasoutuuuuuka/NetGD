@@ -68,8 +68,8 @@ struct Opts {
     /// The ERROR register carried over (`expect_sd.py`): stock and NetGD keep the last CHECK's value through the
     /// commands that succeed (sticky, fix/head-pos-sticky-err); it shows in the register polls.
     prev_err: u8,
-    /// Where the last CD_READ since the mount left the head (`atapi::read_end_fad`), 0 = none.
-    prev_head: u32,
+    /// Where the last CD_READ since the mount left the head (`atapi::read_end_fad`), None = nothing since the mount.
+    prev_head: Option<u32>,
     throughput: bool,
     tp_batches: u32,
     tp_sectors: u32,
@@ -139,7 +139,7 @@ fn parse_args() -> Opts {
         prev_check: false,
         prev_secnr: None,
         prev_err: 0,
-        prev_head: 0,
+        prev_head: None,
         throughput: true,
         tp_batches: 64,
         tp_sectors: 16,
@@ -177,7 +177,7 @@ fn parse_args() -> Opts {
             "--prev-check" => o.prev_check = num(&val()) != 0,
             "--prev-secnr" => o.prev_secnr = Some(num(&val()) as u8),
             "--prev-err" => o.prev_err = num(&val()) as u8,
-            "--prev-head" => o.prev_head = num(&val()),
+            "--prev-head" => o.prev_head = Some(num(&val())),
             "--no-throughput" => o.throughput = false,
             "--tp-batches" => o.tp_batches = num(&val()),
             "--tp-sectors" => o.tp_sectors = num(&val()).clamp(1, 16),
@@ -433,8 +433,8 @@ struct Out {
     /// any packet command that succeeds (that bitstream clears it on the PACKET write).
     err_reg: u8,
     old_bs: bool,
-    /// Where the last CD_READ since the mount left the head, 0 = none (ide.rs `LAST_READ_FAD`).
-    head: u32,
+    /// Where the last CD_READ since the mount left the head, None = nothing since the mount (ide.rs `LAST_READ_FAD`).
+    head: Option<u32>,
 }
 
 impl Out {
@@ -478,10 +478,13 @@ impl Out {
         }
     }
 
-    /// A CD_READ from `fad` (ide.rs `handle_cd_read`): the head goes to the start, and past the last sector when
-    /// the read went through (`atapi::read_end_fad`).
-    fn note_read(&mut self, ok: bool, fad: u32, count: u32) {
-        self.head = if ok { atapi::read_end_fad(fad, count) } else { fad };
+    /// A CD_READ of `count` from `fad` (ide.rs `handle_cd_read`): a start inside a track moves the head there
+    /// (`atapi::read_head_start`, also when the read is then refused for its type), past the last sector when the
+    /// read went through (`atapi::read_end_fad`; gdprobe reads it all). A start outside any track leaves it.
+    fn note_read(&mut self, tracks: &[TrackDesc], ok: bool, fad: u32, count: u32) {
+        if let Some(start) = atapi::read_head_start(tracks, fad, count) {
+            self.head = Some(if ok { atapi::read_end_fad(fad, count) } else { start });
+        }
     }
 
     fn event(&mut self, name: &str, fields: &str) {
@@ -734,7 +737,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
         let c = cdb_read(opt.cdread_flags, ip, 7);
         let (r, data) = read_res(d, opt.cdread_flags, ip, 7);
         o.probe("IP_READ", Some(&format!("fad={} count=7", ip)), Some(&c), &r, true);
-        o.note_read(r.ok, ip, 7);
+        o.note_read(&d.tracks, r.ok, ip, 7);
         hash_sectors(o, ip, 7, &data);
         ip
     };
@@ -761,7 +764,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             };
             let ex = format!("flags=0x{:02x} fad={} count=1 ssz={} crc={} sense={}", flags, ip, ssz, crc, sense);
             o.probe("CDREAD_FLAGS", Some(&ex), Some(&c), &r, false);
-            o.note_read(r.ok, ip, 1);
+            o.note_read(&d.tracks, r.ok, ip, 1);
             if !r.ok {
                 // probes.c reads the sense with a REQ_ERROR that is not logged: the next CDB phase follows it.
                 o.last_check = false;
@@ -785,7 +788,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             let c = cdb_read(opt.cdread_flags, fad, n);
             let (r, data) = read_res(d, opt.cdread_flags, fad, n);
             o.probe(&format!("TP_{:03}", b), Some(&format!("fad={} count={}", fad, n)), Some(&c), &r, false);
-            o.note_read(r.ok, fad, n);
+            o.note_read(&d.tracks, r.ok, fad, n);
             if r.ok {
                 ok += 1;
                 bytes += r.total;
@@ -807,7 +810,7 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
             let c = cdb_read(opt.cdread_flags, fad, 1);
             let (r, data) = read_res(d, opt.cdread_flags, fad, 1);
             o.probe(&format!("SEEK_{:02}", i), Some(&format!("fad={}", fad)), Some(&c), &r, false);
-            o.note_read(r.ok, fad, 1);
+            o.note_read(&d.tracks, r.ok, fad, 1);
             hash_sectors(o, fad, 1, &data);
         }
     }
@@ -957,7 +960,7 @@ fn devreset_lines(o: &mut Out, delay_ms: u32, detect_ms: u32, medium: bool, disc
     }
     // The reset's ERROR stays until the next CHECK; the head goes back to the park position (ide.rs).
     o.err_reg = err;
-    o.head = 0;
+    o.head = None;
     o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
     done
 }
@@ -1101,7 +1104,7 @@ fn main() {
         old_bs: !opt.err_lo,
         // A switch to another folder mounts afresh (ide.rs `mounted`): the head is parked again (a refused one
         // keeps it).
-        head: if opt.switch && opt.devreset_ms.is_none() && !opt.missing_folder { 0 } else { opt.prev_head },
+        head: if opt.switch && opt.devreset_ms.is_none() && !opt.missing_folder { None } else { opt.prev_head },
     };
 
     let disc = match &opt.image {
@@ -1178,7 +1181,10 @@ fn main() {
         o.event("END", "abort=0");
     }
     // Carried into the next section by expect_sd.py (and dropped from the record there).
-    o.s.push_str(&format!("# expect-state last_check={} err=0x{:02x} head={}", o.last_check as u8, o.err_reg, o.head));
+    o.s.push_str(&format!("# expect-state last_check={} err=0x{:02x}", o.last_check as u8, o.err_reg));
+    if let Some(h) = o.head {
+        o.s.push_str(&format!(" head={}", h));
+    }
     if let Some(v) = o.secnr {
         o.s.push_str(&format!(" secnr=0x{:02x}", v));
     }

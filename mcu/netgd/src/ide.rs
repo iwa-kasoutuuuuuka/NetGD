@@ -948,6 +948,15 @@ async fn service_hard_reset(primary: &IdeDevice, state: &mut DeviceState) {
     if RSTN_FALLS_SEEN.swap(falls, core::sync::atomic::Ordering::Relaxed) == falls {
         return;
     }
+    // Stock remounts on a Dreamcast reset (reset_goto): pause, the head
+    // parked, then following the BIOS's reads (img=0 of records 03/07/08/
+    // 10-15/18/20: pause, track 2, lead-out - 2). Do the same for status and
+    // head whether or not an image is reloaded below (the early returns skip
+    // `mounted`). The power-on reset is not one of these: its edge is counted
+    // before `ide_task` takes the counter, so a cold boot stays standby/150.
+    SWITCHED.store(true, core::sync::atomic::Ordering::Relaxed);
+    IDLE_STATUS.store(GD_PAUSE, core::sync::atomic::Ordering::Relaxed);
+    set_last_read_fad(None);
     // No NOT READY window survives a reset: the host is rebooting and a
     // window left open would answer the booting BIOS with NOT READY. A
     // medium that was still in its window gets its UNIT ATTENTION now.
@@ -1113,7 +1122,7 @@ async fn handle(
             // the park position (seq 17 `DR_`: CDI `01 2f 01 01 01 00 00 96`,
             // GDI `01 8f 41 03 01 00 b0 5e`), whatever was read before.
             crate::cdda::stop();
-            set_last_read_fad(0);
+            set_last_read_fad(None);
             // Stock re-detects on every DEVICE RESET, window or not (R155,
             // R159, seq 17): SECNR 0x00 now, the byte at rest detect_time
             // later (`ide_task`'s timer, which writes SECNR only), then the
@@ -1421,7 +1430,7 @@ fn mounted(state: &mut DeviceState, ok: bool) {
         SWITCHED.store(true, core::sync::atomic::Ordering::Relaxed);
         IDLE_STATUS.store(GD_PAUSE, core::sync::atomic::Ordering::Relaxed);
     }
-    set_last_read_fad(0);
+    set_last_read_fad(None);
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
     // Whatever was mounted by name before is gone; `mount_named` records its
@@ -1832,13 +1841,36 @@ static IDLE_STATUS: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8:
 /// park position (`discimg::atapi::idle_fad`, D4), not FAD 150.
 static SWITCHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// Where the last CD_READ since the mount left the head
-/// (`discimg::atapi::read_end_fad`), 0 = none: REQ_STAT / GET_SCD report it
-/// once switched (`discimg::atapi::rest_fad`; stock seq 17/18). A mount and
-/// DEVICE RESET put it back to 0 (the park position).
-static LAST_READ_FAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// (`discimg::atapi::read_head_start` / `read_end_fad`), or where CD_SEEK
+/// stopped CD-DA; `NO_HEAD` = nothing since the mount. REQ_STAT / GET_SCD
+/// report it once switched (`discimg::atapi::rest_fad`; stock seq 17/18). A
+/// mount, DEVICE RESET and a hard reset put it back to `NO_HEAD` (the park
+/// position).
+static LAST_READ_FAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(NO_HEAD);
+/// No FAD a read can leave (`read_head_start` needs a start of 150 or more
+/// inside a track, so the head is never 0..149 nor this).
+const NO_HEAD: u32 = u32::MAX;
 
-fn set_last_read_fad(fad: u32) {
-    LAST_READ_FAD.store(fad, core::sync::atomic::Ordering::Relaxed);
+fn set_last_read_fad(fad: Option<u32>) {
+    LAST_READ_FAD.store(fad.unwrap_or(NO_HEAD), core::sync::atomic::Ordering::Relaxed);
+}
+
+fn last_read_fad() -> Option<u32> {
+    let v = LAST_READ_FAD.load(core::sync::atomic::Ordering::Relaxed);
+    (v != NO_HEAD).then_some(v)
+}
+
+/// What the last `stream_from_sd` / `stream_pio_from_sd` actually got to the
+/// host, in bytes: the head moves by these sectors, not by the request
+/// (a reset or new command before or during the data phase, a block the host
+/// left undrained, a short DMA, a card failure). Unlike `STREAM_OK` it is in
+/// every build. A transfer abandoned by a reset or a new command counts only
+/// what is known delivered: 0 for DMA (the Command write cleared the FIFO, so
+/// its level says nothing), the fully drained blocks for PIO.
+static STREAM_DELIVERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn set_stream_delivered(bytes: usize) {
+    STREAM_DELIVERED.store(bytes as u32, core::sync::atomic::Ordering::Relaxed);
 }
 
 fn idle_status() -> u8 {
@@ -2126,6 +2158,13 @@ async fn handle_packet(
                 crate::cdda::pause();
                 dev.set_secnr(secnr(GD_PAUSE));
             } else {
+                // The head stays where CD-DA stopped (a drive's pickup does not
+                // jump back to the last data read); stock has no record of
+                // REQ_STAT after CD-DA, so this is unmeasured.
+                let s = crate::cdda::snapshot();
+                if s.status != crate::cdda::Status::Standby {
+                    set_last_read_fad(Some(s.fad));
+                }
                 crate::cdda::stop();
                 // Stopped: standby in REQ_STAT too, not the idle pause of a switch.
                 IDLE_STATUS.store(GD_STANDBY, core::sync::atomic::Ordering::Relaxed);
@@ -2309,11 +2348,16 @@ async fn handle_cd_read(
     // track's mode, as on stock: Mode 2 Form 1 on a Mode 1 track, Mode 1 on a
     // Mode 2 track, either on an audio track is CHECK 5/64/00 (D8, D9, R144).
     let track = gdi.track_for_lba(lba);
+    // The head goes to the start of a request that starts inside a track,
+    // whatever follows (stock seq 17: a type refused 5/64/00 leaves REQ_STAT
+    // at the start FAD), and on by the sectors actually delivered (below). A
+    // start outside every track (lead-out, the GDI's gap between the areas,
+    // FAD 0xFFFFFF) or a count of 0 leaves it where it was.
+    let head_start = discimg::atapi::read_head_start(gdi.tracks(), starting_fad, count);
+    if head_start.is_some() {
+        set_last_read_fad(head_start);
+    }
     if let Some(t) = track {
-        // The head goes to the start whatever follows (stock seq 17: a type
-        // refused 5/64/00 leaves REQ_STAT at the start FAD); past the last
-        // sector once the transfer is through (below).
-        set_last_read_fad(starting_fad);
         if discimg::atapi::cd_read_type_mismatch(packet[1], t.mode()) {
             warn!("{}: CD_READ type {=u8:#x} does not fit the track", label, packet[1]);
             finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, discimg::atapi::ASC_ILLEGAL_MODE);
@@ -2381,12 +2425,17 @@ async fn handle_cd_read(
     }
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
     unsafe { STREAM_OK = false };
+    set_stream_delivered(0);
     if stream_from_sd(dev, gdi, lba, count as u32, total, dma, byte_limit).await {
         // The card failed under the read: MEDIUM ERROR for the REQUEST SENSE
         // that follows the error status the stream posted.
         state.pending_sense_key = 0x03;
-    } else {
-        set_last_read_fad(discimg::atapi::read_end_fad(starting_fad, count));
+    }
+    // Whole sectors that reached the host, in the layout just sent (2,048,
+    // 2,352 or 2,324 B), before `clear_out_layout` below.
+    if head_start.is_some() {
+        let done = STREAM_DELIVERED.load(core::sync::atomic::Ordering::Relaxed) as usize / out_sector_bytes();
+        set_last_read_fad(Some(discimg::atapi::read_end_fad(starting_fad, (done as u32).min(count))));
     }
     if raw_out() {
         // What is staged is laid out 2,352 apart: not a cache entry, and no
@@ -3510,6 +3559,7 @@ async fn stream_from_sd(
         // DMA mode itself on a reset but not on a Command write.
         info!("  host reset or new command during CD_READ; no completion");
         dev.disarm();
+        set_stream_delivered(0);
         return false;
     }
     let leftover = dev.read_fifo_level();
@@ -3537,6 +3587,7 @@ async fn stream_from_sd(
     // the full request we set up at data-phase start). Without this
     // the BIOS keeps thinking the transfer is still in flight.
     dev.set_atapi_byte_count((delivered.min(0xFFFE) & !1) as u16);
+    set_stream_delivered(delivered);
     dev.set_irr(0x03);
     if sd_failed {
         // The card failed mid-stream: the host got fewer sectors than it
@@ -3667,6 +3718,7 @@ async fn stream_pio_from_sd(
         info!("  host reset or abandoned CD_READ after {} of {} bytes; no completion",
               delivered, total_bytes);
         dev.disarm();
+        set_stream_delivered(sent);
         return false;
     }
     // Hold BSY (and drop DRQ) *before* releasing flow control: the FPGA's
@@ -3679,6 +3731,7 @@ async fn stream_pio_from_sd(
         blocks, delivered, total_bytes, (Instant::now() - t0).as_millis(), hash
     );
     dev.set_atapi_byte_count((delivered.min(0xFFFE) & !1) as u16);
+    set_stream_delivered(delivered);
     dev.set_irr(0x03);
     if ok {
         dev.complete(0, STATUS_IDLE);
@@ -4593,12 +4646,11 @@ fn build_req_stat_reply() -> [u8; 10] {
 
 /// Idle head position (D4): FAD 150 until the first switch, then the
 /// mounted image's park position (GDI: track 3's start), or where the last
-/// CD_READ since the mount ended (`LAST_READ_FAD`).
+/// CD_READ since the mount ended / CD_SEEK stopped CD-DA (`LAST_READ_FAD`).
 fn idle_fad() -> u32 {
     let switched = SWITCHED.load(core::sync::atomic::Ordering::Relaxed);
     let is_cdi = matches!(gdi_ref(), Some(g) if g.is_cdi);
-    let last = LAST_READ_FAD.load(core::sync::atomic::Ordering::Relaxed);
-    discimg::atapi::rest_fad(mounted_tracks(), is_cdi, switched, last)
+    discimg::atapi::rest_fad(mounted_tracks(), is_cdi, switched, last_read_fad())
 }
 
 /// Build a 6-byte REQ_SES reply describing one session (0-indexed).
