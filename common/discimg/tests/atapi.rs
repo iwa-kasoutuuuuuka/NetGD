@@ -934,9 +934,21 @@ fn disc_format_follows_the_track_modes() {
     assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_MODE2]), true), DISC_FORMAT_CDROM_XA);
     // CDI 10 (Mode 1 data): CD-ROM (`01 1f 01 01 01 00 00 96`, SECNR 0x11).
     assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_MODE1]), true), DISC_FORMAT_CDROM);
-    // Any Mode 2 track makes it XA (Flycast `GuessDiscType`); audio only is CD-DA (not probed on stock).
+    // Any Mode 2 track makes it XA (Flycast `GuessDiscType`).
     assert_eq!(disc_format(&mk(&[TRACK_MODE1, TRACK_MODE2]), true), DISC_FORMAT_CDROM_XA);
-    assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_AUDIO]), true), DISC_FORMAT_CDDA);
+    // CDI 11 (audio only): CD-ROM, not Flycast's CD-DA (R155: `01 1f ...`, SECNR 0x11).
+    assert_eq!(disc_format(&mk(&[TRACK_AUDIO, TRACK_AUDIO]), true), DISC_FORMAT_CDROM);
+    assert_eq!(disc_format(&mk(&[TRACK_AUDIO]), true), DISC_FORMAT_CDROM);
+    assert_eq!(disc_format::<TrackDesc>(&[], true), DISC_FORMAT_CDROM);
+
+    // R155's REQ_STAT of the audio-only CDI after a switch, byte for byte.
+    let tracks = mk(&[TRACK_AUDIO, TRACK_AUDIO]);
+    let fad = idle_fad(&tracks, true, true);
+    let (fad, tr) = head_position(&tracks, AudioState::Standby, 0, fad);
+    assert_eq!(
+        req_stat_reply(AudioState::Standby, DRIVE_PAUSE, disc_format(&tracks, true), 0, fad, tr),
+        [0x01, 0x1f, 0x01, 0x01, 0x01, 0x00, 0x00, 0x96, 0x00, 0x00]
+    );
 
     // R144's REQ_STAT of the Mode 1 CDI after a switch, byte for byte.
     let tracks = mk(&[TRACK_AUDIO, TRACK_MODE1]);

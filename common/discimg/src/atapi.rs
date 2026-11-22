@@ -216,32 +216,29 @@ pub const DRIVE_NODISC: u8 = 0x07;
 
 /// Disc format, already in the high nibble (SECNR, REQ_STAT byte 1;
 /// Flycast `gdrom_if.h`: CD-DA 0x00, CD-ROM 0x10, CD-ROM XA 0x20, GD-ROM 0x80).
-/// See [`disc_format`].
+/// See [`disc_format`]. Stock GDEMU 6.0 never reports CD-DA for an image
+/// (R155: an audio-only CDI is CD-ROM); the constant is Flycast's.
 pub const DISC_FORMAT_CDDA: u8 = 0x00;
 pub const DISC_FORMAT_CDROM: u8 = 0x10;
 pub const DISC_FORMAT_CDROM_XA: u8 = 0x20;
 pub const DISC_FORMAT_GDROM: u8 = 0x80;
 
 /// The disc format a mounted image reports (SECNR's and REQ_STAT byte 1's
-/// high nibble). A GDI is a GD-ROM. A CDI is a CD whose format follows its
-/// tracks' modes, as on stock GDEMU 6.0 (R144: the mkdcdisc CDI 04, Mode 2
-/// data, reports `2_`; the same layout with a Mode 1 data track, 10, reports
-/// `1_`, REQ_STAT `01 1f ...`, SECNR `0x11`): any Mode 2 track makes it
-/// CD-ROM XA, else any Mode 1 track CD-ROM, else (audio only, never probed on
-/// stock) CD-DA, as Flycast's `GuessDiscType` decides.
+/// high nibble), as stock GDEMU 6.0 does: a GDI is a GD-ROM; a CDI with any
+/// Mode 2 track is CD-ROM XA (R144: the mkdcdisc CDI 04 reports `2_`);
+/// every other CDI is CD-ROM -- Mode 1 data (R144: CDI 10, REQ_STAT
+/// `01 1f ...`, SECNR `0x11`) and audio only alike (R155: the two-audio-track
+/// CDI 11, REQ_STAT `01 1f ...`, SECNR `0x11`; R148 had guessed CD-DA 0x00
+/// from Flycast's `GuessDiscType`).
 pub fn disc_format<T: TrackInfo>(tracks: &[T], is_cdi: bool) -> u8 {
     if !is_cdi {
         return DISC_FORMAT_GDROM;
     }
-    let mut fmt = DISC_FORMAT_CDDA;
-    for t in tracks {
-        match t.mode() {
-            TRACK_MODE2 => return DISC_FORMAT_CDROM_XA,
-            TRACK_MODE1 => fmt = DISC_FORMAT_CDROM,
-            _ => {}
-        }
+    if tracks.iter().any(|t| t.mode() == TRACK_MODE2) {
+        DISC_FORMAT_CDROM_XA
+    } else {
+        DISC_FORMAT_CDROM
     }
-    fmt
 }
 
 /// Drive status for the pickup state: what REQ_STAT and REQ_SES put in

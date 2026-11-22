@@ -71,6 +71,15 @@ struct Opts {
     seek_span: u32,
     reads: bool,
     sw_only: bool,
+    /// gdprobe `swap_regpoll=1`: the command-free register poll after the switch (R154).
+    regpoll: bool,
+    /// gdprobe `swap_devreset`: a DEVICE RESET this many ms after the switch (implies the register poll; probe
+    /// names get the prefix `R<ms>_`, and REQ_STAT / REQ_ERROR follow the polls).
+    devreset_ms: Option<u32>,
+    /// The swap window's open / detect lengths (GDEMU.INI open_time / detect_time; the probe card's 150 / 150),
+    /// for where a DEVICE RESET lands. The register poll assumes the window (and the restarted one) is over
+    /// before gdprobe's polls start (1,000 ms, or reset + 300 ms).
+    window: (u32, u32),
 }
 
 fn usage() -> ! {
@@ -79,7 +88,8 @@ fn usage() -> ! {
          \x20             [--missing-folder] [--no-ua]\n\
          \x20             [--header] [--end] [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test] [--raw-sectors]\n\
          \x20             [--no-throughput] [--tp-batches N] [--tp-sectors N] [--no-seek] [--seek-n N]\n\
-         \x20             [--seek-span N] [--no-reads] [--sw-only]"
+         \x20             [--seek-span N] [--no-reads] [--sw-only]
+                       [--regpoll] [--devreset MS] [--window OPEN,DETECT]"
     );
     std::process::exit(2)
 }
@@ -118,6 +128,9 @@ fn parse_args() -> Opts {
         seek_span: 50000,
         reads: true,
         sw_only: false,
+        regpoll: false,
+        devreset_ms: None,
+        window: (150, 150),
     };
     let mut a = std::env::args().skip(1);
     while let Some(k) = a.next() {
@@ -148,6 +161,13 @@ fn parse_args() -> Opts {
             "--seek-span" => o.seek_span = num(&val()),
             "--no-reads" => o.reads = false,
             "--sw-only" => o.sw_only = true,
+            "--regpoll" => o.regpoll = true,
+            "--devreset" => o.devreset_ms = Some(num(&val())),
+            "--window" => {
+                let v = val();
+                let (a, b) = v.split_once(',').unwrap_or_else(|| usage());
+                o.window = (num(a), num(b));
+            }
             _ => usage(),
         }
     }
@@ -379,11 +399,13 @@ struct Out {
     last_check: bool,
     /// The SECNR byte (gdprobe `secnr=`, read at completion), None = not known (the boot disc's).
     secnr: Option<u8>,
+    /// Probe-name prefix (gdprobe's `R<ms>_` for a DEVICE RESET switch), on probe and event lines.
+    pfx: String,
 }
 
 impl Out {
     fn probe(&mut self, name: &str, extra: Option<&str>, cdb: Option<&[u8; 12]>, r: &Res, show_data: bool) {
-        let _ = write!(self.s, "img={} probe={}", self.img, name);
+        let _ = write!(self.s, "img={} probe={}{}", self.img, self.pfx, name);
         if let Some(e) = extra {
             let _ = write!(self.s, " {}", e);
         }
@@ -412,7 +434,7 @@ impl Out {
     }
 
     fn event(&mut self, name: &str, fields: &str) {
-        let _ = write!(self.s, "img={} probe={}", self.img, name);
+        let _ = write!(self.s, "img={} probe={}{}", self.img, self.pfx, name);
         if !fields.is_empty() {
             let _ = write!(self.s, " {}", fields);
         }
@@ -574,6 +596,8 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
     // TOC of both areas; the runner remembers the last valid lead-out and the first data track.
     let mut leadout = 0u32;
     let mut toc_ip = 0u32;
+    // probes.c `toc_any` / `toc_audio`: any valid track entry, the first audio track's FAD.
+    let (mut toc_any, mut toc_audio) = (false, 0u32);
     for s in 0..2u8 {
         let c = cdb_be16(0x14, s, 408);
         let mut toc = [0u8; 408];
@@ -583,12 +607,22 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
         if toc[404] != 0xFF && lo != 0 && lo != 0xFF_FFFF {
             leadout = lo;
         }
+        // The first data track of each area; the last area that has one wins.
+        let mut found = false;
         for t in 0..99 {
             let e = &toc[4 * t..4 * t + 4];
             let f = fad3(&e[1..4]);
-            if e[0] != 0xFF && (e[0] & 0x40) != 0 && f >= 150 && f < 0x00F0_0000 {
+            if e[0] == 0xFF || f < 150 || f >= 0x00F0_0000 {
+                continue;
+            }
+            toc_any = true;
+            if (e[0] & 0x40) == 0 {
+                if toc_audio == 0 {
+                    toc_audio = f;
+                }
+            } else if !found {
                 toc_ip = f;
-                break;
+                found = true;
             }
         }
     }
@@ -638,12 +672,21 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
         45150
     };
 
-    let c = cdb_read(opt.cdread_flags, ip, 7);
-    let (r, data) = read_res(d, opt.cdread_flags, ip, 7);
-    o.probe("IP_READ", Some(&format!("fad={} count=7", ip)), Some(&c), &r, true);
-    hash_sectors(o, ip, 7, &data);
+    // An image whose TOC has tracks but no data track (the audio-only CDI 11, R154/R155): gdprobe skips IP_READ,
+    // throughput and seek and runs only the flag battery on the first audio track.
+    let no_data = opt.ip_fad == 0 && toc_any && toc_ip == 0;
+    let ip = if no_data {
+        o.event("NO_DATA_TRACK", &format!("audio_fad={} reads=skipped", toc_audio));
+        toc_audio
+    } else {
+        let c = cdb_read(opt.cdread_flags, ip, 7);
+        let (r, data) = read_res(d, opt.cdread_flags, ip, 7);
+        o.probe("IP_READ", Some(&format!("fad={} count=7", ip)), Some(&c), &r, true);
+        hash_sectors(o, ip, 7, &data);
+        ip
+    };
 
-    if opt.flags_test {
+    if opt.flags_test && ip != 0 {
         // The sector type in byte 1 is checked by the track's mode (D8, D9, R144); a data track reads 2048 bytes
         // (2352 for 0x10 with --raw-sectors, D10), an audio track its 2352-byte PCM sectors (R144).
         for flags in [0x20u8, 0x24, 0x28, 0x10] {
@@ -670,6 +713,10 @@ fn battery(opt: &Opts, d: &Disc, o: &mut Out, ua: bool, switched: bool) {
                 o.last_check = false;
             }
         }
+    }
+
+    if no_data {
+        return;
     }
 
     if opt.throughput {
@@ -789,11 +836,79 @@ fn sw_poll(o: &mut Out, r: &Res, sense: &str, secnr: Option<u8>) {
     o.secnr = secnr;
 }
 
+/// gdprobe's command-free register poll (`swap_regpoll`, R154) and its DEVICE RESET variant, as NetGD answers.
+struct RegPoll {
+    open_ms: u32,
+    detect_ms: u32,
+    reset_ms: Option<u32>,
+}
+
+/// One `SW_REGPOLL` line: ALTSTATUS / ERROR / interrupt reason / SECNR.
+fn regpoll_line(o: &mut Out, altst: u8, err: u8, irr: u8, secnr: Option<u8>) {
+    let mut f = format!("t_ms=- sample=- altst=0x{:02x} err=0x{:02x} irr=0x{:02x}", altst, err, irr);
+    if let Some(v) = secnr {
+        f.push_str(&format!(" secnr=0x{:02x}", v));
+    }
+    o.event("SW_REGPOLL", &f);
+}
+
+/// The register poll after an accepted `52 82 n`: one line per change. Until the reset (or for the whole poll)
+/// the registers are those `52 82` completed with (ALTSTATUS 0x50, ERROR 0x00 -- `complete(0, ..)` --, IRR 3)
+/// and SECNR walks the window (ide.rs `mounted`, then `ide_task`'s timer): the old byte, `0x06`, `0x00`, the
+/// final one. A DEVICE RESET is modelled as NetGD answers it, not as stock does (R157: stock's rule is unknown;
+/// ERROR 0x01 cannot be produced by the FPGA, whose error register has no bit 0): ide.rs CMD_DEVICE_RESET
+/// reloads the signature (IRR 1, 14/EB) with SECNR at rest (the window's byte at that moment, `rest_secnr`),
+/// completes with status 0x50 / error 0x00 and leaves the window running, so SECNR walks on to the final byte.
+/// Ends with the window over.
+fn regpoll_lines(o: &mut Out, rp: &RegPoll, medium: bool, disc_format: u8) {
+    use atapi::SwapPhase::*;
+    let phases = [(0u32, Open), (rp.open_ms, Detect), (rp.open_ms + rp.detect_ms, Done)];
+    let mut last = o.secnr;
+    regpoll_line(o, 0x50, 0, 0x03, last);
+    for (start, phase) in phases {
+        if rp.reset_ms.map_or(false, |r| start >= r) {
+            break;
+        }
+        let v = Some(atapi::swap_secnr(phase, medium, disc_format));
+        if v != last {
+            regpoll_line(o, 0x50, 0, 0x03, v);
+            last = v;
+        }
+    }
+    if let Some(r) = rp.reset_ms {
+        // The window's byte at the reset; the first sample after it is always written.
+        let at = Some(atapi::swap_secnr(atapi::swap_phase(r, rp.open_ms, rp.detect_ms), medium, disc_format));
+        let mut f = format!(
+            "delay_ms={} t_ms=- rc=ok reset_us=- bsy_seen=1 altst=0x50 err=0x00 irr=0x01",
+            r
+        );
+        if let Some(v) = at {
+            f.push_str(&format!(" secnr=0x{:02x}", v));
+        }
+        f.push_str(" bcl=0x14 bch=0xeb");
+        o.event("SW_DEVRESET", &f);
+        regpoll_line(o, 0x50, 0, 0x01, at);
+        last = at;
+        for (start, phase) in phases {
+            if start <= r {
+                continue;
+            }
+            let v = Some(atapi::swap_secnr(phase, medium, disc_format));
+            if v != last {
+                regpoll_line(o, 0x50, 0, 0x01, v);
+                last = v;
+            }
+        }
+    }
+    o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
+}
+
 /// `switch_to`: `52 82 n`, then TUR / REQ_ERROR polls, one line per change of state. With an image or an
 /// empty folder the swap window plays out (`atapi::swap_phase`): no medium, becoming ready, then UNIT
 /// ATTENTION and READY -- or no medium again, until gdprobe's switch timeout. A refused mount leaves the old
-/// image (and its already-consumed UNIT ATTENTION) in place.
-fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8) {
+/// image (and its already-consumed UNIT ATTENTION) in place. With the register poll (`rp`) the polls only
+/// start once the window is over. A DEVICE RESET switch ends with REQ_STAT and REQ_ERROR.
+fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8, rp: Option<&RegPoll>, disc: Option<&Disc>) {
     let c = cdb_mount(n);
     let fmt = |(asc, ascq): (u8, u8), key: u8| format!("{}/{:02x}/{:02x}", key, asc, ascq);
     let nr = atapi::SENSE_NOT_READY;
@@ -808,9 +923,14 @@ fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8) {
             o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&c), &Res::ok(&[]), false);
             // SECNR through the window (ide.rs `window_secnr`, `atapi::swap_secnr`, R144 b).
             let medium = target == Target::Image;
-            for phase in [atapi::SwapPhase::Open, atapi::SwapPhase::Detect] {
-                let v = atapi::swap_secnr(phase, medium, disc_format);
-                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(phase), nr), Some(v));
+            match rp {
+                Some(rp) => regpoll_lines(o, rp, medium, disc_format),
+                None => {
+                    for phase in [atapi::SwapPhase::Open, atapi::SwapPhase::Detect] {
+                        let v = atapi::swap_secnr(phase, medium, disc_format);
+                        sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(phase), nr), Some(v));
+                    }
+                }
             }
             let done = Some(atapi::swap_secnr(atapi::SwapPhase::Done, medium, disc_format));
             if medium {
@@ -824,11 +944,30 @@ fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8) {
         }
     };
     o.event("SW_RESULT", &format!("n={} rc={} t_ms=- polls=- changes=-", n, if ready { "ok" } else { "timeout" }));
+    if rp.map_or(false, |r| r.reset_ms.is_some()) {
+        // The drive's state block and sense once READY (or not): read-only, like the battery.
+        let rs = cdb_simple(0x10, 0, 0, 10);
+        let re = cdb_simple(0x13, 0, 0, 10);
+        match disc {
+            Some(d) if target != Target::Empty => {
+                let fad = atapi::idle_fad(&d.tracks, d.is_cdi, true);
+                let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, fad);
+                let stat = atapi::req_stat_reply(AudioState::Standby, atapi::DRIVE_PAUSE, atapi::disc_format(&d.tracks, d.is_cdi), 0, fad, track);
+                o.probe("REQ_STAT", None, Some(&rs), &cut(&stat, 10), true);
+                o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(0, 0, 0)), true);
+            }
+            _ => {
+                let (asc, ascq) = atapi::ASC_NO_MEDIUM;
+                o.probe("REQ_STAT", None, Some(&rs), &Res::not_ready(), true);
+                o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(nr, asc, ascq)), true);
+            }
+        }
+    }
 }
 
 fn main() {
     let opt = parse_args();
-    let mut o = Out { s: String::new(), img: opt.img, last_check: opt.prev_check, secnr: opt.prev_secnr };
+    let mut o = Out { s: String::new(), img: opt.img, last_check: opt.prev_check, secnr: opt.prev_secnr, pfx: String::new() };
 
     let disc = match &opt.image {
         Some(p) => match load_disc(p) {
@@ -867,7 +1006,16 @@ fn main() {
             Target::Image
         };
         let fmt = disc.as_ref().map_or(0, |d| atapi::disc_format(&d.tracks, d.is_cdi));
-        switch_lines(&mut o, opt.img as u32, target, fmt);
+        let rp = (opt.regpoll || opt.devreset_ms.is_some()).then(|| RegPoll {
+            open_ms: opt.window.0,
+            detect_ms: opt.window.1,
+            reset_ms: opt.devreset_ms,
+        });
+        if let Some(r) = opt.devreset_ms {
+            o.pfx = format!("R{}_", r);
+        }
+        switch_lines(&mut o, opt.img as u32, target, fmt, rp.as_ref(), disc.as_ref());
+        o.pfx.clear();
     }
     if !opt.sw_only {
         match &disc {
