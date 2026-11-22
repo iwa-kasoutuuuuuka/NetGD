@@ -179,7 +179,20 @@ SUPRA_HOME=$HOME/supra-linux/x/Supra-2026.03.b0 fpga/pinfind/build.sh
 #   --placement FILE --placement-regex RE   実際の配置が書かれた Supra の報告と、その行の読み方（下）
 #   --unused-ok PIN_xx,...                  使わないことを人が確認したボール（報告に残る）
 #   --gate-sim [--gate-sim-ms 300]          配置配線後のネットリストのゲートレベル検査（Icarus Verilog が要る）
+#   --gate-sim-done                         さらに「全パッドを駆動し、最後の 10 % は変化なし」（1 周で止まった）を要求（速い版専用）
+#   --supra-retiming                        af_map の RETIMING 段（`abc -dff`）を Supra の既定どおり残す（試験専用、下の注意）
 ```
+
+**af_map の RETIMING 段は切る**（2026-11-22、ゲートシミュレーションで発見）：Supra 2026.03.b0 の `af_map.tcl` は既定で
+`dfflegalize` の前に `abc -markgroups -dff -D 100`（Yosys 0.61）をかける。この `abc -dff` はフリップフロップを
+クロック・イネーブル・同期リセットの組で束ねて戻すが、**どちらが優先か**を落とす：「イネーブルが立っている時だけ効く同期リセット」
+（`$sdffce`）が「いつでも効く同期リセット」（`$sdffe`）になって戻る。PinFindCore の `ball` は NEXT の中で `ball == n-1` のとき 0 に
+していたので、マップ後は LISTEN 中に `ball` が 131 になった次のクロックで 0 に戻り、131 番は駆動されず、DONE に行かず回り続けた。
+最小の再現は 8 ビットのカウンタ `if (en) c <= (c == 131) ? 0 : c + 1;`（en=0 で 131 に留まるはずが 0 になる）。
+`build.sh` は `af_setup` が作る空の `PinFind.pre_map.asf` に `set RETIMING "None"` を書き（`af_map.tcl` は既定値を決めた後でこれを読む）、
+`map.log` で `DFFLEGALIZE` より前に ABC が走っていないことを確かめる（走っていれば止まる）。あわせてコア（`hw/pinfind.py`）も、
+1 周の終わりを FSM の外に「`state == NEXT` を含む条件」で書き直し、どちらの解釈でも同じレジスタになるようにした（RETIMING を残しても正しい）。
+`fpga/agm/build.sh`（本体のコア）も同じ `af_map` を通るので同じ危険がある（未対処）。
 
 `build.sh` は最初に古い `output/` の 3 ファイルを消す（失敗したビルドの後に古いビットストリームが残らない）。止まる条件：
 
@@ -191,7 +204,8 @@ SUPRA_HOME=$HOME/supra-linux/x/Supra-2026.03.b0 fpga/pinfind/build.sh
 | ピン数 | Supra の報告のピン数が一覧から作ったポート数と違う |
 | **実際の配置**（`checkpnr.py`） | Supra の出力から「ポート → 実際のボール」を読み、`balls.txt` から `portmap.py` の規則で決まる配置と**完全一致**しない（hold も含む）。**読み取れなければ止まる** |
 | **未使用のボール**（`checkpnr.py`） | `$SUPRA_HOME` の pinmap（その場で読むだけ）でユーザー I/O になりうるボールが 1 本でも設計に入っていない（`--unused-ok` で名指ししたものを除く） |
-| ゲートレベル（任意） | `--gate-sim`：配置配線後のネットリストを Supra のモデルでシミュレーションし、「同時に Low のパッドは 1 本以下（段階 0 は 0 本）」「X にならない」「指定時間内に 1 回は駆動する」 |
+| **RETIMING 段**（上の注意） | `map.log` で `DFFLEGALIZE` より前に ABC が走った（`--supra-retiming` なしで）／`pre_map.asf` の仕掛けが Supra に無い |
+| ゲートレベル（任意） | `--gate-sim`：配置配線後のネットリストを Supra のモデルでシミュレーションし、「同時に Low のパッドは 1 本以下（段階 0 は 0 本）」「X にならない」「指定時間内に 1 回は駆動する」。`--gate-sim-done` で「全パッドを駆動して止まった」も |
 | そのほか | `osc` で `alta_osc` が、`ring` で LUT セルがマップ後のネットリストに無い／`fixio.py` でまとめた入出力の数が drive の本数と違う |
 
 **実際の配置の読み取りについて**（Supra 2026.03.b0 の最初のビルドで確認、2026-11-22）：
@@ -349,7 +363,22 @@ MCU からは見えないので、ロジックアナライザで読む（`g1-ag1
   `placed at pin` なし、`checkpnr.py` が io.asf を読んで 169 本すべて一致、ネットリストの座標 169 個がすべて別、pinmap のユーザー I/O になりうるボールで設計に無いものは 0 本。
   hold（G1・G2・C1・D2・特別な機能・DDR の F10/M10/L11/M11・クロックボール）の割り当ても Supra は受け付けた（hold のパッドは `.oe(gnd)`）。
   `.asf` を読む前の「locatiion is not assigned」の Error は hold の 37 本ぶん出る（既知の種類で、`build.sh` は除外している）。
-- 確かめていないこと：`gatesim.py`（WSL に Icarus Verilog が無い）、Supra の報告どおりにシリコンが動くこと、`alta_osc` の周波数・極性、実機のすべて。
+- `gatesim.py`（Icarus Verilog 12.0、WSL）：Supra のモデルから必要なモジュールだけを `--work` に取り出して使う（`alta_sim.v` の ADC は SystemVerilog 専用で Icarus が読めず、`etc/` に同じ写しがある）。
+  本番の設定（prescale 10・start 256）は 1 周が実時間で約 1.2 秒分になり Icarus では何時間もかかるので、ゲートシミュレーション用に `gen.py --prescale 1 --start 8` で別に作ったもの（論理は同じでティックだけ短い）にかける。
+  リングは遅延ゼロだと発振しないため、`--clock ring` ではモデルの LUT に 0.4 ns の遅延と、リングの最初の段だけに「LUT の出力が X なら 0」を足す（シミュレーション専用の上書き）。
+  結果（2026-11-22、最初）：段階 0 と osc は合格（同時に Low は最大 1 本）。ただし配置配線後のネットリストは RTL と違い、1 周で止まらずに回り続け、最後のボール（131）を駆動しない。
+  原因は af_map の RETIMING 段（§3-3 の注意）。マップ直後の `.vqm` でもう同じ（131 番で 0 に戻る）なので配置配線ではない。
+  確かめ方：`.vqm` を正しい `dffeas`（Supra のシミュレーションモデルの `dffeas` は `ena`・`sclr` を無視する）と `cin` をつないだ
+  `cycloneive_lcell_comb`（Supra のモデルは `cin_w` が未接続でキャリーが X）で動かし、RTL とパッドの変化を 1 行ずつ比べた
+  （130 番までの 8,908 行は一致、131 番で分かれる）。Yosys の途中の段で書き出して比べると、RETIMING の `abc -dff` の前は正しく後は誤り。
+  修正後（コアの書き直し＋RETIMING を切る）：osc の速い版は配置配線後も「132 本すべて駆動、1,436.5 µs で停止、同時に Low は最大 1 本」
+  （`--gate-sim-done` 合格）、マップ後の `.vqm` と RTL のパッド変化 8,977 行が完全一致。コアの書き直しだけ（`--supra-retiming`）でも、
+  RETIMING を切るだけ（古いコア）でも、それぞれ単独で同じ結果。段階 0 も合格。
+  ring は最初、前の版の上書き（「LUT の入力に X があれば 0」）のせいで発振しなかった（`half` の LUT は未接続の入力 A・B・D が Z で、出力を常に 0 にされていた）。
+  全スライスで「出力が X なら 0」にすると、今度は 31 段が同じ値から始まって LUT 遅延ごとに一斉に反転する偽の 1.25 GHz になり何も動かない。
+  そこで「出力が X なら 0」はリングの最初の段（`u_clk|stage[0].inv`、ネットリストから探してテストベンチの defparam で指定）だけにした。
+  これで ring の速い版も配置配線後に合格：132 本すべて駆動、1,781.2 µs で停止、同時に Low は最大 1 本（パッド変化 8,977 回は osc と同じ）。
+- 確かめていないこと：Supra の報告どおりにシリコンが動くこと、`alta_osc` の周波数・極性、実機のすべて。
 
 ## 9. 設計メモ：逆向きの探し方（R143 の 9。未実装・要判断）
 

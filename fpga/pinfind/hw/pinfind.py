@@ -287,17 +287,35 @@ class PinFindCore(Elaboratable):
 
             with m.Case(NEXT):
                 m.d.comb += self.skipped.eq(skip)
-                m.d.sync += [left.eq(0), skip.eq(0), level.eq(1), state.eq(LISTEN)]
-                with m.If(ball == n - 1):
-                    m.d.sync += ball.eq(0)
-                    with m.If(loops == self.max_loops - 1):
-                        m.d.sync += state.eq(DONE)
-                    with m.Else():
-                        m.d.sync += loops.eq(loops + 1)
-                with m.Else():
-                    m.d.sync += ball.eq(ball + 1)
+                m.d.sync += [left.eq(0), skip.eq(0), level.eq(1), state.eq(LISTEN),
+                             ball.eq(ball + 1)]
 
             with m.Case(DONE):
                 m.d.sync += level.eq(1)
+
+        # End of a pass. Written outside the FSM on purpose, with the state in
+        # the condition, after the Switch so that it wins over NEXT above.
+        # Supra 2026.03.b0's af_map runs Yosys 0.61 `abc -dff` (its default
+        # RETIMING step), which turns a register whose synchronous reset only
+        # acts while its enable is on ($sdffce) into one whose reset acts
+        # always ($sdffe). Inside Case(NEXT) (reset `ball == n - 1` under
+        # enable `state == NEXT`), `ball` was cleared as soon as it reached
+        # n - 1 in LISTEN: the last ball was never driven and DONE was never
+        # reached (gate-level simulation, README_ja.md). Here the reset
+        # condition contains the enable, so both readings are the same
+        # register. `loops` only counts up (no constant, hence no reset).
+        # build.sh also turns that af_map step off.
+        wrap = Signal()
+        final = Signal()
+        m.d.comb += [
+            wrap.eq((state == NEXT) & (ball == n - 1)),
+            final.eq(wrap & (loops == self.max_loops - 1)),
+        ]
+        with m.If(wrap):
+            m.d.sync += ball.eq(0)
+        with m.If(wrap & ~final):
+            m.d.sync += loops.eq(loops + 1)
+        with m.If(final):
+            m.d.sync += state.eq(DONE)
 
         return m
