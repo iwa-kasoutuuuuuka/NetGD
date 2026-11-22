@@ -2161,6 +2161,126 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：ホストテストと予測で確認。実機では未確認。サイドセッションが、メインの依頼なしに main に取り込んだ（以後、取り込みはメインが確かめてから行う）。
 - 関連：R123（D10・D14）、R134、`docs/research/d10-d14-raw-sectors.md`、`mcu/netgd/Cargo.toml`（`raw-sectors`）。
 
+### R139 独立レビュー（R137）の指摘のうち小さな 4 件を直した（Opus）
+
+- 担当：Opus（Sonnet のサブエージェントが実装、メインがホストテストを再実行して確認）。ブランチ `fix/review-1`（9f78590d から）、コミット `33440c5b`・`2b9bd8d6`・`209a5759`・`4bf3ba8e`・`10b2c33b`（コメントの番号を R139 に）。
+- 結論：
+  1. **センス読み出しと切替の窓**（R137 の指摘 1・h）：`discimg::atapi::advances_swap_window` が 0x03（REQUEST SENSE）・0x13（REQ_ERROR）で false を返し、この 2 つでは窓を進めも閉じもしない（次の通常コマンドで閉じ、そこで CHECK 6/28/00）。
+     また `sense_read_clears_ua`：センス読み出しが UA を落とすのは、報告したキーが 6 のときだけ（`52 00` のあとの REQ_ERROR が、UA を報告しないまま消していた）。
+  2. **起動時のマウント失敗**（R137 の d）：`ide_task` の初めに `EMPTY_SLOT = マウントされていない` を設定し、ボタンが D12 の空フォルダと同じく動く（成功時は変化なし）。
+  3. **`52 82 n` の探索中の読み取りエラー**（R137 の e）：`slot::mount_target_checked`・`gdi::folder_lookup` で SD の読み取りエラーと「フォルダ無し」を区別し、エラーなら CHECK（ILLEGAL REQUEST）で断ってディスクを残す（R132 以前と同じ）。本当に無ければ R132 のまま 01。
+  4. `common/gamecfg/src/ini.rs` の古い「150 + 150」のコメントを 500 + 250（R135）に。
+- テスト：`tests/atapi.rs` 2 件・`tests/slot.rs` 1 件を実装の前に足して失敗を確認（PLAN の決まり）。`discimg` 全通過・`gamecfg` 31・`lzma` 5・`test_expect.py` 13（1 件スキップ）（メインで discimg・gamecfg・test_expect を再実行）。警告は変化なし。
+- 大きさ（text + data、9f78590d → 4bf3ba8e）：4E +308、2E +196、2E `release-z` の `resident,sd-fast` +532（118,192 B、上限まで残り 4,176 B）。bss 変化なし。IDE タスクのスタックの静的な見積もり（release-z）4,800 → 4,808 B。
+- 変更しなかったこと：`step_folder`（ボタンの前後）の読み取りエラーの扱い、`expect.rs`（時間を模擬しないので影響なし）、窓の時間。R137 の a・b・g は実機で確かめる（プローブの追加を準備中）。
+- 信頼度：ホストテストとビルドで確認。`DeviceState`・`handle_packet` 自体はホストでテストできない（判定を `discimg` の純粋関数にしてテスト）。実機では未確認。
+- 関連：R126、R132、R135、R137、`mcu/netgd/src/ide.rs`・`gdi.rs`、`common/discimg/src/atapi.rs`・`slot.rs`、`common/gamecfg/src/ini.rs`。
+
+### R140 試験用 SD の GDEMU.ini を元に戻した（Opus）
+
+- 試験用 SD の `GDEMU.ini` を、控えておいた元の内容（`open_time = 150`・`detect_time = 150`・`reset_goto = 1`、`H:\NetGD_probe_sd\GDEMU.ini.orig`）に戻し、MD5 で一致を確認した。
+- gdprobe（`images=3`、`return_to=2`、読み出し試験なし）で、切替が 2/3A/00 → 約 149〜160 ms 2/04/01 → 約 299〜310 ms 6/28/00 → 約 330〜345 ms READY に戻ったことを確認
+  （`docs/research/probe-records/stock_20261122_12_ini-restored.txt`、`abort=0`）。R119 と同じ。
+- 関連：R119、R129、R135。
+
+### R141 D10（`raw-sectors`）の独立レビューと、R137 の a・b・g を実機で確かめる準備（Fable・Sonnet）
+
+- **D10 のレビュー**（Fable、読むだけ）：重大な不具合は無い。
+  - 既定のビルド（機能なし）は命令列が完全一致ではないが動作は同じ（`.vector_table`・`.rodata`・`.data`・`.bss` は同一、`.text` は同じ大きさ。中身の違いは `handle_packet`（PIO の `out_sector_bytes()` が await をまたいで future に 2,048 を保存）と `gdi::reload_ini` のレジスタ割り当てだけ。DMA・キャッシュ判定・ステージング・先読みに命令の差は無い）。
+  - 機能ありでも、バッファ溢れ・off-by-one・ヘッダの誤りは無い（`expand_raw_in_place` を先頭のずれ 0〜511 × 1〜7 セクタ × 2,352/2,336 の 5,666 通りで総当たり照合。同期 `00 FF×10 00`、BCD の MSF は `lba+150`、モード `02`）。
+  - 指摘（低〜中）：音声トラックの扱いが文書（「音声は 2,048 B のまま」、`Cargo.toml`・設計メモ §3.1・R138）とコード（`ide.rs` 2026〜2027 行、格納 2,352 B なら音声でも 2,352 B の PCM を返す）で食い違う。純正の音声トラックへの `0x10` は未確認。
+  - ほか：gdprobe の `0x10` は 1 セクタ・PIO だけなので、raw の複数チャンク・非マップ・DMA の経路は実機の試験でも通らない（G1 DMA は 32 B の倍数が前提なので、試すなら偶数セクタ）。raw 読みは IP.BIN の先読みキャッシュも捨てる（設計どおり）。
+- **R137 の a・b・g の準備**（Sonnet、ブランチ `feat/gdprobe-more`、コミット `04607ca6`・`3520fd89`）：
+  - gdprobe：PACKET の CDB フェーズで DRQ を見たときの ALTSTATUS を `cdbst=` に、SECNR（0xA05F708C、KOS `g1ata.c:90` の `G1_ATA_LBA_LOW`）を `secnr=` に記録（どちらも読むだけ）。
+    `SW_POLL` は SECNR だけが変わっても 1 行書く。`compare.py` は 2 つの欄を両方の記録にあるときだけ比べる（古い記録との比較は差にならない）。この PC の DreamSDK でビルドが通る。ホストテスト 50,784 チェックと `test_compare.py` 24 件が通過。
+  - mksdcard：`--set variants` にイメージ 10（データのセッションが **Mode 1**、2,352 B の生セクタで保存した CDI。レイアウトは 04 と同じ）を追加。`verify.py` で Mode 1 のセクタも照合する（`verify.py` に文字列の中に本物の改行が入った文法エラーがあり、メインが直した：`3520fd89`）。
+    `H:\NetGD_probe_sd_v3` に生成し、08・09・10 がマニフェストと一致することをメインが確認。
+  - 実行計画：`tools/gdprobe/README_ja.md` の「R137 の実行計画」と `gdprobe.cfg.r137.example`（`images=4,10,3,7`）。音声トラックへの `0x10`（上の D10 の指摘）も、合わせて確かめる項目に加える。
+- 関連：R134、R137、R138、`tools/gdprobe/`、`tools/mksdcard/`。
+
+### R142 ピン探し（設計 2-4 の方法 2）の PC 側の実装（Opus）
+
+- 担当：Opus（サブエージェントが設計・実装）。ブランチ `feat/ag16k-pinfind`（ed4890b3 から）、コミット `5286e8e7`（本体）・`183fc8dc`（WSL で動かすファイルを LF に固定）。未取り込み。
+- 問い：`docs/design/g1-ag16k-port.md` 2-4 の方法 2（ピン探し用のビットストリーム + MCU 側）を、基板と Supra なしでどこまで作って確かめられるか。
+- 結論：
+  - **FPGA 側（`fpga/pinfind/`）**：Amaranth の順序回路。ボールを 1 本ずつ、出力を切ったまま聞く（一度でも Low を読んだボールは飛ばす）→ そのボールだけ出力にして番号のフレームを送る → 次へ。`max_loops` 周（既定 8）で止まり、以後は全出力オフ。
+    同時に出力になるのは常に 1 本以下（シミュレーションで毎クロック確認）。符号はパルス幅の比（SYNC = Low 8T + High 1T、ビット = Low 1T か 3T + High 1T）で、中身は番号とその反転。周波数が分からなくても読める。
+    専用クロック入力 11 本は、同じフレームで周波数を数えて載せる。クロック源は `alta_osc`（既定、Low で有効と推定）・LUT 31 段のリング・ボール（DCLK を MCU が約 1 MHz で振る）の 3 通り（`src/pf_clock.v`）。
+    出力は既定でオープンドレイン（Low だけ出す）。`gen.py` がボール一覧から Verilog・`.asf`・`.sdc` を `build/`（git の管理外）に出す。`build.sh` は WSL + Supra 用（`unshare -rn`、Supra のツリーには書かない）。
+  - **ツール（`tools/pinfind/`）**：`mklist.py` が Supra の pinmap からボール名だけを書き出す（2 列目や機能名は写さない。コンフィグ・JTAG・NC・DDR は除く）。`pins2asf.py` が結果から本番の `.asf` を作る（1 本でも欠ければ `NETGD-PROVISIONAL-PINS` の印、終了コード 2）。
+  - **復号器（`common/pinfind/`、no_std）**：パルス幅 → ビット → 番号、集計、周波数。sigrok の CSV を読む例もある（CN1 側をロジアナで読む用）。
+  - **ファーム（`mcu/netgd` の機能 `pinfind`、既定は無効）**：PS の 5 本以外の全 PIO を入力 + プルアップにしてからビットストリームを流し、DWT で全ピンを見て RTT に出す。最後のフレームから 30 秒か開始から 300 秒で nCONFIG を Low にして止まる。SD への記録は無し。
+  - CI に、pinfind のファームのビルド・`common/pinfind` のテスト・ツールのテスト・シミュレーションを追加。
+- テスト：`fpga/pinfind/test_pinfind.py` 7 件、`common/pinfind` 17 件（Amaranth のシミュレーションの波形を Rust の復号器で読み、番号・周期・周波数が一致）、`tools/pinfind/tests` 12 件、既存の FPGA シミュレーションがすべて通過。
+  既存のファームは 2E の 3 構成と board-v60 がバイト一致、4E は同じ大きさで defmt の番号の 16 B だけ違う。pinfind のビルドは仮のファイルを置いて text 35,384 B、スタックの余裕は約 6.6 KB。
+- **未解決（実機の前に決めること）**：
+  1. **Dreamcast に付けたまま動かしてはいけない**（Dreamcast が駆動している G1 の線と衝突する）。基板の外での給電方法が未確認で、いちばん大きな未解決点。SWD ヘッダの 1 番から入れる案はレギュレータへの逆流のおそれがあり勧めない。
+  2. 専用ファームを SWD で書くと純正ファームは消える。**純正のバックアップ（R43 の fwbackup、ロックされていないこと）が取れてから**でないと実行しない。
+  3. `alta_osc` の可否・極性・周波数、リングが af を通るか、DCLK を構成後に使えるか、Supra が `.asf` の I/O 属性を受け付けるかは不明（`build.sh` が切り分ける）。
+  4. 残るリスク：VCC に直結されたボールや、相手が High を出している線には、聞いても区別できず Low を出してしまう（1 本あたり数十 ms × 最大 8 周）。
+  5. PS の 5 本は v5.5 の仮の値、IRQn（PA22）・RSTn（PA30）の MCU ピンも v5.5 からの仮定。
+- 信頼度：シミュレーションとホストテストは確認済み。ビットストリームは未作成、実機は未確認。
+- 関連：R32、R49、R57、R106、R136、`docs/design/g1-ag16k-port.md` 2-4、`fpga/pinfind/README_ja.md`。
+
+### R143 ピン探し（R142）の安全・設計レビュー：このままでは実機に流せない（Fable）
+
+- 担当：Fable（読むだけ）。対象はブランチ `feat/ag16k-pinfind` の `5286e8e7`・`183fc8dc`。テスト：`test_pinfind.py` 7 件・`common/pinfind` 16 件（R142 の「17 件」は誤り）が通過。
+- 結論：**実行前に必ず直す点が 4 つ**。FPGA の順序回路そのものに欠陥は無い。危ないのは Supra のフローが未検証なこと、設計に入っていないボールの扱い、ファームの例外経路。
+  1. 【重大】`af` は位置指定が効かなかった I/O を警告（`placed at pin`）だけで任意の空きボールに置くが、`build.sh` は見ていない（本数の照合は通ってしまう）。`fixio.py` の `alta_io` の `.oe` の極性も未確認。
+     逆なら走査対象の全ボールが同時に Low を出し続ける。→ 警告で失敗、配置後の「ポート → ボール」を `balls.txt` と完全照合、できればゲートレベルで「同時に Low は 1 本以下」を確認。
+  2. 【重大】G1（DCLK）・G2（DATA0）・C1・D2 や DDR 側のボールが設計に入らず未使用ボールになる（Supra の未使用ピンの既定は不明。Quartus の古い既定は GND 出力）。
+     一方 MCU は構成後も PA23 を Low で保持し、PA24 を約 1 MHz で振り続ける（`TOGGLE_DCLK = true`）。未使用が出力なら最長 300 秒衝突する（`ag16k-config.md` C9 の「G1・G2 は構成後に入力に固定」に反する）。
+     → これらを明示的な入力（hold）として設計に入れる、`TOGGLE_DCLK` は `ball:` クロックのビルドだけ、構成後に PA23・PA24 を入力へ戻す、未使用ピンの扱いを報告で確定。
+  3. 【高】走査中も MCU が LED の PB18 をプッシュプルで High にしている（`main.rs:172`）。「PS の 3 本以外は駆動しない」と矛盾。→ `pinfind` では LED を出力にしない。
+  4. 【高】FPGA が動いたままになる経路：CONF_DONE が PB1 でないと MCU は失敗と見て無限に再ロードする／パニック・RTT の詰まり・デバッガ停止で nCONFIG が High のまま（`ball:` クロックではフレームの途中で 1 本が Low のまま固定）／
+     `gen.py` が `--max-loops 0` を受け付ける／リセットのたびに 1 回分走る。→ ロード失敗で nCONFIG を Low にして停止、`early_done` は失敗、SysTick の割り込みから独立に期限で nCONFIG を Low、パニック時も Low、`max_loops` は 1〜8、再起動での再実行を GPBR で禁止。
+  - ほか【中】：CN1 側の手順で `--drive pp` と `--no-skip-low` を併用すると保護が 2 つ外れる（→ 併用禁止、外付けプルアップで読む）。1 本あたりの Low の時間が長く絶対時間の上限が無い（→ `--no-probes --frames 2 --max-loops 1` から）。
+    48 MHz のクロックボールは PCK0 を止めるので見つからない（→ 第 2 段で PCK0 だけ出す）。オープンドレインの立ち上がりに T ≥ 5 µs は足りない（→ 20 µs 以上）。
+  - 【設計提案・要検証】逆向きの探し方：FPGA は全ボールを入力にして報告に既知の 1 本（G2 = DATA0 が候補）だけを使い、MCU が自分のピンを 1 本ずつ動かす。FPGA は未知のボールを 1 本も駆動しなくて済む。
+- **基板外での給電（提案・要検証）**：純正ファームのまま、無通電で CN1 の電源ピン・U4・Q1・MCU の VDDIO・SWD の 1 番の導通と、各レールと GND の間の抵抗を記録 → Dreamcast に付けた状態でレールの電圧を基板上で測る →
+  CN1 の電源ピンに同じ電圧を電流制限つきの電源（100〜150 mA から）で入れ、**純正ファームのまま基板外で起動する予行**をして基準値（電流・電圧）を取る。12 V に触れない、制限の無い電源を使わない、無通電で信号線をつながない、Dreamcast に付けたまま走らせない。
+- **最初の実機実行の前に必須**：純正のバックアップ（fwbackup が UNLOCKED → dump → 照合。LOCKED なら実行しない）、PS の 5 本・MSEL1・LED のピンの導通確認、基板外の給電の予行、上の 1〜4 の修正、
+  段階を踏む（段階 0 = 出力ゼロのビットストリームで CONF_DONE・電流・構成前後の MCU 全ピンの差分 → 段階 1 = 1〜数本だけ → 段階 2 = 全ボール → 段階 3 = クロック）、実行中は電流制限と記録、SD を抜く。
+- 著作権：違反なし（Supra・rodinia のファイル、pinmap、ビットストリームは追跡対象に無い）。
+- 対応：1〜6 の修正と段階 0 の用意を Opus に依頼（同じブランチ）。逆向きの方式は設計として検討する。
+- 関連：R142、R43、R115・R116、`docs/research/ag16k-supra-build.md` §4-1、`docs/research/ag16k-config.md` C9。
+
+### R144 純正の CDB フェーズの status・切替中の SECNR・Mode 1 の CDI・音声トラックの CD_READ（R137 a・b・g と R141 の実機確認）（Opus）
+
+- 担当：Opus。gdprobe はブランチ `feat/gdprobe-more`（R141）のもの（`cdbst=`・`secnr=` を記録）。試験用 SD に `10`（Mode 1 の CDI）を追加し MD5 で照合。GDEMU.ini は元の内容（150 / 150 / 1）。
+- 記録：`docs/research/probe-records/stock_20261122_13_r137-abg.txt`（`images=4,10,3,7`、`abort=0`）、`stock_20261122_14_audio-flags.txt`（`images=3`、`ip_fad=906`、`abort=0`）。
+  `compare.py --manifest` で 03〜05（547 件）・08〜10（273 件）・音声（9 件）すべて一致、不一致 0。
+- 結論：
+  - **a（CHECK のあとの CDB フェーズの status）**：純正も、ディスクが無い（窓の中・空フォルダ）ときの CHECK のあとの PACKET では CDB フェーズの ALTSTATUS が **0x18**（DRDY = 0）。
+    一方、ディスクがあるときの CHECK（CD_READ の種別違い 5/64/00）のあとは **0x58**（DRDY = 1）。CHECK の status 自体はどちらも 0x11。
+    純正の DRDY は「CHECK を出したか」ではなく「準備できているか（ディスクがあるか）」に従う。**NetGD は FPGA が DRDY を最後に書いた値のまま残すので、ディスクがある CHECK のあとも 0x18 になるはず（違う）**。直すには FPGA（コマンド書き込みで DRDY を「準備できている」に合わせる）かファームの工夫が要る。
+  - **b（切替中の SECNR）**：窓の中は `0x06`（OPEN、上位ニブル 0）→ 約 150 ms で `0x00`（BUSY）→ UA のころ `0xX1`（一時停止、上位はディスク形式：CDI 04 = 2、Mode 1 の CDI 10 = 1、GDI 03 = 8）。
+    空フォルダは `0x06` → `0x00` → `0x07`（NO DISC）。**NetGD（R126）の推測の状態ニブル（6 → 0 → 1 / 7）は純正と同じ**。窓の中は上位ニブル（ディスク形式）が 0 になる点は要確認（NetGD の実装を見る）。
+  - **g（Mode 1 の CDI）**：純正は 10 で `0x24`（Mode 1）を受け付け `0x28` を 5/64/00 で断る。REQ_STAT のディスク形式も **1（CD-ROM）**（`01 1f 01 01 01 00 00 96`）、SECNR も `0x11`。
+    **純正は「CDI かどうか」ではなくトラックのモードで判定し、ディスク形式もトラックのモードから決める**。NetGD（R134 の種別検査は `is_cdi`、ディスク形式は CDI = 2）は違う。
+  - **音声トラック（R141 の D10 の指摘）**：GDI 03 の音声（FAD 906）で、`0x20`（指定なし）と `0x10` は **2,352 B の PCM** をそのまま返し、`0x24`・`0x28` は 5/64/00。7 セクタの IP_READ（`0x20`）も 2,352 B × 7。
+    **NetGD は音声トラックを種別検査で素通しにしていて（R134）、`0x20` で返す大きさも要確認**。
+  - img=0（Dreamcast のリセットのあと）の REQ_STAT は再び `01 2f 41 02 01 05 01 7a`（一時停止・トラック 2・lead-out − 2、R130 の残りと同じ）。
+- 対応：g と音声の規則（種別検査をトラックのモードで、音声は 0x24/0x28 を断り 0x20/0x10 で 2,352 B、CDI のディスク形式をトラックのモードで）を NetGD に入れる。a は FPGA の変更として扱う。
+- 信頼度：確認済み（実機）。
+- 関連：R126、R130、R134、R137、R138、R141。
+
+### R145 ピン探しの安全対策（R143 への対応）（Opus）
+
+- 担当：Opus（サブエージェントが実装）。ブランチ `feat/ag16k-pinfind`、コミット `a7a08fea`（PC 側）・`b0b3fcc3`（ファーム）。未取り込み。
+- 結論：R143 の 1〜8 と 10 に対応した。
+  - `build.sh`：`placed at pin` の警告で止まる。新しい `checkpnr.py` が Supra の出力から「ポート → 実際のボール」を読み、`balls.txt`（SHA-256 も確認）と完全照合する（読めなければ止まる。人が `--placement FILE --placement-regex` を指定）。
+    未使用ピンは確かめる代わりに作らない方式：`$SUPRA_HOME` の pinmap をその場で読み、ユーザー I/O になりうるボールが 1 本でも設計に無ければ止まる（例外は `--unused-ok` で名指しし、報告に残す）。任意の `--gate-sim`（配置後のネットリストを Supra のモデルで Icarus Verilog、同時に Low は 1 本以下）。
+  - hold：G1・G2・C1・D2・特別な機能のボール・DDR の F10・M10・L11・M11・クロックボールを入力として設計に入れる。入れないのは専用のコンフィグ・JTAG・H4 だけ。
+  - `gen.py`：段階 0（出力ゼロ）、最初の実行向けの既定値（2 フレーム・1 周・プローブなし、T ≥ 20 µs）、`max_loops`・`frames` は 1〜8、pp と no-skip-low の併用を拒否。コアに駆動の見張り。
+  - ファーム：ロードは 1 回だけで、失敗・`early_done`・量の不足なら nCONFIG を Low にして停止。SysTick の独立の期限（構成 30 秒、走査 120 + 3 秒、段階 0 は 20 + 3 秒）、panic・HardFault でも Low、500 ms 以上 Low の線で停止、GPBR3 でリセット後の 2 回目を禁止、
+    構成後に PA23・PA24 を入力へ（DCLK は G1 クロックのときだけ）、LED を出力にしない、`embassy-atsam3` の `no-board-io` で SMC 等を設定しない、段階 0 で構成の前後と保持中の全ポートの PDSR を比べる。起動後 10 秒は FPGA を構成前のまま待つ（ロジアナを付ける時間）。
+  - README：§0（必須の前提と段階 0 → 3）、§5（オープンドレイン + 飛ばす + 外付けプルアップ）、§9（逆向き方式の設計メモ）。
+- テスト：`test_pinfind.py` 14・tools 14・`common/pinfind` 16・既存のシミュレーション 62 が通過。2E の 3 構成はロードされる中身が変更前と一致（4E は defmt の番号の 13 B だけ違い、ログを切ると一致）。
+- 未解決：checkpnr が Supra の配置を読めるか（最初の実行で人が指定する見込み）、gatesim が動くか、hold の割り当てを Supra が受け付けるか、`alta_osc`・リングが通るか、`early_done` の扱い（今は安全側で毎回停止。判断が要る）、`ball:` クロックで MCU が止まる場合、§0 の前提（人の作業）。
+- 信頼度：シミュレーション・ホストテスト・ビルドは確認済み。Supra の出力・実機は未確認。
+- 関連：R142、R143、`fpga/pinfind/README_ja.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
