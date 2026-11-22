@@ -16,3 +16,21 @@ gcc $FLAGS -fsanitize=address,undefined -o test_net test_net.c $NSRC 2>/dev/null
 ./test_net xcheck.bin
 python test_sender.py xcheck.bin
 rm -f xcheck.bin
+# g2x (custom UDP transfer): codecs, receiver window, the protocol over a simulated lossy link (C), and the
+# Python sender over localhost UDP through a lossy shim; xport_vec.bin cross-checks the two codecs
+XSRC="../g2x_core.c ../../netgd-recv/src/crc32.c"
+gcc $FLAGS -O1 -fsanitize=address,undefined -o test_xport test_xport.c $XSRC 2>/dev/null \
+  || gcc $FLAGS -O1 -o test_xport test_xport.c $XSRC
+./test_xport xport_vec.bin
+python test_g2x.py xport_vec.bin
+rm -f xport_vec.bin
+# net_tcp-rx-fix.patch: a model of the patched process_pkt decisions (lost last segment + bare FIN, merged
+# retransmission, duplicates, RST/SYN, wraparound). The model's copied condition lines must be in the patch.
+gcc $FLAGS -fsanitize=address,undefined -o test_tcpfix test_tcpfix.c 2>/dev/null || gcc $FLAGS -o test_tcpfix test_tcpfix.c
+./test_tcpfix
+for l in 'seglen = (uint32_t)sz + ((flags & TCP_FLAG_FIN) ? 1 : 0);' '!(!(flags & (TCP_FLAG_RST | TCP_FLAG_SYN)) &&' \
+         'SEQ_GT(seq + seglen, s->nxt)))' 'if(sz && SEQ_LT(seq, s->nxt)) {' 'else if(seglen && seq != s->nxt) {'; do
+  sed 's/s->data\.rcv\./s->/g' ../../kos-patches/net_tcp-rx-fix.patch | grep -qF "$l" || { echo "patch lacks: $l"; exit 1; }
+  grep -qF "$l" test_tcpfix.c || { echo "model lacks: $l"; exit 1; }
+done
+echo "test_tcpfix: model lines match the patch"

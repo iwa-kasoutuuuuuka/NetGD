@@ -27,6 +27,11 @@ int sim_fw_dead;
 int sim_mount_in_session;
 int sim_tur_calls;
 uint32_t sim_fw_version = 0x05200000u;     /* 5.20.0: bytes 00 00 20 05 */
+uint32_t fw_xfer_limit_ms;                  /* fwxfer.h; the model answers at once, it only records the limit */
+int sim_stock;                              /* a stock GDEMU 6.0 as gdprobe recorded it (record 08) */
+int sim_e0_packets;                         /* 0xE0 packets seen (a stock GDEMU must never get one from netgd-t2) */
+int sim_ua_on_e0;                           /* the next 0xE0 packet gets a UNIT ATTENTION */
+uint32_t sim_probe_limit_max;               /* largest fw_xfer_limit_ms seen with 52 00 / E0 03 (0 counted as 39000) */
 uint32_t sim_stack_reserved = 7128, sim_stack_used = 4816, sim_stack_unpainted = 96;   /* STACK (E0 09), with FW_CAP_STACK */
 int sim_stack_calls;
 static int notready_left;
@@ -68,6 +73,11 @@ int fw_xfer(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, ui
     *err = 0;
     if (got) *got = 0;
     sim_packets++;
+    if ((pkt[0] == 0x52 && pkt[1] == 0x00) || (pkt[0] == 0xE0 && pkt[1] == 3)) {
+        uint32_t l = fw_xfer_limit_ms ? fw_xfer_limit_ms : 39000u;
+        if (l > sim_probe_limit_max) sim_probe_limit_max = l;
+    }
+    if (pkt[0] == 0xE0) sim_e0_packets++;
     if (sim_fw_dead) {                          /* not a NetGD board: nothing answers (timeout, no sense key) */
         if (sim_trace) printf("FW (no answer)\n");
         return -1;
@@ -76,6 +86,14 @@ int fw_xfer(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, ui
         printf("FW");
         for (int i = 0; i < 12; i++) printf(" %02X", pkt[i]);
         printf("\n");
+    }
+    if (pkt[0] == 0xE0 && sim_ua_on_e0) { sim_ua_on_e0 = 0; *err = 0x60; return -1; }
+    if (sim_stock) {                            /* record 08: 52 00 -> 8 bytes; what else stock does is not modelled */
+        static const uint8_t v[8] = { 0x00, 0x00, 0x05, 0x02, 0x00, 0x05, 0x20, 0x05 };
+        if (sim_ua_pending) { sim_ua_pending = 0; sim_ua_served++; *err = 0x60; return -1; }
+        if (pkt[0] == 0x52 && pkt[1] == 0x00) return copy_out(v, 8, data, alloc ? alloc : 8, got);
+        *err = 0x50;
+        return -1;
     }
     if (sim_ua_pending) {                       /* not executed: CHECK CONDITION, sense key 6 */
         sim_ua_pending = 0;

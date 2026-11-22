@@ -144,6 +144,35 @@ int fw_gdemu_version(uint32_t *boot, uint32_t *fw)
     return 0;
 }
 
+int fw_probe_netgd(ng_fwinfo_t *out, uint32_t *boot, uint32_t *fwv)
+{
+    static const uint8_t ver52[12] = { 0x52, 0x00 };                /* byte for byte the CDB of the stock record */
+    static const uint8_t ver_e0[12] = { 0xE0, 3, 0, 0, 32 };
+    uint8_t b[32];
+    uint32_t got = 0, bw, fw;
+    uint32_t keep = fw_xfer_limit_ms;
+    int rc;
+    fw_xfer_limit_ms = FW_PROBE_LIMIT_MS;
+    memset(b, 0, sizeof b);
+    rc = atapi_s(ver52, b, 8, &got, NULL, 1);
+    if (rc != 0 || got < 8) { fw_xfer_limit_ms = keep; return FW_PROBE_NOANSWER; }
+    bw = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    fw = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+    if (boot) *boot = bw;
+    if (fwv) *fwv = fw;
+    if (fw != FW_NETGD_GDEMU_WORD) { fw_xfer_limit_ms = keep; return FW_PROBE_OTHER; }
+    memset(b, 0, sizeof b);
+    got = 0;
+    rc = atapi_s(ver_e0, b, 32, &got, NULL, 0);
+    fw_xfer_limit_ms = keep;
+    if (rc != 0 || got < 8 || memcmp(b, "OGDM", 4)) return FW_PROBE_NOTOGDM;
+    out->proto = b[4];
+    out->caps = b[5];
+    memcpy(out->fwstr, b + 8, 24);
+    out->fwstr[24] = 0;
+    return FW_PROBE_NETGD;
+}
+
 int fw_mount_named(const char *name, uint8_t *sense)
 {
     uint8_t s = 0;

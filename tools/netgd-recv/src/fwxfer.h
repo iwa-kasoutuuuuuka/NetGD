@@ -11,4 +11,9 @@
    0 for a timeout / transport failure. */
 int fw_xfer(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, uint8_t *err);
 
+/* 0 (default): the fixed waits of fw_xfer (up to about 39 s for one command, 30 s of it for BSY after the packet).
+   Otherwise every command ends within this many ms however the drive behaves (netgd-t2's identification of the
+   drive: a stock GDEMU that stays BSY must not hold the PC's connection past its timeout). */
+extern uint32_t fw_xfer_limit_ms;
+
 #endif

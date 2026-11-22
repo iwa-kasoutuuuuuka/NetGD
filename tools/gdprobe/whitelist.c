@@ -17,25 +17,25 @@
  */
 const wl_entry wl_table[] = {
     { "TEST_UNIT_READY", 0x00, B(0), 0,
-      "ATAPI: reports ready/not ready only; no data, no state change (UNIT ATTENTION is cleared, as for any host)" },
+      "ATAPI: reports ready/not ready only; no data, no state change (UNIT ATTENTION is cleared, as for any host)", 0 },
     { "REQ_STAT", 0x10, B(0) | B(2) | B(4), 0,
-      "Sega: reads the audio/drive status block (10 bytes)" },
+      "Sega: reads the audio/drive status block (10 bytes)", 0 },
     { "REQ_MODE", 0x11, B(0) | B(2) | B(4), 0,
-      "Sega: reads mode data (the BIOS reads this at every boot); this is NOT SET_MODE" },
+      "Sega: reads mode data (the BIOS reads this at every boot); this is NOT SET_MODE", 0 },
     { "REQ_ERROR", 0x13, B(0) | B(4), 0,
-      "Sega: reads the 10-byte error/sense block (byte 2 low nibble = sense key, 8 = ASC, 9 = ASCQ); the GD-ROM replacement for REQUEST SENSE, which is not a GD-ROM command" },
+      "Sega: reads the 10-byte error/sense block (byte 2 low nibble = sense key, 8 = ASC, 9 = ASCQ); the GD-ROM replacement for REQUEST SENSE, which is not a GD-ROM command", 0 },
     { "GET_TOC", 0x14, B(0) | B(1) | B(3) | B(4), 0,
-      "Sega: reads the 408-byte TOC of the SD (0) or HD (1) area" },
+      "Sega: reads the 408-byte TOC of the SD (0) or HD (1) area", 0 },
     { "REQ_SES", 0x15, B(0) | B(2) | B(4), 0,
-      "Sega: reads the start of session N (the BIOS does this at boot)" },
+      "Sega: reads the start of session N (the BIOS does this at boot)", 0 },
     { "GET_SCD", 0x40, B(0) | B(1) | B(3) | B(4), 0,
-      "Sega: reads the sub-code Q (format 0: 100 bytes, 1: 14 bytes) at the current position" },
+      "Sega: reads the sub-code Q (format 0: 100 bytes, 1: 14 bytes) at the current position", 0 },
     { "CD_READ", 0x30, B(0) | B(1) | B(2) | B(3) | B(4) | B(8) | B(9) | B(10), 0,
-      "Sega: reads data sectors (FAD addressing, at most 64 sectors; byte 1 only 0x20/0x24/0x28/0x10 or the configured cdread_flags); read-only" },
+      "Sega: reads data sectors (FAD addressing, at most 64 sectors; byte 1 only 0x20/0x24/0x28/0x10 or the configured cdread_flags); read-only; the only command that may use the DMA feature bit (seq 25, at most 16 sectors)", 1 },
     { "GDEMU_VERSION", 0x52, B(0), 0,
-      "GDEMU: `52 00` returns the 8-byte bootloader/firmware version (read-only; used by GDmenu tools)" },
+      "GDEMU: `52 00` returns the 8-byte bootloader/firmware version (read-only; used by GDmenu tools)", 0 },
     { "GDEMU_MOUNT", 0x52, B(0) | B(1) | B(2) | B(3), 1,
-      "GDEMU: `52 82 lo hi` mounts folder N; the same command openMenu sends when it boots a game. Opt-in" },
+      "GDEMU: `52 82 lo hi` mounts folder N; the same command openMenu sends when it boots a game. Opt-in", 0 },
 };
 const int wl_count = (int)(sizeof(wl_table) / sizeof(wl_table[0]));
 
@@ -123,4 +123,14 @@ const wl_entry *wl_check_cfg(const uint8_t cdb[12], int switch_enabled, uint8_t 
         return e;
     }
     return NULL;
+}
+
+const wl_entry *wl_check_dma(const uint8_t cdb[12], int switch_enabled, uint8_t cdread_flags)
+{
+    const wl_entry *e = wl_check_cfg(cdb, switch_enabled, cdread_flags);
+    unsigned n;
+    if (!e || !e->dma_ok || cdb[0] != 0x30)
+        return NULL;
+    n = ((unsigned)cdb[8] << 16) | ((unsigned)cdb[9] << 8) | cdb[10];
+    return (n >= 1 && n <= 16) ? e : NULL;
 }

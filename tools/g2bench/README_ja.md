@@ -183,3 +183,29 @@ KOS 側の修正案（DreamSDK の KOS は未変更）：`process_pkt` のデー
 - 直前の gdprobe で純正 GDEMU が BSY のまま固まっていた件：g2netbench は GD-ROM に触れない（INIT_CDROM 無し、G1 / ATA 呼び出し無し）ので、普通は無関係。ただし固まった GDEMU が G1 バスや ASIC の割り込みを出し続けていた場合は影響し得る。**電源を入れ直してから**測るのが安全。
 - 対応：既定の窓を 20480 に（1 個の 16 KiB フレーム＋ヘッダが収まる。連続送信は 14 セグメントで、窓 65535 の 16 KiB フレームで壊れなかった 11〜12 セグメントに近い）。
   画面に各パスの終了行（`pN <status>: ... errno N`）と、段（`pN WANT sent (wait)` → `pN streaming (ok)`）を出す。止まったとき最後の段がどこかで原因を絞れる。
+
+## 段 E：転送路の比較（`feat/g2-transport`、まだ実機なし）
+
+比較と推奨は `docs/research/g2-transport.md`。2 本の ELF を作る：
+
+| ELF | ビルド | プリセット | パス |
+|---|---|---|---|
+| `g2netbench.elf` | `.\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net` | `profiles\g2netbench.ps1` | TCP p1・p2（16 KiB、基準）、UDP の連続 u1〜u3（R178 と同じ）、**g2x** x1〜x6（UDP の独自転送） |
+| `g2netbench_tcpfix.elf` | `.\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net -TcpFix` | `profiles\g2netbench_tcpfix.ps1` | **直した KOS の TCP** で p1〜p6（16 KiB × 1、64 KiB × 1、64 KiB × 2、32 KiB × 2） |
+
+- tcpfix は `tools/kos-patches/net_tcp-rx-fix.patch` を当てた `net_tcp.c` の写し（`build-fix/`）を一緒にリンクし、KOS の `net_tcp.o` を置き換える（DreamSDK はそのまま。リンクのマップで確かめ、違えばビルドが止まる）。パスごとに `pN_tcp_ooo_dropped`・`pN_tcp_trimmed`・`pN_tcp_wnd_updates` を報告する。
+- R178 で 4〜6 KB/s だった通常版の 32〜64 KiB のパスは既定で外した（DreamSDK のシェルで `make net G2N_TCP_ALL=1` とすれば戻る）。
+- g2x のパスでは、Dreamcast が `LINE` の `G2X go ...` で始めを知らせ、PC（`g2x_send.py`）が UDP 20040 へ 1,400 B のデータグラムを流し、Dreamcast が ACK を PC の送り元のポートへ返す。結果のキーは `xN_*`（Dreamcast）と `xN_pc_*`（PC）。`xN_ck=2` のパスは PC が全体の CRC を照合する（`xN_pc_crc_ok`）。
+- **PC のファイアウォール**：g2x では Dreamcast → PC の UDP（ACK）が要る。`xN_pc_reason=no_ack` なら Python の受信を許可する。
+- 所要：通常版 約 3 分（g2x 6 パスは各 20 秒以内）、tcpfix 約 2 分。
+
+ファイル（段 E）：
+
+| ファイル | 内容 |
+|---|---|
+| `g2x_core.c/h` | g2x の見出し・ACK、受け手の窓、送り手の手順（ホストでテスト） |
+| `g2x_send.py` | PC の送り手（ペース配分、選択 ACK による再送、速さの自動調整）とテスト用の受け手 |
+| `profiles/g2netbench_tcpfix.ps1` | tcpfix のプリセット |
+| `tests/test_xport.c` | C：組み立て・受け手・模擬回線（BBA のリング 16 KiB・欠け・重複・ビット反転） |
+| `tests/test_g2x.py` | Python：localhost の UDP で送り手と受け手、損失の挟み込み、C との組み立ての一致 |
+| `../kos-patches/` | KOS の TCP のパッチと説明 |

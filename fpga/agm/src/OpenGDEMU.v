@@ -44,7 +44,10 @@ module OpenGDEMU (
    // Audio crystal heartbeat. The wrapper owns this so the divider
    // sits in CLK_11_2896_MHz's domain; bit 15 (~172 Hz square wave) is
    // sampled by the core's 48 MHz logic to count xtal liveness.
-   reg [15:0] audio_div;
+   // Power-up value given explicitly: the fabric starts every flop at 0, and
+   // without it an RTL simulation keeps the divider X forever (X + 1 = X), so
+   // slot 18 never counts there while the routed netlist does (gatesim.py).
+   reg [15:0] audio_div = 16'd0;
    always @(posedge CLK_11_2896_MHz)
       audio_div <= audio_div + 1'b1;
    wire audio_tick = audio_div[15];

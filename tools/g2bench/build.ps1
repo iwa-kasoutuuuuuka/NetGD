@@ -1,16 +1,22 @@
 <#
 .SYNOPSIS  Builds g2bench.elf with the DreamSDK toolchain and creates host\ with the 32 MiB input file.
 .EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools
-.EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net   # g2netbench.elf (phase D: KOS TCP/IP receive)
+.EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net   # g2netbench.elf (phase D: KOS TCP/IP receive + g2x UDP transfer)
+.EXAMPLE   .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net -TcpFix   # g2netbench_tcpfix.elf (patched net_tcp.c linked in)
 #>
-param([string]$BbaTools = $env:BBA_TOOLS, [switch]$Net, [int]$RcvBuf = $(if ($env:G2NET_RCVBUF) { [int]$env:G2NET_RCVBUF } else { 20480 }), [int]$MaxBs = $(if ($env:G2BENCH_MAXBS) { [int]$env:G2BENCH_MAXBS } else { 65536 }))
+param([string]$BbaTools = $env:BBA_TOOLS, [switch]$Net, [switch]$TcpFix,[int]$RcvBuf = $(if ($env:G2NET_RCVBUF) { [int]$env:G2NET_RCVBUF } else { 20480 }), [int]$MaxBs = $(if ($env:G2BENCH_MAXBS) { [int]$env:G2BENCH_MAXBS } else { 65536 }))
 if (-not $BbaTools -or -not (Test-Path (Join-Path $BbaTools 'scripts\_common.ps1'))) {
     throw 'Set $env:BBA_TOOLS (or -BbaTools) to the Dreamcast-Dev-Tools-for-BBA folder.'
 }
 . (Join-Path $BbaTools 'scripts\_common.ps1')
 
+if ($Net -and $TcpFix) {
+    Invoke-DreamSdkBash "rm -f main_net_fix.o net_tcp_fix.o g2x_core.o g2netbench_tcpfix.elf; make net-tcpfix G2N_LISTEN_RCVBUF=$RcvBuf" $PSScriptRoot
+    Write-Host "Built $(Join-Path $PSScriptRoot 'g2netbench_tcpfix.elf') (window $RcvBuf)"
+    return
+}
 if ($Net) {
-    Invoke-DreamSdkBash "rm -f main_net.o g2n_core.o g2netbench.elf; make net G2N_LISTEN_RCVBUF=$RcvBuf" $PSScriptRoot
+    Invoke-DreamSdkBash "rm -f main_net.o g2n_core.o g2x_core.o g2netbench.elf; make net G2N_LISTEN_RCVBUF=$RcvBuf" $PSScriptRoot
     Write-Host "Built $(Join-Path $PSScriptRoot 'g2netbench.elf')"
     return
 }
