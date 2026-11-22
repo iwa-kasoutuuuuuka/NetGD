@@ -42,6 +42,7 @@ SUPRA_HOME=... fpga/agm/build.sh --pins fpga/agm/pins/gdemu60.asf              #
 | `--work DIR` | 作業フォルダ（既定 `fpga/agm/build/`。毎回消して作り直す） |
 | `--timeout S` | 配置配線を S 秒で打ち切る（既定 1,200）。配線が最後の衝突を解けずに回り続けることがある。そのときはもう一度実行するか、シードを変える |
 | `--supra-retiming` | af_map の RETIMING 段を切らずに残す。**試験専用**（下の「af_map の RETIMING 段」）。報告の `retiming` 行が `ON` になる |
+| `--gate-sim` | 配置配線の後、配置配線後のネットリストと RTL を同じテストベンチでシミュレーションし、ピンのトレースが 1 行でも違えば止まる（下の「配置配線後のネットリストの検査」）。Icarus Verilog が要る。数分余計にかかる |
 
 - 入力：`fpga/amaranth/out/OpenGDEMUCore_ag16k.v`、`src/OpenGDEMU.v`、`src/OpenGDEMU.sdc`、ピンファイル。
 - 出力：`output/<名前>.rbf`（非圧縮、552,352 B、PS 用にビット順を逆にした `_slave.rbf`）と `output/<名前>.txt`
@@ -61,13 +62,15 @@ SUPRA_HOME=... fpga/agm/build.sh --pins fpga/agm/pins/gdemu60.asf              #
 | ファイル | 中身 | 出どころ |
 |----------|------|----------|
 | `build.sh` | 全体の流れ（下の図） | NetGD |
-| `src/OpenGDEMU.v` | 最上位。`fpga/src/OpenGDEMU.v` から、どこにも使われていない `core_pll` を外しただけ | NetGD（本家の最上位が元） |
+| `src/OpenGDEMU.v` | 最上位。`fpga/src/OpenGDEMU.v` から、どこにも使われていない `core_pll` を外し、`audio_div` に電源投入時の値（0）を書いたもの | NetGD（本家の最上位が元） |
 | `src/OpenGDEMU.sdc` | v5.5 の `.sdc` から必要な制約を移したもの | NetGD（本家の `.sdc` が元） |
 | `pll.tcl` | Supra の `generate_pll` を呼ぶ 3 行（11.2896 MHz → 33.8688 MHz、`alta_pllve`） | NetGD |
 | `mkpll.py` | `generate_pll` の出力からパラメータの値だけを読み、v5.5 と同じ名前・ポートの `Audio_PLL` を作業フォルダに書く | NetGD |
 | `fixio.py` | `.vqm` の中で、inout の `ibuf` + `obuf` を 1 個の `alta_io` にまとめる（これをしないと入力と出力が別のボールになる） | NetGD |
 | `mkasf.py` | 仮のピン配置を作る（`pins/PROVISIONAL.asf` の本体を作ったスクリプト。Supra の pinmap を読む） | NetGD |
 | `pins/PROVISIONAL.asf` | **仮の**ピン配置 | `mkasf.py` の出力 |
+| `gatesim.py` | 任意（`build.sh --gate-sim`）：配置配線後のネットリストと RTL を同じテストベンチで動かし、ピンのトレースを比べる | NetGD |
+| `gatesim_tb.v` | その最上位テストベンチ（`fpga/amaranth` のテストから作った刺激。値を読み返しても刺激は変えない） | NetGD |
 
 `Audio_PLL.v` をリポジトリに置いていない理由：中身のほとんどが Supra の `generate_pll` が出した値の並びなので、
 Supra の生成物として扱い、ビルドのたびに作らせることにした。置いてあるのは「どう呼ぶか」（`pll.tcl`）と「どう包むか」（`mkpll.py`）だけ。
@@ -106,6 +109,60 @@ ABC の `scorr`・`retime` はその誤ったモデルの上で回路を変え�
 
 切ると LUT が 9 % 増え、LZMA 後は 1.6 KB 大きくなる（これまでの 36.7〜40.0 KB は RETIMING ありの値）。タイミングは悪くならない。
 
+## 配置配線後のネットリストの検査（`--gate-sim`）
+
+ビットストリームが実装するのは、`fixio.py` と配置配線を経た Supra の配置配線後のネットリスト（作業フォルダの `OpenGDEMU_routed.v`）。
+`gatesim.py` は同じテストベンチ `gatesim_tb.v` を Icarus Verilog で 2 回動かし、ピンのトレースを 1 行ずつ比べる。
+
+- **gate**：`OpenGDEMU_routed.v` を Supra 自身のシミュレーションモデル（`alta_slice`・`alta_dio`・`alta_bram9k`・`alta_pllve` など）で動かす。
+  モデルは `$SUPRA_HOME` の中のものをその場で読み、ネットリストが使うモジュールだけを作業フォルダの `gatesim/models.v` に書き出す（リポジトリには入れない。
+  取り出しは `fpga/pinfind/gatesim.py` と同じ関数）。
+- **RTL**：`build.sh` が Supra に渡したのと同じファイル（作業フォルダの `OpenGDEMU.v`・`OpenGDEMUCore_ag16k.v`・`Audio_PLL.v`）。PLL は gate と同じ `alta_pllve` のモデル。
+- トレース：出力と双方向のパッドすべて（48 MHz 側は立ち上がりの 4 ns 後、CDDA の 3 本は 11.29 MHz の両エッジの 4 ns 後に読み、変わったときだけ 1 行）、
+  テストベンチが読んだ値すべて、CDCLK の立ち上がりの数（1,024 クロックごと）。プルアップは置かないので、駆動していないパッドは `z` のまま比べられる（出力イネーブルの誤りも見える）。
+- 刺激は読み返した値に左右されない（コマンドの通し番号もテストベンチ側で数える）ので、2 回の入力波形は同じで、最初に違う行が分かれ目になる。
+- 刺激（`fpga/amaranth` の test.py・test_top.py・test_cdda.py から）：両方の窓の全スロット 0〜34（と 63・127）の読み出しを始めと終わりに、
+  スロット 32（LBA_LOW 単独、上位 0xA5）、err_lo（スロット 3 の bit 0-1）、スロット 19 のマスク付き書き込み、スロット 13、番号付きのスロット 0・1 の書き込み（古い番号の状態は捨てられる）、
+  Device Control（nIEN・SRST）。ATA PACKET（0xA0：コマンドの書き込みだけで CDB 段、6 語目で BSY）とそれに続く PIO データ入力（読み出しのフロー制御、8 語、ブロックの終わりで BSY、INTRQ）、
+  副デバイスの PIO データ出力（WRITE SECTORS、8 語）、DMA 読み出し 16 語 × 2（片方に負エッジでしか見えない短い間隔を含む）と副デバイスの DMA 書き込み 4 語、
+  CDDA（有効化、24 語、約 16 フレーム：データのある間と、尽きてアンダーフロー、クリア、フラッシュ、無効化）。約 21,500 クロック（447 µs）。
+- テストベンチには `fpga/amaranth` のテストと同じ期待値の確認も入れてある（`EXPECT FAIL`）。RTL の側で 1 つでも外れたら、ネットリストではなくテストベンチの誤りとして止まる。
+- `--audio-alive`（`gatesim.py` だけ）：さらに約 6.5 ms 回して水晶のハートビート（スロット 18）が 2 回数えることを確かめる。遅い（gate は数十分）ので既定では回さない。
+
+```sh
+# build.sh から（配置配線の後に回る。食い違えばビットストリームを出さずに止まる）
+SUPRA_HOME=... fpga/agm/build.sh --gate-sim
+# 単独で（ビルド済みの作業フォルダに対して）
+python3 -I fpga/agm/gatesim.py --work fpga/agm/build --supra "$SUPRA_HOME" [--clk-to-q 0.1] [--audio-alive]
+```
+
+結果は `build/gatesim/gatesim.out`（1 行目が `GATESIM PASS` / `GATESIM DIFF` / `GATESIM FAIL`、違いの最初の数十か所）、
+トレースは `build/gatesim/rtl.trace`・`gate.trace`。報告（`output/<名前>.txt`）の `gate-sim` 行に 1 行目を書く。
+
+シミュレーションの決まりごと（どれも実際に引っかかったもの）：
+
+- 2 つのクロックのエッジは決して重ならないようにしてある（48 MHz は偶数 ps、水晶は奇数 ps）。同時刻の 2 つのエッジの順番はシミュレータ任せで、2 回の実行で変わりうる。
+  入力は 48 MHz の立ち上がりの 5 ns 後に変え、出力は 4 ns 後に読む。
+- RTL は `-g2005`、gate は `-g2012` でコンパイルする。Yosys が書く Verilog（生成したコア）は `always @*` を `reg \$auto$verilog_backend... = 0` の初期化で起こすが、
+  これが時刻 0 のイベントになるのは Verilog-2005 の決まりのときだけで、SystemVerilog の決まりでは入力が変わらない `always @*` が一度も評価されず出力が X のまま残る
+  （dev0 の読み出し FIFO の `r_en` が X のままで、FIFO のレベルが 1 で止まった）。一方 Supra の配置配線後のネットリストは、セルの出力ポートで `reg` を駆動していて SystemVerilog でしか通らない。
+- 同じ理由で、テストベンチは時刻 0 のクロックの変化を数えない（`reg clk11 = 0` は `-g2005` では時刻 0 のイベントになり、`-g2012` ではならない）。
+- PLL のモデルが出す「locked at」の行は、インスタンス名の書き方が 2 つのネットリストで違うので比べずに報告だけする（時刻は同じ）。
+- `--clk-to-q NS`：モデルのすべての FF に clock-to-Q の遅延を足す（試験用の上書き）。ゲーテッドクロック（`alta_clkenctrl`）がデルタサイクルの順番に頼っていないかを見る。
+
+### 確かめたこと（2026-11-23、仮ピン、シード既定、Supra 2026.03.b0、Icarus Verilog 12、WSL）
+
+- **RETIMING なし（既定）：一致。** `build.sh --gate-sim` が最後まで通り、トレース 3,918 行（パッド 922、CDDA 2,524、読み出し 229 ほか）が RTL と 1 行も違わない。
+  `EXPECT FAIL` は両方 0、パッドに X は 0。`--clk-to-q 0.1`（全 FF に 0.1 ns）でも一致。所要時間は gate 側の 1 回が約 3〜4 分、ビルド全体で約 11 分。
+- **RETIMING あり（`--supra-retiming --gate-sim`、検出できることの確認）：食い違いで止まる。** 2,534 行が違う。CDDA の FIFO が一度も読まれず
+  （スロット 30 が 0x18 のまま、RTL は 0x16→0x06→0x00）、アンダーフローも数えない（スロット 29 が 0x0001、RTL は 0x0403）、`cdda.phase` の電源投入時の値もずれる。
+  2026-11-22 にマップ後の `.vqm` で見た RETIMING の誤り（上の節）が、配置配線後のネットリストでもそのまま見える。
+- 見つかって直した RTL のあいまいさ：`src/OpenGDEMU.v` の `audio_div` に初期値が無く、RTL のシミュレーションでは X のまま（X+1 = X）で、
+  スロット 18（水晶のハートビート）が数えない。シリコンと配置配線後のネットリストは 0 から数える。初期値 0 を書いた（論理・資源は同じ。LUT 2,241・FF 1,115）。
+  `--audio-alive` で、直す前の RTL はスロット 18 が 0 のまま（期待 2）になることを確かめた。
+  `fpga/src/OpenGDEMU.v`（Cyclone II）にも同じ書き方が残っている（ここでは触っていない）。
+- シミュレーションの手順の側の問題（ネットリストの問題ではない）：上の `-g2005` / `-g2012` と時刻 0 のクロックの件。最初の実行ではこれで RTL 側の FIFO が止まり、CDDA のトレースが 1 エッジずれた。
+
 ## 再現性について
 
 **同じ入力でも、Supra の出力はビット単位では同じにならない**（`docs/research/ag16k-supra-build.md` §11-3。シードを固定すれば同じになるかは未確認）。
@@ -125,7 +182,7 @@ cd mcu/netgd && DEFMT_LOG=off cargo build --release --no-default-features --feat
 ## 未確認
 
 - 実機での動作すべて（コンフィグが通るか、PLL がロックするか、I/O、タイミング）。
-- `fixio.py` の後のネットリストの等価性（Supra の配置後ネットリストを目で見ただけ）。マップ直後の `.vqm`（fixio 前）は、
-  修正したセルモデルで上位から短い刺激（MCU レジスタ読み、CDDA 有効化と 16 語、ATA レジスタ読み）を与え、RTL とトレースが一致した（2026-11-22）。配置配線後は未確認。
+- 配置配線後のネットリストと RTL の等価性は、`--gate-sim` のテストベンチが動かす範囲だけ（形式的な等価性検査ではない）。
+  また Supra のシミュレーションモデルがシリコンどおりであることは前提で、確かめていない。
 - DDR の休止、未使用ピンの扱い、I/O 規格・駆動能力（何も指定していない）。
 - Supra 2026.03.b0 以外の版。

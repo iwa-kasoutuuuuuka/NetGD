@@ -17,6 +17,11 @@
 #   --supra-retiming
 #                 leave af_map's RETIMING step (Yosys `abc -dff` before
 #                 dfflegalize) on. For testing only: the result is broken (below).
+#   --gate-sim    after place-and-route, simulate Supra's ROUTED netlist
+#                 (OpenGDEMU_routed.v) with Supra's own cell models and the
+#                 RTL with the same testbench (gatesim_tb.v), and stop unless
+#                 the two pin-level traces are identical (gatesim.py; needs
+#                 Icarus Verilog). The bitstream is delivered only if it passes.
 #
 # af_map.tcl runs `abc -markgroups -dff -D 100` ("RETIMING") by default. In
 # Supra 2026.03.b0 (Yosys 0.61) that pass hands each flop to ABC as a plain
@@ -52,6 +57,7 @@ WORK=$HERE/build
 SEED=
 AF_TIMEOUT=1200
 RETIME=0
+GATE_SIM=0
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -63,7 +69,8 @@ while [ $# -gt 0 ]; do
         --work) WORK=$2; shift 2 ;;
         --timeout) AF_TIMEOUT=$2; shift 2 ;;
         --supra-retiming) RETIME=1; shift ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        --gate-sim) GATE_SIM=1; shift ;;
+        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -76,6 +83,11 @@ done
 for t in unshare timeout python3 xz sha256sum; do
     command -v "$t" >/dev/null || die "\`$t\` is needed"
 done
+if [ "$GATE_SIM" = 1 ]; then
+    for t in iverilog vvp; do
+        command -v "$t" >/dev/null || die "\`$t\` (Icarus Verilog) is needed for --gate-sim"
+    done
+fi
 unshare -rn true 2>/dev/null || die "\`unshare -rn\` does not work here; Supra is only ever run without network"
 [ -f "$PINS" ] || die "pin file not found: $PINS"
 [ -f "$CORE" ] || die "core not found: $CORE (cd fpga/amaranth && python main.py --target ag16k)"
@@ -183,6 +195,18 @@ if grep '^Error\|^Fatal' run.out | grep -v locatiion | grep -q .; then
     grep -n '^Error\|^Fatal' run.out | grep -v locatiion | head -20 >&2
     die "af_run reported errors (run.out)"
 fi
+
+# --- optional: routed netlist vs RTL -------------------------------------------
+GATE="not run (build.sh --gate-sim)"
+if [ "$GATE_SIM" = 1 ]; then
+    echo "== gatesim (routed netlist vs RTL, Supra's models; a few minutes)"
+    [ -f ${DESIGN}_routed.v ] || die "af_run wrote no ${DESIGN}_routed.v"
+    # An earlier build's bitstream of this name must not survive a failed check.
+    rm -f "$HERE/output/$OUTNAME.rbf" "$HERE/output/$OUTNAME.txt"
+    python3 -I "$HERE/gatesim.py" --work "$WORK" --supra "$SUPRA_HOME" ||
+        die "routed netlist and RTL differ, or the check could not run (gatesim/gatesim.out); no bitstream delivered"
+    GATE=$(grep '^GATESIM' gatesim/gatesim.out | paste -sd ' ')
+fi
 lzma=$(xz --format=raw --lzma1=$XZ_FILTER -c "$RBF" | wc -c)
 
 # --- deliver ------------------------------------------------------------------
@@ -215,6 +239,8 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
     echo "Audio_PLL   sha256 $(sha Audio_PLL.v) (generated)"
     echo
     grep -A10 'Packing Statistics' run.out | tail -n +1 || true
+    echo
+    echo "gate-sim    $GATE"
     echo
     grep 'Fmax:' alta_db/fmax.rpt || true
     grep -m1 -B1 'Slack:' alta_db/fmax.rpt || true
