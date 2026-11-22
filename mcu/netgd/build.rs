@@ -69,7 +69,10 @@ fn main() {
     // the moment it appears.
     println!("cargo:rerun-if-changed={rbf}");
 
+    // `census` never configures the FPGA: embed nothing, whatever is there.
+    let census = std::env::var_os("CARGO_FEATURE_CENSUS").is_some();
     let raw = match std::fs::read(rbf) {
+        _ if census => None,
         Ok(raw) => Some(raw),
         Err(e) if v60 && e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => panic!("cannot read {rbf}: {e} -- build the FPGA project first"),
@@ -98,6 +101,10 @@ fn main() {
                 raw.len() as f64 / out.stdout.len() as f64
             );
             (out.stdout, raw.len())
+        }
+        None if census => {
+            println!("cargo:warning=census: no FPGA bitstream embedded (the census never configures the FPGA)");
+            (Vec::new(), 0)
         }
         None => {
             println!(
