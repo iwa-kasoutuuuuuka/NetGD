@@ -56,6 +56,8 @@ const REG_LBA_LOW_MID: usize = 6;
 /// LBA_LOW alone (bitstreams with the byte-lane write; see `set_secnr`).
 /// Reads 0xA5 in the high byte, 0 on a bitstream without the slot.
 const REG_LBA_LOW8: usize = 32;
+/// ID slot: reads 0xC0DE on a live FPGA (used by the slot 32 probe).
+const REG_ID: usize = 12;
 const REG_LBA_HIGH_LOWP: usize = 7;
 const REG_LBA_MIDP_HIGHP: usize = 8;
 const REG_DATA_FIFO: usize = 9;
@@ -569,6 +571,31 @@ impl IdeDevice {
     /// bus cycles rather than whatever an interrupt in between costs; closing
     /// it takes the low-byte-only write described below.
     ///
+    /// Is slot 32 really the LBA_LOW byte write? A bitstream without it
+    /// reads 0 there, but a board whose A6 line is wrong or stuck would alias
+    /// slot 32 onto slot 0 (HW_INFO, whose high byte is 0x80 | cmd_seq), and
+    /// a write there would drop or forge commands. So nothing is written
+    /// until the reads agree: the ID slot says 0xC0DE, slot 32 has 0xA5 in
+    /// the high byte and slot 6's LBA_LOW in the low byte. Only then SECNR as
+    /// it stands is written through slot 32 and must read back unchanged in
+    /// slot 6. Any mismatch (including a host LBA_LOW write landing between
+    /// the reads, which a packet device does not do) means "absent", which
+    /// is the safe answer: the slot 6 path.
+    fn probe_low8(&self) -> bool {
+        critical_section::with(|_| {
+            if self.read(REG_ID) != 0xC0DE {
+                return false;
+            }
+            let w = self.read(REG_LBA_LOW8);
+            let low = self.read(REG_LBA_LOW_MID) as u8;
+            if (w >> 8) != 0xA5 || (w as u8) != low {
+                return false;
+            }
+            self.write(REG_LBA_LOW8, low as u16);
+            self.read(REG_LBA_LOW_MID) as u8 == low && (self.read(REG_LBA_LOW8) as u8) == low
+        })
+    }
+
     /// A bitstream with slot 32 (`REG_LBA_LOW8`, LBA_LOW alone) gets exactly
     /// that: one write, no read, nothing of lba_mid touched. Whether it has
     /// it is asked once (slot 32 reads 0xA5 in the high byte there and 0
@@ -579,8 +606,9 @@ impl IdeDevice {
         static LOW8: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
         let mut have = LOW8.load(Relaxed);
         if have == 0 {
-            have = if (self.read(REG_LBA_LOW8) >> 8) == 0xA5 { 1 } else { 2 };
+            have = if self.probe_low8() { 1 } else { 2 };
             LOW8.store(have, Relaxed);
+            info!("slot 32 (LBA_LOW byte write): {}", if have == 1 { "present" } else { "absent" });
         }
         if have == 1 {
             self.write(REG_LBA_LOW8, v as u16);

@@ -873,7 +873,7 @@ class IDEDevice(Elaboratable):
         # ----- MCU window --------------------------------------------------
         # MCU window: the 7-bit slot index is mcu_addr. Slot 12 reads the
         # ID value 0xC0DE. The full slot map is in docs/AddressMapMCU.md.
-        # Slots in use (0..31; byte offset = 2 * slot):
+        # Slots in use (0..32; byte offset = 2 * slot):
         #    0-8  IDE registers (HW_INFO, STATUS, DEVICE, ERROR, COMMAND,
         #         SECTOR_COUNT, LBA bytes and the previous-LBA bytes).
         #         Slot 0 also carries the command sequence number (bits
@@ -893,7 +893,7 @@ class IDEDevice(Elaboratable):
         #         high byte doubles as the presence probe)
         # Slots 33..127 are unmapped (read 0).
         # The SMC read is a pure combinational cone: MCU_ADDR -> decode -> a
-        # 22-way mux -> the data pins, with nothing registered and no timing
+        # 33-way mux (slots 0-32) -> the data pins, with nothing registered and no timing
         # constraint on any of it (56 unconstrained input ports). Its budget is
         # the SMC access -- 1 MCK setup + 8 MCK pulse at 96 MHz, so ~90 ns
         # minus SAM3U setup and board delay -- on a Cyclone II C8. smc.rs

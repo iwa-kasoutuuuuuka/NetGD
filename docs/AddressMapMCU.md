@@ -327,6 +327,15 @@ Primary device only. RO. Words in the CDDA sample FIFO (depth 768). The firmware
 Primary device only. Write only. Each write pushes one 16-bit PCM word. Samples go in left then right. The
 push is edge-sampled, so one write is one word.
 
+### Slot 32 (0x40): LBA_LOW alone
+
+R/W. A write changes `lba_low` from bits 7:0 and nothing else; a read gives `lba_low` in the low byte and `0xA5`
+in the high byte. Slot 6 stores `lba_low` and `lba_mid` together from one word, and the host writes BYTE COUNT
+LOW into `lba_mid`, so the firmware's read-modify-write of slot 6 to set SECNR could lose a host write that fell
+between its read and its write. `set_secnr` uses slot 32 when the high byte reads `0xA5`. A bitstream without the
+slot reads 0 there and the firmware keeps the slot 6 path; old firmware never touches slot 32. Decoded on both
+devices.
+
 ## Discrepancies and open points
 
 These were found while writing this page. Nothing was changed in the code to resolve them.
@@ -348,12 +357,3 @@ These were found while writing this page. Nothing was changed in the code to res
    and slot 19 has a write mask. Both fall back to whole-word writes on a bitstream built before that; the
    shipped `OpenGDEMU.rbf` has to be rebuilt from `out/OpenGDEMUCore.v` to get the new behaviour.
 6. **Slot 1 bit 8 is a pulse.** Reads never show it, so the MCU cannot check whether INTRQ was raised.
-
-### Slot 32 (0x40): LBA_LOW alone
-
-R/W. A write changes `lba_low` from bits 7:0 and nothing else; a read gives `lba_low` in the low byte and `0xA5`
-in the high byte. Slot 6 stores `lba_low` and `lba_mid` together from one word, and the host writes BYTE COUNT
-LOW into `lba_mid`, so the firmware's read-modify-write of slot 6 to set SECNR could lose a host write that fell
-between its read and its write. `set_secnr` uses slot 32 when the high byte reads `0xA5`. A bitstream without the
-slot reads 0 there and the firmware keeps the slot 6 path; old firmware never touches slot 32. Decoded on both
-devices.
