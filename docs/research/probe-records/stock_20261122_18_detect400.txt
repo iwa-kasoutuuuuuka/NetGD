@@ -1,0 +1,180 @@
+# gdprobe version=2 kos=2.3.0 label=stock stamp=seq00018 seq=18 dcload=1
+# config switch=1 identify=0 throughput=0 tp=64x16 seek=0/16 ip_fad=0 cdread_flags=0x24 timeout_ms=3000 return_to=2 images=4,3,7
+# config swap_regpoll=1 regpoll_ms=1000 regpoll_interval_ms=2 swap_devreset=0 devreset_ms=50,200
+# config swap_reswitch=1 reswitch_wait_ms=1000 devreset_only=1 devreset_only_wait_ms=1000
+# g1bus prot_before=0 prot_after=3 bios_read=2097152 us=551429 altstatus_before=0x30 altstatus_after=0x51
+img=0 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=20
+img=0 probe=WARMUP ready=1
+img=0 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=21
+img=0 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=012f41020105017a0000 us=29
+img=0 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=0000000000b419000008 us=28
+img=0 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=52657620362e3432 us=24
+img=0 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x21 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=33
+img=0 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=f0000000000000000000 us=26
+img=0 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01010000410200004105017c us=170
+img=0 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01010000410200004105017c us=168
+img=0 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=01000205017c us=28
+img=0 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010001000096 us=26
+img=0 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010002002e4c us=28
+img=0 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=22
+img=0 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x21 data=00150064004000000000004000000000000040000000000000000040004040400000000000000040004040000000000000404000000000000000000000404040000040000040004000400000000000004000000000400000400000004000000040404000 us=82
+img=0 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x21 data=0015000e41020104d32e0005017a us=24615
+img=0 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=0000050200052005 us=26
+img=4 probe=SW_CMD n=4 cdb=528204000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=20
+img=4 probe=SW_REGPOLL t_ms=1 sample=1 altst=0x50 err=0x50 irr=0x03 secnr=0x21
+img=4 probe=SW_REGPOLL t_ms=3 sample=2 altst=0x50 err=0x50 irr=0x03 secnr=0x06
+img=4 probe=SW_REGPOLL t_ms=151 sample=75 altst=0x50 err=0x50 irr=0x03 secnr=0x00
+img=4 probe=SW_REGPOLL t_ms=549 sample=273 altst=0x50 err=0x50 irr=0x03 secnr=0x21
+img=4 probe=SW_REGPOLL_END t_ms=1000 samples=495 changes=4 stop=time
+img=4 probe=SW_POLL t_ms=1002 poll=1 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x21
+img=4 probe=SW_POLL t_ms=1026 poll=2 rc=ok status=0x50 err=0x00 sense=none secnr=0x21
+img=4 probe=SW_RESULT n=4 rc=ok t_ms=1027 polls=2 changes=2
+img=4 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=21
+img=4 probe=WARMUP ready=1
+img=4 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=20
+img=4 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=012f0101010000960000 us=29
+img=4 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=0000000000b419000008 us=27
+img=4 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=52657620362e3432 us=23
+img=4 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x21 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=34
+img=4 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=f0000000000000000000 us=28
+img=4 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010100004102000041003dee us=171
+img=4 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x21 data=0100009641002e4cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010100004102000041003dee us=172
+img=4 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010002003dee us=23
+img=4 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010001000096 us=28
+img=4 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x21 data=010002002e4c us=27
+img=4 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=20
+img=4 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x21 data=00150064000000000000004000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000400040400040000000400040000000 us=83
+img=4 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x21 data=0015000e01010100000000000096 us=24440
+img=4 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x21 data=0000050200052005 us=24
+img=4 probe=IP_READ fad=11852 count=7 cdb=3024002e4c00000000000700 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=619
+img=4 probe=RS_SW_CMD n=4 cdb=528204000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x18 secnr=0x21 us=22
+img=4 probe=RS_SW_REGPOLL t_ms=0 sample=1 altst=0x50 err=0x50 irr=0x03 secnr=0x21
+img=4 probe=RS_SW_REGPOLL_END t_ms=1000 samples=497 changes=1 stop=time
+img=4 probe=RS_SW_POLL t_ms=1002 poll=1 rc=ok status=0x50 err=0x00 sense=none secnr=0x21
+img=4 probe=RS_SW_RESULT n=4 rc=ok t_ms=1003 polls=1 changes=1 ua_28=0
+img=4 probe=RS_REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=012f410201002e4c0000 us=26
+img=4 probe=RS_REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=f0000000000000000000 us=25
+img=4 probe=DR_IDLE idle_ms=500
+img=4 probe=DR_SW_DEVRESET delay_ms=0 t_ms=0 rc=ok reset_us=2001 bsy_seen=1 altst=0x00 err=0x01 irr=0x01 secnr=0x00 bcl=0x14 bch=0xeb
+img=4 probe=DR_SW_REGPOLL t_ms=2 sample=1 altst=0x00 err=0x01 irr=0x01 secnr=0x00
+img=4 probe=DR_SW_REGPOLL t_ms=402 sample=199 altst=0x00 err=0x01 irr=0x01 secnr=0x21
+img=4 probe=DR_SW_REGPOLL_END t_ms=1000 samples=495 changes=2 stop=time
+img=4 probe=DR_SW_POLL t_ms=1001 poll=1 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x21
+img=4 probe=DR_SW_POLL t_ms=1029 poll=2 rc=ok status=0x50 err=0x00 sense=none secnr=0x21
+img=4 probe=DR_SW_RESULT n=4 rc=ok t_ms=1030 polls=2 changes=2 ua_28=1
+img=4 probe=DR_REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=012f0101010000960000 us=28
+img=4 probe=DR_REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x21 data=f0000000000000000000 us=25
+img=3 probe=SW_CMD n=3 cdb=528203000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x21 us=21
+img=3 probe=SW_REGPOLL t_ms=0 sample=1 altst=0x50 err=0x60 irr=0x03 secnr=0x21
+img=3 probe=SW_REGPOLL t_ms=5 sample=3 altst=0x50 err=0x60 irr=0x03 secnr=0x06
+img=3 probe=SW_REGPOLL t_ms=151 sample=75 altst=0x50 err=0x60 irr=0x03 secnr=0x00
+img=3 probe=SW_REGPOLL t_ms=552 sample=274 altst=0x50 err=0x60 irr=0x03 secnr=0x81
+img=3 probe=SW_REGPOLL_END t_ms=1001 samples=496 changes=4 stop=time
+img=3 probe=SW_POLL t_ms=1003 poll=1 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x81
+img=3 probe=SW_POLL t_ms=1025 poll=2 rc=ok status=0x50 err=0x00 sense=none secnr=0x81
+img=3 probe=SW_RESULT n=3 rc=ok t_ms=1026 polls=2 changes=2
+img=3 probe=TUR_W0 cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=21
+img=3 probe=WARMUP ready=1
+img=3 probe=TUR cdb=000000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=22
+img=3 probe=REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=018f41030100b05e0000 us=30
+img=3 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=0000000000b419000008 us=27
+img=3 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x81 data=52657620362e3432 us=27
+img=3 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x81 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=33
+img=3 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=f0000000000000000000 us=25
+img=3 probe=GET_TOC_0 cdb=140000019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x81 data=410000960100038affffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff4101000001020000010005e2 us=173
+img=3 probe=GET_TOC_1 cdb=140100019800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=408 cdbst=0x58 secnr=0x81 data=ffffffffffffffff4100b05effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff41030000410300004100fe7e us=168
+img=3 probe=REQ_SES_0 cdb=150000000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x81 data=01000100fe7e us=26
+img=3 probe=REQ_SES_1 cdb=150001000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 cdbst=0x58 secnr=0x81 data=010001000096 us=28
+img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=20
+img=3 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x18 secnr=0x81 us=20
+img=3 probe=GET_SCD_0 cdb=400000006400000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=100 cdbst=0x18 secnr=0x81 data=00150064004000000000004000000000000040400000000000000040000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000004000000000000000000040004000404000400000404000404000 us=83
+img=3 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14 cdbst=0x58 secnr=0x81 data=0015000e4103010000000000b05e us=24492
+img=3 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x81 data=0000050200052005 us=24
+img=3 probe=IP_READ fad=45150 count=7 cdb=302400b05e00000000000700 rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x81 data=5345474120534547414b4154414e41205345474120454e544552505249534553303030302047442d524f4d312f3120204a554520202020204530303046313020542d4e4554474420202056312e303030323032363031303120202020202020203153545f524541442e42494e202020204e4554474420202020202020202020204e455447442050524f42452030332020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020204e455447442d50524f424520696d673d30332074726b3d33206c62613d3030303435303030204e1fce7c87ceffee04c67cb08f658c54241143f7d3ebc78cf4b75b841537f3b231892628c81801312f21dc547494838c7a27b3891268ade1efb07295252de81663dd69eb8f16a7b34dc72ec27d575396d59adb9b05cf0c05990ba31aa882c99ea3dee924dc78ce60ac1cfdb6b4de2c21d5028921351667f93123a2bcb657ea224da6cf1acc14f01ec3307dd49d6f565417aeefa07329581d8f3f5e1621607bb49065043776c568614824805fbd1a4981a539f4f29b787921aa5efb158996520994a72f6d38c2fd15a3f7a362f85d650442ad4253636906be94a1 us=7281
+img=3 probe=HASH fad=45150 ssz=2048 crc=62d4cf63
+img=3 probe=HASH fad=45151 ssz=2048 crc=77c923a4
+img=3 probe=HASH fad=45152 ssz=2048 crc=b9d16dc1
+img=3 probe=HASH fad=45153 ssz=2048 crc=0d3bf321
+img=3 probe=HASH fad=45154 ssz=2048 crc=6f5887e8
+img=3 probe=HASH fad=45155 ssz=2048 crc=ef682ddb
+img=3 probe=HASH fad=45156 ssz=2048 crc=dee01194
+img=3 probe=RS_SW_CMD n=3 cdb=528203000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=19
+img=3 probe=RS_SW_REGPOLL t_ms=0 sample=1 altst=0x50 err=0x50 irr=0x03 secnr=0x81
+img=3 probe=RS_SW_REGPOLL_END t_ms=1000 samples=497 changes=1 stop=time
+img=3 probe=RS_SW_POLL t_ms=1002 poll=1 rc=ok status=0x50 err=0x00 sense=none secnr=0x81
+img=3 probe=RS_SW_RESULT n=3 rc=ok t_ms=1003 polls=1 changes=1 ua_28=0
+img=3 probe=RS_REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=018f41030100b0650000 us=27
+img=3 probe=RS_REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=f0000000000000000000 us=23
+img=3 probe=DR_IDLE idle_ms=500
+img=3 probe=DR_SW_DEVRESET delay_ms=0 t_ms=0 rc=ok reset_us=2001 bsy_seen=1 altst=0x00 err=0x01 irr=0x01 secnr=0x00 bcl=0x14 bch=0xeb
+img=3 probe=DR_SW_REGPOLL t_ms=3 sample=1 altst=0x00 err=0x01 irr=0x01 secnr=0x00
+img=3 probe=DR_SW_REGPOLL t_ms=401 sample=199 altst=0x00 err=0x01 irr=0x01 secnr=0x81
+img=3 probe=DR_SW_REGPOLL_END t_ms=1001 samples=496 changes=2 stop=time
+img=3 probe=DR_SW_POLL t_ms=1003 poll=1 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x81
+img=3 probe=DR_SW_POLL t_ms=1029 poll=2 rc=ok status=0x50 err=0x00 sense=none secnr=0x81
+img=3 probe=DR_SW_RESULT n=3 rc=ok t_ms=1030 polls=2 changes=2 ua_28=1
+img=3 probe=DR_REQ_STAT cdb=100000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=018f41030100b05e0000 us=29
+img=3 probe=DR_REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x81 data=f0000000000000000000 us=26
+img=7 probe=SW_CMD n=7 cdb=528207000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x81 us=18
+img=7 probe=SW_REGPOLL t_ms=0 sample=1 altst=0x50 err=0x60 irr=0x03 secnr=0x06
+img=7 probe=SW_REGPOLL t_ms=150 sample=75 altst=0x50 err=0x60 irr=0x03 secnr=0x00
+img=7 probe=SW_REGPOLL t_ms=548 sample=273 altst=0x50 err=0x60 irr=0x03 secnr=0x07
+img=7 probe=SW_REGPOLL_END t_ms=1001 samples=496 changes=3 stop=time
+img=7 probe=SW_POLL t_ms=1002 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x07
+img=7 probe=SW_RESULT n=7 rc=timeout t_ms=6010 polls=240 changes=1
+img=7 probe=TUR_W0 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=19
+img=7 probe=REQ_ERROR_W0 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=26
+img=7 probe=TUR_W1 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=21
+img=7 probe=REQ_ERROR_W1 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=24
+img=7 probe=TUR_W2 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=21
+img=7 probe=REQ_ERROR_W2 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=25
+img=7 probe=TUR_W3 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=18
+img=7 probe=REQ_ERROR_W3 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=26
+img=7 probe=TUR_W4 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=20
+img=7 probe=REQ_ERROR_W4 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=26
+img=7 probe=TUR_W5 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=18
+img=7 probe=REQ_ERROR_W5 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=24
+img=7 probe=TUR_W6 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=21
+img=7 probe=REQ_ERROR_W6 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=26
+img=7 probe=TUR_W7 cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=20
+img=7 probe=REQ_ERROR_W7 cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=24
+img=7 probe=WARMUP ready=0
+img=7 probe=TUR cdb=000000000000000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=19
+img=7 probe=REQ_STAT cdb=100000000a00000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=20
+img=7 probe=REQ_MODE_0_10 cdb=110000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=0000000000b419000008 us=24
+img=7 probe=REQ_MODE_18_8 cdb=110012000800000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x58 secnr=0x07 data=52657620362e3432 us=25
+img=7 probe=REQ_MODE_0_32 cdb=110000002000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=32 cdbst=0x58 secnr=0x07 data=0000000000b419000008534520202020202052657620362e3432393930333136 us=33
+img=7 probe=REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x58 secnr=0x07 data=f0000000000000000000 us=25
+img=7 probe=GET_TOC_0 cdb=140000019800000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=20
+img=7 probe=GET_TOC_1 cdb=140100019800000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=20
+img=7 probe=REQ_SES_0 cdb=150000000600000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=19
+img=7 probe=REQ_SES_1 cdb=150001000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=19
+img=7 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=20
+img=7 probe=REQ_SES_3 cdb=150003000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=17
+img=7 probe=GET_SCD_0 cdb=400000006400000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=19
+img=7 probe=GET_SCD_1 cdb=400100000e00000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x18 secnr=0x07 us=20
+img=7 probe=GDEMU_VERSION cdb=520000000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=8 cdbst=0x18 secnr=0x07 data=0000050200052005 us=27
+img=7 probe=RS_SW_CMD n=7 cdb=528207000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=19
+img=7 probe=RS_SW_REGPOLL t_ms=0 sample=1 altst=0x50 err=0x20 irr=0x03 secnr=0x07
+img=7 probe=RS_SW_REGPOLL_END t_ms=1000 samples=497 changes=1 stop=time
+img=7 probe=RS_SW_POLL t_ms=1002 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x07
+img=7 probe=RS_SW_RESULT n=7 rc=timeout t_ms=6019 polls=242 changes=1 ua_28=0
+img=7 probe=RS_REQ_STAT cdb=100000000a00000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=21
+img=7 probe=RS_REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=26
+img=7 probe=DR_IDLE idle_ms=500
+img=7 probe=DR_SW_DEVRESET delay_ms=0 t_ms=0 rc=ok reset_us=2001 bsy_seen=1 altst=0x00 err=0x01 irr=0x01 secnr=0x00 bcl=0x14 bch=0xeb
+img=7 probe=DR_SW_REGPOLL t_ms=2 sample=1 altst=0x00 err=0x01 irr=0x01 secnr=0x00
+img=7 probe=DR_SW_REGPOLL t_ms=401 sample=199 altst=0x00 err=0x01 irr=0x01 secnr=0x07
+img=7 probe=DR_SW_REGPOLL_END t_ms=1001 samples=496 changes=2 stop=time
+img=7 probe=DR_SW_POLL t_ms=1003 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x07
+img=7 probe=DR_SW_RESULT n=7 rc=timeout t_ms=6014 polls=240 changes=1 ua_28=0
+img=7 probe=DR_REQ_STAT cdb=100000000a00000000000000 rc=check status=0x11 err=0x20 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=19
+img=7 probe=DR_REQ_ERROR cdb=130000000a00000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 cdbst=0x18 secnr=0x07 data=f0000200000000003a00 us=25
+img=2 probe=SW_CMD n=2 cdb=528202000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 cdbst=0x58 secnr=0x07 us=18
+img=2 probe=SW_POLL t_ms=0 poll=1 rc=check status=0x11 err=0x20 sense=2/3a/00 secnr=0x06
+img=2 probe=SW_POLL t_ms=154 poll=5 rc=check status=0x11 err=0x20 sense=2/04/01 secnr=0x00
+img=2 probe=SW_POLL t_ms=556 poll=24 rc=check status=0x11 err=0x60 sense=6/28/00 secnr=0x21
+img=2 probe=SW_POLL t_ms=586 poll=25 rc=ok status=0x50 err=0x00 sense=none secnr=0x21
+img=2 probe=SW_RESULT n=2 rc=ok t_ms=587 polls=25 changes=4
+img=2 probe=END abort=0
+# done abort=0 bytes_written=26568

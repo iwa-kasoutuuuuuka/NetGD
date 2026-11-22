@@ -2448,6 +2448,29 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み（実機）。
 - 関連：R155〜R159。
 
+### R161 DEVICE RESET のあとの検出の時間は detect_time（seq 18、GDEMU.ini の detect_time = 400）（Opus）
+
+- 担当：Opus。gdprobe は `feat/gdprobe-seq17`（設定 `gdprobe.cfg.seq18.example`）。試験の前に SD の GDEMU.ini を `detect_time = 400` に変えた（`open_time = 150`・`reset_goto = 1` はそのまま。元の内容は `H:\NetGD_probe_sd\GDEMU.ini.before_seq18`、試験のあと戻す）。記録：`docs/research/probe-records/stock_20261122_18_detect400.txt`（`abort=0`）。
+- 結論：
+  - 通常の切替：`0x06` → 150 ms（open_time）で `0x00` → 約 550 ms（open_time + detect_time）で最終の値。R135 の「窓 = open_time + detect_time」と同じ。
+  - **DEVICE RESET のあと SECNR が最終の値になるまでは約 400 ms ＝ detect_time**（detect_time = 150 のときは約 150 ms、R159・R160）。DEVICE RESET は「open を飛ばして検出（detect_time）からやり直す」。UA・ヘッドの位置の戻り・空フォルダの 2/3A/00 は R160 と同じ。
+  - 同じフォルダへの再切替だけは今回も何もしない（UA なし）。
+- 対応：`fix/r159-devreset` の担当に「検出の長さは detect_time」と伝えた。
+- 信頼度：確認済み（実機）。
+- 関連：R135、R159、R160。
+
+### R162 ピン探しが Supra で初めて最後まで通った（R145 の未解決点）（Opus）
+
+- 担当：Opus（サブエージェント）。ブランチ `feat/pinfind-supra`、コミット `01279ace`（main `5a5252d3` から）。未取り込み。基板には何も流していない。
+- Supra 2026.03.b0（WSL）でピン探しの `build.sh` が初めて最後まで通った（osc 既定・ring・段階 0）。`.rbf` 552,352 B、LZMA は osc 14,160 B・ring 14,320 B・段階 0 1,699 B、ピン 169 / 251。ビルドは 2〜4 分。
+- `cycloneive_clkctrl` は af_map が知らず（`NO_ALTA_GCLKSW` のときだけの blackbox）、`alta_gclksw` は af_run が「no corresponding resource」のあと落ちる。`--clkctrl` を既定オフにした（af_run が自分で GCLK を作る）。
+- 実際の配置は `alta_db/io.asf`（af_run が書く I/O 配置のデータベース）から読める。`P[5]` の割り当てを外す実験で `placed at pin DDR_DM1` と出て io.asf にも DDR_DM1 が出たので、要求の写しではなく Supra の結果と判断した。`checkpnr.py` が既定で読む（`--placement` は不要）。
+- 配置配線後のネットリストにはボール名が無く座標（coord_x/y/z）だけなので、ポートごとに座標が 1 つで重複しないことを確かめ、`.sites` に残す。`--sites-ref` で osc・ring・段階 0 と本番 NetGD の 66 本が同じ座標に一致した。
+- hold（G1・G2・C1・D2・特別な機能・DDR の F10/M10/L11/M11・クロックボール）の割り当ても Supra は受け付け、hold のパッドは `.oe(gnd)`。pinmap のユーザー I/O になりうるボールで設計に無いものは 0 本。`alta_osc` とリング 31 段も配置配線を通った（推定 Fmax 70〜76 MHz、実周波数は不明）。
+- `--gate-sim` は WSL に Icarus Verilog が無いので未実施（入れるにはユーザーの許可が要る）。ファームは実ビットストリーム入りでフラッシュ 32,436 B（osc の段階 1・2。最初の実機の段階 0 用には作り直しが要る）。
+- 残り：io.asf と実際のシリコンの一致はロジアナでしか確かめられない、alta_osc の周波数（T ≥ 20 µs は 51 MHz 以下のときだけ）、`early_done` の方針、README §0 の人の作業（基板の外での給電の練習、ロックされていない純正ファームのバックアップ、PS ピン・MSEL1・LED の導通）。
+- 関連：R142、R143、R145、R158。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
