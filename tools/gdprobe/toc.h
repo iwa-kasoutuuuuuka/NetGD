@@ -14,6 +14,7 @@ typedef struct {
     uint8_t ctl[99];      /* CTRL/ADR byte */
     uint32_t fad[99];
     uint32_t leadout;     /* 0 = none */
+    uint8_t leadout_ctl;  /* seq 24: CTRL/ADR byte of the lead-out entry */
 } gp_toc_area;
 
 /* Parse one area. Returns a->valid. */
@@ -50,5 +51,22 @@ int gp_offset_fads(uint32_t start, const int *offs, int n, uint32_t *out);
 /* One step of the search for the last readable sector in [lo, hi] (lo known readable, hi known unreadable):
  * returns the FAD to try next, or 0 when hi == lo + 1 (done: lo is the last readable one). */
 uint32_t gp_bsearch_next(uint32_t lo, uint32_t hi);
+
+/* seq 24: off-track regions for the CTRL case. For each: the track before it (prev, read at in_fad), the track after
+ * it (next, read at next_in; for the lead-out none: next_ctl = the lead-out entry's CTRL, next_in = first track + 16)
+ * and up to 3 off-track FADs.
+ *   GAP  between track 1 and track 2 (CD): off = track 2 start - 151 (below its pregap)
+ *   HDG  GD-ROM: LD lead-out .. HD pregap: off = LD lead-out, the middle, HD start - 151
+ *   LO   lead-out of the last area: off = lead-out + 1 */
+typedef struct {
+    const char *name;
+    uint32_t prev_num, prev_ctl, in_fad;
+    int has_next;
+    uint32_t next_num, next_ctl, next_in;
+    uint32_t rev_num, rev_ctl, rev_in;   /* the reverse order's first read: next track, or first track (LO) */
+    int n_off;
+    uint32_t off[3];
+} gp_ctl_region;
+int gp_ctl_regions(const gp_toc_area area[2], const gp_gap_plan *p, gp_ctl_region out[3]);
 
 #endif

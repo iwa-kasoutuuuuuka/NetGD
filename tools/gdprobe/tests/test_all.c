@@ -349,6 +349,9 @@ typedef struct {
     int cdi_folder, gdi_folder;
     /* seq 23: stock's readable range per track is [start - 150, data end) (LOG R174): pregaps read like the track */
     int pregap_model;
+    /* seq 24: on this folder a multi-sector read that starts readable and runs past the readable end sends the
+     * readable sectors and then never completes (stock at XEND, record 23): the drive stays stuck */
+    int hang_folder;
 } fake;
 
 static int f_edge(const fake *f) { return f->mounted && (f->mounted == f->cdi_folder || f->mounted == f->gdi_folder); }
@@ -505,6 +508,16 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
             uint32_t z = f_edge_ssz(f, fad), k;
             int bad = !z || !cnt;
             for (k = 1; k < cnt && !bad; k++) bad = f_edge_ssz(f, fad + k) != z;
+            if (bad && z && f->hang_folder && f->mounted == f->hang_folder) {
+                uint32_t good = 1;
+                while (good < cnt && f_edge_ssz(f, fad + good) == z) good++;
+                for (s = 0; s < good * z && s < cap; s++) buf[s] = (uint8_t)((fad + s / z) * 7u + s % z);
+                f->stuck = 1;
+                f->now += (uint64_t)timeout_ms * 1000u;
+                r->rc = GD_TIMEOUT; r->us = (uint64_t)timeout_ms * 1000u; r->status = 0x80 | 0x08;
+                r->total = good * z; r->stored = r->total < cap ? r->total : cap;
+                return r->rc;
+            }
             if (bad || (z == 2352 && (cdb[1] & 0x0E))) {
                 r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50;
                 f->pend_sk = 5; f->pend_asc = bad ? 0x21 : 0x64; f->pend_ascq = 0;
@@ -1833,6 +1846,154 @@ static void test_seq23_example_cfg(void)
     CHECK(f.now < 240ull * 1000000u);
 }
 
+/* seq 24: CTRL regions, deferred risky reads */
+static void test_ctl_regions(void)
+{
+    uint8_t t0[408], t1[408];
+    gp_toc_area a[2];
+    gp_gap_plan p;
+    gp_ctl_region g[3];
+    /* GDI */
+    {
+        static const uint8_t c0[2] = { 0x41, 0x01 }, c1[1] = { 0x41 };
+        static const uint32_t f0[2] = { 150, 906 }, f1[1] = { 45150 };
+        static const int n0[2] = { 1, 2 }, n1[1] = { 3 };
+        mk_toc(t0, c0, f0, n0, 2, 0x01, 1506);
+        mk_toc(t1, c1, f1, n1, 1, 0x41, 65150);
+    }
+    gp_toc_parse(t0, &a[0]); gp_toc_parse(t1, &a[1]);
+    CHECK(a[0].leadout_ctl == 0x01 && a[1].leadout_ctl == 0x41);
+    gp_gap_plan_make(a, &p);
+    CHECK(gp_ctl_regions(a, &p, g) == 3);
+    CHECK(!strcmp(g[0].name, "GAP") && g[0].prev_num == 1 && g[0].in_fad == 166 && g[0].next_ctl == 0x01 && g[0].off[0] == 755);
+    CHECK(!strcmp(g[1].name, "HDG") && g[1].prev_num == 2 && g[1].prev_ctl == 0x01 && g[1].in_fad == 922);
+    CHECK(g[1].has_next && g[1].next_num == 3 && g[1].next_ctl == 0x41 && g[1].next_in == 45166 && g[1].rev_in == 45166);
+    CHECK(g[1].n_off == 3 && g[1].off[0] == 1506 && g[1].off[1] == 23252 && g[1].off[2] == 44999);
+    CHECK(!strcmp(g[2].name, "LO") && g[2].prev_num == 3 && g[2].prev_ctl == 0x41 && g[2].in_fad == 45166 && !g[2].has_next);
+    CHECK(g[2].next_ctl == 0x41 && g[2].off[0] == 65151 && g[2].rev_num == 1 && g[2].rev_ctl == 0x41 && g[2].rev_in == 166);
+    /* audio-only CD: lead-out after an audio track, lead-out entry CTRL 0x01 */
+    {
+        static const uint8_t ctl[2] = { 0x01, 0x01 };
+        static const uint32_t fad[2] = { 150, 602 };
+        static const int tno[2] = { 1, 2 };
+        mk_toc(t0, ctl, fad, tno, 2, 0x01, 1004);
+    }
+    gp_toc_parse(t0, &a[0]); gp_toc_parse(t0, &a[1]);
+    gp_gap_plan_make(a, &p);
+    CHECK(gp_ctl_regions(a, &p, g) == 2 && !strcmp(g[0].name, "GAP") && g[0].off[0] == 451);
+    CHECK(!strcmp(g[1].name, "LO") && g[1].prev_ctl == 0x01 && g[1].next_ctl == 0x01 && g[1].off[0] == 1005);
+    memset(a, 0, sizeof(a));
+    gp_gap_plan_make(a, &p);
+    CHECK(gp_ctl_regions(a, &p, g) == 0);
+}
+
+static void test_runner_seq24(void)
+{
+    static fake f;
+    gp_config c;
+    const char *l, *hang;
+
+    gp_config_defaults(&c);
+    CHECK(c.risky_cross == GP_RISKY_INLINE && !c.ctl_probe);
+    gp_config_parse(&c, "risky_cross=end\nctl_probe=on\n");
+    CHECK(c.risky_cross == GP_RISKY_END && c.ctl_probe && c.unknown_keys == 0);
+    gp_config_parse(&c, "risky_cross=off\nrisky_cross=later\nctl_probe=2\n");
+    CHECK(c.risky_cross == GP_RISKY_OFF && c.unknown_keys == 2);
+
+    /* GDI 3, CDI 4 (the one that hangs on a read past the data end), deferred risky reads */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.cdi_folder = 4; f.gdi_folder = 3;
+    f.pregap_model = 1; f.hang_folder = 4;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,4\nreturn_to=2\npregap_probe=on\ngap_crc=on\nrisky_cross=end\nctl_probe=on\n"
+                        "throughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 1 && f.sent_bad == 0 && find_line("probe=END abort=1"));
+    CHECK(count_of("probe=GP_RISKY_SKIP cases=XEND,XLD,XLO reason=deferred_to_end") == 2);
+    /* the normal cases of both images ran before the risky phase */
+    hang = find_line("img=4 probe=GP_RISKY case=XLO");
+    CHECK(hang && find_line("img=4 probe=GP_CTL_REGION region=LO") && find_line("img=4 probe=GP_CTL_REGION region=LO") < hang);
+    CHECK(find_line("img=3 probe=GP_RISKY_START") > find_line("img=4 probe=GP_CTLR_LO_IN_POS"));
+    /* GDI XGAP2 starts on track 1 data: checked with one sector, deferred; XGAP3 starts in the gap: sent inline */
+    CHECK(find_line("img=3 probe=GP_XGAP2_CHK flags=0x20 fad=748 count=1 ssz=2048 sense=none"));
+    CHECK(find_line("img=3 probe=GP_XGAP2_SKIP fad=748 reason=starts_on_data_deferred_to_end"));
+    CHECK(find_line("img=3 probe=GP_XGAP3_CHK flags=0x20 fad=44992 count=1 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=3 probe=GP_XGAP3 flags=0x20 fad=44992 count=16") < find_line("img=3 probe=GP_RISKY_START"));
+    /* image 3's risky phase: XGAP2, XLD, XLO (CHECK on that folder), then XEND (no gap below the pregap) */
+    l = find_line("img=3 probe=GP_RISKY case=XGAP2 fad=748 count=16 edge=756 crosses=data_into_pregap note=may_hang");
+    CHECK(l && l > find_line("img=3 probe=GP_RISKY_START"));
+    CHECK(find_line("img=3 probe=GP_RISKY case=XLD fad=1498 count=16 edge=1506 crosses=ld_leadout note=may_hang") > l);
+    CHECK(find_line("img=3 probe=GP_XLD flags=0x20 fad=1498 count=16 ssz=- sense=5/21/00"));
+    CHECK(find_line("img=3 probe=GP_RISKY case=XLO fad=65142 count=16 edge=65150 crosses=leadout"));
+    CHECK(find_line("img=3 probe=GP_XEND_SKIP a_fad=150 b_fad=906 hi=755 src=scan reads=2 reason=no_gap") > find_line("img=3 probe=GP_XLO "));
+    /* image 4: XGAP2 starts in the gap (no risky read), no HD area, then XLO never completes */
+    CHECK(find_line("img=4 probe=GP_XGAP2_CHK flags=0x20 fad=11694 count=1 ssz=- sense=5/21/00") && !find_line("img=4 probe=GP_RISKY case=XGAP2"));
+    CHECK(find_line("img=4 probe=GP_RISKY case=XLO fad=15846 count=16 edge=15854 crosses=leadout note=may_hang"));
+    l = line_of("img=4 probe=GP_XLO ");
+    CHECK(l > hang && strstr(l, "rc=timeout") && strstr(l, "bytes=16384"));
+    CHECK(find_line("probe=ABORT reason=drive-not-answering") > hang && !find_line("img=4 probe=GP_RISKY case=XEND"));
+    CHECK(f.n_mounts == 2 + 2);   /* 3, 4, then 3, 4 again; no return_to after the abort */
+
+    /* CTRL lines (the fake reports 0x41 everywhere) */
+    CHECK(find_line("img=3 probe=GP_CTL_REGION region=HDG prev=2/0x01 in=922 next=3/0x41 rev=3/0x41/45166 off=1506,23252,44999"));
+    CHECK(find_line("img=3 probe=GP_CTLF_HDG_IN flags=0x20 fad=922 count=1 ssz=2352"));
+    CHECK(find_line("img=3 probe=GP_CTLF_HDG_OFF0 flags=0x20 fad=1506 count=1 ssz=- sense=5/21/00"));
+    l = line_of("img=3 probe=GP_CTL region=HDG dir=fwd off_fad=1506 ");
+    CHECK(strstr(l, "off_rc=check trk=3 idx=1 ctl=0x41 scd_trk=3 scd_ctl=0x41 scd_rel=0 last_read=2/0x01 prev_query=2/0x41 next=3/0x41 match=const41,prev_query,next"));
+    CHECK(find_line("img=3 probe=GP_CTL region=HDG dir=fwd off_fad=44999 ") && find_line("img=3 probe=GP_CTLR_HDG_PRE flags=0x20 fad=45166"));
+    CHECK(find_line("img=3 probe=GP_CTL region=HDG dir=rev off_fad=23252 off_rc=check") && find_line("img=3 probe=GP_CTLR_HDG_IN flags=0x20 fad=922"));
+    CHECK(strstr(line_of("img=3 probe=GP_CTL region=GAP dir=fwd off_fad=755 "), "off_rc=ok off_track=0"));
+    CHECK(strstr(line_of("img=3 probe=GP_CTL region=LO dir=fwd off_fad=65151 "), "next=- leadout_entry=0x41 match="));
+    CHECK(find_line("img=4 probe=GP_CTL_REGION region=GAP prev=1/0x01 in=166 next=2/0x41 rev=2/0x41/11868 off=11701"));
+    CHECK(strstr(line_of("img=4 probe=GP_CTL region=GAP dir=fwd off_fad=11701 "), "last_read=1/0x01"));
+    CHECK(strstr(line_of("img=4 probe=GP_CTL_REGION region=LO "), "rev=1/0x01/166 off=15855"));
+
+    /* risky_cross=off: nothing risky is sent; switch=off + end: the risky phase on the mounted image */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1; f.cdi_folder = 4; f.pregap_model = 1; f.hang_folder = 4;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4\npregap_probe=on\nrisky_cross=off\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && find_line("img=4 probe=GP_RISKY_SKIP cases=XEND,XLD,XLO reason=risky_cross_off"));
+    CHECK(!find_line("GP_XEND") && !find_line("GP_XLO") && !find_line("GP_DSCAN") && !find_line("GP_RISKY ") && !find_line("GP_CTL"));
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "pregap_probe=on\nrisky_cross=end\nthroughput=off\nseek=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0 && find_line("img=0 probe=GP_RISKY_START") > find_line("img=0 probe=GP_RISKY_SKIP"));
+    CHECK(find_line("img=0 probe=GP_RISKY case=XLO") && find_line("probe=END abort=0"));
+    /* inline (seq 23 default): no GP_RISKY lines */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.head_model = 1; f.cdi_folder = 4; f.pregap_model = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4\npregap_probe=on\nthroughput=off\nseek=off\ncdread_flags_test=off\ncdread_flags=0x20\n");
+    CHECK(run_fake(&f, &c) == 0 && find_line("img=4 probe=GP_XEND ") && !find_line("GP_RISKY"));
+}
+
+static void test_seq24_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    FILE *in = fopen("../gdprobe.cfg.seq24.example", "rb");
+    CHECK(in != NULL);
+    if (!in) return;
+    n = fread(text, 1, sizeof(text) - 1, in);
+    fclose(in);
+    text[n] = 0;
+    CHECK(n < 2048);   /* main.c reads at most cfgbuf - 1 bytes */
+    gp_config_defaults(&c);
+    gp_config_parse(&c, text);
+    CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == 24);
+    CHECK(c.do_switch && c.n_images == 3 && c.images[0] == 3 && c.images[1] == 10 && c.images[2] == 4 && c.return_to == 2);
+    CHECK(c.gap_probe && c.gap_crc && c.pregap_probe && c.ctl_probe && c.risky_cross == GP_RISKY_OFF);
+    CHECK(!c.head_probe && !c.swap_regpoll && !c.swap_devreset && !c.swap_reswitch && !c.devreset_only && !c.devreset_cmd);
+    CHECK(!c.do_cdread_flags && !c.do_throughput && !c.do_seek && !c.do_identify && c.cdread_flags == 0x20);
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.passive = 1; f.head_model = 1; f.cdi_folder = 4; f.gdi_folder = 3;
+    f.pregap_model = 1; f.hang_folder = 4;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 0 && f.n_mounts == 3 + 1 && find_line("probe=END abort=0"));
+    CHECK(count_of("probe=GP_PG_START ") == 3 && count_of("probe=GP_RISKY_SKIP ") == 3 && !find_line("probe=GP_RISKY "));
+    CHECK(count_of("probe=GP_CTL_REGION region=HDG") == 1 && count_of("probe=GP_CTL ") >= 10);
+    CHECK(find_line("img=3 probe=GP_START") < find_line("img=10 probe=GP_START") && find_line("img=10 probe=GP_START") < find_line("img=4 probe=GP_START"));
+    CHECK(f.now < 300ull * 1000000u);
+}
+
 int main(void)
 {
     g_rec = malloc(8u << 20);
@@ -1866,6 +2027,9 @@ int main(void)
     test_seq22_example_cfg();
     test_runner_seq23();
     test_seq23_example_cfg();
+    test_ctl_regions();
+    test_runner_seq24();
+    test_seq24_example_cfg();
     printf("OK: %d checks passed\n", g_checks);
     return 0;
 }

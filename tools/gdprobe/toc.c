@@ -19,8 +19,10 @@ int gp_toc_parse(const uint8_t toc[408], gp_toc_area *a)
         a->n++;
     }
     lo = fad3(toc + 405);
-    if (toc[404] != 0xFF && lo && lo < 0x00F00000)
+    if (toc[404] != 0xFF && lo && lo < 0x00F00000) {
         a->leadout = lo;
+        a->leadout_ctl = toc[404];
+    }
     a->valid = a->n > 0;
     return a->valid;
 }
@@ -143,4 +145,61 @@ int gp_offset_fads(uint32_t start, const int *offs, int n, uint32_t *out)
             out[m++] = (uint32_t)f;
     }
     return m;
+}
+
+int gp_ctl_regions(const gp_toc_area area[2], const gp_gap_plan *p, gp_ctl_region out[3])
+{
+    trk t[198];
+    int n = merge(area, t), k = 0, i;
+    memset(out, 0, 3 * sizeof(*out));
+    if (!n)
+        return 0;
+    if (p->trk_ok && p->b_fad > p->a_fad + 151 + 17) {
+        gp_ctl_region *g = &out[k++];
+        g->name = "GAP";
+        g->prev_num = p->a_num; g->prev_ctl = p->a_ctl; g->in_fad = p->a_fad + 16;
+        g->has_next = 1; g->next_num = p->b_num; g->next_ctl = p->b_ctl; g->next_in = p->b_fad + 16;
+        g->n_off = 1; g->off[0] = p->b_fad - 151;
+    }
+    if (p->hd_ok && p->hd_fad > p->ld_leadout + 151) {
+        gp_ctl_region *g = &out[k++];
+        uint32_t pf = 0, pn = 0, pc = 0;
+        for (i = 0; i < area[0].n; i++)
+            if (area[0].fad[i] < p->ld_leadout && area[0].fad[i] >= pf) {
+                pf = area[0].fad[i]; pn = area[0].num[i]; pc = area[0].ctl[i];
+            }
+        g->name = "HDG";
+        g->prev_num = pn; g->prev_ctl = pc; g->in_fad = (pf + 16 < p->ld_leadout) ? pf + 16 : pf;
+        g->has_next = 1; g->next_num = p->hd_num; g->next_ctl = 0x41; g->next_in = p->hd_fad + 16;
+        for (i = 0; i < area[1].n; i++)
+            if (area[1].fad[i] == p->hd_fad)
+                g->next_ctl = area[1].ctl[i];
+        g->n_off = 3;
+        g->off[0] = p->ld_leadout;
+        g->off[1] = p->ld_leadout + (p->hd_fad - 151 - p->ld_leadout) / 2;
+        g->off[2] = p->hd_fad - 151;
+    }
+    if (p->lo_ok) {
+        gp_ctl_region *g = &out[k++];
+        uint8_t lc = 0;
+        for (i = 0; i < 2; i++)
+            if (area[i].valid && area[i].leadout == p->leadout)
+                lc = area[i].leadout_ctl;
+        g->name = "LO";
+        g->prev_num = p->last_num;
+        for (i = 0; i < n; i++)
+            if (t[i].fad == p->last_fad)
+                g->prev_ctl = t[i].ctl;
+        g->in_fad = (p->last_fad + 16 < p->leadout) ? p->last_fad + 16 : p->last_fad;
+        g->has_next = 0; g->next_num = 0; g->next_ctl = lc; g->next_in = t[0].fad + 16;
+        g->n_off = 1; g->off[0] = p->leadout + 1;
+    }
+    for (i = 0; i < k; i++) {
+        if (out[i].has_next) {
+            out[i].rev_num = out[i].next_num; out[i].rev_ctl = out[i].next_ctl; out[i].rev_in = out[i].next_in;
+        } else {
+            out[i].rev_num = t[0].num; out[i].rev_ctl = t[0].ctl; out[i].rev_in = t[0].fad + 16;
+        }
+    }
+    return k;
 }

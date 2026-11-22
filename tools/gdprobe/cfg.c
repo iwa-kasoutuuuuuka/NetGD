@@ -195,6 +195,12 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "pregap_low")) { ok = parse_list(c->pregap_low, &c->n_pregap_low, v, GP_MAX_GAPLIST, 0, 149);
     } else if (!strcmp(k, "pregap_offs")) { ok = parse_list(c->pregap_offs, &c->n_pregap_offs, v, GP_MAX_PGOFFS, -300, 300);
     } else if (!strcmp(k, "pregap_cross")) { n = parse_num(v, &ok); if (ok) c->pregap_cross = clampi(n, 2, 16);
+    } else if (!strcmp(k, "risky_cross")) {
+        if (!strcmp(v, "inline")) c->risky_cross = GP_RISKY_INLINE;
+        else if (!strcmp(v, "end")) c->risky_cross = GP_RISKY_END;
+        else if (!strcmp(v, "off")) c->risky_cross = GP_RISKY_OFF;
+        else ok = 0;
+    } else if (!strcmp(k, "ctl_probe")) { if (parse_bool(v, &b)) c->ctl_probe = b; else ok = 0;
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

@@ -161,6 +161,9 @@ int main(int argc, char **argv)
     for (i = 0; i < cfg.n_pregap_offs && n < sizeof(h) - 8; i++)
         n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.pregap_offs[i]);
     header(h);
+    snprintf(h, sizeof(h), "config risky_cross=%s ctl_probe=%d",
+             cfg.risky_cross == GP_RISKY_END ? "end" : cfg.risky_cross == GP_RISKY_OFF ? "off" : "inline", cfg.ctl_probe);
+    header(h);
     sink_sync(NULL);
 
     /* Without cdrom_init the G1 bus protection may still be closed: every

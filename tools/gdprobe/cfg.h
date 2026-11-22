@@ -83,6 +83,14 @@
  *   pregap_low=0,1,100,149 PGL FADs (up to 4, 0..149)
  *   pregap_offs=-156,-151,-150,-149,-100,-2,-1,0   offsets from each track start (up to 8, -300..300)
  *   pregap_cross=16        sector count of the crossing reads (2..16; the whitelist allows 1..64, the buffer 16 raw)
+ *
+ * seq 24 (seq 23 cfgs are unchanged):
+ *   risky_cross=inline     where the pregap_probe reads that start on data and run past its end (XEND into the gap,
+ *                          XLD past the LD lead-out, XLO past the lead-out; stock hung at XEND in record 23) go:
+ *                          inline = in each image's sequence (seq 23), end = after every image's cases, one image at a
+ *                          time again (GP_RISKY line flushed before each read), off = not sent (GP_RISKY_SKIP)
+ *   ctl_probe=off          on = CTRL off-track cases (CTLF_* forward / CTLR_* reverse + GP_CTL lines) per region from the
+ *                          TOC (GAP, HDG, LO; toc.c gp_ctl_regions); 1-sector reads only
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
@@ -93,6 +101,9 @@
 #define GP_MAX_HEADCNT 6
 #define GP_MAX_GAPLIST 4
 #define GP_MAX_PGOFFS 8
+#define GP_RISKY_INLINE 0
+#define GP_RISKY_END 1
+#define GP_RISKY_OFF 2
 
 typedef struct {
     char label[32];
@@ -150,6 +161,8 @@ typedef struct {
     int pregap_offs[GP_MAX_PGOFFS];
     int n_pregap_offs;
     int pregap_cross;
+    int risky_cross;      /* seq 24: GP_RISKY_INLINE / _END / _OFF */
+    int ctl_probe;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 

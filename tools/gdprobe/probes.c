@@ -898,6 +898,9 @@ typedef struct {
     int scd;             /* head_scd / gap_scd */
     int ext;             /* seq 22: also ctl (REQ_STAT byte 2), scd_ctl, scd_rel (GET_SCD bytes 4, 7..9) */
     int crc;             /* seq 23: crc= (CRC-32 of the returned bytes) and scrc= (per sector) on read lines */
+    /* seq 24: the last two REQ_STAT answers and the last GET_SCD(1) answer of hp_pos (for GP_CTL) */
+    int q_ok, pq_ok, qscd_ok;
+    uint8_t q[10], pq[10], qscd[14];
 } hp_state;
 
 static void hp_note_abort(runner *r, hp_state *s)
@@ -995,6 +998,14 @@ static void hp_pos(runner *r, hp_state *s, const char *label, int is_read, uint3
         s->prev = pos;
         s->have_prev = 1;
     }
+    s->pq_ok = s->q_ok;
+    memcpy(s->pq, s->q, 10);
+    s->q_ok = st_ok;
+    if (st_ok)
+        memcpy(s->q, st, 10);
+    s->qscd_ok = scd_ok;
+    if (scd_ok)
+        memcpy(s->qscd, scd, 14);
     snprintf(nm, sizeof(nm), "%s_%s_POS", s->pfx, label);
     out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
     hp_note_abort(r, s);
@@ -1052,14 +1063,16 @@ static int hp_read_line(runner *r, hp_state *s, const char *nm, const char *pre,
     return res.rc;
 }
 
-static void hp_read(runner *r, hp_state *s, const char *label, uint8_t flags, uint32_t fad, uint32_t count)
+static int hp_read(runner *r, hp_state *s, const char *label, uint8_t flags, uint32_t fad, uint32_t count)
 {
     char nm[40];
+    int rc;
     if (r->abort)
-        return;
+        return GD_REFUSED;
     snprintf(nm, sizeof(nm), "%s_%s", s->pfx, label);
-    hp_read_line(r, s, nm, NULL, flags, fad, count);
+    rc = hp_read_line(r, s, nm, NULL, flags, fad, count);
     hp_pos(r, s, label, 1, fad, count, NULL);
+    return rc;
 }
 
 /* A non-read command case (TUR, GET_TOC, REQ_SES): its normal line, then hp_pos. */
@@ -1322,6 +1335,104 @@ static void gap_cases22(runner *r, hp_state *sp, const gp_gap_plan *pp)
     *sp = s;
 }
 
+/* seq 23 / 24: the crossing reads that start on data and run past its end. Stock hung (BSY after the 8 real sectors)
+ * at XEND in record 23; XLD and XLO have the same shape. warn = 1 (risky_cross=end): a GP_RISKY line, flushed, before
+ * each one, so a hang is visible in the record. */
+static void risky_note(runner *r, int warn, const char *cs, uint32_t fad, uint32_t count, uint32_t edge, const char *what)
+{
+    if (!warn || r->abort)
+        return;
+    event(r, "GP_RISKY", "case=%s fad=%lu count=%lu edge=%lu crosses=%s note=may_hang", cs, (unsigned long)fad,
+          (unsigned long)count, (unsigned long)edge, what);
+    sync_out(r);
+}
+
+/* 1-sector check of XGAP<t>'s first sector (GP_XGAP<t>_CHK, no position queries): 1 = it reads */
+static int xgap_starts_on_data(runner *r, hp_state *s, uint32_t num, uint32_t fad)
+{
+    char nm[40];
+    snprintf(nm, sizeof(nm), "GP_XGAP%lu_CHK", (unsigned long)num);
+    return hp_read_line(r, s, nm, NULL, r->cfg->gap_flags, fad, 1) == GD_OK;
+}
+
+static void risky_xend(runner *r, hp_state *s, const gp_gap_plan *p, int warn)
+{
+    uint8_t fl = r->cfg->gap_flags;
+    uint32_t cross = (uint32_t)r->cfg->pregap_cross, half = cross / 2;
+    char f[300];
+    if (!p->trk_ok) {
+        gp_skip(r, "XEND", "reason=%s", p->trk_why);
+    } else if (!r->abort) {
+        uint32_t g = 0, hi = p->b_fad > 151 ? p->b_fad - 151 : 0;
+        int reads = 0;
+        const char *why = "-", *src = "scan";
+        if (r->cfg->gap_track_end) {
+            src = "cfg";
+            g = r->cfg->gap_track_end;
+            if (g <= p->a_fad || g >= p->b_fad) {
+                why = "gap_track_end_outside";
+                g = 0;
+            }
+        } else if (hi <= p->a_fad) {
+            why = "short_track";
+        } else {
+            g = gp_find_gap(r, s, "GP_DSCAN_R", p->a_fad, hi, &reads, &why);
+        }
+        if (!g) {
+            if (!r->abort)
+                gp_skip(r, "XEND", "a_fad=%lu b_fad=%lu hi=%lu src=%s reads=%d reason=%s", (unsigned long)p->a_fad,
+                        (unsigned long)p->b_fad, (unsigned long)hi, src, reads, why);
+        } else {
+            snprintf(f, sizeof(f), "a_fad=%lu b_fad=%lu hi=%lu last_ok=%lu gap_lo=%lu src=%s reads=%d", (unsigned long)p->a_fad,
+                     (unsigned long)p->b_fad, (unsigned long)hi, (unsigned long)(g - 1), (unsigned long)g, src, reads);
+            out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_DSCAN", f), 0);
+            risky_note(r, warn, "XEND", g > half ? g - half : 0, cross, g, "data_end_into_gap");
+            hp_read(r, s, "XEND", fl, g > half ? g - half : 0, cross);
+        }
+    }
+}
+
+static void risky_xld_xlo(runner *r, hp_state *s, const gp_gap_plan *p, int warn)
+{
+    uint8_t fl = r->cfg->gap_flags;
+    uint32_t cross = (uint32_t)r->cfg->pregap_cross, half = cross / 2;
+    if (p->hd_ok && !r->abort) {
+        risky_note(r, warn, "XLD", p->ld_leadout - half, cross, p->ld_leadout, "ld_leadout");
+        hp_read(r, s, "XLD", fl, p->ld_leadout - half, cross);
+    }
+    if (p->lo_ok && !r->abort) {
+        risky_note(r, warn, "XLO", p->leadout - half, cross, p->leadout, "leadout");
+        hp_read(r, s, "XLO", fl, p->leadout - half, cross);
+    } else if (!p->lo_ok)
+        gp_skip(r, "XLO", "reason=%s", p->lo_why);
+}
+
+/* warn = 0 (inline, seq 23): XEND, XLD, XLO. warn = 1 (risky_cross=end): the XGAP<t> that start on data (checked with
+ * one sector first), XLD, XLO, then XEND (the one stock hung at) last. */
+static void risky_reads(runner *r, hp_state *s, const gp_gap_plan *p, int warn)
+{
+    if (!warn) {
+        risky_xend(r, s, p, 0);
+        risky_xld_xlo(r, s, p, 0);
+        return;
+    }
+    {
+        static gp_track t[198];
+        uint32_t cross = (uint32_t)r->cfg->pregap_cross;
+        char lb[32];
+        int nt = gp_toc_tracks(r->toc, t), i;
+        for (i = 1; i < nt && !r->abort; i++) {
+            if (t[i].fad < 158 || !xgap_starts_on_data(r, s, t[i].num, t[i].fad - 158))
+                continue;
+            snprintf(lb, sizeof(lb), "XGAP%lu", (unsigned long)t[i].num);
+            risky_note(r, 1, lb, t[i].fad - 158, cross, t[i].fad - 150, "data_into_pregap");
+            hp_read(r, s, lb, r->cfg->gap_flags, t[i].fad - 158, cross);
+        }
+    }
+    risky_xld_xlo(r, s, p, 1);
+    risky_xend(r, s, p, 1);
+}
+
 /* seq 23 (pregap_probe=on): what the drive returns in the pregaps and across boundaries (FADs from the TOC):
  *   GP_PG_START                 the merged track list
  *   PGL_<f>                     1 sector at each pregap_low FAD (track 1 pregap, below 150)
@@ -1336,7 +1447,7 @@ static void pregap_cases(runner *r, hp_state *s, const gp_gap_plan *p)
 {
     static gp_track t[198];
     uint8_t fl = r->cfg->gap_flags;
-    uint32_t fads[GP_MAX_PGOFFS], cross = (uint32_t)r->cfg->pregap_cross, half = cross / 2;
+    uint32_t fads[GP_MAX_PGOFFS], cross = (uint32_t)r->cfg->pregap_cross;
     char f[600], lb[32];
     size_t n = 0;
     int nt, i, j, m;
@@ -1387,44 +1498,138 @@ static void pregap_cases(runner *r, hp_state *s, const gp_gap_plan *p)
         }
         if (i && t[i].fad >= 158) {
             snprintf(lb, sizeof(lb), "XGAP%lu", (unsigned long)t[i].num);
-            hp_read(r, s, lb, fl, t[i].fad - 158, cross);
+            /* seq 24: if its first sector reads, this one starts on data and runs into the pregap (like XEND) */
+            if (r->cfg->risky_cross != GP_RISKY_INLINE && xgap_starts_on_data(r, s, t[i].num, t[i].fad - 158))
+                gp_skip(r, lb, "fad=%lu reason=starts_on_data_%s", (unsigned long)(t[i].fad - 158),
+                        r->cfg->risky_cross == GP_RISKY_END ? "deferred_to_end" : "risky_cross_off");
+            else
+                hp_read(r, s, lb, fl, t[i].fad - 158, cross);
         }
     }
-    if (!p->trk_ok) {
-        gp_skip(r, "XEND", "reason=%s", p->trk_why);
-    } else if (!r->abort) {
-        uint32_t g = 0, hi = p->b_fad > 151 ? p->b_fad - 151 : 0;
-        int reads = 0;
-        const char *why = "-", *src = "scan";
-        if (r->cfg->gap_track_end) {
-            src = "cfg";
-            g = r->cfg->gap_track_end;
-            if (g <= p->a_fad || g >= p->b_fad) {
-                why = "gap_track_end_outside";
-                g = 0;
-            }
-        } else if (hi <= p->a_fad) {
-            why = "short_track";
-        } else {
-            g = gp_find_gap(r, s, "GP_DSCAN_R", p->a_fad, hi, &reads, &why);
-        }
-        if (!g) {
-            if (!r->abort)
-                gp_skip(r, "XEND", "a_fad=%lu b_fad=%lu hi=%lu src=%s reads=%d reason=%s", (unsigned long)p->a_fad,
-                        (unsigned long)p->b_fad, (unsigned long)hi, src, reads, why);
-        } else {
-            snprintf(f, sizeof(f), "a_fad=%lu b_fad=%lu hi=%lu last_ok=%lu gap_lo=%lu src=%s reads=%d", (unsigned long)p->a_fad,
-                     (unsigned long)p->b_fad, (unsigned long)hi, (unsigned long)(g - 1), (unsigned long)g, src, reads);
-            out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_DSCAN", f), 0);
-            hp_read(r, s, "XEND", fl, g > half ? g - half : 0, cross);
-        }
-    }
-    if (p->hd_ok)
-        hp_read(r, s, "XLD", fl, p->ld_leadout - half, cross);
-    if (p->lo_ok)
-        hp_read(r, s, "XLO", fl, p->leadout - half, cross);
+    if (r->cfg->risky_cross == GP_RISKY_INLINE)
+        risky_reads(r, s, p, 0);
     else
-        gp_skip(r, "XLO", "reason=%s", p->lo_why);
+        gp_skip(r, "RISKY", "cases=XEND,XLD,XLO reason=%s", r->cfg->risky_cross == GP_RISKY_END ? "deferred_to_end" : "risky_cross_off");
+}
+
+/* seq 24 (ctl_probe=on): is the CTRL that REQ_STAT reports off-track (gap, lead-out) a constant 0x41, the CTRL of the
+ * track read last, of the previous query, or of the next track (lead-out: the lead-out entry)? Per region (toc.c):
+ *   GP_CTL_REGION                     the region's tracks and FADs
+ *   CTLF_<R>_IN, CTLF_<R>_OFF<k>      forward: read the track before, then each off-track FAD
+ *   CTLR_<R>_PRE, CTLR_<R>_OFF, CTLR_<R>_IN   reverse: read the track after (LO: the first track), the middle
+ *                                     off-track FAD, then the track before again
+ *   GP_CTL                            after each off-track read: what was reported and which hypotheses it matches */
+static void ctl_verdict(runner *r, hp_state *s, const gp_ctl_region *g, const char *dir, uint32_t off, int rc,
+                        uint32_t last_num, uint32_t last_ctl)
+{
+    char f[400], m[64];
+    size_t n = 0, mn = 0;
+    int ctl = s->q_ok ? s->q[2] : -1;
+    if (r->abort)
+        return;
+    n += (size_t)snprintf(f + n, sizeof(f) - n, "region=%s dir=%s off_fad=%lu off_rc=%s", g->name, dir, (unsigned long)off,
+                          rec_rc_name(rc));
+    if (rc == GD_OK)
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " off_track=0");
+    if (s->q_ok)
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " trk=%u idx=%u ctl=0x%02x", s->q[3], s->q[4], s->q[2]);
+    else
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " trk=- idx=- ctl=-");
+    if (s->qscd_ok)
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " scd_trk=%u scd_ctl=0x%02x scd_rel=%lu", s->qscd[5], s->qscd[4],
+                              (unsigned long)fad3(s->qscd + 7));
+    n += (size_t)snprintf(f + n, sizeof(f) - n, " last_read=%lu/0x%02lx", (unsigned long)last_num, (unsigned long)last_ctl);
+    if (s->pq_ok)
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " prev_query=%u/0x%02x", s->pq[3], s->pq[2]);
+    else
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " prev_query=-");
+    if (g->has_next)
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " next=%lu/0x%02lx", (unsigned long)g->next_num, (unsigned long)g->next_ctl);
+    else
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " next=- leadout_entry=0x%02lx", (unsigned long)g->next_ctl);
+    m[0] = 0;
+#define M_ADD(t) do { mn += (size_t)snprintf(m + mn, sizeof(m) - mn, "%s%s", mn ? "," : "", t); } while (0)
+    if (ctl >= 0) {
+        if (ctl == 0x41) M_ADD("const41");
+        if ((uint32_t)ctl == last_ctl) M_ADD("last_read");
+        if (s->pq_ok && ctl == s->pq[2]) M_ADD("prev_query");
+        if ((uint32_t)ctl == g->next_ctl) M_ADD(g->has_next ? "next" : "leadout_entry");
+    }
+#undef M_ADD
+    snprintf(f + n, sizeof(f) - n, " match=%s", mn ? m : "none");
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_CTL", f), 0);
+}
+
+static void ctl_cases(runner *r, hp_state *s)
+{
+    gp_gap_plan p;
+    gp_ctl_region g[3];
+    uint8_t fl = r->cfg->gap_flags;
+    char f[300], lb[32];
+    int ng, i, k, rc;
+
+    if (r->abort)
+        return;
+    gp_gap_plan_make(r->toc, &p);
+    ng = gp_ctl_regions(r->toc, &p, g);
+    if (!ng) {
+        gp_skip(r, "CTL", "reason=no_region");
+        return;
+    }
+    for (i = 0; i < ng && !r->abort; i++) {
+        size_t n = (size_t)snprintf(f, sizeof(f), "region=%s prev=%lu/0x%02lx in=%lu next=", g[i].name,
+                                    (unsigned long)g[i].prev_num, (unsigned long)g[i].prev_ctl, (unsigned long)g[i].in_fad);
+        if (g[i].has_next)
+            n += (size_t)snprintf(f + n, sizeof(f) - n, "%lu/0x%02lx", (unsigned long)g[i].next_num, (unsigned long)g[i].next_ctl);
+        else
+            n += (size_t)snprintf(f + n, sizeof(f) - n, "- leadout_entry=0x%02lx", (unsigned long)g[i].next_ctl);
+        n += (size_t)snprintf(f + n, sizeof(f) - n, " rev=%lu/0x%02lx/%lu off=", (unsigned long)g[i].rev_num,
+                              (unsigned long)g[i].rev_ctl, (unsigned long)g[i].rev_in);
+        for (k = 0; k < g[i].n_off && n < sizeof(f) - 12; k++)
+            n += (size_t)snprintf(f + n, sizeof(f) - n, "%s%lu", k ? "," : "", (unsigned long)g[i].off[k]);
+        out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "GP_CTL_REGION", f), 0);
+
+        /* forward: the track before, then each off-track FAD */
+        snprintf(lb, sizeof(lb), "CTLF_%s_IN", g[i].name);
+        hp_read(r, s, lb, fl, g[i].in_fad, 1);
+        for (k = 0; k < g[i].n_off && !r->abort; k++) {
+            snprintf(lb, sizeof(lb), "CTLF_%s_OFF%d", g[i].name, k);
+            rc = hp_read(r, s, lb, fl, g[i].off[k], 1);
+            ctl_verdict(r, s, &g[i], "fwd", g[i].off[k], rc, g[i].prev_num, g[i].prev_ctl);
+        }
+        /* reverse: the track after (or the first track), the middle off-track FAD, then the track before */
+        {
+            uint32_t mid = g[i].off[g[i].n_off / 2];
+            snprintf(lb, sizeof(lb), "CTLR_%s_PRE", g[i].name);
+            hp_read(r, s, lb, fl, g[i].rev_in, 1);
+            snprintf(lb, sizeof(lb), "CTLR_%s_OFF", g[i].name);
+            rc = hp_read(r, s, lb, fl, mid, 1);
+            ctl_verdict(r, s, &g[i], "rev", mid, rc, g[i].rev_num, g[i].rev_ctl);
+            snprintf(lb, sizeof(lb), "CTLR_%s_IN", g[i].name);
+            hp_read(r, s, lb, fl, g[i].in_fad, 1);
+        }
+    }
+}
+
+/* seq 24 (risky_cross=end): the risky reads of the image now mounted, after every image's normal cases */
+static void risky_phase(runner *r)
+{
+    hp_state s;
+    gp_gap_plan p;
+    memset(&s, 0, sizeof(s));
+    s.pfx = "GP";
+    s.late_ms = r->cfg->gap_late_ms;
+    s.scd = r->cfg->gap_scd;
+    s.ext = 1;
+    s.crc = r->cfg->gap_crc;
+    if (r->abort)
+        return;
+    gp_gap_plan_make(r->toc, &p);
+    event(r, "GP_RISKY_START", "leadout=%lu ld_leadout=%lu a_fad=%lu b_fad=%lu cross=%d", (unsigned long)p.leadout,
+          (unsigned long)p.ld_leadout, (unsigned long)p.a_fad, (unsigned long)p.b_fad, r->cfg->pregap_cross);
+    hp_pos(r, &s, "RISKY_BASE", 0, 0, 0, NULL);
+    risky_reads(r, &s, &p, 1);
+    sync_out(r);
 }
 
 static void gap_probe(runner *r)
@@ -1459,6 +1664,9 @@ static void gap_probe(runner *r)
     /* seq 23 */
     if (r->cfg->pregap_probe)
         pregap_cases(r, &s, &p);
+    /* seq 24 */
+    if (r->cfg->ctl_probe)
+        ctl_cases(r, &s);
     sync_out(r);
 }
 
@@ -1499,7 +1707,7 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
                 if (cfg->head_probe)
                     head_probe(r);
                 /* seq 22: reads at the TOC's edges */
-                if ((cfg->gap_probe || cfg->pregap_probe) && !r->abort)
+                if ((cfg->gap_probe || cfg->pregap_probe || cfg->ctl_probe) && !r->abort)
                     gap_probe(r);
             }
             /* R148: the same image again, once per delay, with a DEVICE RESET inside the window */
@@ -1514,6 +1722,15 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
             for (j = 0; cfg->devreset_cmd && j < cfg->n_devreset_cmd && !r->abort; j++)
                 devreset_cmd_run(r, n, cfg->devreset_cmd_ms[j]);
         }
+        /* seq 24: the reads that may hang the drive, after everything else, one image at a time */
+        for (i = 0; cfg->pregap_probe && cfg->risky_cross == GP_RISKY_END && i < cfg->n_images && !r->abort; i++) {
+            int n = cfg->images[i];
+            snprintf(msg, sizeof(msg), "risky reads, image %d...", n);
+            say(r, msg);
+            switch_to(r, n, n, cfg->swap_regpoll, -1, SK_NORMAL);
+            if (battery(r, 0) && !r->abort)
+                risky_phase(r);
+        }
         if (cfg->return_to > 0 && !r->abort)
             switch_to(r, cfg->return_to, cfg->return_to, 0, -1, SK_NORMAL);
     } else {
@@ -1522,8 +1739,10 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
         if (battery(r, 1) && !r->abort) {
             if (cfg->head_probe)
                 head_probe(r);
-            if ((cfg->gap_probe || cfg->pregap_probe) && !r->abort)
+            if ((cfg->gap_probe || cfg->pregap_probe || cfg->ctl_probe) && !r->abort)
                 gap_probe(r);
+            if (cfg->pregap_probe && cfg->risky_cross == GP_RISKY_END && !r->abort)
+                risky_phase(r);
         }
     }
     event(r, "END", "abort=%d", r->abort);
