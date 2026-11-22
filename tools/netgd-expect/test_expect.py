@@ -218,6 +218,20 @@ class ExpectTest(unittest.TestCase):
         self.assertEqual(one(7, 'REQ_ERROR_W0')['cdbst'], '0x18')
         self.assertNotIn('secnr', one(3, 'SW_CMD'))                     # the boot disc's SECNR is not known
 
+    def test_cdbst_carries_a_check_from_the_last_battery_command_into_the_next_section(self):
+        # Records 17 / 18 (cdread_flags_test=0, no throughput / seek): the battery ends with IP_READ, which is a
+        # CHECK for the CDI with a Mode 2 track at 0x24, and no hidden REQ_ERROR follows it, so the next section's
+        # first command (RS_SW_CMD) sees 0x18. With the flag test on, the last command is CDREAD_FLAGS 0x10 (ok): 0x58.
+        base = ['--cdread-flags', '0x24', '--no-throughput', '--no-seek']
+        for extra, want in (([ '--no-flags-test'], '0x18'), ([], '0x58')):
+            text = expect_sd.predict(self.card, images=[4], return_to=0, regpoll=True, reswitch=True,
+                                     passthrough=base + extra)
+            _, entries = compare.parse_record(text)
+            get = lambda probe: [e for e in entries if e['img'] == 4 and e['probe'] == probe]
+            self.assertEqual(get('IP_READ')[0]['rc'], 'check')
+            self.assertEqual(get('RS_SW_CMD')[0]['cdbst'], want)
+            self.assertEqual(get('RS_REQ_STAT')[0]['cdbst'], '0x58')
+
     def test_regpoll_and_device_reset_as_netgd_answers(self):
         # gdprobe swap_regpoll / swap_devreset (R154), as NetGD answers since R159: the R<ms>_ switch is a
         # same-folder re-switch (a no-op: SECNR flat, ALTSTATUS 0x50), then DEVICE RESET re-detects: status 0x00,
