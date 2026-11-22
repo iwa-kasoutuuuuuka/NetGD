@@ -218,7 +218,7 @@ opt-level = "s"
 [profile.release-z-hot-s.package.psload]
 opt-level = "s"
 
-# embedded-sdmmc 0.9.0 vendored to carry a one-line fix for a panic on
-# crafted long names (vendor/README.md). Same version, same features.
+# embedded-sdmmc 0.9.0 vendored to carry fixes for panics/hangs on crafted
+# cards (vendor/README.md). Same version, same features.
 [patch.crates-io]
 embedded-sdmmc = { path = "vendor/embedded-sdmmc-0.9.0" }

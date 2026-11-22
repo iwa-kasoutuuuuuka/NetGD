@@ -286,6 +286,30 @@ impl FatVolume {
         Ok(())
     }
 
+    /// OpenGDEmu patch: whether `cluster` numbers a cluster of the data area.
+    fn is_data_cluster(&self, cluster: ClusterId) -> bool {
+        cluster.0 >= 2 && cluster.0 - 2 < self.cluster_count
+    }
+
+    /// OpenGDEmu patch: called for each cluster of a directory walk. Refuses a
+    /// cluster outside the data area and a chain longer than the largest
+    /// legal directory (65,536 entries = 2 MiB), so a damaged or cyclic FAT
+    /// chain ends the walk with an error instead of looping forever.
+    fn check_dir_cluster<E: core::fmt::Debug>(
+        &self,
+        cluster: ClusterId,
+        hops: &mut u32,
+    ) -> Result<(), Error<E>> {
+        if cluster == ClusterId::ROOT_DIR {
+            return Ok(());
+        }
+        *hops += 1;
+        if !self.is_data_cluster(cluster) || *hops > (2 << 20) / self.bytes_per_cluster() {
+            return Err(Error::BadCluster);
+        }
+        Ok(())
+    }
+
     /// Look in the FAT to see which cluster comes next.
     pub(crate) fn next_cluster<D>(
         &self,
@@ -295,8 +319,11 @@ impl FatVolume {
     where
         D: BlockDevice,
     {
-        if cluster.0 > (u32::MAX / 4) {
-            panic!("next_cluster called on invalid cluster {:x?}", cluster);
+        // OpenGDEmu patch: a cluster outside the data area (a damaged FAT or
+        // directory entry, e.g. a start cluster with its top bits set) is an
+        // error, not a panic.
+        if !self.is_data_cluster(cluster) {
+            return Err(Error::BadCluster);
         }
         match &self.fat_specific_info {
             FatSpecificInfo::Fat16(_fat16_info) => {
@@ -700,7 +727,9 @@ impl FatVolume {
             _ => BlockCount(u32::from(self.blocks_per_cluster)),
         };
 
+        let mut hops = 0u32; // OpenGDEmu patch
         while let Some(cluster) = current_cluster {
+            self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
             for block_idx in first_dir_block_num.range(dir_size) {
                 trace!("Reading FAT");
                 let block = block_cache.read(block_idx)?;
@@ -749,7 +778,9 @@ impl FatVolume {
             ClusterId::ROOT_DIR => Some(fat32_info.first_root_dir_cluster),
             _ => Some(dir_info.cluster),
         };
+        let mut hops = 0u32; // OpenGDEmu patch
         while let Some(cluster) = current_cluster {
+            self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
             let start_block_idx = self.cluster_to_block(cluster);
             for block_idx in start_block_idx.range(BlockCount(u32::from(self.blocks_per_cluster))) {
                 trace!("Reading FAT");
@@ -805,7 +836,9 @@ impl FatVolume {
                     _ => BlockCount(u32::from(self.blocks_per_cluster)),
                 };
 
+                let mut hops = 0u32; // OpenGDEmu patch
                 while let Some(cluster) = current_cluster {
+                    self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
                     for block in first_dir_block_num.range(dir_size) {
                         match self.find_entry_in_block(
                             block_cache,
@@ -836,7 +869,9 @@ impl FatVolume {
                     ClusterId::ROOT_DIR => Some(fat32_info.first_root_dir_cluster),
                     _ => Some(dir_info.cluster),
                 };
+                let mut hops = 0u32; // OpenGDEmu patch
                 while let Some(cluster) = current_cluster {
+                    self.check_dir_cluster(cluster, &mut hops)?; // OpenGDEmu patch
                     let block_idx = self.cluster_to_block(cluster);
                     for block in block_idx.range(BlockCount(u32::from(self.blocks_per_cluster))) {
                         match self.find_entry_in_block(

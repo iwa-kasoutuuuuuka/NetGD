@@ -1,64 +1,93 @@
 # Vendored crates
 
-## embedded-sdmmc 0.9.0 (one-line fix)
+## embedded-sdmmc 0.9.0, patched
 
 `embedded-sdmmc-0.9.0/` is the crates.io release of embedded-sdmmc 0.9.0
 (MIT OR Apache-2.0; `LICENSE-MIT`, `LICENSE-APACHE` and `NOTICE` are kept),
-used through `[patch.crates-io]` in `mcu/netgd/Cargo.toml`. It carries one
-change, `embedded-sdmmc-0.9.0-opengdemu.patch`.
-The upstream `tests/`, `examples/`, `.github/`, `.gitignore` and `.cargo-ok` are
-left out (the first two hold
-about 750 KB of disk images; none is built for a dependency). The manifest's
-`[[example]]`/`[[test]]` targets for them are removed by the patch.
-The history keeps the pristine copy and the fix as separate commits.
+used through `[patch.crates-io]` in `mcu/netgd/Cargo.toml`. Its changes are
+`embedded-sdmmc-0.9.0-opengdemu.patch` (against the pristine copy; the git
+history has the pristine copy and each fix as separate commits). Every
+changed line is marked `OpenGDEmu patch`.
 
-### Why
+Left out of the copy: `tests/` and `examples/` (about 750 KB of disk images,
+never built for a dependency), `.github/`, `.gitignore` and `.cargo-ok`. The
+manifest's `[[example]]` / `[[test]]` targets, which point at the removed
+files, are removed by the patch.
 
-`LfnBuffer::push` decodes each 13-unit long-name piece, plus the unpaired
-surrogate it carried over from the previous piece, into a
-`heapless::Vec<char, 13>` and `expect`s every push.
-A full 13-unit piece followed by a piece that starts with a lone surrogate
-decodes to 14 chars. The 14th push panics ("Vec was full?!").
-Two names that trigger it:
+### What it fixes
 
-* 13 chars, then a lone low surrogate, then more;
-* 25 chars, then a lone low surrogate and a lone high surrogate.
+Four specific ways a crafted (or damaged) SD card could panic or hang the
+firmware through this crate. The firmware has no watchdog, so a hang never
+recovers. These four paths were found by our differential tests and a
+review, and are covered by tests. **This does not make the crate robust
+against arbitrary corrupt cards**: other paths were not audited, in
+particular:
 
-The firmware lists directories with `iterate_dir_lfn` (`gdi::walk_to`, on
-every mount). So a card holding such a name, which a PC can write, would
-panic the firmware. The bug was found by the host differential tests of
-the fatmap reader (LOG R165).
+* the write and delete paths (the firmware does not write through this crate);
+* file data read from a file's first cluster, which is not range-checked and
+  can alias another part of the card. That gives wrong data, but no panic
+  or hang;
+* unchecked arithmetic in other BPB fields, which wraps in release builds.
 
-### The fix
+1. **Long names with lone surrogates** (`filesystem/filename.rs`).
+   - **Bug:** `LfnBuffer::push` decoded 13 units plus a carried-over surrogate
+     into a `heapless::Vec<char, 13>` and `expect`ed each push. A full piece
+     followed by one opening with a lone surrogate gave 14 chars, and the
+     14th push panicked. `iterate_dir_lfn` runs on every mount
+     (`gdi::walk_to`).
+   - **Fix:** capacity 14. Such names list with U+FFFD; all other names
+     list as before.
+2. **Zero blocks per cluster** (`fat/bpb.rs`).
+   - **Bug:** boot-sector byte 13 = 0 divided by zero in `open_volume`.
+   - **Fix:** such a BPB, or one claiming less room than its own metadata,
+     is refused with `FormatError("Invalid FAT format")`.
+3. **Start clusters outside the volume** (`fat/volume.rs`).
+   - **Bug:** directory-entry and BPB root clusters are the raw 32-bit
+     value. 0x40000002 with 4 blocks per cluster aliased cluster 2, read
+     fine, and then `next_cluster` hit its `panic!`.
+   - **Fix:** `next_cluster` returns `Error::BadCluster` for any cluster
+     outside the data area (no `panic!` left there). Directory walks check
+     each cluster before reading it.
+4. **Cyclic directory chains** (`fat/volume.rs`).
+   - **Bug:** `iterate_fat16`/`iterate_fat32` (listing) and
+     `find_directory_entry` (open by name) followed a looping FAT chain
+     forever.
+   - **Fix:** each walk stops with `Error::BadCluster` after more clusters
+     than the largest legal directory can have (65,536 entries = 2 MiB).
 
-The capacity of the Vec goes from 13 to 14, which is the most the decode can
-produce. Such a name now lists the way embedded-sdmmc already treats lone
-surrogates elsewhere: U+FFFD in place of the surrogate. Every other name
-lists exactly as before.
+### Tests
 
-`tools/sdmmc-lfn-check` tests this, calling the crate the way `walk_to` does
-(384-byte `LfnBuffer`, `gamecfg::fit::<96>`). It checks:
+`tools/sdmmc-robustness` (run `cd tools/sdmmc-robustness && cargo test`,
+with the firmware's release arithmetic: no overflow checks):
 
-* both names list correctly through the patched copy and still panic
-  through the crates.io release;
-* the walk continues past them;
-* other surrogate placements, a full NetGD-shaped card and every
-  `mcu/bootcore` fixture list identically with and without the patch.
+* `tests/lfn_panic.rs` calls the crate the way `walk_to` does (384-byte
+  `LfnBuffer`, `gamecfg::fit::<96>`). It checks that:
+  * the two crashing long names list, and still panic through the
+    crates.io release;
+  * the walk continues past them;
+  * other surrogate placements, a NetGD-shaped card and every
+    `mcu/bootcore` fixture list identically with and without the patch.
+* `tests/crafted_cards.rs` has:
+  * long-name and directory-entry fuzzing;
+  * zero blocks per cluster;
+  * a root cluster and a folder cluster with the top bits set;
+  * a cyclic chain in a FAT32 root and in a FAT16 folder, run under a
+    10 s deadline so that a regression cannot stall the suite.
 
-Run it with `cd tools/sdmmc-lfn-check && cargo test`.
+  All of them fail against the crates.io release.
 
 ### Upstream status and dropping the patch
 
-As of 2026-11-22 the bug is still present in 0.10.0, the newest release:
-`char_vec` is still `Vec<char, 13>` with the same `expect`s, and the
-changelog does not mention it.
-0.10.0 is also a breaking release (edition 2024, heapless 0.9, defmt 1.0,
-iterator callback changes), so moving to it is not a smaller fix.
+As of 2026-11-22, 0.10.0 (the newest release) still has the long-name bug:
+same `Vec<char, 13>` and `expect`s, and nothing about it in the changelog.
+The other three were not checked against 0.10.0. 0.10.0 is a breaking
+release (edition 2024, heapless 0.9, defmt 1.0, iterator callback changes),
+so moving to it is not a smaller fix.
 
-Once a release fixes `LfnBuffer::push`:
+Once a release fixes these:
 
 1. Delete `vendor/embedded-sdmmc-0.9.0/` and the `[patch.crates-io]` entry.
-2. Bump the `embedded-sdmmc` version in `mcu/netgd/Cargo.toml`.
-3. Point `tools/sdmmc-lfn-check`'s `embedded-sdmmc` at the new version.
-   Its two crash tests must still pass, and the `upstream` comparison can
-   then be removed.
+2. Bump the version in `mcu/netgd/Cargo.toml`.
+3. Point `tools/sdmmc-robustness` at the new version. Its crash and hang
+   tests must still pass, and the `upstream` comparison in `lfn_panic.rs`
+   can then be removed.

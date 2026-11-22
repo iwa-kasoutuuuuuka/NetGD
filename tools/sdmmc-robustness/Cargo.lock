@@ -74,7 +74,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sdmmc-lfn-check"
+name = "sdmmc-robustness"
 version = "0.1.0"
 dependencies = [
  "embedded-sdmmc 0.9.0",

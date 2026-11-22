@@ -35,7 +35,12 @@ impl<'a> Bpb<'a> {
         let non_data_blocks = u32::from(bpb.reserved_block_count())
             + (u32::from(bpb.num_fats()) * bpb.fat_size())
             + root_dir_blocks;
-        let data_blocks = bpb.total_blocks() - non_data_blocks;
+        // OpenGDEmu patch: a BPB with 0 blocks per cluster (or less room than
+        // its metadata) is refused instead of dividing by zero (or wrapping).
+        let data_blocks = match bpb.total_blocks().checked_sub(non_data_blocks) {
+            Some(n) if bpb.blocks_per_cluster() != 0 => n,
+            _ => return Err("Invalid FAT format"),
+        };
         bpb.cluster_count = data_blocks / u32::from(bpb.blocks_per_cluster());
         if bpb.cluster_count < 4085 {
             return Err("FAT12 is unsupported");

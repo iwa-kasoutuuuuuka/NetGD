@@ -1,6 +1,6 @@
 [package]
-name = "sdmmc-lfn-check"
-description = "Host test for the vendored embedded-sdmmc 0.9.0 long-name fix (mcu/netgd/vendor/README.md)"
+name = "sdmmc-robustness"
+description = "Host tests for the vendored embedded-sdmmc 0.9.0 fixes: crafted cards that panicked or hung it (mcu/netgd/vendor/README.md)"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -15,3 +15,10 @@ embedded-sdmmc = { path = "../../mcu/netgd/vendor/embedded-sdmmc-0.9.0", default
 embedded-sdmmc-upstream = { package = "embedded-sdmmc", version = "=0.9.0", default-features = false }
 gamecfg = { path = "../../common/gamecfg" }
 heapless = "0.8"
+
+# Like the firmware's release build: no overflow checks or debug assertions
+# (so the tests see the same arithmetic), and fast enough for the fuzz loops.
+[profile.test]
+opt-level = 2
+debug-assertions = false
+overflow-checks = false
