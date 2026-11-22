@@ -12,10 +12,11 @@
 //! `handle_packet` wraps them: status / error / interrupt-reason registers (a CHECK CONDITION is status 0x11,
 //! error = sense key << 4, as stock), REQ_MODE contents, REQ_ERROR (`F0`, the pending sense key and its
 //! ASC/ASCQ), the swap window after `52 82` (no medium, becoming ready, then UNIT ATTENTION), the answers with
-//! no medium (`atapi::not_ready_answer`), CD_READ ignoring byte 1 of the CDB and always returning 2048 bytes
-//! per sector.
+//! no medium (`atapi::not_ready_answer`), CD_READ checking the expected sector type in byte 1 of the CDB as
+//! stock does (5/64/00 on a mismatch, LOG R134) and returning 2048 bytes per sector (no 2352-byte raw reads).
 //!
-//! Time is not simulated. The window's phases (`atapi::swap_phase`, 150 + 150 ms) are written as the sequence
+//! Time is not simulated. The window's phases (`atapi::swap_phase`; GDEMU.INI open_time / detect_time, else
+//! 500 + 250 ms) are written as the sequence
 //! of SW_POLL state changes a poller that samples every phase sees (gdprobe polls every ~20 ms); when each
 //! change happens (`t_ms`) is left `-`. A poller slower than a phase, or commands other than TUR inside the
 //! window, are not modelled.

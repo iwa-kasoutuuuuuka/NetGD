@@ -367,11 +367,13 @@ pub const fn check_error(sense_key: u8) -> u8 {
 /// [`SwapPhase::Open`] for the first `open_ms` (2/3A/00, "no medium"), then
 /// [`SwapPhase::Detect`] for `detect_ms` (2/04/01, "becoming ready"), then
 /// [`SwapPhase::Done`]: one UNIT ATTENTION 6/28/00 and READY with an image,
-/// 2/3A/00 for good without one. 150 + 150 ms is what was measured (READY at
-/// 331-351 ms with 20 ms polls); the probe card's GDEMU.INI set
-/// `open_time = detect_time = 150`, so these are also the INI's values there.
-pub const SWAP_OPEN_MS: u32 = 150;
-pub const SWAP_DETECT_MS: u32 = 150;
+/// 2/3A/00 for good without one. Stock takes the two lengths from GDEMU.INI
+/// `open_time` / `detect_time` (150/150 -> READY at 331-351 ms, R119; 600/300
+/// -> 932-956 ms, R129). These constants are its values when the INI does not
+/// set the keys: 500 + 250 ms (READY at 785-795 ms, R135), the documented
+/// GDEMU defaults.
+pub const SWAP_OPEN_MS: u32 = 500;
+pub const SWAP_DETECT_MS: u32 = 250;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SwapPhase {

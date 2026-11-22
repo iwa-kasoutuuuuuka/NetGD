@@ -2089,6 +2089,21 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：純正の値は確認済み（実機）。NetGD 側はホストテストと予測だけで、実機では未確認。
 - 関連：R118、R119、R123、`common/discimg/src/atapi.rs`、`mcu/netgd/src/ide.rs`、`common/discimg/examples/expect.rs`。
 
+### R135 GDEMU.ini に時間のキーが無いとき、純正の切替の窓は 500 + 250 ms（NetGD の既定値を修正）（Opus）
+
+- 担当：Opus。問いは R126 で推測のままだった、`open_time`・`detect_time` が無いときの純正の切替の時間。
+- 方法：試験用 SD の `GDEMU.ini` を `reset_goto = 2` の 1 行だけにして、gdprobe を `images=3,4`、`return_to=2`、`cdread_flags=0x20` で実行。
+- 記録：`docs/research/probe-records/stock_20261122_11_ini-no-time-keys.txt`（`abort=0`）。
+- 結論：03・04・02 のどれも、2/3A/00 が約 506〜515 ms、2/04/01 から 6/28/00 までが約 250 ms、そこから約 30 ms で READY（786〜795 ms）。
+  **キーが無いときの純正の値は open 500 ms・detect 250 ms**（GDEMU の説明書きにある既定値と同じ）。150 / 150（R119）・600 / 300（R129）と合わせて、純正は INI の値を、無ければ 500 / 250 を使う。
+- NetGD の修正：R126 で推測で入れた既定値 150 + 150 ms を **500 + 250 ms** に（`common/discimg/src/atapi.rs` の `SWAP_OPEN_MS`・`SWAP_DETECT_MS`）。
+  テストの期待値を先に純正の値に変えて失敗を確かめてから直した（PLAN の決まり）。INI のキーがあればその値を使う動作（`Ini::swap_window_ms`）は変更なし。
+  あわせて `examples/expect.rs` の冒頭のコメント（時間と、R134 で古くなった CD_READ の説明）を直した。
+- テスト：`common/discimg` 138 件、`common/gamecfg` 31 件、`test_expect.py` 13 件（1 件スキップ）がすべて通過。2E `release-z` の `resident,sd-fast` のビルドが通る（警告の増加なし）。
+- 影響：GDEMU.ini に時間のキーが無いカードでは、NetGD の切替のあとの NOT READY が約 300 ms から約 750 ms に延びる（純正と同じ）。
+- 信頼度：純正の値は確認済み（実機）。NetGD はホストテストとビルドだけ。
+- 関連：R119、R126、R129、`common/discimg/src/atapi.rs`、`common/discimg/tests/atapi.rs`、`common/gamecfg/src/ini.rs`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
@@ -2141,3 +2156,4 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 | 2026-11-22 | マウント経路のスタック削減は、インライン展開をやめてフレームの重なりを無くす方法にする（static 化はしない） | 2 つのマウントが同時に起きないことを示す必要が無く、BSS も増えない。「呼び出し側で 1 回だけ呼ぶ」案は候補ごとのフォールバックと合わない（R131） | Opus |
 | 2026-11-22 | スタックの最高水位の計測（`stack-hw`）は既定でオフの機能にする | 2E release-z のイメージが詰め物で +512 B になり、起動時の書き込みも足すため。実機で測れたら既定にするか決め直す（R133） | Opus |
 | 2026-11-22 | CD_READ の期待セクタ種別を純正と同じく検査する（GDI に 0x28、CDI に 0x24 は 5/64/00） | GD-ROM と CDI の両方で純正の規則を確認した（R119・R134）。純正と本物のドライブも同じく断る | ユーザー（取り込みを指示） |
+| 2026-11-22 | GDEMU.ini に時間のキーが無いときの切替の窓を 150 + 150 ms から 500 + 250 ms に改める（R126 の判断の訂正） | キーの無い SD で純正を測った値（R135） | Opus |

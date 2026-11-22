@@ -214,9 +214,10 @@ impl Ini {
 
     /// The two phases of the NOT READY window after an image switch, in
     /// milliseconds: (`open_time`, `detect_time`), each the file's value if it
-    /// set the key, else the caller's default. The firmware's defaults are the
-    /// stock GDEMU 6.0 measurement (`discimg::atapi::SWAP_OPEN_MS` /
-    /// `SWAP_DETECT_MS`), not the documented 500 / 250 nobody has measured.
+    /// set the key, else the caller's default. The firmware's defaults
+    /// (`discimg::atapi::SWAP_OPEN_MS` / `SWAP_DETECT_MS`) are the stock
+    /// GDEMU 6.0 values measured with the keys absent: 500 / 250 (LOG R135),
+    /// the documented defaults.
     pub fn swap_window_ms(&self, open_default: u32, detect_default: u32) -> (u32, u32) {
         let o = if self.open_time_set { self.open_time as u32 } else { open_default };
         let d = if self.detect_time_set { self.detect_time as u32 } else { detect_default };

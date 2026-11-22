@@ -732,17 +732,24 @@ fn check_registers_are_the_stock_form() {
 
 #[test]
 fn swap_window_phases() {
-    // Stock after `52 82 n` (GDEMU.INI open_time = detect_time = 150 on the
-    // probe card): 2/3A/00 from t=0, 2/04/01 from ~150 ms, one 6/28/00 at
-    // ~300 ms, READY from the next poll.
-    assert_eq!((SWAP_OPEN_MS, SWAP_DETECT_MS), (150, 150));
+    // Stock after `52 82 n` with no open_time / detect_time in GDEMU.INI
+    // (`stock_20261122_11_ini-no-time-keys.txt`, LOG R135): 2/3A/00 from t=0,
+    // 2/04/01 from ~506 ms, one 6/28/00 at ~755 ms, READY from the next poll.
+    assert_eq!((SWAP_OPEN_MS, SWAP_DETECT_MS), (500, 250));
     let p = |t| swap_phase(t, SWAP_OPEN_MS, SWAP_DETECT_MS);
     assert_eq!(p(0), SwapPhase::Open);
-    assert_eq!(p(149), SwapPhase::Open);
-    assert_eq!(p(150), SwapPhase::Detect);
-    assert_eq!(p(299), SwapPhase::Detect);
-    assert_eq!(p(300), SwapPhase::Done);
+    assert_eq!(p(499), SwapPhase::Open);
+    assert_eq!(p(500), SwapPhase::Detect);
+    assert_eq!(p(749), SwapPhase::Detect);
+    assert_eq!(p(750), SwapPhase::Done);
     assert_eq!(p(u32::MAX), SwapPhase::Done);
+    // With the INI keys set to 150 / 150 (R119) and 600 / 300 (R129) stock
+    // used those values instead; `swap_phase` takes them as arguments.
+    assert_eq!(swap_phase(149, 150, 150), SwapPhase::Open);
+    assert_eq!(swap_phase(150, 150, 150), SwapPhase::Detect);
+    assert_eq!(swap_phase(300, 150, 150), SwapPhase::Done);
+    assert_eq!(swap_phase(899, 600, 300), SwapPhase::Detect);
+    assert_eq!(swap_phase(900, 600, 300), SwapPhase::Done);
     // Zero-length phases are skipped.
     assert_eq!(swap_phase(0, 0, 150), SwapPhase::Detect);
     assert_eq!(swap_phase(0, 0, 0), SwapPhase::Done);
