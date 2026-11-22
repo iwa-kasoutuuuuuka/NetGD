@@ -45,7 +45,10 @@ KOS_INIT_FLAGS(INIT_DEFAULT & ~INIT_CDROM);
 #define DATA_TO_MS     12000      /* WANT -> DATA: report and move on (menu-app.md 8 allows 30 s) */
 #define DRAIN_IDLE_MS  5000       /* after a failed pass: discard what is still in flight until this much silence */
 #ifndef G2N_LISTEN_RCVBUF
-#define G2N_LISTEN_RCVBUF 65535   /* receive buffer = TCP window of accepted connections (set on the listener) */
+#define G2N_LISTEN_RCVBUF 16384   /* receive buffer = TCP window of accepted connections (set on the listener).
+                                      65535 corrupted the stream on hardware: the PC then sends bursts of up to 45
+                                      segments, the BBA drops some, and KOS TCP (net_tcp.c process_pkt) appends a
+                                      later segment as if it were in sequence (no seq == rcv.nxt check) */
 #endif
 #define PASS_LIMIT_US  (20ull * 1000000ull)
 #define PASS_BYTES     (32ull << 20)
@@ -55,6 +58,7 @@ static uint64_t now_us(void) { return timer_us_gettime64(); }
 static volatile uint64_t g_rx_total;           /* every byte recv_all() took */
 static volatile unsigned g_frames_total;
 static volatile int g_conn_dead;               /* the TCP connection is gone (closed / reset) */
+static volatile int g_dead_errno = -1, g_dead_eof;   /* why: errno of the failing call; eof = recv() returned 0 */
 
 /* ---- on-screen log (works when the console is dead) ---- */
 #define SCR_W     640
@@ -131,10 +135,10 @@ static int recv_all(int fd, uint8_t *buf, size_t n, int ms, g2n_stat *st)
     uint64_t t0 = now_us();
     while (got < n) {
         int w = wait_readable(fd, ms);
-        if (w <= 0) { if (st) st->recv_us += now_us() - t0; if (w < 0) g_conn_dead = 1; errno = w == 0 ? ETIMEDOUT : errno; return -1; }
+        if (w <= 0) { if (st) st->recv_us += now_us() - t0; if (w < 0) { g_conn_dead = 1; g_dead_errno = errno; } errno = w == 0 ? ETIMEDOUT : errno; return -1; }
         ssize_t r = recv(fd, buf + got, n - got, 0);
         if (st) st->recv_calls++;
-        if (r <= 0) { if (st) st->recv_us += now_us() - t0; g_conn_dead = 1; if (r == 0) errno = 0; return -1; }
+        if (r <= 0) { if (st) st->recv_us += now_us() - t0; g_conn_dead = 1; g_dead_errno = errno; g_dead_eof = r == 0; if (r == 0) errno = 0; return -1; }
         got += (size_t)r;
         g_rx_total += (uint64_t)r;
     }
@@ -148,7 +152,7 @@ static int send_all(int fd, const uint8_t *buf, size_t n, g2n_stat *st)
     uint64_t t0 = now_us();
     while (sent < n) {
         ssize_t r = send(fd, buf + sent, n - sent, 0);
-        if (r <= 0) { if (st) st->send_us += now_us() - t0; return -1; }
+        if (r <= 0) { if (st) st->send_us += now_us() - t0; g_conn_dead = 1; g_dead_errno = errno; return -1; }
         sent += (size_t)r;
     }
     if (st) st->send_us += now_us() - t0;
@@ -200,9 +204,11 @@ static uint64_t drain(int idle_ms)
 
 /* ---- one TCP pass ---- */
 typedef struct { uint32_t want, depth, rcvbuf; int ck; } pass_cfg;
-static const pass_cfg PASSES[] = {   /* the 64 KiB frames (the ones that hung in the first run) come last */
+static const pass_cfg PASSES[] = {   /* the biggest frames come last */
     { 16384, 1, 0, 1 },
     { 16384, 1, 0, 0 },       /* no checksums: the network alone */
+    { 32768, 1, 0, 1 },
+    { 49152, 1, 0, 1 },
     { 65536, 1, 0, 1 },       /* netgd-recv's plan (menu-app.md D6) */
     { 65536, 1, 0, 0 },
     { 65536, 2, 0, 1 },       /* one WANT read ahead */
@@ -307,6 +313,8 @@ out:;
     kvp(pfx, "max_frame_us", st.max_frame_us);
     kvp(pfx, "rx_bytes_total", g_rx_total - rx0);   /* incl. a frame cut off by the failure */
     kvp(pfx, "outstanding", ps.outstanding);
+    kvp(pfx, "conn_dead", (uint64_t)g_conn_dead); kvp(pfx, "conn_errno", (uint64_t)(g_dead_errno < 0 ? 0 : g_dead_errno));
+    kvp(pfx, "conn_eof", (uint64_t)g_dead_eof);
     kvh(pfx, "crc", crc); kvh(pfx, "fnv", fnv);
     send_kv(g_text);
     return good ? 0 : -1;
@@ -551,6 +559,7 @@ int main(int argc, char **argv)
             send_line(g_text);
             say("p%u failed; drained %lu bytes%s", i + 1, (unsigned long)d, g_conn_dead ? " (connection lost)" : "");
             if (g_conn_dead) { failed = 1; break; }
+            send_line("note=connection kept after a failed pass");
         }
     }
     if (!failed) {

@@ -30,6 +30,14 @@ int g2n_hdr_parse(const uint8_t hdr[G2N_HDR], g2n_hdr *h);
 /* CRC-32 of header + payload, to compare with the 4 bytes after the payload */
 uint32_t g2n_frame_crc(const uint8_t hdr[G2N_HDR], const void *payload, uint32_t n);
 
+/* Incremental frame reassembly (what recv_all + parse do on the Dreamcast, but for any chunking of the byte stream).
+ * buf holds the payload + 4 CRC bytes of the frame being built (cap >= G2N_MAX_PAYLOAD + 4). */
+typedef struct { uint8_t hdr[G2N_HDR]; uint32_t have, need; g2n_hdr h; uint8_t *buf; uint32_t cap; int in_body; } g2n_rx;
+void g2n_rx_init(g2n_rx *r, uint8_t *buf, uint32_t cap);
+/* Feeds up to n bytes; *used = bytes taken. Returns 1 = one whole frame, CRC ok (r->h, payload in r->buf),
+ * 0 = need more, -1 = bad header (stream lost), -2 = bad CRC (frame was complete: the stream is still aligned). */
+int g2n_rx_feed(g2n_rx *r, const uint8_t *p, size_t n, size_t *used);
+
 /* WANT payload: u16 file, u16 0, u64 offset, u32 length (16 bytes) */
 void g2n_want_build(uint8_t out[16], uint16_t idx, uint64_t off, uint32_t len);
 /* DATA payload: u16 file, u16 0, u64 offset, data. 0 ok, -1 too short */

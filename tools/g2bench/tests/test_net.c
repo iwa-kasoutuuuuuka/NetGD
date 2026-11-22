@@ -46,6 +46,138 @@ static void test_frames(void)
     CHECK(g2n_data_parse(d, 11, &idx, &off, &dl, &data) == -1);
 }
 
+/* ---- reassembly with arbitrary recv chunking ---- */
+static uint32_t rnd_state = 12345;
+static uint32_t rnd(void) { rnd_state ^= rnd_state << 13; rnd_state ^= rnd_state >> 17; rnd_state ^= rnd_state << 5; return rnd_state; }
+
+static size_t build_stream(uint8_t *out, unsigned frames, const uint32_t *sizes)
+{
+    size_t o = 0;
+    static uint8_t pl[G2N_MAX_PAYLOAD];
+    for (unsigned i = 0; i < frames; i++) {
+        for (uint32_t j = 0; j < sizes[i]; j++) pl[j] = (uint8_t)(rnd() >> 8);
+        o += g2n_frame_build(out + o, G2N_T_DATA, 0, i + 1, pl, sizes[i]);
+    }
+    return o;
+}
+
+static void rx_bytes(g2n_rx *rx, const uint8_t *p, size_t n, unsigned *frames, unsigned *bad, int *dead)
+{
+    size_t fo = 0, used;
+    while (fo < n && !*dead) {
+        int r = g2n_rx_feed(rx, p + fo, n - fo, &used);
+        fo += used;
+        if (r == 1) (*frames)++;
+        else if (r == -2) (*bad)++;
+        else if (r == -1) { (*bad)++; *dead = 1; }
+        else if (used == 0) break;
+    }
+}
+
+/* feed `stream` to a parser in chunks of random size (1..maxchunk) */
+static void feed_chunked(const uint8_t *stream, size_t len, uint32_t maxchunk, unsigned *frames, unsigned *bad)
+{
+    static uint8_t rb[G2N_MAX_PAYLOAD + 4];
+    g2n_rx rx; g2n_rx_init(&rx, rb, sizeof rb);
+    size_t o = 0; int dead = 0;
+    *frames = *bad = 0;
+    while (o < len) {
+        size_t n = 1 + rnd() % maxchunk;
+        if (n > len - o) n = len - o;
+        rx_bytes(&rx, stream + o, n, frames, bad, &dead);
+        o += n;
+    }
+}
+
+/* The KOS 2.3 TCP receive ring (net_tcp.c: process_pkt writer, net_tcp_recvfrom reader), size 65535, copied
+ * statement by statement: 65568-byte frames (> the ring) wrap correctly when the segments arrive in order;
+ * and what the missing "seq == rcv.nxt" check does when one segment is lost. */
+static uint8_t kring[65535];
+static uint32_t k_sz = 65535, k_head, k_tail, k_cur, k_wnd;
+static void k_init(void) { k_head = k_tail = k_cur = 0; k_wnd = k_sz; }
+static uint32_t k_input(const uint8_t *buf, uint32_t sz)   /* returns the bytes taken (window limit) */
+{
+    if (sz > k_wnd) sz = k_wnd;
+    if (!sz) return 0;
+    uint8_t *rb = kring + k_tail;
+    uint32_t took = sz;
+    k_wnd -= sz; k_cur += sz;
+    if (k_tail + sz <= k_sz) { memcpy(rb, buf, sz); k_tail += sz; }
+    else { uint32_t tmp = k_sz - k_tail; memcpy(rb, buf, tmp); sz -= tmp; buf += tmp; memcpy(kring, buf, sz); k_tail = sz; }
+    return took;
+}
+static uint32_t k_recv(uint8_t *buf, uint32_t length)
+{
+    uint32_t size = length > k_cur ? k_cur : length;
+    uint8_t *rb = kring + k_head;
+    k_wnd += size; k_cur -= size;
+    if (k_head + size <= k_sz) { memcpy(buf, rb, size); k_head += size; if (k_head == k_sz) k_head = 0; }
+    else { uint32_t tmp = k_sz - k_head; memcpy(buf, rb, tmp); memcpy(buf + tmp, kring, size - tmp); k_head = size - tmp; }
+    if (!k_cur) k_head = k_tail = 0;
+    return size;
+}
+
+/* sender: segments of 1460; the application reads up to `rd` bytes after every `every` segments (and whenever
+   the window is full). drop_seg >= 0: that segment never arrives and is never retransmitted. */
+static void ring_run(const uint8_t *stream, size_t len, int drop_seg, uint32_t rd, unsigned every, unsigned *frames, unsigned *bad)
+{
+    static uint8_t rb[G2N_MAX_PAYLOAD + 4], tmp[70000];
+    g2n_rx rx; g2n_rx_init(&rx, rb, sizeof rb);
+    k_init();
+    *frames = *bad = 0;
+    size_t o = 0; int seg = 0, dead = 0; unsigned since = 0;
+    while (o < len && !dead) {
+        size_t n = len - o < 1460 ? len - o : 1460;
+        if (seg != drop_seg) {
+            uint32_t took = k_input(stream + o, (uint32_t)n);
+            if (took < n) {                      /* window full: read, then the sender continues from the unacked byte */
+                uint32_t g = k_recv(tmp, rd);
+                rx_bytes(&rx, tmp, g, frames, bad, &dead);
+                o += took;
+                continue;
+            }
+        }
+        seg++; o += n;
+        if (++since >= every) { since = 0; uint32_t g = k_recv(tmp, rd); rx_bytes(&rx, tmp, g, frames, bad, &dead); }
+    }
+    uint32_t g;
+    while (!dead && (g = k_recv(tmp, sizeof tmp)) > 0) rx_bytes(&rx, tmp, g, frames, bad, &dead);
+}
+
+static void test_reassembly(void)
+{
+    static uint8_t stream[8 * 66000];
+    static const uint32_t sizes[8] = { 12 + 65536, 12 + 65536, 12 + 49152, 12 + 32768, 12 + 16384, 12 + 65536, 0, 12 + 1 };
+    size_t len = build_stream(stream, 8, sizes);
+    unsigned frames, bad;
+    static const uint32_t chunks[] = { 1, 2, 7, 16, 20, 1460, 1500, 8192, 65536, 200000 };
+    for (unsigned i = 0; i < sizeof chunks / sizeof chunks[0]; i++)
+        for (int rep = 0; rep < 3; rep++) {
+            feed_chunked(stream, len, chunks[i], &frames, &bad);
+            CHECK(frames == 8 && bad == 0);
+        }
+    /* a flipped bit is a bad CRC; the stream stays aligned for the next frame */
+    stream[100] ^= 0x10;
+    feed_chunked(stream, len, 1460, &frames, &bad);
+    CHECK(frames == 7 && bad == 1);
+    stream[100] ^= 0x10;
+
+    /* KOS ring, in order, frames larger than the 65535-byte ring */
+    static const uint32_t rds[] = { 100, 1460, 4096, 20000, 65535 };
+    static const unsigned evs[] = { 1, 3, 10, 45 };
+    for (unsigned a = 0; a < 5; a++)
+        for (unsigned b = 0; b < 4; b++) {
+            ring_run(stream, len, -1, rds[a], evs[b], &frames, &bad);
+            CHECK(frames == 8 && bad == 0);
+        }
+    /* one lost segment: KOS appends the next segment as if it were in sequence, so the application sees bad data
+       (here a bad CRC or a lost header, never silently good data) */
+    for (int d = 5; d < 120; d += 17) {
+        ring_run(stream, len, d, 4096, 3, &frames, &bad);
+        CHECK(bad >= 1);
+    }
+}
+
 static void test_pass(void)
 {
     g2n_pass p; uint64_t off; uint32_t len;
@@ -116,6 +248,7 @@ static void write_xcheck(const char *path)
 int main(int argc, char **argv)
 {
     test_frames();
+    test_reassembly();
     test_pass();
     test_udp();
     if (argc > 1) write_xcheck(argv[1]);

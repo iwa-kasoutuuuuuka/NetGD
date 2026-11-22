@@ -31,6 +31,44 @@ uint32_t g2n_frame_crc(const uint8_t hdr[G2N_HDR], const void *payload, uint32_t
     return ng_crc32(ng_crc32(0, hdr, G2N_HDR), payload, n);
 }
 
+void g2n_rx_init(g2n_rx *r, uint8_t *buf, uint32_t cap)
+{
+    memset(r, 0, sizeof *r);
+    r->buf = buf; r->cap = cap;
+}
+
+int g2n_rx_feed(g2n_rx *r, const uint8_t *p, size_t n, size_t *used)
+{
+    size_t u = 0;
+    while (u < n) {
+        if (!r->in_body) {
+            size_t take = G2N_HDR - r->have;
+            if (take > n - u) take = n - u;
+            memcpy(r->hdr + r->have, p + u, take);
+            r->have += (uint32_t)take; u += take;
+            if (r->have == G2N_HDR) {
+                if (g2n_hdr_parse(r->hdr, &r->h) != 0 || r->h.len + 4 > r->cap) { *used = u; r->have = 0; return -1; }
+                r->in_body = 1; r->have = 0; r->need = r->h.len + 4;
+            }
+        } else {
+            size_t take = r->need - r->have;
+            if (take > n - u) take = n - u;
+            memcpy(r->buf + r->have, p + u, take);
+            r->have += (uint32_t)take; u += take;
+            if (r->have == r->need) {
+                uint32_t want = (uint32_t)r->buf[r->h.len] | ((uint32_t)r->buf[r->h.len + 1] << 8) |
+                                ((uint32_t)r->buf[r->h.len + 2] << 16) | ((uint32_t)r->buf[r->h.len + 3] << 24);
+                int ok = g2n_frame_crc(r->hdr, r->buf, r->h.len) == want;
+                r->in_body = 0; r->have = 0;
+                *used = u;
+                return ok ? 1 : -2;
+            }
+        }
+    }
+    *used = u;
+    return 0;
+}
+
 void g2n_want_build(uint8_t out[16], uint16_t idx, uint64_t off, uint32_t len)
 {
     put16(out, idx); put16(out + 2, 0); put64(out + 4, off); put32(out + 12, len);

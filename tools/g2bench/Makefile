@@ -14,6 +14,9 @@ endif
 # phase D: the same checksums, but the data comes over KOS's TCP/IP stack (INIT_NET): make g2netbench.elf
 NET_TARGET = g2netbench.elf
 NET_OBJS = main_net.o g2n_core.o g2b_core.o crc32.o
+ifneq ($(G2N_LISTEN_RCVBUF),)
+  KOS_CFLAGS += -DG2N_LISTEN_RCVBUF=$(G2N_LISTEN_RCVBUF)
+endif
 
 all: rm-elf $(TARGET)
 
