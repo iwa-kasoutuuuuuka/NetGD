@@ -17,6 +17,8 @@ typedef struct {
     int consec_timeouts;
     uint32_t ip_fad;     /* from REQ_SES(2) */
     uint32_t toc_ip;     /* fallback: first data track of the last valid TOC area */
+    int toc_any;         /* some TOC area listed at least one valid track */
+    uint32_t toc_audio;  /* first audio track of the first TOC area that has one (no-data-track images) */
     uint32_t leadout;
     char line[REC_LINE_MAX];
     char extra[160];
@@ -270,13 +272,19 @@ static void battery_info(runner *r, int ready)
             if (r->buf[404] != 0xFF && lo && lo != 0xFFFFFF)
                 r->leadout = lo;
             {   /* first data track (control bit 2) of this area, for the IP_READ fallback */
-                int t;
+                int t, found = 0;
                 for (t = 0; t < 99; t++) {
                     const uint8_t *e = r->buf + 4 * t;
                     uint32_t f = fad3(e + 1);
-                    if (e[0] != 0xFF && (e[0] & 0x40) && f >= 150 && f < 0x00F00000) {
+                    if (e[0] == 0xFF || f < 150 || f >= 0x00F00000)
+                        continue;
+                    r->toc_any = 1;
+                    if (!(e[0] & 0x40)) {
+                        if (!r->toc_audio)
+                            r->toc_audio = f;
+                    } else if (!found) {
                         r->toc_ip = f;
-                        break;
+                        found = 1;
                     }
                 }
             }
@@ -313,6 +321,20 @@ static void battery_reads(runner *r)
     char nm[24], ex[96];
     uint32_t ip = r->cfg->ip_fad ? r->cfg->ip_fad : (r->ip_fad ? r->ip_fad : (r->toc_ip ? r->toc_ip : 45150));
     int i;
+
+    /* An image whose TOC lists tracks but no data track (an audio-only CDI, R148 image 11): there is no IP.BIN
+     * to read and REQ_SES / the 45150 fallback would point at nothing. Skip IP_READ, throughput and seek; only
+     * the CD_READ flag battery runs, on the first audio track (stock returns 2352-byte PCM for 0x20 / 0x10 and
+     * 5/64/00 for 0x24 / 0x28 on GDI audio, R144). An explicit ip_fad= still forces the normal reads. */
+    if (!r->cfg->ip_fad && r->toc_any && !r->toc_ip) {
+        event(r, "NO_DATA_TRACK", "audio_fad=%lu reads=skipped", (unsigned long)r->toc_audio);
+        sync_out(r);
+        if (r->cfg->do_cdread_flags && r->toc_audio && !r->abort) {
+            say(r, "no data track: cd_read flags on the first audio track...");
+            battery_cdread_flags(r, r->toc_audio);
+        }
+        return;
+    }
 
     /* IP.BIN: the BIOS reads 7 sectors from here at boot. */
     snprintf(ex, sizeof(ex), "fad=%lu count=7", (unsigned long)ip);
@@ -389,6 +411,8 @@ static void battery(runner *r, int full)
     int ready;
     r->ip_fad = 0;
     r->toc_ip = 0;
+    r->toc_any = 0;
+    r->toc_audio = 0;
     r->leadout = 0;
     ready = warmup(r);
     event(r, "WARMUP", "ready=%d", ready);
@@ -399,32 +423,150 @@ static void battery(runner *r, int full)
     sync_out(r);
 }
 
+/* ---- R148: the swap window without commands ----------------------------- */
+
+static void wait_step(runner *r, uint32_t ms)
+{
+    if (r->ops->spin_us)
+        r->ops->spin_us(r->ops->ctx, ms * 1000u);
+    else
+        r->ops->sleep_ms(r->ops->ctx, ms);
+}
+
+/* ATA DEVICE RESET inside the window, then one line with the registers right after it:
+ *   img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=50 rc=ok reset_us=2000 bsy_seen=0 altst=0x.. err=0x.. irr=0x.. secnr=0x.. bcl=0x14 bch=0xeb
+ * Only reached with switch=on and swap_devreset=on (and the ATA whitelist agrees). */
+static void swap_devreset(runner *r, const char *pfx, uint64_t t0, int delay_ms)
+{
+    gd_regs g;
+    uint32_t us = 0;
+    int bsy = 0, rc;
+    char nm[32], f[220];
+    uint64_t t_ms = (r->ops->now_us(r->ops->ctx) - t0) / 1000u;
+    memset(&g, 0, sizeof(g));
+    if (r->abort) {
+        rc = GD_REFUSED;
+    } else if (!r->ops->ata_reset || !wl_ata_check(0x08, r->cfg->do_identify, r->cfg->do_switch && r->cfg->swap_devreset)) {
+        rc = GD_REFUSED;
+    } else {
+        rc = r->ops->ata_reset(r->ops->ctx, r->cfg->timeout_ms, &g, &us, &bsy);
+        if (rc == GD_TIMEOUT || rc == GD_BUSY) {
+            if (++r->consec_timeouts >= 3)
+                r->abort = 1;
+        } else {
+            r->consec_timeouts = 0;
+        }
+    }
+    snprintf(nm, sizeof(nm), "%sSW_DEVRESET", pfx);
+    snprintf(f, sizeof(f), "delay_ms=%d t_ms=%lu rc=%s reset_us=%lu bsy_seen=%d altst=0x%02x err=0x%02x irr=0x%02x secnr=0x%02x bcl=0x%02x bch=0x%02x",
+             delay_ms, (unsigned long)t_ms, rec_rc_name(rc), (unsigned long)us, bsy, g.altst, g.err, g.irr, g.secnr, g.bcl, g.bch);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+    if (r->abort && rc != GD_REFUSED) {
+        event(r, "ABORT", "reason=drive-not-answering");
+        say(r, "drive stopped answering: giving up");
+    }
+}
+
+/* After `52 82 n`: send NO packet command until `until_ms` (from t0), only read the registers every
+ * swap_regpoll_interval_ms and write one line per change:
+ *   img=3 probe=SW_REGPOLL t_ms=12 sample=4 altst=0x50 err=0x00 irr=0x03 secnr=0x06
+ * reset_at_ms >= 0: issue DEVICE RESET at that time (swap_devreset) and record every register again right
+ * after it. Ends with  probe=SW_REGPOLL_END t_ms=.. samples=.. changes=.. stop=.. . Bounded by time AND by
+ * an iteration cap, so a stuck clock cannot hang it. Returns the time spent (ms). */
+static uint32_t swap_regpoll(runner *r, const char *pfx, uint64_t t0, uint32_t until_ms, int reset_at_ms)
+{
+    char nm[32], f[160];
+    gd_regs g, last;
+    int have_last = 0, samples = 0, changes = 0, reset_done = reset_at_ms < 0;
+    uint32_t step = r->cfg->swap_regpoll_interval_ms ? r->cfg->swap_regpoll_interval_ms : 2;
+    uint32_t iter = 0, max_iter = (until_ms / step) * 4u + 1000u;
+    const char *why = "time";
+    uint64_t t_ms = 0;
+
+    snprintf(nm, sizeof(nm), "%sSW_REGPOLL", pfx);
+    memset(&last, 0, sizeof(last));
+    if (!r->ops->regs) {
+        snprintf(nm, sizeof(nm), "%sSW_REGPOLL_END", pfx);
+        out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, "t_ms=0 samples=0 changes=0 stop=no-register-access"), 0);
+        return 0;
+    }
+    for (;;) {
+        if (r->abort) { why = "abort"; break; }
+        t_ms = (r->ops->now_us(r->ops->ctx) - t0) / 1000u;
+        if (!reset_done && t_ms >= (uint64_t)reset_at_ms) {
+            swap_devreset(r, pfx, t0, reset_at_ms);
+            reset_done = 1;
+            have_last = 0;      /* the first sample after the reset is always written */
+            continue;
+        }
+        if (t_ms >= until_ms)
+            break;
+        if (++iter > max_iter) { why = "iteration-cap"; break; }
+        if (r->ops->regs(r->ops->ctx, &g)) { why = "bus-lock"; break; }
+        samples++;
+        if (!have_last || g.altst != last.altst || g.err != last.err || g.irr != last.irr || g.secnr != last.secnr) {
+            changes++;
+            snprintf(f, sizeof(f), "t_ms=%lu sample=%d altst=0x%02x err=0x%02x irr=0x%02x secnr=0x%02x",
+                     (unsigned long)t_ms, samples, g.altst, g.err, g.irr, g.secnr);
+            out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+            last = g;
+            have_last = 1;
+        }
+        wait_step(r, step);
+    }
+    snprintf(nm, sizeof(nm), "%sSW_REGPOLL_END", pfx);
+    snprintf(f, sizeof(f), "t_ms=%lu samples=%d changes=%d stop=%s", (unsigned long)t_ms, samples, changes, why);
+    out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+    sync_out(r);
+    return (uint32_t)t_ms;
+}
+
 /* ---- image switch -------------------------------------------------------- */
 
 /* `52 82 n`, then TEST UNIT READY / REQ_ERROR every 20 ms. Only changes of
  * state are written to the record. A drive that never gets READY (or an empty
- * folder) is a recorded result, not an error. Returns 1 if READY. */
-static int switch_to(runner *r, int n, int tag)
+ * folder) is a recorded result, not an error. Returns 1 if READY.
+ * regpoll = 1: the command-free register poll (swap_regpoll) runs first.
+ * reset_at_ms >= 0: the R148 DEVICE RESET variant; every line's probe name gets the prefix R<ms>_ and
+ * the register poll always runs (before and after the reset). */
+static int switch_to(runner *r, int n, int tag, int regpoll, int reset_at_ms)
 {
     uint8_t c[12];
     gd_result res;
-    char ex[96];
+    char ex[96], pfx[16], nm[40];
     uint64_t t0, now;
     int ready = 0, polls = 0, changes = 0;
     int last_secnr = -1;
     int last_rc = -1, last_st = -1, last_er = -1, last_sk = -1, last_asc = -1, last_ascq = -1;
     uint32_t timeout_ms_total;
-    char msg[48];
+    char msg[64];
 
     r->img = tag;
-    snprintf(msg, sizeof(msg), "switch to image %d...", n);
+    if (reset_at_ms >= 0)
+        snprintf(pfx, sizeof(pfx), "R%d_", reset_at_ms);
+    else
+        pfx[0] = 0;
+    if (reset_at_ms >= 0)
+        snprintf(msg, sizeof(msg), "switch to image %d, DEVICE RESET at %d ms...", n, reset_at_ms);
+    else
+        snprintf(msg, sizeof(msg), "switch to image %d...", n);
     say(r, msg);
     cdb_mount(c, n);
     snprintf(ex, sizeof(ex), "n=%d", n);
+    snprintf(nm, sizeof(nm), "%sSW_CMD", pfx);
     t0 = r->ops->now_us(r->ops->ctx);
-    do_cmd(r, "SW_CMD", ex, c, 0, r->cfg->timeout_ms, 0, &res);
+    do_cmd(r, nm, ex, c, 0, r->cfg->timeout_ms, 0, &res);
 
     timeout_ms_total = r->cfg->switch_timeout_ms;
+    /* Only after a switch command the drive accepted: never reset or sit silent after a refused/failed one. */
+    if (res.rc == GD_OK && !r->abort && (regpoll || reset_at_ms >= 0)) {
+        uint32_t until = r->cfg->swap_regpoll_ms;
+        if (reset_at_ms >= 0 && until < (uint32_t)reset_at_ms + 300u)
+            until = (uint32_t)reset_at_ms + 300u;
+        timeout_ms_total += swap_regpoll(r, pfx, t0, until, reset_at_ms);
+    }
+
+    snprintf(nm, sizeof(nm), "%sSW_POLL", pfx);
     while (!r->abort) {
         int sk = -1, asc = -1, ascq = -1, secnr_changed = 0;
         uint64_t t_ms;
@@ -485,7 +627,7 @@ static int switch_to(runner *r, int n, int tag)
                     sec[0] = 0;
                 snprintf(f, sizeof(f), "t_ms=%lu poll=%d rc=%s status=0x%02x err=0x%02x sense=%s%s",
                          (unsigned long)t_ms, polls, rec_rc_name(tr.rc), tr.status, tr.error, sn, sec);
-                out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "SW_POLL", f), 0);
+                out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
                 last_rc = tr.rc; last_st = tr.status; last_er = tr.error;
                 last_sk = sk; last_asc = asc; last_ascq = ascq;
             }
@@ -497,8 +639,23 @@ static int switch_to(runner *r, int n, int tag)
         r->ops->sleep_ms(r->ops->ctx, 20);
     }
     now = r->ops->now_us(r->ops->ctx);
-    event(r, "SW_RESULT", "n=%d rc=%s t_ms=%lu polls=%d changes=%d", n, ready ? "ok" : (r->abort ? "abort" : "timeout"),
-          (unsigned long)((now - t0) / 1000u), polls, changes);
+    {
+        char f[120];
+        snprintf(nm, sizeof(nm), "%sSW_RESULT", pfx);
+        snprintf(f, sizeof(f), "n=%d rc=%s t_ms=%lu polls=%d changes=%d", n, ready ? "ok" : (r->abort ? "abort" : "timeout"),
+                 (unsigned long)((now - t0) / 1000u), polls, changes);
+        out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nm, f), 0);
+    }
+    /* After a reset switch: the drive's state block and sense once it is READY (did the reset change the
+     * pause / standby state or the head position?). Read-only, like the battery. */
+    if (reset_at_ms >= 0 && !r->abort) {
+        cdb_simple(c, 0x10, 0, 0, 10);
+        snprintf(nm, sizeof(nm), "%sREQ_STAT", pfx);
+        do_cmd(r, nm, NULL, c, 10, r->cfg->timeout_ms, 1, &res);
+        cdb_simple(c, 0x13, 0, 0, 10);
+        snprintf(nm, sizeof(nm), "%sREQ_ERROR", pfx);
+        do_cmd(r, nm, NULL, c, 10, r->cfg->timeout_ms, 1, &res);
+    }
     sync_out(r);
     return ready;
 }
@@ -508,13 +665,13 @@ static int switch_to(runner *r, int n, int tag)
 int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
 {
     runner *r = &g_r;
-    int i;
+    int i, j;
     memset(r, 0, sizeof(*r));
     r->ops = ops;
     r->cfg = cfg;
     r->sink = sink;
 
-    if (cfg->do_identify && ops->identify) {
+    if (cfg->do_identify && ops->identify && wl_ata_check(0xA1, cfg->do_identify, 0)) {
         gd_result res;
         rec_probe p;
         memset(&res, 0, sizeof(res));
@@ -532,13 +689,16 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
         battery(r, 0);
         for (i = 0; i < cfg->n_images && !r->abort; i++) {
             int n = cfg->images[i];
-            int ready = switch_to(r, n, n);
+            int ready = switch_to(r, n, n, cfg->swap_regpoll, -1);
             snprintf(msg, sizeof(msg), "probing image %d%s...", n, ready ? "" : " (not ready)");
             say(r, msg);
             battery(r, 1);
+            /* R148: the same image again, once per delay, with a DEVICE RESET inside the window */
+            for (j = 0; cfg->swap_devreset && j < cfg->n_devreset && !r->abort; j++)
+                switch_to(r, n, n, 1, cfg->devreset_ms[j]);
         }
         if (cfg->return_to > 0 && !r->abort)
-            switch_to(r, cfg->return_to, cfg->return_to);
+            switch_to(r, cfg->return_to, cfg->return_to, 0, -1);
     } else {
         r->img = 0;
         say(r, "probing the mounted image...");

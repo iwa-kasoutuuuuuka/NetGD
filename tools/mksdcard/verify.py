@@ -53,6 +53,27 @@ def check_mode1_cdi(path, entry):
     return problems
 
 
+def check_audio_only_cdi(path, entry):
+    """Image 11 (R148): every track is audio and holds the generator's 2352-byte PCM sectors."""
+    sys.path.insert(0, HERE)
+    import mksdcard
+    problems = []
+    with open(path, 'rb') as f:
+        for t in entry['tracks']:
+            if t.get('form') != 'audio_2352':
+                problems.append('track %d is %s, not audio' % (t['number'], t.get('form')))
+                continue
+            for i in (0, 1, t['sector_count'] - 1):
+                f.seek(t['file_offset'] + i * 2352)
+                if f.read(2352) != mksdcard.audio_sector(t['start_lba'] + i):
+                    problems.append('track %d sector %d: differs from the generator' % (t['number'], i))
+    return problems
+
+
+def is_audio_only(entry):
+    return all(t.get('type') == 'audio' for t in entry['tracks'])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('outdir')
@@ -76,12 +97,19 @@ def main(argv=None):
             bad += 1
             print('MISMATCH\n  parser:   %s\n  manifest: %s' % (got, want))
         else:
-            extra = check_mode1_cdi(path, e) if e['format'] == 'cdi' else []
+            audio_only = e['format'] == 'cdi' and is_audio_only(e)
+            if audio_only:
+                extra = check_audio_only_cdi(path, e)
+            else:
+                extra = check_mode1_cdi(path, e) if e['format'] == 'cdi' else []
             if extra:
                 bad += 1
-                print('MISMATCH (Mode 1 content)\n  ' + '\n  '.join(extra))
+                print('MISMATCH (%s content)\n  ' % ('audio' if audio_only else 'Mode 1') + '\n  '.join(extra))
             else:
-                print('OK (matches manifest)' + (' + Mode 1 sectors' if any(t.get('form') == 'cdi_mode1_2352' for t in e['tracks']) else ''))
+                tail = ' + Mode 1 sectors' if any(t.get('form') == 'cdi_mode1_2352' for t in e['tracks']) else ''
+                if audio_only:
+                    tail = ' + audio only (no data track), PCM sectors'
+                print('OK (matches manifest)' + tail)
     return 1 if bad else 0
 
 

@@ -2,6 +2,7 @@
 """mksdcard: build the test SD card used to probe a stock GDEMU with tools/gdprobe.
 
     python mksdcard.py OUTDIR [--menu DIR_01] [--dcload disc.cdi] [--small] [--force]
+    python mksdcard.py OUTDIR --set variants [--only 11] [--small] [--force]
 
 Creates OUTDIR/01 .. 07 (see docs/research/stock-gdemu-flow.md, section 3) and
 OUTDIR/NETGD-PROBE-MANIFEST.json. Python 3 standard library only. Output is
@@ -15,6 +16,8 @@ Images generated here (all synthetic, no copyrighted content, they do not boot):
   10  CDI        : like 04 (one audio track, then a data session) but the data track is Mode 1 stored as
                    2352-byte raw sectors (DiscJuggler track mode 1, read mode 2), not mkdcdisc's Mode 2 Form 1
                    (--set variants only; LOG R137 g)
+  11  CDI        : audio only: one session with two audio tracks, no data track (--set variants only;
+                   R148: the disc-format nibble of REQ_STAT / SECNR for an audio-only CDI)
 
 Data sectors
   Each 2048-byte user-data block starts with the ASCII tag
@@ -452,6 +455,13 @@ def cdi_spec_10(small):
     return [[('audio', CDDA_MIN, None)], [('data1', 1100 if small else 4000, 'NETGD PROBE 10')]]
 
 
+def cdi_spec_11(small):
+    """Audio only (R148): one session, two audio tracks, no data track. Does stock mount it, and which disc
+    format (REQ_STAT byte 1 high nibble, SECNR high nibble) does it report? NetGD assumes 0 (Flycast).
+    The size does not depend on --small (audio tracks are already at mkdcdisc's 302-sector floor)."""
+    return [[('audio', CDDA_MIN, None), ('audio', CDDA_MIN + 100, None)]]
+
+
 def cdi_spec_05(small):
     return [[('audio', CDDA_MIN, None), ('audio', CDDA_MIN + 100, None)],
             [('data', 1100 if small else 4000, 'NETGD PROBE 05')]]
@@ -481,14 +491,21 @@ def crc_file(path):
     return '%08x' % (c & 0xFFFFFFFF)
 
 
-def make_variants(outdir, small=False, force=False):
-    """--set variants: only the extra images 08, 09 (GDI) and 10 (CDI, Mode 1) (copied next to an existing card's 01-07)."""
+VARIANTS = ((8, 'gdi', gdi_spec_08), (9, 'gdi', gdi_spec_09), (10, 'cdi', cdi_spec_10), (11, 'cdi', cdi_spec_11))
+
+
+def make_variants(outdir, small=False, force=False, only=None):
+    """--set variants: only the extra images 08, 09 (GDI), 10 (CDI, Mode 1) and 11 (CDI, audio only), to copy next
+    to an existing card's 01-07. only = a set of folder numbers to build (None = all of them)."""
+    plan = [v for v in VARIANTS if only is None or v[0] in only]
+    if only is not None and len(plan) != len(only):
+        raise SystemExit('error: --only accepts %s' % ','.join(str(v[0]) for v in VARIANTS))
     if os.path.exists(outdir) and os.listdir(outdir) and not force:
         raise SystemExit('error: %s is not empty (use --force to write into it)' % outdir)
     os.makedirs(outdir, exist_ok=True)
     manifest = {'tool': 'mksdcard', 'version': VERSION, 'small': bool(small), 'set': 'variants',
                 'folders': {}, 'images': {}}
-    for n, kind, spec in ((8, 'gdi', gdi_spec_08), (9, 'gdi', gdi_spec_09), (10, 'cdi', cdi_spec_10)):
+    for n, kind, spec in plan:
         folder = os.path.join(outdir, '%02d' % n)
         e = build_gdi(folder, n, spec(small)) if kind == 'gdi' else build_cdi(folder, n, spec(small))
         e['file_crc32'] = {fn: crc_file(os.path.join(folder, fn)) for fn in e['files']}
@@ -557,10 +574,22 @@ def main(argv=None):
     ap.add_argument('--small', action='store_true', help='a few MB instead of ~100 MB (for tests)')
     ap.add_argument('--force', action='store_true', help='write into a non-empty OUTDIR')
     ap.add_argument('--set', choices=('card', 'variants'), default='card',
-                    help='card = the full 01-07 card (default); variants = only the extra images 08, 09 (GDI) and 10 (CDI, Mode 1)')
+                    help='card = the full 01-07 card (default); variants = only the extra images 08, 09 (GDI), '
+                         '10 (CDI, Mode 1) and 11 (CDI, audio only)')
+    ap.add_argument('--only', help='with --set variants: comma-separated folder numbers to build (e.g. 11)')
     a = ap.parse_args(argv)
+    only = None
+    if a.only is not None:
+        if a.set != 'variants':
+            raise SystemExit('error: --only needs --set variants')
+        try:
+            only = {int(x) for x in a.only.split(',') if x.strip()}
+        except ValueError:
+            raise SystemExit('error: --only takes folder numbers, e.g. --only 11')
+        if not only:
+            raise SystemExit('error: --only takes folder numbers, e.g. --only 11')
     if a.set == 'variants':
-        m = make_variants(a.outdir, a.small, a.force)
+        m = make_variants(a.outdir, a.small, a.force, only)
     else:
         m = make_card(a.outdir, a.menu, a.dcload, a.small, a.force)
     total = 0

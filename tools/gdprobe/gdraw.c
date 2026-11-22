@@ -8,7 +8,8 @@
  * g1_ata_select_device(G1_ATA_MASTER) (g1ata.c:216-222), i.e. it writes the
  * DEVICE_SELECT register after every command -- something neither KOS's cdrom
  * driver nor openMenu does to a GDEMU. Taking the semaphore directly keeps the
- * only register writes the ones below: FEATURES, byte count, COMMAND, DATA.
+ * only register writes the ones below: FEATURES, byte count, COMMAND, DATA. (COMMAND takes 0xA0 PACKET,
+ * 0xA1 IDENTIFY PACKET when identify=on, and 0x08 DEVICE RESET only when swap_devreset=on.)
  * Register addresses are the ones g1ata.c and the openMenu gdemu_sdk.c use. */
 #include <kos.h>
 #include <kos/sem.h>
@@ -280,6 +281,80 @@ done:
     return r->rc;
 }
 
+/* Passive register snapshot (R148 SW_REGPOLL). Only reads: ALTSTATUS (unlike STATUS it does not clear the
+ * interrupt), ERROR, interrupt reason, SECNR and the byte-count pair. No register is written. */
+static void read_regs(gd_regs *g)
+{
+    g->altst = IN8(GD_ALTSTATUS);
+    g->err = IN8(GD_ERROR);
+    g->irr = IN8(GD_IRQ_REASON);
+    g->secnr = IN8(GD_SECNR);
+    g->bcl = IN8(GD_LBA_MID);
+    g->bch = IN8(GD_LBA_HIGH);
+}
+
+static int gd_regs_op(void *ctx, gd_regs *g)
+{
+    (void)ctx;
+    memset(g, 0, sizeof(*g));
+    if (bus_lock())
+        return 1;
+    read_regs(g);
+    bus_unlock();
+    return 0;
+}
+
+/* ATA DEVICE RESET (0x08), only when the config enabled swap_devreset (probes.c checks the ATA whitelist
+ * first). The one register write is COMMAND = 0x08, the same register every PACKET writes; DEVICE_SELECT is
+ * still never touched. The command does not raise an interrupt (ATA-4 8.7); we only wait, bounded by
+ * timeout_ms, for BSY to clear and then read the registers (byte count 0x14/0xEB = the ATAPI signature,
+ * SECNR = what the GD-ROM shows right after a reset). The bus is held for at least RESET_MIN_US (2 ms). */
+#define RESET_MIN_US 2000u
+
+static int gd_ata_reset(void *ctx, uint32_t timeout_ms, gd_regs *after, uint32_t *us, int *bsy_seen)
+{
+    uint64_t t0, deadline;
+    int rc = GD_OK;
+    (void)ctx;
+    memset(after, 0, sizeof(*after));
+    *us = 0;
+    *bsy_seen = 0;
+    if (bus_lock())
+        return GD_BUSY;
+    t0 = now_us();
+    deadline = t0 + (uint64_t)timeout_ms * 1000u;
+    OUT8(GD_COMMAND, 0x08);
+    settle();
+    /* A drive whose firmware (not its bus logic) takes the command may raise BSY a little late: keep
+     * watching for at least RESET_MIN_US before trusting a clear BSY. The register poll that follows
+     * catches anything later. */
+    for (;;) {
+        uint8_t s = IN8(GD_ALTSTATUS);
+        uint64_t t = now_us();
+        if (s & SR_BSY)
+            *bsy_seen = 1;
+        else if (t - t0 >= RESET_MIN_US)
+            break;
+        if (t >= deadline) {
+            rc = GD_TIMEOUT;
+            break;
+        }
+    }
+    *us = (uint32_t)(now_us() - t0);
+    read_regs(after);
+    bus_unlock();
+    return rc;
+}
+
+/* Busy-wait on the CPU timer only: no bus access. */
+static void op_spin(void *ctx, uint32_t us)
+{
+    uint64_t end = now_us() + us;
+    (void)ctx;
+    while (now_us() < end)
+        ;
+}
+
 static uint64_t op_now(void *ctx) { (void)ctx; return now_us(); }
 static void op_sleep(void *ctx, uint32_t ms) { (void)ctx; thd_sleep((int)ms); }
 static void op_progress(void *ctx, const char *m) { (void)ctx; printf("[gdprobe] %s\n", m); }
@@ -292,4 +367,7 @@ void gdraw_get_ops(gd_ops *ops)
     ops->now_us = op_now;
     ops->sleep_ms = op_sleep;
     ops->progress = op_progress;
+    ops->regs = gd_regs_op;
+    ops->ata_reset = gd_ata_reset;
+    ops->spin_us = op_spin;
 }

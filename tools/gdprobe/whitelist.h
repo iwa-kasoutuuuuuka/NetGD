@@ -32,4 +32,19 @@ const wl_entry *wl_check(const uint8_t cdb[12], int switch_enabled);
 const wl_entry *wl_check_cfg(const uint8_t cdb[12], int switch_enabled, uint8_t cdread_flags);
 int wl_cdread_flags_probe_ok(uint8_t byte1);   /* byte1 in {0x20,0x24,0x28,0x10} */
 
+/* The ATA commands (written to the COMMAND register directly, not as a PACKET CDB) this tool may issue.
+ * PACKET (0xA0) itself is the transport of every CDB above and is not listed. Each entry is opt-in. */
+typedef struct wl_ata_entry {
+    const char *name;
+    uint8_t command;
+    int optin;           /* WL_ATA_IDENTIFY or WL_ATA_DEVRESET: which config switch must be on */
+    const char *why;
+} wl_ata_entry;
+#define WL_ATA_IDENTIFY 1
+#define WL_ATA_DEVRESET 2
+extern const wl_ata_entry wl_ata_table[];
+extern const int wl_ata_count;
+/* NULL = refuse. identify_enabled = config identify=on; devreset_enabled = switch=on AND swap_devreset=on. */
+const wl_ata_entry *wl_ata_check(uint8_t command, int identify_enabled, int devreset_enabled);
+
 #endif

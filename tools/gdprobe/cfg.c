@@ -17,6 +17,11 @@ void gp_config_defaults(gp_config *c)
     c->seek_span = 50000;
     c->cdread_flags = 0x24;
     c->timeout_ms = 3000;
+    c->swap_regpoll_ms = 1000;
+    c->swap_regpoll_interval_ms = 2;
+    c->devreset_ms[0] = 50;
+    c->devreset_ms[1] = 200;
+    c->n_devreset = 2;
 }
 
 static int parse_bool(const char *v, int *out)
@@ -70,6 +75,32 @@ static void trim(char *s)
     while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
 }
 
+/* "50,200": up to GP_MAX_DEVRESET delays of 0..5000 ms. Any bad token rejects the whole value (the
+ * previous list stays). Returns 1 if parsed. */
+static int parse_delays(gp_config *c, char *v)
+{
+    int tmp[GP_MAX_DEVRESET], n = 0;
+    char *tok = v, *next;
+    while (tok) {
+        int ok;
+        long d;
+        next = strchr(tok, ',');
+        if (next) *next++ = 0;
+        while (isspace((unsigned char)*tok)) tok++;
+        trim(tok);
+        d = parse_num(tok, &ok);
+        if (!ok || d < 0 || d > 5000 || n >= GP_MAX_DEVRESET)
+            return 0;
+        tmp[n++] = (int)d;
+        tok = next;
+    }
+    if (!n)
+        return 0;
+    memcpy(c->devreset_ms, tmp, sizeof(tmp[0]) * (size_t)n);
+    c->n_devreset = n;
+    return 1;
+}
+
 static void apply(gp_config *c, const char *k, char *v)
 {
     int ok = 1, b = 0;
@@ -97,6 +128,11 @@ static void apply(gp_config *c, const char *k, char *v)
     } else if (!strcmp(k, "cdread_flags_test")) { if (parse_bool(v, &b)) c->do_cdread_flags = b; else ok = 0;
     } else if (!strcmp(k, "cdread_flags")) { n = parse_num(v, &ok); if (ok) c->cdread_flags = (uint8_t)(n & 0xFE);
     } else if (!strcmp(k, "timeout_ms")) { n = parse_num(v, &ok); if (ok) c->timeout_ms = (uint32_t)clampi(n, 100, 30000);
+    } else if (!strcmp(k, "swap_regpoll")) { if (parse_bool(v, &b)) c->swap_regpoll = b; else ok = 0;
+    } else if (!strcmp(k, "swap_regpoll_ms")) { n = parse_num(v, &ok); if (ok) c->swap_regpoll_ms = (uint32_t)clampi(n, 100, 10000);
+    } else if (!strcmp(k, "swap_regpoll_interval_ms")) { n = parse_num(v, &ok); if (ok) c->swap_regpoll_interval_ms = (uint32_t)clampi(n, 1, 50);
+    } else if (!strcmp(k, "swap_devreset")) { if (parse_bool(v, &b)) c->swap_devreset = b; else ok = 0;
+    } else if (!strcmp(k, "swap_devreset_ms")) { ok = parse_delays(c, v);
     } else ok = 0;
     if (!ok) c->unknown_keys++;
 }

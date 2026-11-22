@@ -1,0 +1,36 @@
+# gdprobe run configuration for the R148 hardware probe (swap window without commands, DEVICE RESET inside
+# the window, audio-only CDI). Copy to <host folder>/gdprobe.cfg. See README_ja.md, "R148 の実行計画".
+# Needs the audio-only CDI on the SD card as folder 11:
+#   python tools/mksdcard/mksdcard.py OUT --set variants --only 11    (then copy OUT/11 next to 01-07 and 10)
+
+label=stock
+seq=15
+
+# 4 = the Mode 2 Form 1 CDI, 3 = the GDI (baselines with known disc formats 2 / 8), 11 = the audio-only CDI
+# (the question: disc format nibble), 7 = the empty folder (NO DISC). Back to the dcload-ip disc at the end.
+switch=on
+images=4,3,11,7
+return_to=2
+# the empty folder never gets READY: 5 s instead of 15 s keeps the run short (stock is READY after ~0.35 s)
+switch_timeout_ms=5000
+
+# 1. after every 52 82 n of the image loop: no command for 1 s, ALTSTATUS / ERROR / interrupt reason / SECNR
+#    every 2 ms, one SW_REGPOLL line per change; then the usual TUR / REQ_ERROR flow (UNIT ATTENTION)
+swap_regpoll=on
+swap_regpoll_ms=1000
+swap_regpoll_interval_ms=2
+
+# 2. after each image's battery: the same image again, ATA DEVICE RESET 50 ms (open phase) and 200 ms
+#    (detect phase) after 52 82 n; signature registers right after it, then the register poll as in 1
+swap_devreset=on
+swap_devreset_ms=50,200
+
+# the usual per-image battery, as in record 13 (stock_20261122_13): CD_READ byte 1 = 0x20 suits every image
+cdread_flags=0x20
+cdread_flags_test=on
+throughput=on
+tp_batches=16
+tp_sectors=16
+seek=on
+seek_n=8
+identify=off

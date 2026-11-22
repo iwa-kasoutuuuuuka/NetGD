@@ -11,7 +11,7 @@
 #include "cfg.h"
 #include "gdtypes.h"
 
-#define GDPROBE_VERSION "1"
+#define GDPROBE_VERSION "2"
 
 typedef struct gp_sink {
     void *ctx;
