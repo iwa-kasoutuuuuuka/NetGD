@@ -11,6 +11,7 @@ typedef struct wl_entry {
     uint16_t mask;       /* bit i set = CDB byte i may be non-zero; all others must be 0 */
     int optin;           /* 1 = only when the config enabled image switching */
     const char *why;     /* why this command cannot harm the drive */
+    int dma_ok;          /* seq 25: 1 = may be sent with the DMA feature bit (CD_READ only) */
 } wl_entry;
 
 extern const wl_entry wl_table[];
@@ -30,6 +31,9 @@ const wl_entry *wl_check(const uint8_t cdb[12], int switch_enabled);
  * default (0x24); the runner calls wl_check_cfg() with the configured value. */
 #define WL_CDREAD_FLAGS_DEFAULT 0x24
 const wl_entry *wl_check_cfg(const uint8_t cdb[12], int switch_enabled, uint8_t cdread_flags);
+/* seq 25: the same check, but only an entry with dma_ok (CD_READ) passes: nothing else is ever sent with the
+ * DMA feature bit. Besides the CD_READ limits the count is at most 16 (the DMA buffer). */
+const wl_entry *wl_check_dma(const uint8_t cdb[12], int switch_enabled, uint8_t cdread_flags);
 int wl_cdread_flags_probe_ok(uint8_t byte1);   /* byte1 in {0x20,0x24,0x28,0x10} */
 
 /* The ATA commands (written to the COMMAND register directly, not as a PACKET CDB) this tool may issue.

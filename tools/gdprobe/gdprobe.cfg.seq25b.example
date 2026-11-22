@@ -1,0 +1,48 @@
+# gdprobe run configuration for seq 25b (record numbering seq=26): CD_READ by G1 DMA on the stock GDEMU, images 3, 4, 11.
+# Record 25: data DMA works (1/2/7/16 sectors); an audio DMA programmed for 2352 rounded UP to 2368 never completed
+# (extent 2336 = 73 x 32: the engine writes whole 32-byte blocks only, the last 16 bytes of the sector stay in the FIFO).
+# This run: modes exact, floor (2336: DMA completes, the rest of the sector is drained by PIO and recorded: drq= drain=
+# tail= tail_ok=), pad last. An incomplete DMA stops only its own (data|audio, mode) kind (DM_STOP slot=..), so the other
+# modes and the data throughput still run; 6 incomplete DMAs stop everything. Read-only, every wait bounded.
+
+label=stock
+seq=26
+
+# 3 = GDI (data, audio track 2), 4 = Mode 2 Form 1 CDI (audio track 1 + data), 11 = audio-only CDI
+switch=on
+images=3,4,11
+return_to=2
+switch_timeout_ms=5000
+
+# the swap-window / reset probes and everything of seq 21-24: off
+swap_regpoll=off
+swap_devreset=off
+swap_reswitch=off
+devreset_only=off
+devreset_cmd=off
+head_probe=off
+gap_probe=off
+pregap_probe=off
+ctl_probe=off
+
+# battery IP_READ with 0x20; no flag battery, throughput or seek (the DMA throughput below replaces them)
+cdread_flags=0x20
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off
+
+# seq 25
+dma_probe=on
+dma_data=on
+dma_audio=on
+dma_counts=1,2,7,16
+dma_modes=exact,floor,pad
+dma_flags=0x20
+dma_pio_ref=on
+dma_timeout_ms=3000
+dma_late_ms=300
+dma_scd=on
+dma_throughput=on
+dma_tp_batches=64
+dma_tp_max_ms=10000

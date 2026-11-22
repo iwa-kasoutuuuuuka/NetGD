@@ -571,3 +571,68 @@ GDI 03・CDI 10 は記録できなかった。`gdprobe.cfg.seq24.example` は `i
 区別できるのは次（またはリードアウト項目）が音声の場所だけで、このカードでは**音声だけの CDI 11 のリードアウト**（最後のトラックが音声）。cfg の `#images=3,10,11,4` を使う。
 
 所要は約 2 分（3 イメージ × seq 22 約 20 + seq 23 約 25 + CTL 約 14 ケース × 約 0.35 秒）。新しく送るコマンドは無い。記録のヘッダに `# config risky_cross=.. ctl_probe=..` の行が増えた。
+
+## seq 25 の実行計画（G1 DMA の CD_READ：音声の奇数セクタ数・ヘッド位置・スループット）
+
+**状態：用意しただけ。実機では未実行。** ゲームは G1 DMA で読む。純正に対し PIO だけでは答えられない次の 3 点を、DMA の CD_READ で測る（LOG R148 / R171 / R172-R179 / R123 付近の続き）。
+`gdprobe.cfg.seq25.example` は `images=3,4,11`、`return_to=2`、seq 21〜24 の試験はすべて off、`dma_probe=on`。
+
+1. **奇数個の 2,352 B 音声セクタの DMA**：7 × 2,352 = 16,464 B は 32 の倍数でない（G1 DMA の単位は 32 B）。`dma_modes=pad,exact` で、長さを 32 の倍数に切り上げた場合（`pad`、16,480 B）と実際のバイト数のまま（`exact`、16,464 B）の両方を試し、
+   実際に書き込まれたバイト数（`extent=`。バッファを既知のパターンで埋めておき、最後に変わったバイトの位置から求める）、余りの書き込み（`pad_written=`）、はみ出し（`over=`）、セクタごとの CRC（`scrc=`）を記録する。
+   音声は 1・7 セクタ（32 の倍数でない）。`16` や データの各数は 32 の倍数なので 1 回だけ（`mode=al`）。
+2. **DMA のあとのヘッド位置**：各 DMA の直後に `DM_<ケース>_POS`（REQ_STAT → GET_SCD(1) → `dma_late_ms` 後の REQ_STAT。seq 21 の `HD_*_POS` と同じ項目）。続けて同じ範囲を PIO で読み直し（`DM_<ケース>_PIO`、`same=1` なら DMA と PIO のバイト列が同じ、`crc=`）、その `_PIO_POS` を残す。
+   DMA と PIO で `pos` / `d_start` / `d_end` が同じかを比べる（LOG R172-R179 の規則）。
+3. **スループット**：`dma_throughput=on` で、IP の位置から 16 セクタ（2,048 B × 16）× `dma_tp_batches` を DMA で読み（`DM_TP_<n>`、`DM_TP_SUMMARY`：`kib_s` = 命令全体、`kib_s_dma` = DMA 開始から終了まで）、同じ範囲を PIO で読んで CRC を突き合わせる（`DM_TPP_SUMMARY`、`crc_mismatch=`）。純正の PIO は約 2,280 KiB/s。`dma_tp_max_ms` で打ち切る。
+
+**DMA の手順（gdraw.c の `gd_packet_dma`）**：KOS 2.3 の `g1ata.c`（DMA レジスタ 0xA05F74xx、ATA コマンド → 開始の順）と `cdrom.c`（DMA 保護レジスタの解除）に合わせた。
+バッファは 32 バイト境界の RAM（P1）、書き込み後にデータキャッシュを書き戻して破棄（`dcache_flush_range` → `dcache_inval_range`）、DMA のあともう一度破棄。
+`FEATURES=1`、DMA アドレス・長さ・方向（メモリ向き）・許可を PACKET の前に設定し、CDB を書いた直後に開始（`0xA05F7418=1`）。DMA 保護レジスタ（0xA05F74B8）はシステム RAM だけを許す値にする。
+**この順序と値は実機で未確認**（KOS の `cdrom.c` は BIOS のシステムコールで DMA を行うため、生レジスタの順序は `g1ata.c` と GD-ROM の資料から）。うまく動かなければ `DM_*` 行の `dma_done` / `dma_st` / `first` / `left` / `bc` で状況が分かる。
+
+**安全策**：
+- 読むだけ。DMA 付きで送れるのは CD_READ（0x30）だけ。ホワイトリスト（`wl_entry.dma_ok`、`wl_check_dma`）で CD_READ のみ・FAD 指定・1〜16 セクタ・既存のフラグ制限。`gd_packet_dma` 自身も 0x30 以外を拒否する（二重）。
+- どの待ちも `dma_timeout_ms` までで、DMA が先に終わった／ドライブが先に終わったときの猶予は 200 ms。
+- どの出口でも DMA 開始レジスタを 0、許可を 0 に戻し、ASIC の DMA 終了・エラー bit を消し、キャッシュを破棄し、FEATURES を 0 に戻す。ドライブが DRQ を立てたまま（DMA でなく PIO を要求）なら読み捨てて idle に戻す（`drain=`）。
+- DMA が完了しなかった最初のケースで `DM_STOP` を書き、以降の DMA は送らない（`DM_<ケース>_SKIP`）。CHECK で返った（DMA が走らなかった）ときは続ける。3 回連続のタイムアウトは従来どおり実行を中止する。
+- バッファの外へは書かない（DMA 長 ≤ バッファ − 64 B のガード。長さは cfg の数で決まり 16 セクタ以内）。
+
+**cfg キー**（すべて既定は off／安全側）：`dma_probe`（off）、`dma_data`（on）、`dma_audio`（off）、`dma_counts`（1,2,7,16、最大 6 個、1〜16）、`dma_modes`（pad,exact）、`dma_flags`（0x20）、`dma_pio_ref`（on）、
+`dma_timeout_ms`（3000）、`dma_late_ms`（300）、`dma_scd`（on）、`dma_throughput`（off）、`dma_tp_batches`（64）、`dma_tp_max_ms`（10000）。記録のヘッダに `# config dma_probe=.. ` の行が増えた。
+
+主な行（イメージごと、`battery` のあと）：`DM_START`、`DM_BASE_POS`、`DM_D<n>_<mode>`・`DM_A<n>_<mode>`（`mode` = `al`／`pad`／`exact`。項目：`exp` 期待バイト、`dma_len` 設定した長さ、`extent`、`ext_ok`、`pad_written`、`over`、`dma_done`、`dma_us`、`dma_st`、`left`（長さレジスタの残り）、`addr_d`（アドレスレジスタ）、
+`first`（`d` = DMA が先に終わった／`g` = ドライブの割り込みが先）、`asic`、`aerr`、`bc`、`drain`、`aborted`、`prot`、`crc`、`scrc`、`sense`、`rc`、`status`、`err`、`irr`、`us`）、`..._POS`、`..._PIO`、`..._PIO_POS`、`DM_TP_*`。
+注意：`extent` はパターンとの違いで測るので、データの最後のバイトがたまたまパターンと同じだと 1〜2 バイト短く出ることがある（`ext_ok=0` のとき `crc` と `same` で確かめる）。
+
+実行（dc_auto）：`.\dc_auto.ps1` の seq 25 の行を、報告に書いた。所要は約 3 分（3 イメージ × DMA 約 30 ケース × 約 0.9 秒 + スループット各約 3 秒）。
+
+## seq 25b の実行計画（音声 DMA：切り上げが止まった理由と、32 の倍数に切り捨てた長さ）
+
+**状態：用意しただけ。実機では未実行。** seq 25 の記録（`stock_20261123_25_dma.txt`）：データの DMA は 1・2・7・16 セクタとも完了（`dma_done=1`、`extent=exp`）。
+音声 1 セクタを `pad`（2,352 → 2,368 B）で読むと完了せず（`dma_done=0`、`extent=2336`、`bc=0800`、`status=0x50`、200 ms で中止）、以降の DMA がすべて飛ばされた。
+
+**`extent=2336` の意味**：2,336 = 73 × 32。パターンの偶然の一致なら最後の数バイトしか違わないので、32 の倍数ちょうどで止まるのは G1 DMA が 32 バイト単位（ブロック）でしかメモリに書かないことを示す。
+ドライブが送るのは 2,352 B 丁度で、最後の 16 B は 32 B の半端なブロックのまま FIFO に残り、2,368 B（あと 16 B）を待って終わらない。状態が `0x50`（BSY・DRQ なし）なのでドライブ側は済んでいる。
+同じ理由で、`exact`（2,352）も完了しない可能性がある。
+
+**変更点**：
+- `dma_modes` に `floor`（長さを 32 の倍数に切り捨て：2,352 → 2,336）を追加。既定の順は `exact,floor,pad`（止まりそうな `pad` は最後）。
+- `floor` は DMA が完了すると、ドライブに残りのバイト（2,352 − 2,336 = 16 B）が DRQ のまま残る。PIO で読み捨てて数え、`drq=`（DRQ が立っていたか）・`drq_bc=`（そのときのバイトカウント）・`drain=`・`st_after=`（ALTSTATUS）・`tail=`（読み捨てた先頭 64 B まで）を記録する。
+  PIO で読み直した範囲の `dlen` 以降と一致すれば `..._PIO` 行の `tail_ok=1`。`same=` は DMA が書いた範囲（`cmp_n=`）だけを比べる。
+- `DM_STOP` は (データ|音声, モード) ごと（`slot=audio_pad` など）。止まったものだけが以降飛ばされ、ほかのモード・種類・データのスループットは続く。完了しない DMA が 1 回の実行で 6 回になると DMA 全体を止める。
+- 安全策は seq 25 と同じ（CD_READ のみ、1〜16 セクタ、すべての待ちに上限、どの出口でも DMA 停止・ASIC bit 消去・キャッシュ破棄）。
+- cfg：`gdprobe.cfg.seq25b.example`（`seq=26`、images 3,4,11、`dma_throughput=on`）。
+
+## seq 25c の実行計画（exact だけ：書き込みのはみ出しを記録、floor は最後に隔離）
+
+**状態：用意しただけ。実機では未実行。** seq 25b の記録（`stock_20261123_26_dma-exact-floor.txt`）：
+- 音声 1 セクタの `exact`（`dma_len=2352`）は**完了**（`dma_done=1`、`extent=2368`、PIO と `same=1`）。エンジンは 32 B ブロック単位でしか書かず、要求した長さの次の 32 B 境界まで（16 B はみ出して）書く。
+- `floor`（2,336）は DMA 自体は完了（`first=d`）したが、ドライブは BSY のまま（`status=0x80`、`irr=0x02`、`bc=0010` = 残り 16 B）で DRQ も割り込みも来ず、3 秒で `rc=timeout`。
+  ドライブは最後の 16 B（半端なブロック）を DMA で受け取ってもらうのを待っていて、エンジンはもう止まっている（長さを使い切った）ので、誰も取りに来ない。PIO でも取れない（DRQ なし）。以降の REQ_STAT・TUR もすべて BSY で返り、実行が `abort=1` で終わった。
+  つまり「ドライブに送りきれなかったバイトを残す」と詰まる（回復はドライブのリセットだけ）。
+
+**変更点**：
+- `dma_modes` の既定は `exact` のみ。`floor`・`pad` は明示した場合だけで、すべてのイメージの通常の試験とスループットのあと、イメージを順にマウントし直して最後に実行（`DM_RISKY_START`）。詰まっても通常の結果は記録済みで、`return_to` に戻れないだけ。
+- 音声 1/2/7/16 の `exact`：`extent`、はみ出したバイト数 `over_n=`、その先頭 32 B `over_hex=`、バッファのガード領域（要求長から先）に何が書かれたか。
+  はみ出しが次のセクタの先頭か：同じ範囲の PIO 読み出しのあとに次の 1 セクタを PIO で読み、`DM_<ケース>_OVER` 行の `over_eq_next=1/0` で比べる。**ホスト側（NetGD）は、要求長を超えて次の 32 B 境界まで書く／読む前提で作る必要がある**。
+- データ 1/2/7/16、データのスループット、ケースごとのスロット停止、安全策は seq 25b のまま。
+- cfg：`gdprobe.cfg.seq25c.example`（`seq=27`、images 3,4,11、`dma_throughput=on`）。

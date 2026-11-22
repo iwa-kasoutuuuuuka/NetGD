@@ -46,6 +46,31 @@ typedef struct {
     uint8_t bch;
 } gd_regs;
 
+/* seq 25: what the G1 DMA engine did during one CD_READ done with the DMA feature bit (R-DMA probes).
+ * The runner pre-fills the buffer with a known pattern; the transport programs the G1 DMA registers, runs the
+ * command and reports the registers it saw. The number of bytes the DMA really wrote is measured by the runner
+ * from the buffer (gd_result.total stays 0 here). */
+typedef struct {
+    uint32_t req_len;     /* bytes programmed into G1_ATA_DMA_LENGTH */
+    uint32_t len_left;    /* G1_ATA_DMA_LENGTH read back after the command (0xFFFFFFFF = not read) */
+    uint32_t addr_after;  /* G1_ATA_DMA_ADDRESS read back after the command */
+    uint32_t drain;       /* bytes drained by PIO because the drive raised DRQ instead of doing DMA */
+    uint32_t us_dma;      /* microseconds from "DMA started" until G1_ATA_DMA_STATUS read idle (0 = never) */
+    uint8_t done;         /* 1 = the DMA engine reported idle before the deadline */
+    uint8_t aborted;      /* 1 = the transport had to stop the DMA (timeout or drive finished without it) */
+    uint8_t dma_st_end;   /* G1_ATA_DMA_STATUS (low byte) when the wait ended */
+    uint8_t asic_nrm;     /* ASIC normal status bits seen: 1 = GD DMA end (bit 14), 2 = GD command (bit 0 ext) */
+    uint8_t asic_err;     /* ASIC error bits: 1 = DMA overrun (bit 13), 2 = illegal address (bit 12) */
+    uint8_t first;        /* which came first: 'd' DMA idle, 'g' GD-ROM interrupt, '-' neither */
+    uint8_t bcl, bch;     /* byte-count registers at the end */
+    uint8_t prot_ok;      /* G1_ATA_DMA_PROTECTION read back as the system-memory unlock value */
+    uint8_t drq;          /* 1 = the drive still had DRQ up when the command completed (bytes left in the drive) */
+    uint16_t drq_bc;      /* byte-count registers when that DRQ was first seen */
+    uint8_t st_after;     /* ALTSTATUS after the drain */
+    uint8_t tail_n;       /* first bytes of what was drained (tail[0..tail_n)) */
+    uint8_t tail[64];
+} gd_dma;
+
 /* The transport the runner uses. gdraw.c implements it on real hardware; the
  * host tests implement it with a scripted fake drive. */
 typedef struct gd_ops {
@@ -71,6 +96,12 @@ typedef struct gd_ops {
     /* Busy-wait about `us` microseconds without touching the drive (the register poll needs 2-5 ms steps,
      * finer than a thread sleep may give). May be NULL: sleep_ms is used instead. */
     void (*spin_us)(void *ctx, uint32_t us);
+    /* --- seq 25; may be NULL (an older transport: the DMA probes are skipped). A CD_READ (0x30) PACKET with the
+     * DMA feature bit set: `buf` is 32-byte aligned and `buflen` (a multiple of 32) bytes long, and the transport
+     * programs the G1 DMA registers for `dma_len` (<= buflen) bytes into it. Refuses (GD_REFUSED, nothing sent)
+     * any other opcode. Always leaves the DMA engine stopped. Fills *r and *d. */
+    int (*packet_dma)(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t buflen, uint32_t dma_len,
+                      uint32_t timeout_ms, gd_result *r, gd_dma *d);
 } gd_ops;
 
 #endif

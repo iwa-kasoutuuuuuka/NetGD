@@ -164,6 +164,16 @@ int main(int argc, char **argv)
     snprintf(h, sizeof(h), "config risky_cross=%s ctl_probe=%d",
              cfg.risky_cross == GP_RISKY_END ? "end" : cfg.risky_cross == GP_RISKY_OFF ? "off" : "inline", cfg.ctl_probe);
     header(h);
+    n = (size_t)snprintf(h, sizeof(h), "config dma_probe=%d dma_data=%d dma_audio=%d dma_flags=0x%02x dma_pio_ref=%d dma_timeout_ms=%lu dma_late_ms=%lu dma_scd=%d dma_throughput=%d dma_tp_batches=%d dma_tp_max_ms=%lu dma_modes=",
+                         cfg.dma_probe, cfg.dma_data, cfg.dma_audio, cfg.dma_flags, cfg.dma_pio_ref,
+                         (unsigned long)cfg.dma_timeout_ms, (unsigned long)cfg.dma_late_ms, cfg.dma_scd,
+                         cfg.dma_throughput, cfg.dma_tp_batches, (unsigned long)cfg.dma_tp_max_ms);
+    for (i = 0; i < cfg.n_dma_modes; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%s", i ? "," : "", cfg.dma_mode_list[i] == GP_DMA_PAD ? "pad" : cfg.dma_mode_list[i] == GP_DMA_FLOOR ? "floor" : "exact");
+    n += (size_t)snprintf(h + n, sizeof(h) - n, " dma_counts=");
+    for (i = 0; i < cfg.n_dma_counts && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.dma_counts[i]);
+    header(h);
     sink_sync(NULL);
 
     /* Without cdrom_init the G1 bus protection may still be closed: every
