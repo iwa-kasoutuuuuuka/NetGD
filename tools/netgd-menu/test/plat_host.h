@@ -25,5 +25,6 @@ extern int nm_host_net_nodev;
 extern int nm_host_no_udp;
 extern int nm_host_net_noaddr;
 extern int nm_host_net_up_calls;
+extern int nm_host_net_nolink;
 
 #endif

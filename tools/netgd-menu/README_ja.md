@@ -4,7 +4,7 @@ SD カードのフォルダ `01` に置く Dreamcast 用メニュー。NetGD の
 
 > **重要：実機では一度も動かしていない。**
 > ホスト（PC の gcc）での試験だけが済んでいる（下の「テスト」）。KOS 用の部分（`src/main_kos.c` `src/plat_kos.c` `src/net_kos.c`、それと `tools/netgd-recv` の `dev_kos.c` `fwxfer_kos.c`）は **この PC にツールチェーンが無く、コンパイルは CI（`.github/workflows/kos.yaml`、KOS 2.3.0）だけ。実機では一度も動かしていない**。最初の実機検証では、下の「初回確認リスト」を上から順に確かめること。
-> 純正 GDEMU には対応しない（`0xE0` VERSION が `OGDM` を返さなければ、SD に触らず案内だけ出して BIOS に戻る）。
+> 純正 GDEMU には対応しない。起動時にまず `52 00`（GDEMU_VERSION、純正の記録と同じ CDB）だけを送り、**NetGD の 5.20.0 と答えたときだけ** `E0 03`（VERSION）を送る（netgd-t2 と同じ `fw_probe_netgd`）。それ以外（純正の 5.20.5 など）には `E0` を 1 個も送らず、SD にも触らず、理由（例「GDEMU 5.20.5 is not NetGD: no NetGD command sent.」）を出して START で BIOS に戻るだけ。
 
 ## 何をするか
 
@@ -27,13 +27,16 @@ DreamSDK のシェル（`KOS_BASE` 設定済み、KOS は 2.3.0 のユーザー�
 
 ```
 cd tools/netgd-menu
-make                 # netgd-menu.elf
+make                 # netgd-menu.elf（KOS の TCP のまま：NGTP の窓 16 KiB × 1）
+make tcpfix          # netgd-menu-tcpfix.elf（直した net_tcp.c を一緒にリンク：64 KiB × 2）
 make cdi             # netgd-menu.cdi（SD のフォルダ 01 用。CI では作らない）
 ```
 
-PowerShell からは `.\build.ps1 [-Debug] [-Cdi] -BbaTools <Dreamcast-Dev-Tools-for-BBA のフォルダ>`。
+PowerShell からは `.\build.ps1 [-Debug] [-TcpFix] [-Cdi] [-Make 'NM_IP=0x...'] -BbaTools <Dreamcast-Dev-Tools-for-BBA のフォルダ>`。
 
-- オブジェクトは `build/kos/` に出る（`tools/netgd-recv/src/*.c` と FatFs のオブジェクトもここ。netgd-recv 側のビルドには触らない）。
+- オブジェクトは `build/kos/`（tcpfix は `build/kos-fix/`）に出る（`tools/netgd-recv/src/*.c` と FatFs のオブジェクトもここ。netgd-recv 側のビルドには触らない）。
+- **NGTP の窓**（WANT の大きさ × 同時数）：既定は **16 KiB × 1**。KOS 2.3 の TCP は窓より大きいフレームでほぼ止まる（R178：32〜64 KiB で 4〜6 KB/s）ため。`make tcpfix` だけ **64 KiB × 2**（`tools/netgd-t2` と同じ仕組み：`$(KOS_BASE)/kernel/net/net_tcp.c` を写して `../kos-patches/net_tcp-rx-fix.patch` を当て、ここでコンパイルしてリンク。リンクマップで直した版が入り KOS の `net_tcp.o` が入っていないことを確かめる。DreamSDK は変更しない）。受信バッファ（= TCP の窓）は両方とも listen の前に 20480 B（`make NM_RCVBUF=…` で変更）。取り込み画面の 4 行目に `window 16 KiB x 1 (stock tcp)` のように出る。
+- `make NM_IP=0xC0A80A02`：固定 IP（既定 192.168.10.2）。数値だけ（引用符つきの `-D` は kos-cc を通らない）。
 - `make cdi` が使うツール（`sh-elf-objcopy`、`scramble`、`makeip`、`mkisofs`、`cdi4dc`）は変数で差し替えられる（`MKISOFS=... make cdi`）。**`mkisofs`・`cdi4dc` が DreamSDK に入っているかは未確認**（無ければ `mkdcdisc` に替える）。`ip.txt` の書式も実機の DreamSDK の `makeip` で確かめること。
 - `make NM_HANDOFF_DEFAULT=1`：既定の渡し方を再起動にする（0 = BIOS メニュー）。`make NM_SHOW_SLOT1=1`：フォルダ `01` も一覧に出す。
 - `make NM_HANDOFF_TUR=1`：BIOS に渡す前に TEST UNIT READY を 20 ms ごとに送って待つ（2 回続けて READY で渡す。実機試験 H2 の変種 B）。**既定（0）は送らず、`52 82` が成功した時点で BIOS に渡す**（変種 A）。ファームは UNIT ATTENTION を BIOS に残す設計なので、メニューの TUR がそれを消費すると、BIOS が古い目次のままになるおそれがある（R104 の指摘 3、推測）。
@@ -79,12 +82,24 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 
 ## BBA からの取り込み（実機未検証）
 
-1. 一覧で **Y**。メニューが BBA を起こし（`net_init`。BBA が無ければ「BBA not found」）、IP アドレス・ポート 20039・4 桁の合言葉を出して待つ。この間は SD カードの読み取り専用マウントを外している（書き込みセッションと同時には持たない）。
+1. 一覧で **Y**。メニューが BBA を**手で**起こし（DHCP なし。下の「BBA の立ち上げ」）、IP アドレス・ポート 20039・4 桁の合言葉を出して待つ。この間は SD カードの読み取り専用マウントを外している（書き込みセッションと同時には持たない）。
 2. PC：`python tools/netgd-send/netgd-send.py push game.gdi --host <IP> --code <合言葉> --slot auto`（詳しくは `tools/netgd-send/README_ja.md`）。最初の要求でファームの書き込みセッションが開く（メニューのイメージは排出される。メニューは RAM 上で動き続ける）。
 3. 進捗は本体の画面と PC の両方に出る（同じ `NGD:` 行）。**B**：待機中は取り込み画面を出る、転送中は安全に止める（PC は終了コード 2。同じ `push` で続きから再開）。保護フォルダ（`GDEMU.CFG` の既定・`01`）への上書きは、PC の `--force` と本体で **A を 1 秒押し続ける** の両方が要る（B か 30 秒で拒否）。
 4. PC が `FINISH` を送る、B で出る、または要求が 5 分来ないとセッションを閉じ（既定のイメージが戻る）、一覧を読み直す。新しいゲームが出る。閉じられなかったときは「Could not close the session: reset the console」と出て止まる（リセットでファームが戻す）。
 
-構成：`src/ngtp.h`・`ngtp_frame.c`（フレーム）、`ngtp_srv.c`（サーバ。受信コア `tools/netgd-recv/src/recv_core.c` を変更せず呼ぶ）、`src/nm_net.h`（ネットワークの境界。KOS は `net_kos.c`、ホスト試験は `test/net_host.c` の 127.0.0.1 のソケット）。KOS のネットワーク（`net_init`、ソケット）の API 名は KOS 2.3.0 のヘッダで確かめていない：`net_kos.c` の `KOS-API-UNVERIFIED` を参照。
+構成：`src/ngtp.h`・`ngtp_frame.c`（フレーム）、`ngtp_srv.c`（サーバ。受信コア `tools/netgd-recv/src/recv_core.c` を変更せず呼ぶ）、`src/nm_net.h`（ネットワークの境界。KOS は `net_kos.c`、ホスト試験は `test/net_host.c` の 127.0.0.1 のソケット）。`net_kos.c` と `nm_netup.c` は **netgd-t2 と共用**（t2 の Makefile が `menu_net_kos.o`・`menu_nm_netup.o` としてコンパイルする。t2 の `src/net_kos.c` は無くなった）。
+
+### BBA の立ち上げ（DHCP なし、実機未検証）
+
+以前の `net_init(0)`（DHCP を待つ）は PC と Dreamcast を直結したケーブルでは返ってこない。netgd-t2・`tools/g2bench` と同じ手順に替えた（手順と時間の上限は `src/nm_netup.c`、KOS の呼び出しは `src/net_kos.c`）：
+
+1. IP を決める：dcload-ip から起動したときはその IP と PC の IP、それ以外は固定 IP（既定 **192.168.10.2**、`make NM_IP=…`）。ネットマスク 255.255.255.0、PC（ゲートウェイ）は x.y.z.1。**PC 側は 192.168.10.1/24 などを手で設定する**。
+2. `eth_init()` でドライバを登録し、すべての netif に IP を入れる（netif が 0 個 =「BBA not found」）。
+3. `net_init(0)` をスレッドで動かし **30 秒まで**待つ（BBA のドライバ自身がリンクを 10 秒待つ）。`-1` が返ったら「No link: check the cable and restart the console」で**終わり**（Y の表示も消え、Y を押してもこのメッセージが出るだけ）。KOS 2.3 の `bba_if_start()` はリンク待ちに失敗しても rx スレッドを止めず `bba_rx_thread` を残すので、2 回目の `net_init()` は `assert(bba_rx_thread == NULL)` で abort する（`nm_netup.h` の `init_again`）。ケーブルを挿してから本体を再起動する。30 秒で返らなければ「No network link yet (Y: wait again)」：次の Y では 2 つ目の `net_init` を起こさず、同じスレッドをもう 30 秒待つ（それでも返らなければ「Network start hangs: restart the console」）。
+4. 既定のデバイスに IP を入れ直す（ドライバが flashrom の ISP 設定を読むことがあるため）。PC の ARP を **8 秒まで**（答えがなくても失敗にしない）。
+5. 各手順は「Starting network ...」の画面の 7 行目から 1 行ずつ出る。どの待ちにも上限があり、無限に待つループは無い。
+
+ホスト試験（`menu_host selftest` の U11）は、偽の KOS 操作と仮想時計で手順の順番・時間の上限・エラー文・やり直しを確かめる。KOS の呼び出し自体（`eth_init`・`net_init` のスレッド・`net_arp_lookup`）は netgd-t2 の実績（R175・R178 の g2netbench）と同じだが、**`net_init` が失敗した後の 2 回目の `net_init` は実機で試していない**。
 
 ## 初回確認リスト（実機、上から順に）
 
@@ -100,7 +115,7 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 7. 同じ番号のフォルダが 2 つあるときにファームがどちらを選ぶか（H8）。
 8. `reset_goto`・`open_time`・`detect_time` の表示が `GDEMU.INI` と合っているか。
 
-9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。（R104 の指摘 1：KOS は `INIT_NET` が無いと BBA のドライバを登録しないので、`nm_net_up` が `net_init` の前に `bba_init()`（あれば `la_init()`）を呼ぶ。DHCP の待ちの前に「Starting network ...」が出る。IP が出なかったとき、もう一度 Y で DHCP をやり直す。）BBA ありで IP が出るか（DHCP の待ち時間、固定 IP が使われるか）。`netgd-send push` が最後まで通り、実効速度はどれくらいか（`WANT`／`DATA` の往復、64 KiB ごと）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
+9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありでケーブルを抜いたまま Y：約 10 秒で「No link: check the cable and restart the console」が出て、もう一度 Y を押しても落ちない（net_init を再び呼ばない）か。挿して再起動すれば通るか。取り込み画面を何度も出入りしても空きメモリが減らないか（リッスンソケットは閉じずに使い回す）。直結ケーブル（PC 192.168.10.1/24）で 192.168.10.2 が出て、ARP の行が「PC 192.168.10.1 answered ARP」になるか。`netgd-send push` が最後まで通り、実効速度はどれくらいか（既定 16 KiB × 1 で約 2 MB/s の見込み（R178）、tcpfix 版 64 KiB × 2 と比べる）。純正 GDEMU で起動したとき `52 00` だけで止まるか（ファームのログ、または gdprobe の記録と比べる）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
 
 KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`arch_menu()`／`arch_reboot()`（K1）、`bfont` の色設定（netgd-fwupd が使用）、`maple`（netgd-recv が使用）、ネットワーク：`net_init`・`net_default_dev->ip_addr`・TCP の `listen`／`accept`・`O_NONBLOCK`（K2〜K4、`net_kos.c`）。
 
@@ -108,7 +123,7 @@ KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`
 
 ### 手順 9：UDP の探索（実機未検証）
 
-- 取り込み画面を開いている間（`NET_IDLE`／`NET_BUSY`）だけ、UDP 20039 で待つ。`net_start` で開き（開けなくても何も出さない。IP を手で指定すればよい）、`nm_net_stop` で閉じる。
+- 取り込み画面を開いている間（`NET_IDLE`／`NET_BUSY`）だけ、UDP 20039 で待つ。`net_start` で開き（開けなくても何も出さない。IP を手で指定すればよい）、`nm_net_stop` で閉じる。TCP のリッスンソケットは `nm_net_stop` では閉じず（accept しないだけ）、次の `nm_net_listen` で溜まった接続を捨ててから使い回す：KOS 2.3 の `net_tcp.c` はリッスン中のソケットを閉じるとき `SO_RCVBUF` で確保した受信バッファ（20 KiB）を解放しないため。
 - 要求は `NGTP-DISCOVER 1`（後ろに空白・改行が続いてもよい。`NGTP-DISCOVER 10` や別の版には答えない）。答えは `NGTP-HERE 1 name=NetGD app=<版> state=idle|busy`。`busy` は「PC が TCP でつながっている」（もう 1 台は入れない）。**合言葉と TCP のポートは答えに入れない**（ポートは NGTP の 20039 固定。PC は `--port`）。
 - 1 フレームに 1 通だけ見る（`nm_disc_service`）。操作の最中（`RECV_BUSY`）は 1 つの操作が終わるまで答えない。そのとき PC は 2 秒で諦めて `--host` を求める。
 - 中核は `src/nm_disc.c`（文字列だけ。ソケットは持たない）。境界に `nm_net_udp_listen`／`nm_net_udp_recv`（待っていなければ 0 を返す）／`nm_net_udp_reply`（最後に受けた相手へ）を足した。KOS 側（`net_kos.c`）は `SOCK_DGRAM`・`recvfrom`・`sendto`・`socklen_t`・データグラムソケットの `O_NONBLOCK` が `KOS-API-UNVERIFIED`。
@@ -125,7 +140,7 @@ KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`
 
 ## 独立レビュー（R104）の指摘への対応（実機未検証）
 
-- **指摘 1（BBA）**：`net_kos.c` が `net_init` の前に `bba_init()`（ヘッダがあれば `la_init()`）を呼ぶ。第 2 の Y で、IP が無ければ `net_dhcp_request` をやり直す。DHCP の前に「Starting network ...」を描く。`KOS-API-UNVERIFIED`：`bba_init`・`la_init`（と `__has_include` による有無の判定）・`net_dhcp_request`（引数の有無）・`net_init` の引数。
+- **指摘 1（BBA）**（※ fix/menu-net で手動の立ち上げに置き換え。上の「BBA の立ち上げ」）：`net_kos.c` が `net_init` の前に `bba_init()`（ヘッダがあれば `la_init()`）を呼ぶ。第 2 の Y で、IP が無ければ `net_dhcp_request` をやり直す。DHCP の前に「Starting network ...」を描く。`KOS-API-UNVERIFIED`：`bba_init`・`la_init`（と `__has_include` による有無の判定）・`net_dhcp_request`（引数の有無）・`net_init` の引数。
 - **指摘 3（TUR）**：上の `NM_HANDOFF_TUR`（既定 0 = TUR を送らない）と、初回確認リストの H2 の 2 変種を参照。ホスト試験は両方の組み立て（`menu_host`・`menu_host_tur`）で通る。
 - **A**：待機中（要求が来ていないとき）に新しい接続が来たら、古い接続を閉じて新しい方に替える（`ngtp_srv.c`）。新しい接続は HELLO からやり直す。書き込みセッションはそのまま。
 - **B**：一覧で同じフレームに複数のボタンが来たら、遷移は 1 つだけ（優先順は A・Y・X・START。どれも無いときだけカーソルが動く）。情報画面は B が A より先。

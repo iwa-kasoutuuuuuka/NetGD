@@ -30,8 +30,8 @@ else
   MAP =
 endif
 
-T2_OBJS   = $(addprefix $(OBJDIR)/, t2_app.o main_kos.o net_kos.o)
-MENU_OBJS = $(addprefix $(OBJDIR)/menu_, nm_screen.o ngtp_frame.o ngtp_srv.o plat_kos.o)
+T2_OBJS   = $(addprefix $(OBJDIR)/, t2_app.o main_kos.o)
+MENU_OBJS = $(addprefix $(OBJDIR)/menu_, nm_screen.o ngtp_frame.o ngtp_srv.o plat_kos.o net_kos.o nm_netup.o)
 RECV_OBJS = $(addprefix $(OBJDIR)/recv_, crc32.o manifest.o diskio.o ngblk.o ngfs.o fwctl.o recv_core.o dev_kos.o fwxfer_kos.o)
 FATFS_OBJS = $(addprefix $(OBJDIR)/ff_, ff.o ffunicode.o ffsystem.o)
 OBJS = $(T2_OBJS) $(MENU_OBJS) $(RECV_OBJS) $(FATFS_OBJS) $(FIX_OBJS)

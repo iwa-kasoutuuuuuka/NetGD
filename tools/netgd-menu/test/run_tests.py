@@ -99,7 +99,8 @@ EXE_TUR = os.path.join(ROOT, "build", "menu_host_tur.exe" if os.name == "nt" els
 RECV_EXE = os.path.join(RECV, "build", "test_host.exe" if os.name == "nt" else "test_host")
 
 MENU_SRCS = ["src/nm_text.c", "src/nm_slot.c", "src/nm_cfgparse.c", "src/nm_ipbin.c", "src/nm_list.c", "src/nm_input.c",
-             "src/nm_screen.c", "src/nm_scan.c", "src/nm_launch.c", "src/nm_disc.c", "src/nm_art.c", "src/ngtp_frame.c", "src/ngtp_srv.c", "src/nm_ui.c"]
+             "src/nm_screen.c", "src/nm_scan.c", "src/nm_launch.c", "src/nm_disc.c", "src/nm_art.c", "src/ngtp_frame.c", "src/ngtp_srv.c", "src/nm_ui.c",
+             "src/nm_netup.c"]
 # the netgd-recv core and its test doubles (a disk image file, a packet-level firmware model); never main.c, xport_pc.c,
 # dev_kos.c, fwxfer_kos.c, plat_kos.c
 RECV_SRCS = ["src/crc32.c", "src/manifest.c", "src/ngblk.c", "src/fwctl.c", "src/ngfs.c", "src/recv_core.c", "src/diskio.c",
@@ -272,8 +273,8 @@ class TestListAndInfo(UiBase):
         # L2: reading only
         self.assertEqual((run.n("cmd_writes"), run.n("sector_writes"), run.n("begin"), run.n("unsess")), (0, 0, 0, 0), run.text)
         self.assertEqual(run.n("violations"), 0)
-        # the firmware was asked its version (E0 03) and the GDEMU version (52 00), nothing else
-        self.assertEqual([p.split()[0] for p in run.packets], ["E0", "52"], run.text)
+        # the stock-safe gate: the GDEMU version (52 00) first, then the NetGD version (E0 03), nothing else
+        self.assertEqual([p[:5] for p in run.packets], ["52 00", "E0 03"], run.text)
 
     def test_default_image_mark_and_duplicate_numbers(self):
         files = {"/02/DISC.GDI": GDI3, "/002/DISC.GDI": GDI3, "/03/DISC.GDI": GDI3, "/GDEMU.CFG": b"image=03\n"}
@@ -401,15 +402,96 @@ class TestNetStart(UiBase):
         self.assertIsNotNone(m, r.text)
         self.assertIn("Starting network", m.group(1))
 
-    def test_no_bba_is_reported(self):
-        r = self.ui(self.lib(), "scan Y dump", "--slots", "2", "--nobba")
+    def test_no_bba_is_reported_and_final(self):
+        # KOS: no BBA is DEAD, like no link: Y:Network goes away and a second Y does not call nm_net_up
+        r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--nobba")
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
+        self.assertIn("BBA not found", NL.join(r.screens[0][1]))
         self.assertIn("BBA not found", NL.join(r.rows))
+        self.assertNotIn("Y:Network", NL.join(r.rows))
 
-    def test_second_y_retries_when_there_was_no_address(self):
+    def test_no_address_is_final_and_y_does_not_start_again(self):
         r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--noaddr", "1")
-        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 2)
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
         self.assertIn("No IP address", NL.join(r.screens[0][1]))
-        self.assertIn("127.0.0.1", NL.join(r.rows))                    # the transfer screen after the second Y
+        self.assertIn("No IP address", NL.join(r.rows))
+        self.assertNotIn("Y:Network", NL.join(r.rows))
+        self.assertNotIn("127.0.0.1", NL.join(r.rows))
+
+    def test_transfer_screen_ip_and_window(self):
+        r = self.ui(self.lib(), "scan Y dump", "--slots", "2")
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
+        self.assertIn("127.0.0.1", NL.join(r.rows))
+        self.assertIn("window 16 KiB x 1 (stock tcp)", NL.join(r.rows))
+
+    def test_no_dhcp_text_and_steps_on_the_screen(self):
+        r = self.ui(self.lib(), "scan Y", "--slots", "2")
+        m = re.search(r"^NETLOG screen5=\|(.*)\| screen7=\|(.*)\|$", r.text, re.M)
+        self.assertIsNotNone(m, r.text)
+        self.assertIn("static IP, no DHCP", m.group(1))
+        self.assertEqual(m.group(2), "  host: bring-up step")          # nm_net_log lines are drawn (and shown) while it runs
+
+    def test_no_link_is_final_and_y_does_not_start_again(self):
+        # KOS 2.3 aborts on a second net_init after one that returned -1 (bba_rx_thread assert): one start, then a final
+        # message, no Y:Network hint, and a second Y only shows the message again (nm_net_up is not called)
+        r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--nolink", "1")
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
+        first = NL.join(r.screens[0][1])
+        self.assertIn("No link: check the cable and restart the console", first)
+        self.assertNotIn("Y: try again", first)
+        self.assertNotIn("Y:Network", first)
+        self.assertIn("A:Start  X:Info  START:BIOS menu", first)
+        self.assertIn("No link: check the cable and restart the console", NL.join(r.rows))
+        self.assertNotIn("127.0.0.1", NL.join(r.rows))
+        self.assertNotIn("Starting network", NL.join(r.rows))
+
+    def test_y_network_is_offered_before_a_failure(self):
+        r = self.ui(self.lib(), "scan dump", "--slots", "2", "--nolink", "1")
+        self.assertIn("Y:Network", NL.join(r.rows))
+
+
+class TestStockGate(UiBase):
+    """The stock-safe write gate (as netgd-t2's t2_gate): 52 00 first; E0 03 (and every other E0) only when 52 00 says 5.20.0"""
+
+    def lib(self):
+        return self.card({"/02/DISC.GDI": GDI3})
+
+    def test_stock_gdemu_gets_52_00_only(self):
+        run = self.ui(self.lib(), "step step dump", "--stock", "--slots", "2")
+        self.assertEqual(run.head["state"], "1", run.text)                      # NM_S_NOFW
+        self.assertEqual([p[:5] for p in run.packets], ["52 00"], run.text)
+        self.assertEqual(run.packets[0], "52 00 00 00 00 00 00 00 00 00 00 00")   # byte for byte the CDB of the stock record
+        self.assertFalse([p for p in run.packets if p.startswith("E0")], run.text)
+        rows = NL.join(run.rows)
+        self.assertIn("NetGD firmware not found", rows)
+        self.assertIn("GDEMU 5.20.5 is not NetGD: no NetGD command sent.", rows)
+        self.assertTrue(run.rows[0].endswith("fw 5.20.5"), run.rows[0])
+        self.assertEqual(run.n("rcmds"), 0, run.text)                           # the SD card was not touched
+
+    def test_stock_with_unit_attention_and_start(self):
+        run = self.ui(self.lib(), "step step dump S Y X A", "--stock", "--ua", "--slots", "2")
+        self.assertEqual([p[:5] for p in run.packets], ["52 00", "52 00"], run.text)   # repeated once on UNIT ATTENTION
+        self.assertEqual(run.handoff, ["bios"], run.text)
+        self.assertFalse([p for p in run.packets if p.startswith("E0")], run.text)
+        self.assertNotIn("NETUP", run.text)
+
+    def test_other_gdemu_version_gets_no_e0(self):
+        for v in ("0x05200500", "0x05210000", "0x06000000"):
+            run = self.ui(self.lib(), "step step dump Y", "--gdemu-version", v, "--slots", "2")
+            self.assertEqual(run.head["state"], "1", run.text)
+            self.assertEqual([p[:5] for p in run.packets], ["52 00"], (v, run.text))
+            self.assertIn("is not NetGD", NL.join(run.rows))
+
+    def test_no_answer_to_52_00(self):
+        run = self.ui(self.lib(), "step step dump", "--nofw")
+        self.assertEqual(run.packets, ["(no answer)"], run.text)                 # one packet (52 00), no E0 after it
+        self.assertEqual(run.n("packets"), 1)
+        self.assertIn("did not answer 52 00", NL.join(run.rows))
+
+    def test_netgd_is_asked_e0_03_after_52_00(self):
+        run = self.ui(self.lib(), "scan dump", "--slots", "2")
+        self.assertEqual([p[:5] for p in run.packets[:2]], ["52 00", "E0 03"], run.text)
+        self.assertEqual(run.head["state"], "3", run.text)                      # NM_S_LIST
 
 
 class TestLaunchDefault(UiBase):
@@ -422,7 +504,7 @@ class TestLaunchDefault(UiBase):
     def test_no_test_unit_ready_before_the_hand_off(self):
         run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3")
         self.assertEqual(run.rc, 0, run.text)
-        self.assertEqual([p[:11] for p in run.packets[:2]], ["E0 03 00 00", "52 00 00 00"])
+        self.assertEqual([p[:11] for p in run.packets[:2]], ["52 00 00 00", "E0 03 00 00"])
         self.assertEqual([p[:2] for p in run.packets[2:]], ["52"], run.text)     # only the mount: no 00 (TEST UNIT READY)
         self.assertEqual(run.packets[2][:11], "52 82 03 00")
         self.assertEqual(run.handoff, ["bios"], run.text)
@@ -469,7 +551,7 @@ class TestLaunch(UiBase):
     def test_l3_launch_by_number(self):
         run = self.ui(self.games(), "scan D A t:2000", "--slots", "2,3")
         self.assertEqual(run.rc, 0, run.text)
-        self.assertEqual([p[:11] for p in run.packets[:2]], ["E0 03 00 00", "52 00 00 00"])
+        self.assertEqual([p[:11] for p in run.packets[:2]], ["52 00 00 00", "E0 03 00 00"])
         self.assertEqual(self.fw(run)[0][:11], "52 82 03 00")                    # 52 82 lo hi
         self.assertEqual([p[:2] for p in self.fw(run)], ["52", "00", "00"])      # READY twice in a row, then nothing more
         self.assertEqual(run.handoff, ["bios"], run.text)
@@ -1503,6 +1585,64 @@ def solid_png(w, h, rgb):
     raw = (b"\0" + bytes(rgb) * w) * h
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw))
             + chunk(b"IEND", b""))
+
+
+class TestWindow(NetBase):
+    """The NGTP receive window: 16 KiB x 1 on stock KOS TCP (R178), 64 KiB x 2 in a tcpfix build (as netgd-t2)"""
+
+    def push_counting(self, c, text, src):
+        """a PUT; WANTs are answered only when no more frames come for 0.3 s: the largest WANT and most outstanding at once"""
+        seq = c.send(NGT_PUT, self.put_payload(text, mode=1))
+        pending, most, biggest = [], 0, 0
+        while True:
+            c.sock.settimeout(0.3 if pending else 30)
+            try:
+                peek = c.sock.recv(1, socket.MSG_PEEK)
+            except socket.timeout:
+                idx, off, n, sq = pending.pop(0)
+                c.send_raw(ngt_frame(NGT_DATA, struct.pack("<HHQ", idx, 0, off) + src[idx][off:off + n], 0, sq))
+                continue
+            finally:
+                c.sock.settimeout(30)
+            self.assertTrue(peek, "the server closed")
+            t, fl, sq, p = c.recv()
+            if t == NGT_WANT:
+                idx, _z, off, n = struct.unpack("<HHQI", p)
+                pending.append((idx, off, n, sq))
+                most = max(most, len(pending))
+                biggest = max(biggest, n)
+            elif t == NGT_DONE:
+                self.assertEqual(p[0], 1, p)
+                self.assertEqual(pending, [])
+                return biggest, most
+            elif t == NGT_ERROR:
+                self.fail(p)
+        del seq
+
+    def run_push(self, *opts):
+        img = self.card({"/02/DISC.GDI": GDI3})
+        text, src, files = self.gdi_set("03", sizes=(300000, 6000, 9000))
+        srv = NgtServe(self, img, *opts)
+        c = srv.client()
+        c.hello()
+        biggest, most = self.push_counting(c, text, src)
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
+        fc = self.clean_fs(img)
+        for n, d in files.items():
+            self.assertEqual(self.read(fc, "/03", n), d, n)
+        return srv, biggest, most
+
+    def test_stock_default_is_16k_x_1(self):
+        srv, biggest, most = self.run_push()
+        self.assertIn("WINDOW want=16384 depth=1 tcpfix=0 rcvbuf=20480", srv.text)
+        self.assertEqual((biggest, most), (16384, 1))
+
+    def test_tcpfix_is_64k_x_2(self):
+        srv, biggest, most = self.run_push("--tcpfix")
+        self.assertIn("WINDOW want=65536 depth=2 tcpfix=1 rcvbuf=20480", srv.text)
+        self.assertEqual((biggest, most), (65536, 2))
 
 
 class TestR104LowItems(NetBase):
