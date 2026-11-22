@@ -171,19 +171,102 @@ pub fn build_toc<T: TrackInfo>(
 /// sector CDDA is playing or paused at (`cdda_fad`), or `idle_fad` when no
 /// CD-DA has been started ([`idle_fad`]: FAD 150 after power-on, the park
 /// position after an image switch, D4).
+///
+/// `last_tno` is the track number the previous REQ_STAT / GET_SCD reported
+/// from on a track ([`head_on`]; 0 = none since the mount). Off every track
+/// and pregap stock keeps reporting that number (seq 23 CDI 04: after FAD
+/// 150 in track 1, the gap FADs 11696 / 11701 before track 2's pregap say
+/// track 1; after 11858 in track 2, 11694 says track 2; seq 22 GDI 03: 1506
+/// right after a read of 1505 in track 2 says track 3, the number the query
+/// before it gave -- a read does not set it, a query does), with CTRL 4
+/// ([`head_on`] false; seq 23 `ctl=0x41` there although track 1 is audio).
+/// With none, [`head_track`]'s next / last track. The caller stores the
+/// number back when [`head_on`] holds.
 #[inline(never)] // shared by REQ_STAT and GET_SCD; inlined twice it costs ~100 bytes
 pub fn head_position<T: TrackInfo>(
     tracks: &[T],
     state: AudioState,
     cdda_fad: u32,
     idle_fad: u32,
+    last_tno: u8,
 ) -> (u32, Option<&T>) {
     let fad = match state {
         AudioState::Standby => idle_fad,
         _ => cdda_fad,
     };
-    let track = track_for_lba(tracks, fad.saturating_sub(150));
+    let track = head_track(tracks, fad);
+    let track = match track {
+        Some(t) if !head_on(t, fad) && last_tno != 0 => {
+            tracks.iter().find(|u| u.number() == last_tno).or(track)
+        }
+        _ => track,
+    };
     (fad, track)
+}
+
+/// Whether a head at `fad` is on `track`'s sectors or its pregap
+/// ([`PREGAP_SECTORS`] before it): REQ_STAT / GET_SCD then report the
+/// track's own CTRL, index and relative position ([`head_index_rel`]); off
+/// it CTRL 4, index 1 and [`SCD_REL_OUTSIDE`] (stock seq 21-23).
+pub fn head_on<T: TrackInfo>(track: &T, fad: u32) -> bool {
+    let start = track.start_lba().wrapping_add(150);
+    (fad >= start && fad - start < track.sector_count()) || (fad < start && start - fad <= PREGAP_SECTORS)
+}
+
+/// Sectors before each track's index 1 that stock GDEMU 6.0 counts as its
+/// pregap (index 0): seq 22 reads FAD 0 / 100 (track 1), 905 (GDI audio
+/// track 2 at 906), 11851 (CDI track 2 at 11852) and 45149 (GDI track 3 at
+/// 45150) without a CHECK.
+pub const PREGAP_SECTORS: u32 = 150;
+
+/// GET_SCD format 1's relative field while the head is on no track's
+/// sectors nor its pregap (a gap, the lead-out): stock GDEMU 6.0 sends this
+/// constant, 513660 (seq 21 CDI 04 / 10 FAD 3075 / 6001; seq 22 the lead-out
+/// + 0 / 1 / 100 of CDI 04 / 10 and GDI 03, the GDI's gap between the areas
+/// 1506 / 23328) -- whatever the FAD and the track.
+pub const SCD_REL_OUTSIDE: u32 = 0x07_D67C;
+
+/// The track REQ_STAT / GET_SCD report for a head at `fad`: the track whose
+/// sectors hold it, else the next track after it (a FAD in a pregap, in a
+/// CDI's space between the sessions, in the GDI's gap between the areas,
+/// below 150), else (the lead-out) the last track. Stock GDEMU 6.0: seq 21
+/// CDI 04 / 10 FAD 3075 / 6001 (between track 1's 302 sectors and track 2)
+/// -> track 2; seq 22 GDI 03 FAD 1506 (after audio track 2, before track 3)
+/// and 23328 -> track 3, FAD 1 / 101 -> track 1 (index 0), the lead-out ->
+/// the last track (2 / 3). Tracks are in disc order. Where tracks overlap,
+/// the open-ended [`track_for_lba`]'s pick wins when it holds the sector.
+pub fn head_track<T: TrackInfo>(tracks: &[T], fad: u32) -> Option<&T> {
+    let next = || {
+        tracks
+            .iter()
+            .find(|t| t.start_lba().wrapping_add(150) > fad)
+            .or_else(|| tracks.last())
+    };
+    if fad < 150 {
+        return next();
+    }
+    let lba = fad - 150;
+    match track_for_lba(tracks, lba) {
+        Some(t) if lba - t.start_lba() < t.sector_count() => Some(t),
+        _ => next(),
+    }
+}
+
+/// Index and relative position REQ_STAT (byte 4) and GET_SCD report for a
+/// head at `fad` on `track` ([`head_track`]): on the track's sectors index 1
+/// and the distance from its start; in its pregap ([`PREGAP_SECTORS`] before
+/// it) index 0 and the distance to its start, counting down (seq 22: FAD 1
+/// -> `idx=0`, relative 149; 101 -> 49); anywhere else (a gap, the lead-out)
+/// index 1 and [`SCD_REL_OUTSIDE`].
+pub fn head_index_rel<T: TrackInfo>(track: &T, fad: u32) -> (u8, u32) {
+    let start = track.start_lba().wrapping_add(150);
+    if fad >= start && fad - start < track.sector_count() {
+        (1, fad - start)
+    } else if fad < start && start - fad <= PREGAP_SECTORS {
+        (0, start - fad)
+    } else {
+        (1, SCD_REL_OUTSIDE)
+    }
 }
 
 /// The idle head position (no CD-DA started) for REQ_STAT / GET_SCD (D4).
@@ -222,22 +305,67 @@ pub fn read_end_fad(start_fad: u32, transferred: u32) -> u32 {
 }
 
 /// Whether a CD_READ of `count` sectors from `start_fad` moves the head to
-/// its start before anything is transferred, and so where to: only a request
-/// whose start lies inside a track (bounded by the track's sectors, not the
-/// open-ended [`track_for_lba`]) with at least one sector. A read refused
-/// for its sector type there still moves it (seq 17, CDI 04 at 0x2E4C). A
-/// start in the lead-out, in the GDI's gap between the areas, at FAD
-/// 0xFFFFFF or below 150, or a count of 0, leaves the head where it was
-/// (stock unmeasured; a command refused before CD_READ runs -- NOT READY,
-/// UNIT ATTENTION -- never gets here). FAD 0..149 never qualifies, so the
-/// head never rests below 150.
-pub fn read_head_start<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Option<u32> {
-    if count == 0 || start_fad < 150 {
+/// its start before anything is transferred, and so where to: every request
+/// with at least one sector, wherever it starts and whether or not it is
+/// refused. Stock GDEMU 6.0: refused for its sector type 5/64/00 (seq 17,
+/// CDI 04 at 0x2E4C; seq 21 `HD_CHK24` / `HD_CHK28`), refused 5/21/00 from a
+/// gap no track holds (seq 21 `HD_AUD1` / `HD_AUD7`, FAD 3075 / 6001; seq 22
+/// the GDI's gap between the areas, `GP_HDG_MID` 23328) or from the lead-out
+/// and past it (seq 22 `GP_LO_0` / `_1` / `_100`: pos = lead-out + 0 / 1 /
+/// 100), and a read below 150 that stock serves from track 1's pregap (seq
+/// 22 `GP_LOW_0` / `_100`: pos 1 / 101 after one sector) all leave REQ_STAT
+/// at the start (+ what was sent). A count of 0 is not measured (gdprobe's
+/// whitelist) and leaves the head. A command refused before CD_READ runs --
+/// NOT READY, UNIT ATTENTION -- never gets here.
+pub fn read_head_start(start_fad: u32, count: u32) -> Option<u32> {
+    (count != 0).then_some(start_fad)
+}
+
+/// A CD_READ that starts in a track's pregap ([`PREGAP_SECTORS`] before its
+/// index 1, on no track's sectors) and ends in that pregap or on the
+/// track's sectors: `(track, zeros)`, the first `zeros` sectors being the
+/// pregap's. Stock GDEMU 6.0 serves it as that track's: the pregap sectors
+/// are zeros (seq 23 `scrc=` / `crc=` on CDI 04: FAD 0 / 1 / 100 / 149 ->
+/// CRC be97ce3f = 2,352 zero bytes; 11702..11851 -> d0912a98 = 2,324 zero
+/// bytes, the pregap of the Mode 2 track as Form 2 -- the same as the CDI
+/// file's stored pregaps), then the track's own sectors (`GP_XPRE1`: FAD
+/// 140, 16 sectors = 10 zero + track 1's first 6, crc 053616bb;
+/// `GP_XPRE2`: 11842 = 10 x 2,324 zero + 6 x 2,048 of track 2, 35,528 B).
+/// A GDI does not store its pregaps; stock's bytes there are not recorded
+/// (the seq 23 run stopped before GDI 03): NetGD sends zeros too. `None` for
+/// a count of 0, a start no pregap holds (seq 23 `GP_XGAP2`, 11694 x 16
+/// from the gap into the pregap: 5/21/00) or a request past the track's end.
+pub fn pregap_read<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Option<(&T, u32)> {
+    let t = tracks.iter().find(|t| t.start_lba().wrapping_add(150) > start_fad)?;
+    let start = t.start_lba().wrapping_add(150);
+    let end = start_fad.checked_add(count)?;
+    if count == 0 || start - start_fad > PREGAP_SECTORS || end > start.wrapping_add(t.sector_count()) {
         return None;
     }
-    let lba = start_fad - 150;
-    let t = track_for_lba(tracks, lba)?;
-    (lba - t.start_lba() < t.sector_count()).then_some(start_fad)
+    // No other track's sectors in the pregap part.
+    let zeros_end = end.min(start);
+    let on_a_track = tracks.iter().any(|u| {
+        let s = u.start_lba().wrapping_add(150);
+        s < zeros_end && start_fad < s.wrapping_add(u.sector_count())
+    });
+    (!on_a_track).then_some((t, zeros_end - start_fad))
+}
+
+/// Whether stock GDEMU 6.0 would refuse a CD_READ from `start_fad` as LBA
+/// out of range, 5/21/00 ([`ASC_LBA_OUT_OF_RANGE`]): no track holds the
+/// sector, nor its pregap ([`PREGAP_SECTORS`] before the track). Seq 21: CDI
+/// 04 / 10 FAD 3075 / 6001 (between track 1's 302 sectors and track 2's
+/// pregap at 11702); seq 22: the lead-out + 0 / 1 / 100 (CDI and GDI), the
+/// GDI's gap 1506 and 23328 -- while 1505 (last sector of audio track 2),
+/// 905 / 11851 / 45149 (pregaps) and 0 / 100 (track 1's pregap) read. NetGD
+/// does not serve pregap sectors yet: it refuses them 5/00/00 (stock's bytes
+/// there are not recorded). A start inside a track whose count runs past the
+/// track's end is refused too, ASC not measured (NetGD: 5/00/00).
+pub fn cd_read_start_outside<T: TrackInfo>(tracks: &[T], start_fad: u32) -> bool {
+    !tracks.iter().any(|t| {
+        let start = t.start_lba().wrapping_add(150);
+        start_fad >= start.saturating_sub(PREGAP_SECTORS) && start_fad < start.wrapping_add(t.sector_count())
+    })
 }
 
 /// The head with no CD-DA started: the end of the last CD_READ since the
@@ -328,15 +456,15 @@ pub fn req_stat_reply<T: TrackInfo>(
 ) -> [u8; 10] {
     let status = drive_status(state, idle);
     let repeat = if state == AudioState::Playing { repeat } else { 0x0F };
-    let (ctrl_adr, tno) = track
-        .map(|t| ((t.ctrl() << 4) | 1, t.number()))
-        .unwrap_or((0x41, 1));
+    let (ctrl_adr, tno, index) = track
+        .map(|t| (if head_on(t, fad) { (t.ctrl() << 4) | 1 } else { 0x41 }, t.number(), head_index_rel(t, fad).0))
+        .unwrap_or((0x41, 1, 1));
     [
         status,
         (disc_format & 0xF0) | (repeat & 0x0F),
         ctrl_adr,
         tno,
-        0x01,
+        index,
         (fad >> 16) as u8,
         (fad >> 8) as u8,
         fad as u8,
@@ -394,6 +522,9 @@ pub const ASC_NO_MEDIUM: (u8, u8) = (0x3A, 0x00);
 pub const ASC_ILLEGAL_MODE: (u8, u8) = (0x64, 0x00);
 pub const ASC_BECOMING_READY: (u8, u8) = (0x04, 0x01);
 pub const ASC_MEDIUM_CHANGED: (u8, u8) = (0x28, 0x00);
+/// ILLEGAL REQUEST / logical block address out of range (5/21/00): a CD_READ
+/// whose start no track holds ([`cd_read_start_outside`]; stock seq 21).
+pub const ASC_LBA_OUT_OF_RANGE: (u8, u8) = (0x21, 0x00);
 
 /// CD_READ / CD_READ2 byte 1, bits 3..1: the sector type the host expects.
 pub const CD_READ_TYPE_ANY: u8 = 0;
@@ -908,15 +1039,18 @@ pub fn get_scd_reply<T: TrackInfo>(
     };
     let mut q: [u8; 12] = [0; 12];
     let mut rel = 0;
+    q[2] = 0x01; // index 1
     match track {
         Some(t) => {
-            q[0] = (t.ctrl() << 4) | 1; // CTRL, ADR=1 (Q-mode 1)
+            // CTRL, ADR=1 (Q-mode 1); CTRL 4 off the track (stock seq 23).
+            q[0] = if head_on(t, fad) { (t.ctrl() << 4) | 1 } else { 0x41 };
             q[1] = bcd(t.number() as u32);
-            rel = fad.saturating_sub(t.start_lba().wrapping_add(150));
+            // Index 0 and a countdown in the pregap, stock's constant off
+            // the track (`head_index_rel`, seq 22).
+            (q[2], rel) = head_index_rel(t, fad);
         }
         None => q[0] = 0x41,
     }
-    q[2] = 0x01; // index 1
 
     r.fill(0);
     r[1] = audio_status;

@@ -356,6 +356,134 @@ class ExpectTest(unittest.TestCase):
         self.assertTrue(lget('DC200_CMD_REQ_STAT')[0]['data'].startswith('012f01'))
         self.assertEqual([e['sense'] for e in lget('DC200_CMD_POLL')], ['none'])
 
+    def test_head_probe_as_netgd_answers(self):
+        # gdprobe seq 21 (head_probe=1), stock_20261122_21_head-position.txt: every CD_READ puts the head at its
+        # start, refused or not, then past what it sent; TUR / GET_TOC / REQ_SES and idling leave it; pause always;
+        # GET_SCD agrees. CDI 04's audio cases (FAD 3075 / 6001) lie between track 1's sectors and track 2: refused
+        # 5/21/00, the head goes there, REQ_STAT names track 2.
+        text = expect_sd.predict(self.card, images=[4, 3], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--head-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda img, probe: [e for e in ents if e['img'] == img and e['probe'] == probe]
+        for img in (4, 3):
+            start = get(img, 'HD_START')[0]
+            self.assertEqual((start['data_cases'], start['audio_cases']), ('1', '1'))
+            hd = [e for e in ents if e['img'] == img and e['probe'].startswith('HD_')]
+            names = [e['probe'] for e in hd]
+            for case in ('R1', 'R2', 'R7', 'R16', 'HIT', 'MID7', 'END7', 'END1', 'START7', 'CHK24', 'CHK28',
+                         'AUD1', 'AUD7'):
+                r = get(img, 'HD_' + case)[0]
+                pos = get(img, 'HD_%s_POS' % case)[0]
+                self.assertEqual(names.index('HD_%s_POS' % case), names.index('HD_' + case) + 1)
+                self.assertEqual(pos['st'], 'pause')
+                self.assertEqual(pos['scd_pos'], pos['pos'])
+                self.assertEqual(pos['late_pos'], pos['pos'])
+                if r['rc'] == 'ok':
+                    self.assertEqual(pos['d_end'], '+0', case)
+                else:
+                    self.assertEqual(pos['d_start'], '+0', case)
+            for case in ('TUR', 'TOC', 'SES'):
+                self.assertEqual(get(img, 'HD_%s_POS' % case)[0]['moved'], '0')
+            idle = get(img, 'HD_IDLE_POS')[0]
+            self.assertEqual((idle['idle_ms'], idle['moved']), ('2000', '0'))
+        self.assertEqual(get(4, 'HD_CHK24')[0]['sense'], '5/64/00')
+        self.assertEqual(get(3, 'HD_CHK28')[0]['sense'], '5/64/00')
+        for case, fad in (('AUD1', '3075'), ('AUD7', '6001')):
+            r, pos = get(4, 'HD_' + case)[0], get(4, 'HD_%s_POS' % case)[0]
+            self.assertEqual((r['fad'], r['rc'], r['sense']), (fad, 'check', '5/21/00'))
+            self.assertEqual((pos['pos'], pos['trk'], pos['moved']), (fad, '2', '1'))
+            self.assertTrue(pos['stat'].startswith('012f4102'), pos['stat'])
+        self.assertEqual(get(3, 'HD_AUD1_POS')[0]['trk'], '2')
+        self.assertEqual(get(3, 'HD_AUD1')[0]['ssz'], '2352')
+
+    def test_gap_probe_as_netgd_answers(self):
+        # gdprobe seq 22 (gap_probe=1), stock_20261122_22_gap-leadout-low.txt: the lead-out + 0 / 1 / 100 and the
+        # GDI's gap between the areas are refused 5/21/00 with the head there (last / next track, GET_SCD relative
+        # 513660); pregaps (FAD 0 / 100, the sector before a track) read as zeros, index 0 below 150.
+        text = expect_sd.predict(self.card, images=[4, 3], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--gap-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda img, probe: [e for e in ents if e['img'] == img and e['probe'] == probe]
+        for img in (4, 3):
+            st = get(img, 'GP_START')[0]
+            lo = int(st['leadout'])
+            self.assertEqual(get(img, 'GP_TRK_SKIP')[0]['reason'], 'no_gap')
+            for off in (0, 1, 100):
+                r, pos = get(img, 'GP_LO_%d' % off)[0], get(img, 'GP_LO_%d_POS' % off)[0]
+                self.assertEqual((r['rc'], r['sense']), ('check', '5/21/00'))
+                self.assertEqual((pos['pos'], pos['scd_rel'], pos['idx']), (str(lo + off), '513660', '1'))
+            for f in (0, 100):
+                r, pos = get(img, 'GP_LOW_%d' % f)[0], get(img, 'GP_LOW_%d_POS' % f)[0]
+                self.assertEqual(r['rc'], 'ok')
+                self.assertEqual((pos['pos'], pos['trk'], pos['idx'], pos['scd_rel']),
+                                 (str(f + 1), '1', '0', str(149 - f)))
+            self.assertEqual(get(img, 'GP_CNT0_SKIP')[0]['reason'], 'whitelist_count_1_64')
+        self.assertEqual(get(4, 'GP_HDG_SKIP')[0]['reason'], 'no_hd_area')
+        hdg = get(3, 'GP_HDG')[0]
+        for case in ('HDG_L0', 'HDG_MID', 'HDG_MID2'):
+            r, pos = get(3, 'GP_' + case)[0], get(3, 'GP_%s_POS' % case)[0]
+            self.assertEqual((r['sense'], pos['trk'], pos['ctl'], pos['scd_rel']), ('5/21/00', '3', '0x41', '513660'))
+            self.assertEqual(pos['pos'], r['fad'])
+        hi = get(3, 'GP_HDG_HI')[0]
+        self.assertEqual((hi['fad'], hi['rc'], hi['ssz']), (str(int(hdg['hd_fad']) - 1), 'ok', '2048'))
+        self.assertEqual(get(3, 'GP_HDG_HI_POS')[0]['scd_rel'], '0')
+
+    def test_pregap_probe_as_netgd_answers(self):
+        # gdprobe seq 23 (gap_crc=1 pregap_probe=1), stock_20261122_23_pregap-crc.txt: pregap sectors are zeros
+        # (CRC be97ce3f = 2,352 zero bytes), a read from the pregap runs on into the track, a read from the gap into
+        # the pregap is 5/21/00, and off every track REQ_STAT keeps the last track number with CTRL 4.
+        text = expect_sd.predict(self.card, images=[4], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--gap-crc', '--pregap-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda probe: [e for e in ents if e['img'] == 4 and e['probe'] == probe][0]
+        self.assertNotIn('GP_TRK_SKIP', [e['probe'] for e in ents])    # gap_probe off: seq 23 cases only
+        for f in (0, 1, 100, 149):
+            r = get('GP_PGL_%d' % f)
+            self.assertEqual((r['rc'], r['ssz'], r['crc']), ('ok', '2352', 'be97ce3f'))
+        x = get('GP_XPRE1')
+        self.assertEqual((x['rc'], x['bytes']), ('ok', str(16 * 2352)))
+        self.assertEqual(x['scrc'].split(',')[:10], ['be97ce3f'] * 10)
+        self.assertEqual(get('GP_XPRE1_POS')['pos'], '156')
+        g = get('GP_XGAP2')
+        self.assertEqual((g['rc'], g['sense']), ('check', '5/21/00'))
+        for case in ('PG2_M156', 'PG2_M151'):
+            pos = get('GP_%s_POS' % case)
+            self.assertEqual((pos['trk'], pos['ctl'], pos['scd_rel']), ('1', '0x41', '513660'))
+        self.assertEqual(get('GP_XGAP2_POS')['trk'], '2')
+        self.assertEqual(get('GP_PG2_M150_POS')['idx'], '0')
+
+    def test_ctl_probe_and_risky_cross_off_as_netgd_answers(self):
+        # gdprobe seq 24 (risky_cross=off ctl_probe=1), stock_20261122_24_pregap-ctl.txt: off every track REQ_STAT
+        # reports CTRL 4 whatever the next track / lead-out entry / track read last; reads from data past its end
+        # are skipped, an XGAP<t> whose first sector reads too.
+        text = expect_sd.predict(self.card, images=[3, 4], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--gap-probe', '--gap-crc', '--pregap-probe',
+                                              '--risky-cross', 'off', '--ctl-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda img, probe: [e for e in ents if e['img'] == img and e['probe'] == probe]
+        for img in (3, 4):
+            self.assertEqual(get(img, 'GP_RISKY_SKIP')[0]['reason'], 'risky_cross_off')
+            self.assertFalse(get(img, 'GP_XEND') or get(img, 'GP_XLO'))
+            verdicts = get(img, 'GP_CTL')
+            self.assertTrue(verdicts)
+            for v in verdicts:
+                if v['off_rc'] == 'check':
+                    self.assertEqual((v['ctl'], v['scd_ctl'], v['scd_rel']), ('0x41', '0x41', '513660'))
+                    self.assertIn('const41', v['match'])
+        # XGAP<t>: skipped after its 1-sector check when that reads, else sent (from the gap: 5/21/00).
+        for img in (3, 4):
+            for chk in [e for e in ents if e['img'] == img and e['probe'].endswith('_CHK')]:
+                name = chk['probe'][:-4]
+                if chk['rc'] == 'ok':
+                    self.assertEqual(get(img, name + '_SKIP')[0]['reason'], 'starts_on_data_risky_cross_off')
+                else:
+                    self.assertEqual(get(img, name)[0]['sense'], '5/21/00')
+        self.assertIn('HDG', [r['region'] for r in get(3, 'GP_CTL_REGION')])
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '

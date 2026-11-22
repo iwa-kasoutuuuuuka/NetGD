@@ -1,0 +1,50 @@
+# gdprobe run configuration for seq 24: the seq 23 cases again (pregap CRCs, safe crossing reads), images 3 and 10
+# first, 4 last; the reads that start on data and run past its end (stock hung at XEND in record 23) are not sent
+# (risky_cross=off; =end runs them after everything else); new CTRL cases (ctl_probe). See README_ja.md, "seq 24".
+
+label=stock
+seq=24
+
+# 3 = GDI (track 2 audio), 10 = Mode 1 CDI, 4 = Mode 2 Form 1 CDI (11 = audio-only CDI: its lead-out follows an audio
+# track, the CTRL case that tells a constant 0x41 from the lead-out entry's CTRL)
+switch=on
+images=3,10,4
+#images=3,10,11,4
+return_to=2
+switch_timeout_ms=5000
+
+# the swap-window / reset probes and the seq 21 head cases: all off
+swap_regpoll=off
+swap_devreset=off
+swap_reswitch=off
+devreset_only=off
+devreset_cmd=off
+head_probe=off
+
+# battery IP_READ with 0x20 (no CHECK on the CDIs); no flag battery, throughput or seek
+cdread_flags=0x20
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off
+
+# the TOC-edge cases after each image's battery (GP_* lines)
+gap_probe=on
+gap_flags=0x20
+gap_late_ms=300
+gap_scd=on
+gap_track_end=0
+gap_leadout=0,1,100
+gap_low=0,100
+gap_count0=on
+
+# seq 23: CRCs on every GP_ read, pregap and crossing reads
+gap_crc=on
+pregap_probe=on
+pregap_low=0,1,100,149
+pregap_offs=-156,-151,-150,-149,-100,-2,-1,0
+pregap_cross=16
+
+# seq 24: risky crossing reads off (end = after all images), CTRL off-track cases on
+risky_cross=off
+ctl_probe=on

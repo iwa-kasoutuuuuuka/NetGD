@@ -499,8 +499,12 @@ def classify(pr: ProbeRs, chip: str, probe: str | None) -> dict:
         if _OLD_RE.search(e.msg):
             res["status"] = ST_OLD_PROBE_RS
             return res
-        if re.search(r"(chip|target).{0,40}(not found|unknown|not (a )?(valid|supported))|no (such )?(chip|target)|"
-                     r"Specified chip|could not find chip", e.msg, re.I) and not dp_visible(e.msg):
+        # probe-rs 0.32.0 wording: "The requested chip 'X' was not found in the list of known targets."
+        # / "Unable to load specification for chip". NOT "No target responded to the debug port" (wiring/power).
+        if (re.search(r"(chip|target).{0,40}(not found|unknown|not (a )?(valid|supported))|no such (chip|target)|"
+                      r"Unable to load specification for chip|Specified chip|could not find chip", e.msg, re.I)
+                and not re.search(r"no target responded|did not respond", e.msg, re.I)
+                and not dp_visible(e.msg)):
             res["status"] = ST_BAD_CHIP
             return res
     # read failed or returned junk: is the debug port alive?

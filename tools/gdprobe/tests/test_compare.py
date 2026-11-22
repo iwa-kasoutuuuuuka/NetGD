@@ -201,6 +201,38 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('img=3 RS_SW_RESULT: ua_28 1 vs 0', out)
 
+    SEQ20 = (
+        'img=3 probe=DC10_IDLE idle_ms=500\n'
+        'img=3 probe=DC10_SW_DEVRESET delay_ms=0 t_ms=0 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x06 bcl=0x14 bch=0xeb\n'
+        'img=3 probe=DC10_CMD_TUR delay_ms=10 t_ms=12 rc=check status=0x51 err=0x20 sense=2/04/01 secnr=0x81 altst=0x50\n'
+        'img=3 probe=DC10_CMD_REQ_STAT cdb=100000000a000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 data=0102030405060708090a us=1500\n'
+        'img=3 probe=DC10_CMD_REQ_ERROR cdb=130000000a000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=10 data=f0000200000000000401 us=1500\n'
+        'img=3 probe=DC10_CMD_POLL poll=14 t_ms=152 rc=check status=0x51 err=0x60 sense=6/29/00 secnr=0x82 altst=0x50\n'
+        'img=3 probe=DC10_CMD_RESULT delay_ms=10 rc=ok ready=1 ready_ms=162 t_ms=162 polls=15 changes=1\n')
+
+    def test_seq20_lines(self):
+        a = self.write('a.txt', self.SEQ20)
+        _, ents = compare.parse_record(self.SEQ20)
+        self.assertEqual(len(ents), 7)
+        # other times (t_ms, ready_ms, polls, reset_us): no difference
+        t = (self.SEQ20.replace('t_ms=12 ', 't_ms=25 ').replace('ready_ms=162', 'ready_ms=400')
+             .replace('polls=15', 'polls=33').replace('reset_us=2000', 'reset_us=4000').replace('poll=14', 'poll=30'))
+        rc, out, _ = run([a, self.write('b.txt', t)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('DC10_CMD_RESULT: ready_ms 162 -> 400', out)      # timing note only
+        rc, out, _ = run([a, self.write('b2.txt', t), '--ignore-timing'])
+        self.assertEqual(rc, 0, out)
+        # what the drive answered is a difference
+        rc, out, _ = run([a, self.write('c.txt', self.SEQ20.replace('sense=2/04/01', 'sense=6/29/00'))])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=3 DC10_CMD_TUR: sense 2/04/01 vs 6/29/00', out)
+        rc, out, _ = run([a, self.write('d.txt', self.SEQ20.replace('altst=0x50\nimg=3 probe=DC10_CMD_REQ_STAT', 'altst=0xd0\nimg=3 probe=DC10_CMD_REQ_STAT'))])
+        self.assertEqual(rc, 1)
+        self.assertIn('altst 0x50 vs 0xd0', out)
+        rc, out, _ = run([a, self.write('e.txt', self.SEQ20.replace('ready=1 ready_ms=162', 'ready=0 ready_ms=-').replace('rc=ok ready', 'rc=timeout ready'))])
+        self.assertEqual(rc, 1)
+        self.assertIn('ready 1 vs 0', out)
+
     CDR_A = (
         'img=3 probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302000b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'
         'img=3 probe=CDREAD_FLAGS flags=0x24 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302400b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'

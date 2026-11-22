@@ -1,0 +1,39 @@
+# gdprobe run configuration for seq 22: where does the STOCK GDEMU put the head (REQ_STAT, GET_SCD format 1) after
+# reads at the edges of the TOC: the gap after track 1 (from track 1, and back from track 2), the lead-out (+0, +1,
+# +100), the GD-ROM gap between the LD lead-out and 45150, FAD < 150 (0, 100); count 0 is logged as a whitelist skip.
+# All FADs come from each image's TOC at run time. Copy to <host folder>/gdprobe.cfg. See README_ja.md, "seq 22".
+
+label=stock
+seq=22
+
+# 4 = Mode 2 Form 1 CDI, 3 = GDI, 10 = Mode 1 CDI (11 = audio-only CDI: add it for a single-session image)
+switch=on
+images=4,3,10
+#images=4,3,10,11
+return_to=2
+switch_timeout_ms=5000
+
+# the swap-window / reset probes and the seq 21 head cases: all off
+swap_regpoll=off
+swap_devreset=off
+swap_reswitch=off
+devreset_only=off
+devreset_cmd=off
+head_probe=off
+
+# battery IP_READ with 0x20 (no CHECK on the CDIs); no flag battery, throughput or seek
+cdread_flags=0x20
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off
+
+# the TOC-edge cases after each image's battery (GP_* lines)
+gap_probe=on
+gap_flags=0x20
+gap_late_ms=300
+gap_scd=on
+gap_track_end=0
+gap_leadout=0,1,100
+gap_low=0,100
+gap_count0=on
