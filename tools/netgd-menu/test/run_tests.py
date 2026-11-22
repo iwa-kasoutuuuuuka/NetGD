@@ -25,6 +25,29 @@ import time
 import unittest
 import zlib
 
+
+def _refuse_msys_python_with_native_gcc():
+    """Stop early when an MSYS/Cygwin Python (os.name == "posix") would drive a native Windows gcc.
+
+    That Python makes POSIX paths (/tmp/..., /h/...) and names the test program without .exe, and its runtime rewrites every
+    argument that starts with "/" before a native program sees it ("/02/DISC.GDI" becomes "C:/<msys root>/02/DISC.GDI"), so
+    nearly every test fails with misleading messages.  A Cygwin Python with a Cygwin gcc is consistent and is let through.
+    """
+    if sys.platform not in ("cygwin", "msys"):
+        return
+    try:
+        target = subprocess.run(["gcc", "-dumpmachine"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                timeout=60).stdout
+    except Exception:
+        return
+    if "mingw" in target or "windows" in target:
+        sys.exit("run_tests.py: this Python is an MSYS/Cygwin build (%s, sys.platform=%s) but gcc is a native Windows "
+                 "compiler (%s).\nRun the tests with a native Windows Python instead, e.g.  py -3 %s"
+                 % (sys.executable, sys.platform, target.strip(), os.path.relpath(os.path.abspath(__file__))))
+
+
+_refuse_msys_python_with_native_gcc()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)                      # tools/netgd-menu
 RECV = os.path.join(os.path.dirname(ROOT), "netgd-recv")
