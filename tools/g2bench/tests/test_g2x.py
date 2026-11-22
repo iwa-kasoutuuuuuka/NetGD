@@ -21,7 +21,7 @@ class FakeRx(threading.Thread):
     """the Dreamcast's g2x receiver loop (main_net.c run_xport) with impairments on its input and its ACKs"""
 
     def __init__(self, pass_no, total, need_crc=True, loss=0.0, ack_loss=0.0, dup=0.0, flip=0.0, burst=0, seed=1,
-                 stop_after_s=None):
+                 stop_after_s=None, lose_final=False):
         threading.Thread.__init__(self)
         self.daemon = True
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -34,6 +34,8 @@ class FakeRx(threading.Thread):
         self.loss, self.ack_loss, self.dup, self.flip, self.burst = loss, ack_loss, dup, flip, burst
         self.rnd = random.Random(seed)
         self.stop_after_s = stop_after_s
+        self.lose_final = lose_final        # every ACK of the final burst is lost (stray replies get through)
+        self.strays = 0
         self.status = None
         self.error = None
         self.dropped = 0
@@ -45,6 +47,8 @@ class FakeRx(threading.Thread):
 
     def _ack(self, peer, flags=0):
         a = self.rx.make_ack(flags, self._now())
+        if self.lose_final and self.rx.complete():
+            return
         if self.rnd.random() >= self.ack_loss:
             self.s.sendto(a.pack(), peer)
 
@@ -90,10 +94,26 @@ class FakeRx(threading.Thread):
                     break
             if self.status is None:
                 self.status = "done"
+            final = None
             for _ in range(5):
                 if peer:
-                    self.s.sendto(self.rx.make_ack(gx.A_STOP if self.status != "done" else 0, self._now()).pack(), peer)
+                    final = self.rx.make_ack(gx.A_STOP if self.status != "done" else 0, self._now()).pack()
+                    if not self.lose_final:
+                        self.s.sendto(final, peer)
                 time.sleep(0.003)
+            # main_net.c: a stray datagram of the finished pass gets the final ACK (DONE / STOP) again
+            quiet = time.perf_counter()
+            while final and time.perf_counter() - quiet < 0.7:
+                try:
+                    d, a = self.s.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except ConnectionResetError:
+                    continue
+                if len(d) >= 8 and d[:4] == b"G2X1" and int.from_bytes(d[6:8], "little") == self.rx.pass_no:
+                    self.strays += 1
+                    self.s.sendto(final, a)
+                    quiet = time.perf_counter()
         except Exception as e:  # noqa: BLE001
             self.error = repr(e)
         finally:
@@ -172,6 +192,47 @@ class G2xTests(unittest.TestCase):
         q, rs = tx.next(100 + gx.RTO_US + 50)                   # no ACK at all: resend from the oldest
         self.assertEqual((q, rs), (0, True))
         self.assertEqual(tx.rto_fires, 1)
+
+    def test_final_acks_lost(self):
+        # every ACK of the receiver's final burst lost: the PC's RTO resend is answered with DONE
+        rx, r, data = self.go(100 * 1024, lose_final=True)
+        self.check_ok(rx, r, data)
+        self.assertGreaterEqual(rx.strays, 1)
+        self.assertLess(r["s"], 1.0)                             # not the 3 s idle limit
+
+    def test_stop_acks_lost(self):
+        rx, r, data = self.go(50 << 20, pps=500, stop_after_s=0.3, lose_final=True)
+        self.assertEqual(rx.status, "time_limit")
+        self.assertEqual(r["reason"], "stop")
+        self.assertGreaterEqual(rx.strays, 1)
+        self.assertLess(r["s"], 1.5)
+
+    def test_tx_rto_backoff(self):
+        tx = gx.Tx(10, 1000)
+        for s in range(10):
+            q, rs = tx.next(100 + s)
+            tx.sent_one(q, rs, 100 + s)
+        t, fires, rto = 109, [], gx.RTO_US
+        while len(fires) < 8:                                    # no ACK at all for a long time
+            t += 1000
+            q, rs = tx.next(t)
+            if q is None:
+                continue
+            self.assertEqual((q, rs), (0, True))                 # only the oldest, never the whole window
+            tx.sent_one(q, rs, t)
+            fires.append(t)
+            self.assertEqual(tx.next(t + 1), (None, False))
+        gaps = [b - a for a, b in zip(fires, fires[1:])]
+        exp = [min(gx.RTO_US * 2 ** (i + 1), gx.RTO_MAX_US) for i in range(len(gaps))]
+        for g, e in zip(gaps, exp):
+            self.assertTrue(e <= g <= e + 1000, (gaps, exp))     # 60, 120, 240, 480, then 500 ms
+        self.assertEqual(tx.rto_fires, 8)
+        self.assertEqual(tx.resent, 8)
+        # the resend of 0 got through: cum = 1, so 1..9 (sent before it) are lost and go out at once
+        tx.on_ack(gx.Ack(0, 1, 1, 10, 0, 0, 1), t + 5000)
+        self.assertEqual(tx.rto, gx.RTO_US)
+        got = [tx.next(t + 5001 + i)[0] for i in range(9)]
+        self.assertEqual(got, list(range(1, 10)))
 
     def test_tx_sack_marks_hole_lost(self):
         tx = gx.Tx(20, 1000)

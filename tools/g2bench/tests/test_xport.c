@@ -103,8 +103,17 @@ typedef struct {
     unsigned ring;                    /* BBA RX ring bytes */
     uint64_t total;
     int crc;
+    uint64_t blackout_at, blackout_us; /* both directions dead for blackout_us from blackout_at (a stall) */
+    int lose_final;                    /* every ACK of the receiver's final burst is lost (only replies to
+                                          stray datagrams of the finished pass get through) */
 } sim_cfg;
-typedef struct { uint64_t us; uint32_t ring_drops, rand_drops, acks_lost, delivered_bad; double pps_end; g2x_tx tx; g2x_rx rx; uint32_t crc; int ok; } sim_res;
+#define MAXFIRE 32
+typedef struct {
+    uint64_t us; uint32_t ring_drops, rand_drops, acks_lost, delivered_bad; double pps_end; g2x_tx tx; g2x_rx rx; uint32_t crc; int ok;
+    uint32_t bo_sends, bo_resends, bo_fires;   /* transmissions / resends / RTO expiries during the blackout */
+    uint64_t fire_us[MAXFIRE];                 /* when each RTO fired */
+    uint64_t rx_done_us, strays;               /* receiver complete at; stray datagrams answered after that */
+} sim_res;
 
 #define QMAX 4096
 typedef struct { uint64_t t; uint16_t n; uint8_t b[G2X_DGRAM]; } pkt;
@@ -132,7 +141,9 @@ static void sim(const sim_cfg *c, sim_res *res)
     uint64_t now = 0, next_send = 0, dc_busy_until = 0;
     const uint64_t LAT = 60, ALAT = 120;
     uint8_t b[G2X_DGRAM];
+    uint8_t final_ack[G2X_ACK_LEN];
     while (!g2x_tx_done(&res->tx) && now < 60ull * 1000000ull) {
+        int dark = c->blackout_us && now >= c->blackout_at && now < c->blackout_at + c->blackout_us;
         /* PC: ACKs that arrived */
         while (b_n && back[b_head].t <= now) {
             g2x_ack a;
@@ -141,11 +152,15 @@ static void sim(const sim_cfg *c, sim_res *res)
         }
         /* PC: paced send */
         if (now >= next_send) {
-            int resend; int64_t q = g2x_tx_next(&res->tx, now, &resend);
+            int resend; uint32_t fires = res->tx.rto_fires;
+            int64_t q = g2x_tx_next(&res->tx, now, &resend);
+            if (res->tx.rto_fires != fires && fires < MAXFIRE) res->fire_us[fires] = now;
             if (q >= 0) {
                 size_t n = mkf(b, 1, (uint32_t)q, c->total, c->crc, resend ? G2X_F_RESEND : 0);
                 g2x_tx_sent(&res->tx, (uint32_t)q, resend, now);
-                if (chance(c->loss)) res->rand_drops++;
+                if (dark) { res->bo_sends++; res->bo_resends += resend != 0; res->bo_fires += res->tx.rto_fires != fires; }
+                if (dark) res->rand_drops++;
+                else if (chance(c->loss)) res->rand_drops++;
                 else {
                     if (chance(c->flip)) b[G2X_HDR + rnd() % (n - G2X_HDR)] ^= (uint8_t)(1u << (rnd() & 7));
                     q_push(wire, &w_head, &w_n, QMAX, now + LAT, b, n);
@@ -162,8 +177,15 @@ static void sim(const sim_cfg *c, sim_res *res)
             else { q_push(ring_q, &r_head, &r_n, 64, now, wire[w_head].b, wire[w_head].n); ring_q[(r_head + r_n - 1) % 64].t = sz; r_bytes += sz; }
             w_head = (w_head + 1) % QMAX; w_n--;
         }
-        /* Dreamcast: drain one datagram per service time, ACK as the receiver says */
-        if (r_n && now >= dc_busy_until) {
+        /* Dreamcast: drain one datagram per service time, ACK as the receiver says (main_net.c run_xport) */
+        if (r_n && now >= dc_busy_until && res->rx_done_us) {
+            /* the pass is over (the next one runs): a stray datagram of it gets the final ACK (DONE) again */
+            r_bytes -= (unsigned)ring_q[r_head].t; r_head = (r_head + 1) % 64; r_n--;
+            dc_busy_until = now + c->service_us;
+            res->strays++;
+            if (dark || chance(c->ack_loss)) res->acks_lost++;
+            else q_push(back, &b_head, &b_n, QMAX, now + ALAT, final_ack, sizeof final_ack);
+        } else if (r_n && now >= dc_busy_until) {
             pkt *p = &ring_q[r_head];
             int want = g2x_rx_input(&res->rx, p->b, p->n, now);
             r_bytes -= (unsigned)p->t; r_head = (r_head + 1) % 64; r_n--;
@@ -172,22 +194,23 @@ static void sim(const sim_cfg *c, sim_res *res)
                 g2x_ack a; uint8_t ab[G2X_ACK_LEN];
                 g2x_rx_make_ack(&res->rx, &a, 0, now);
                 g2x_ack_build(ab, &a);
-                if (chance(c->ack_loss)) res->acks_lost++;
+                if (g2x_rx_complete(&res->rx)) {
+                    /* complete: this ACK + 5 more are the final burst; the pass ends here */
+                    memcpy(final_ack, ab, sizeof ab);
+                    res->rx_done_us = now;
+                    for (int i = 0; i < 6; i++) {
+                        if (c->lose_final || dark || chance(c->ack_loss)) res->acks_lost++;
+                        else q_push(back, &b_head, &b_n, QMAX, now + ALAT, ab, sizeof ab);
+                    }
+                } else if (dark || chance(c->ack_loss)) res->acks_lost++;
                 else q_push(back, &b_head, &b_n, QMAX, now + ALAT, ab, sizeof ab);
             }
-        } else if (now >= dc_busy_until && g2x_rx_poll(&res->rx, now)) {
+        } else if (now >= dc_busy_until && !res->rx_done_us && g2x_rx_poll(&res->rx, now)) {
             g2x_ack a; uint8_t ab[G2X_ACK_LEN];
             g2x_rx_make_ack(&res->rx, &a, 0, now);
             g2x_ack_build(ab, &a);
-            if (chance(c->ack_loss)) res->acks_lost++;
+            if (dark || chance(c->ack_loss)) res->acks_lost++;
             else q_push(back, &b_head, &b_n, QMAX, now + ALAT, ab, sizeof ab);
-        }
-        /* the receiver finished, and keeps re-sending DONE while the PC lacks it (its ACKs may be lost) */
-        if (g2x_rx_complete(&res->rx) && now - res->rx.last_ack_us >= 2000) {
-            g2x_ack a; uint8_t ab[G2X_ACK_LEN];
-            g2x_rx_make_ack(&res->rx, &a, 0, now);
-            g2x_ack_build(ab, &a);
-            if (!chance(c->ack_loss)) q_push(back, &b_head, &b_n, QMAX, now + ALAT, ab, sizeof ab);
         }
         now += 5;
     }
@@ -206,11 +229,13 @@ static uint32_t expect_crc(uint64_t total)
     return crc;
 }
 
+static sim_res g_last;
 static void run_case(const char *name, sim_cfg c, double min_kbps)
 {
     sim_res r;
     rs = 0x1234567u;
     sim(&c, &r);
+    g_last = r;
     double kbps = r.us ? (double)c.total / 1024.0 / ((double)r.us / 1e6) : 0;
     printf("  %-28s %s %7.0f KB/s  sent %u resent %u (rto %u) ring_drop %u rand_drop %u acks %u lost_acks %u bad %u pps_end %.0f\n",
            name, r.ok ? "ok  " : "FAIL", kbps, r.tx.sent, r.tx.resent, r.tx.rto_fires, r.ring_drops, r.rand_drops,
@@ -224,7 +249,7 @@ static void test_sim(void)
 {
     const uint64_t T = 8ull << 20;            /* 8 MiB per case */
     printf("simulated link (8 MiB each; Dreamcast service 340 us = ~2,900 datagrams/s, 16 KiB ring):\n");
-    sim_cfg base = { 1200, 0, 0, 0, 0, 0, 0, 340, 16384, T, 1 };
+    sim_cfg base = { 1200, 0, 0, 0, 0, 0, 0, 340, 16384, T, 1, 0, 0, 0 };
     run_case("1200 pps clean", base, 1500);
     sim_cfg c = base; c.pps = 2500;
     run_case("2500 pps clean", c, 3000);
@@ -238,6 +263,33 @@ static void test_sim(void)
     run_case("adaptive, 10% / 20% ack loss", c, 800);
     c = base; c.pps = 2000; c.total = G2X_PAYLOAD * 3 + 1; run_case("tiny transfer (4 datagrams)", c, 0);
     c = base; c.pps = 2000; c.loss = 0.5; c.total = 200 * 1024; run_case("50% loss, 200 KiB", c, 10);
+
+    /* a 400 ms stall (both directions dead) in a clean 2 MiB transfer: one resend per RTO, the RTO doubling
+       from 30 ms (about +30, +90, +210, then +450 = after the stall), not a window of resends per RTO */
+    c = base; c.pps = 2000; c.total = 2u << 20; c.blackout_at = 200000; c.blackout_us = 400000;
+    run_case("400 ms stall (RTO backoff)", c, 500);
+    printf("    stall: %u sends, %u resends, %u RTO expiries in the stall; RTO at", g_last.bo_sends, g_last.bo_resends, g_last.bo_fires);
+    for (unsigned i = 0; i < g_last.tx.rto_fires && i < MAXFIRE; i++) printf(" %.1f", (double)g_last.fire_us[i] / 1000.0);
+    printf(" ms\n");
+    CHECK(g_last.bo_resends == g_last.bo_fires);           /* each resend in the stall is an RTO's one datagram */
+    CHECK(g_last.bo_fires == 3);
+    CHECK(g_last.tx.rto_fires == 4);                       /* the 4th, after the stall, gets through */
+    for (unsigned i = 2; i < g_last.tx.rto_fires && i < MAXFIRE; i++) {
+        double g0 = (double)(g_last.fire_us[i - 1] - g_last.fire_us[i - 2]), g1 = (double)(g_last.fire_us[i] - g_last.fire_us[i - 1]);
+        CHECK(g1 > 1.9 * g0 && g1 < 2.1 * g0);             /* doubling */
+    }
+    CHECK(g_last.fire_us[0] > c.blackout_at && g_last.fire_us[0] <= c.blackout_at + G2X_RTO_US + 2000);   /* RTO after the last ACK */
+    CHECK(g_last.tx.rto_us == G2X_RTO_US);                 /* back to the base after progress */
+    CHECK(g_last.tx.resent < G2X_WIN + 8);                 /* the stalled window once, plus the RTO probes */
+
+    /* every ACK of the receiver's final burst lost: the PC's RTO resend is a stray datagram of the finished
+       pass, answered with DONE, so the PC ends about one RTO later (not after its 5 s idle limit) */
+    c = base; c.pps = 2000; c.total = 1u << 20; c.lose_final = 1;
+    run_case("final DONE ACKs all lost", c, 500);
+    printf("    final ACKs lost: PC done %.1f ms after the receiver, %u stray datagram(s) answered\n",
+           (double)(g_last.us - g_last.rx_done_us) / 1000.0, (unsigned)g_last.strays);
+    CHECK(g_last.strays >= 1);
+    CHECK(g_last.us - g_last.rx_done_us < G2X_RTO_US + 10000);
 }
 
 static void write_vec(const char *path)

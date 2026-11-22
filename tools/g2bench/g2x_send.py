@@ -6,11 +6,18 @@ Dreamcast's UDP port, paced at a fixed or adaptive rate, and recovers losses fro
 
 * a hole below a datagram that was sent after it is lost (the BBA RX ring is a FIFO: nothing is reordered),
   so it is resent at once (no timer);
-* nothing acknowledged for RTO (30 ms): resend everything in flight (tail loss);
+* unacknowledged and sent before a datagram that was acknowledged (cumulatively or selectively) = lost too;
+* nothing acknowledged for RTO (30 ms): resend only the oldest unacknowledged datagram, and double the RTO
+  (up to 500 ms) per expiry without progress; the ACK for that resend tells what else was lost;
+* the pass ends as soon as everything is acknowledged (or on the Dreamcast's DONE / STOP; the Dreamcast
+  answers a stray datagram of a finished pass with its final ACK again, so a lost DONE costs one RTO);
+* pacing: no catch-up burst after a window / credit stall; the wait between sends sleeps (select on the
+  socket, so ACKs wake it) and only spins for the last ~1 ms;
 * adaptive rate: +3 pps per ACK with progress, x0.85 per loss event (at most one per 20 ms).
 
 Rx is a Python port of the receiver (g2x_rx_*), used by the tests as the fake Dreamcast.
 Standard library only."""
+import select
 import socket
 import struct
 import time
@@ -26,6 +33,7 @@ T_DATA, T_ACK = 1, 2
 F_RESEND, F_CRC = 0x01, 0x02
 A_DONE, A_STOP = 0x01, 0x02
 RTO_US = 30000
+RTO_MAX_US = 500000
 CUT_GAP_US = 20000
 ACK_EVERY = 16
 ACK_GAP_US = 1000
@@ -99,6 +107,8 @@ class Tx(object):
         self.tx_no = 0
         self.rq = deque()
         self.last_progress = 0
+        self.acked_stamp = 0        # newest transmission known to have arrived
+        self.rto = RTO_US           # doubles per RTO without progress, up to RTO_MAX_US
         self.pps, self.pps_min, self.pps_max = float(pps), float(pps_min), float(pps_max)
         self.adaptive = pps_max > pps_min
         self.last_cut = 0
@@ -120,13 +130,15 @@ class Tx(object):
     def on_ack(self, a, now):
         progress = False
         cum = min(a.cum, self.count)
-        acked = self.acked
+        acked, stamp = self.acked, self.stamp
+        top = self.acked_stamp
         while self.cum < cum:
             if not acked[self.cum]:
                 acked[self.cum] = 1
                 progress = True
+                if stamp[self.cum] > top:
+                    top = stamp[self.cum]
             self.cum += 1
-        high = -1
         bits = a.sack_lo | (a.sack_hi << 32)
         i = 0
         while bits and i < WIN - 1:
@@ -136,7 +148,8 @@ class Tx(object):
                     if not acked[q]:
                         acked[q] = 1
                         progress = True
-                    high = q
+                    if stamp[q] > top:
+                        top = stamp[q]
             bits >>= 1
             i += 1
         while self.cum < self.count and acked[self.cum]:
@@ -145,13 +158,14 @@ class Tx(object):
             self.limit = min(a.limit, self.count)
         if progress:
             self.last_progress = now
+            self.rto = RTO_US
+        self.acked_stamp = top
+        # unacknowledged and sent before a datagram that arrived = lost (the BBA ring is FIFO)
         lost = False
-        if high >= 0:
-            hs = self.stamp[high]
-            for q in range(self.cum, high):
-                if not acked[q] and not self.queued[q] and self.stamp[q] and self.stamp[q] < hs:
-                    self._enqueue(q)
-                    lost = True
+        for q in range(self.cum, self.next_new):
+            if not acked[q] and not self.queued[q] and stamp[q] and stamp[q] < top:
+                self._enqueue(q)
+                lost = True
         if lost:
             self._cut(now)
         elif progress and self.adaptive:
@@ -164,14 +178,13 @@ class Tx(object):
             self.queued[s] = 0
             if not self.acked[s]:
                 return s, True
-        if self.cum < self.next_new and self.last_progress and now - self.last_progress > RTO_US:
+        if self.cum < self.next_new and self.last_progress and now - self.last_progress > self.rto:
+            # nothing acknowledged for an RTO: only the oldest unacked (self.cum), then back off
             self.last_progress = now
+            self.rto = min(self.rto * 2, RTO_MAX_US)
             self.rto_fires += 1
             self._cut(now)
-            for q in range(self.cum, self.next_new):
-                self._enqueue(q)
-            if self.rq:
-                return self.next(now)
+            return self.cum, True
         if self.next_new < self.count and self.next_new < self.limit:
             return self.next_new, False
         return None, False
@@ -186,6 +199,12 @@ class Tx(object):
             self.sent += 1
         if not self.last_progress:
             self.last_progress = now or 1
+
+    def rto_at(self):
+        """when the RTO fires if nothing is acknowledged (us), or None"""
+        if self.cum < self.next_new and self.last_progress:
+            return self.last_progress + self.rto + 1
+        return None
 
     def done(self):
         return self.cum >= self.count
@@ -299,6 +318,7 @@ def send_pass(host, port, pass_no, total, data, pps, pps_min=0, pps_max=0, crc=T
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
             except OSError:
                 pass
+            s.bind(("0.0.0.0", 0))          # Windows: recvfrom / select on a never-bound UDP socket fail (WSAEINVAL)
         s.setblocking(False)
         mv = memoryview(data)
         count = count_for(total)
@@ -309,6 +329,7 @@ def send_pass(host, port, pass_no, total, data, pps, pps_min=0, pps_max=0, crc=T
         last_ack = t0
         end_flags, acks, bad_acks, stop_reason, pps_sum, pps_n = 0, 0, 0, "", 0.0, 0
         dest = (host, port)
+        stalled = False                     # the window / credit was closed: restart the pacing clock
         while True:
             now = clock()
             now_us = int((now - t0) * 1e6) + 1
@@ -330,8 +351,8 @@ def send_pass(host, port, pass_no, total, data, pps, pps_min=0, pps_max=0, crc=T
                 pps_n += 1
                 if a.flags & (A_DONE | A_STOP):
                     end_flags = a.flags
-            if end_flags:
-                stop_reason = "done" if end_flags & A_DONE else "stop"
+            if end_flags or tx.done():     # all acknowledged: no need to wait for the DONE flag itself
+                stop_reason = "done" if end_flags & A_DONE or tx.done() else "stop"
                 break
             if now - last_ack > idle_s:
                 stop_reason = "no_ack"
@@ -351,7 +372,25 @@ def send_pass(host, port, pass_no, total, data, pps, pps_min=0, pps_max=0, crc=T
                         except (BlockingIOError, InterruptedError):
                             pass
                     gap = 1.0 / tx.pps
-                    next_send = max(next_send + gap, now - 3 * gap)   # catch up by 3 at most (the ring holds ~11)
+                    if stalled:                 # after a stall: from now, no catch-up burst
+                        next_send = now + gap
+                        stalled = False
+                    else:                       # scheduling jitter: catch up by 3 at most (the ring holds ~11)
+                        next_send = max(next_send + gap, now - 3 * gap)
+                    continue
+                stalled = True
+                ra = tx.rto_at()                # nothing to send: wait for an ACK or the RTO
+                wake = t0 + ra / 1e6 if ra is not None else now + 0.05
+            else:
+                wake = next_send
+            wake = min(wake, last_ack + idle_s, t0 + max_s)
+            wait = wake - clock()
+            # Windows: select()'s timeout has ~15 ms steps (it still wakes at once on an ACK), time.sleep() ~1 ms.
+            if wait > 0.02:
+                select.select([s], [], [], wait - 0.016)
+            elif wait > 0.0012:
+                time.sleep(min(wait - 0.0007, 0.001))
+            # else: the last ~1 ms (sub-ms gaps between sends) is a fine-grained spin
         el = clock() - t0
         log("[g2x] pass %d: %s after %.2f s, sent %d + %d resent, rto %d, loss events %d, pps end %.0f, acks %d" % (
             pass_no, stop_reason, el, tx.sent, tx.resent, tx.rto_fires, tx.loss_events, tx.pps, acks))

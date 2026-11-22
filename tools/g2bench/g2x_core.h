@@ -89,12 +89,15 @@ typedef struct {
     uint64_t tx_no;                      /* transmissions so far */
     uint32_t *rq; uint32_t rq_n, rq_cap; /* retransmit queue (seqs) */
     uint8_t *queued;                     /* count: seq is in rq */
-    uint64_t last_progress_us;
+    uint64_t last_progress_us;           /* last ACK with progress, or the last RTO */
+    uint64_t acked_stamp;                /* newest transmission (stamp) known to have arrived */
+    uint32_t rto_us;                     /* current RTO: doubles per RTO without progress */
     double pps, pps_min, pps_max;        /* pacing rate; adaptive when pps_max > pps_min */
     uint64_t last_cut_us;
     uint32_t sent, resent, loss_events, rto_fires;
 } g2x_tx;
-#define G2X_RTO_US     30000u            /* nothing acknowledged for this long: resend the oldest */
+#define G2X_RTO_US     30000u            /* nothing acknowledged for this long: resend the oldest unacked */
+#define G2X_RTO_MAX_US 500000u           /* the RTO doubles per expiry without progress, up to this */
 #define G2X_CUT_GAP_US 20000u            /* at most one rate cut per this */
 
 void g2x_tx_init(g2x_tx *t, uint32_t count, uint8_t *acked, uint64_t *stamp, uint32_t *rq, uint8_t *queued,
@@ -103,6 +106,8 @@ void g2x_tx_init(g2x_tx *t, uint32_t count, uint8_t *acked, uint64_t *stamp, uin
 void g2x_tx_on_ack(g2x_tx *t, const g2x_ack *a, uint64_t now_us);
 /* the next seq to transmit (resend first), or -1 (window closed / all sent); *resend set */
 int64_t g2x_tx_next(g2x_tx *t, uint64_t now_us, int *resend);
+/* when the RTO fires if nothing is acknowledged (0: no timer running) */
+uint64_t g2x_tx_rto_at(const g2x_tx *t);
 void g2x_tx_sent(g2x_tx *t, uint32_t seq, int resend, uint64_t now);
 int g2x_tx_done(const g2x_tx *t);
 #endif

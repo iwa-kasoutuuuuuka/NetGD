@@ -442,26 +442,55 @@ static void xsink(void *ctx, uint32_t seq, const uint8_t *data, uint16_t len)
     g_rx_total += len;
 }
 
+/* the final ACK (DONE, or STOP after the time limit) of the last finished pass: a stray datagram of that pass
+   means the PC missed every copy of it, so it gets it again (else the PC would wait for its idle limit) */
+static struct { int valid; uint16_t pass; uint8_t ack[G2X_ACK_LEN]; } g_xlast;
+static uint8_t g_xack[G2X_ACK_LEN];                    /* the last ACK sent */
+static uint8_t g_xpkt[2048] __attribute__((aligned(32)));
+
 static void x_ack(int ufd, g2x_rx *rx, const struct sockaddr_in *to, uint8_t flags)
 {
-    g2x_ack a; uint8_t b[G2X_ACK_LEN];
+    g2x_ack a;
     g2x_rx_make_ack(rx, &a, flags, now_us());
-    g2x_ack_build(b, &a);
-    sendto(ufd, b, sizeof b, 0, (const struct sockaddr *)to, sizeof *to);
+    g2x_ack_build(g_xack, &a);
+    sendto(ufd, g_xack, sizeof g_xack, 0, (const struct sockaddr *)to, sizeof *to);
+}
+
+/* 1 when p is a DATA datagram of the finished pass (answered with its final ACK) */
+static int x_stray(int ufd, const uint8_t *p, ssize_t n, const struct sockaddr_in *from)
+{
+    if (!g_xlast.valid || n < 8 || memcmp(p, "G2X1", 4) != 0 || p[4] != G2X_T_DATA ||
+        (uint16_t)(p[6] | (p[7] << 8)) != g_xlast.pass) return 0;
+    sendto(ufd, g_xlast.ack, sizeof g_xlast.ack, 0, (const struct sockaddr *)from, sizeof *from);
+    return 1;
+}
+
+/* after the last pass (no next pass answers its strays): until no stray for quiet_ms (> the PC's 500 ms RTO cap) */
+static void x_linger(int ufd, unsigned quiet_ms, unsigned max_ms)
+{
+    if (!g_xlast.valid) return;
+    uint64_t t0 = now_us(), tq = t0;
+    while (now_us() - tq < quiet_ms * 1000ull && now_us() - t0 < max_ms * 1000ull) {
+        struct sockaddr_in f; socklen_t fl = sizeof f;
+        ssize_t r = recvfrom(ufd, g_xpkt, sizeof g_xpkt, 0, (struct sockaddr *)&f, &fl);
+        if (r >= 0) { if (x_stray(ufd, g_xpkt, r, &f)) tq = now_us(); continue; }
+        thd_sleep(1);
+    }
 }
 
 static int run_xport(int ufd, unsigned n, const xpass_cfg *c)
 {
     char pfx[16], line[128];
     snprintf(pfx, sizeof pfx, "x%u", n);
-    static uint8_t pkt[2048] __attribute__((aligned(32)));
+    uint8_t *pkt = g_xpkt;
     static g2x_rx rx;
     xsink_t xs; memset(&xs, 0, sizeof xs); xs.ck = c->ck; xs.fnv = NG_FNV_INIT;
     g2x_rx_init(&rx, (uint16_t)n, PASS_BYTES, g_xslots, xsink, &xs);
     rx.need_crc = c->ck >= 1;
-    {   /* whatever is still queued from earlier passes */
+    {   /* whatever is still queued from earlier passes (strays of the previous one are answered) */
         struct sockaddr_in f; socklen_t fl = sizeof f;
-        while (recvfrom(ufd, pkt, sizeof pkt, 0, (struct sockaddr *)&f, &fl) >= 0) fl = sizeof f;
+        ssize_t r;
+        while ((r = recvfrom(ufd, pkt, sizeof g_xpkt, 0, (struct sockaddr *)&f, &fl)) >= 0) { x_stray(ufd, pkt, r, &f); fl = sizeof f; }
     }
     snprintf(line, sizeof line, "G2X go pass=%u bytes=%lu pps=%u min=%u max=%u crc=%d win=%u limit_s=%u", n,
              (unsigned long)PASS_BYTES, c->pps, c->pps_min, c->pps_max, c->ck >= 1, G2X_WIN, (unsigned)(PASS_LIMIT_US / 1000000ull));
@@ -472,11 +501,11 @@ static int run_xport(int ufd, unsigned n, const xpass_cfg *c)
     uint64_t tfirst = 0, tlast = now_us();
     while (!g2x_rx_complete(&rx)) {
         struct sockaddr_in from; socklen_t fl = sizeof from;
-        ssize_t r = recvfrom(ufd, pkt, sizeof pkt, 0, (struct sockaddr *)&from, &fl);
+        ssize_t r = recvfrom(ufd, pkt, sizeof g_xpkt, 0, (struct sockaddr *)&from, &fl);
         uint64_t t = now_us();
         if (r >= 0) {
             int w = g2x_rx_input(&rx, pkt, (size_t)r, t);
-            if (w < 0) continue;                       /* not ours (old UDP burst end packets) */
+            if (w < 0) { x_stray(ufd, pkt, r, &from); continue; }   /* not ours: the previous pass, old UDP bursts */
             if (!have_peer) { peer = from; have_peer = 1; tfirst = t; stage_f("x%u streaming (%s)", n, "g2x"); }
             tlast = t;
             if (w == 1) x_ack(ufd, &rx, &peer, 0);
@@ -488,8 +517,11 @@ static int run_xport(int ufd, unsigned n, const xpass_cfg *c)
         thd_pass();
     }
     uint64_t tend = now_us();
-    if (have_peer)                                     /* the end: the PC stops on DONE / STOP */
+    if (have_peer) {                                   /* the end: the PC stops on DONE / STOP */
         for (int i = 0; i < 5; i++) { x_ack(ufd, &rx, &peer, strcmp(status, "done") ? G2X_A_STOP : 0); thd_sleep(3); }
+        memcpy(g_xlast.ack, g_xack, sizeof g_xack);    /* strays of this pass get it again (x_stray) */
+        g_xlast.pass = (uint16_t)n; g_xlast.valid = 1;
+    }
     uint64_t bytes = xs.bytes, span = tfirst && tend > tfirst ? tend - tfirst : 0;
     int good = !strcmp(status, "done") || !strcmp(status, "time_limit");
     say("x%u %s: %lu KB, %lu KB/s, dgrams %u bad %u dups %u gaps %u acks %u", n, status, (unsigned long)(bytes / 1024),
@@ -730,6 +762,8 @@ int main(int argc, char **argv)
             stage(nm);
             if (run_xport(ufd, i + 1, &XPASSES[i]) != 0) nfail++;
         }
+        stage("g2x linger");
+        x_linger(ufd, 700, 3000);                      /* the last pass's strays */
 #endif
     }
     snprintf(g_text, sizeof g_text, "passes_failed=%d", nfail);

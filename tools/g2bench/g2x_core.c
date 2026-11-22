@@ -153,6 +153,7 @@ void g2x_tx_init(g2x_tx *t, uint32_t count, uint8_t *acked, uint64_t *stamp, uin
     memset(acked, 0, count); memset(queued, 0, count); memset(stamp, 0, sizeof *stamp * count);
     t->limit = count < G2X_WIN ? count : G2X_WIN;
     t->pps = pps; t->pps_min = pps_min; t->pps_max = pps_max;
+    t->rto_us = G2X_RTO_US;
 }
 
 static void enqueue(g2x_tx *t, uint32_t s)
@@ -171,26 +172,29 @@ static void cut(g2x_tx *t, uint64_t now)
 void g2x_tx_on_ack(g2x_tx *t, const g2x_ack *a, uint64_t now)
 {
     int progress = 0;
+    uint64_t top = t->acked_stamp;
     uint32_t cum = a->cum > t->count ? t->count : a->cum;
-    while (t->cum < cum) { if (!t->acked[t->cum]) { t->acked[t->cum] = 1; progress = 1; } t->cum++; }
-    int64_t high = -1;
+    while (t->cum < cum) {
+        if (!t->acked[t->cum]) { t->acked[t->cum] = 1; progress = 1; if (t->stamp[t->cum] > top) top = t->stamp[t->cum]; }
+        t->cum++;
+    }
     for (unsigned i = 0; i + 1 < G2X_WIN; i++) {
         uint32_t bit = i < 32 ? (a->sack_lo >> i) & 1u : (a->sack_hi >> (i - 32)) & 1u;
         uint32_t q = cum + 1 + i;
         if (!bit || q >= t->count) continue;
         if (!t->acked[q]) { t->acked[q] = 1; progress = 1; }
-        high = q;
+        if (t->stamp[q] > top) top = t->stamp[q];
     }
     while (t->cum < t->count && t->acked[t->cum]) t->cum++;
     if (a->limit > t->limit) t->limit = a->limit > t->count ? t->count : a->limit;
-    if (progress) t->last_progress_us = now;
-    /* a hole below a datagram sent after it = lost (the BBA ring is FIFO: nothing is reordered) */
+    if (progress) { t->last_progress_us = now; t->rto_us = G2X_RTO_US; }
+    t->acked_stamp = top;
+    /* unacknowledged, and sent before a datagram that arrived = lost (the BBA ring is FIFO: nothing is
+       reordered). Covers the cumulative part too: when an RTO resend of the oldest gets through, whatever
+       was in flight before it is known lost and resent at once (no RTO per datagram). */
     int lost = 0;
-    if (high >= 0) {
-        uint64_t hs = t->stamp[high];
-        for (uint32_t q = t->cum; q < (uint32_t)high; q++)
-            if (!t->acked[q] && !t->queued[q] && t->stamp[q] && t->stamp[q] < hs) { enqueue(t, q); lost = 1; }
-    }
+    for (uint32_t q = t->cum; q < t->next_new; q++)
+        if (!t->acked[q] && !t->queued[q] && t->stamp[q] && t->stamp[q] < top) { enqueue(t, q); lost = 1; }
     if (lost) cut(t, now);
     else if (progress && t->pps_max > t->pps_min) { t->pps += 3.0; if (t->pps > t->pps_max) t->pps = t->pps_max; }
 }
@@ -203,12 +207,15 @@ int64_t g2x_tx_next(g2x_tx *t, uint64_t now, int *resend)
         t->queued[s] = 0;
         if (!t->acked[s]) { *resend = 1; return s; }
     }
-    if (t->cum < t->next_new && t->last_progress_us && now - t->last_progress_us > G2X_RTO_US) {
-        t->last_progress_us = now;                  /* back off until the next RTO */
+    if (t->cum < t->next_new && t->last_progress_us && now - t->last_progress_us > t->rto_us) {
+        /* nothing acknowledged for an RTO: resend only the oldest unacked (t->cum is never acked), and back
+           off (x2 up to G2X_RTO_MAX_US) until an ACK makes progress. The ACK for it tells what else is lost. */
+        t->last_progress_us = now;
+        t->rto_us = t->rto_us * 2 > G2X_RTO_MAX_US ? G2X_RTO_MAX_US : t->rto_us * 2;
         t->rto_fires++;
         cut(t, now);
-        for (uint32_t q = t->cum; q < t->next_new; q++) enqueue(t, q);   /* all of them are >= RTO old */
-        if (t->rq_n) return g2x_tx_next(t, now, resend);
+        *resend = 1;
+        return t->cum;
     }
     if (t->next_new < t->count && t->next_new < t->limit) { *resend = 0; return t->next_new; }
     return -1;
@@ -220,6 +227,11 @@ void g2x_tx_sent(g2x_tx *t, uint32_t seq, int resend, uint64_t now)
     if (resend) t->resent++;
     else { t->next_new++; t->sent++; }
     if (!t->last_progress_us) t->last_progress_us = now ? now : 1;   /* the RTO clock starts with the first send */
+}
+
+uint64_t g2x_tx_rto_at(const g2x_tx *t)
+{
+    return t->cum < t->next_new && t->last_progress_us ? t->last_progress_us + t->rto_us + 1 : 0;
 }
 
 int g2x_tx_done(const g2x_tx *t) { return t->cum >= t->count; }
