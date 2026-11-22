@@ -317,7 +317,18 @@ impl IdeDevice {
         }
     }
 
+    /// Write ERROR. On the packet device (the primary) a 0 is not written:
+    /// stock GDEMU 6.0 keeps the last CHECK's ERROR (0x50, 0x60 ...) through
+    /// every command that succeeds, until the next CHECK or a reset (seq
+    /// 15-17 register polls). The ERR status bit, cleared by the FPGA on
+    /// every Command write, tells the host it means nothing now. A bitstream
+    /// that still clears ERROR on the PACKET write (before
+    /// fix/head-pos-sticky-err) reads 0 after a successful packet command, as
+    /// before. The disk (secondary) keeps writing 0.
     fn set_error(&self, err: u8) {
+        if err == 0 && self.is_primary() {
+            return;
+        }
         self.write(REG_ERROR, err as u16);
     }
 
@@ -1074,6 +1085,7 @@ async fn handle(
             // the park position (seq 17 `DR_`: CDI `01 2f 01 01 01 00 00 96`,
             // GDI `01 8f 41 03 01 00 b0 5e`), whatever was read before.
             crate::cdda::stop();
+            set_last_read_fad(0);
             // Stock re-detects on every DEVICE RESET, window or not (R155,
             // R159, seq 17): SECNR 0x00 now, the byte at rest detect_time
             // later (`ide_task`'s timer, which writes SECNR only), then the
@@ -1381,6 +1393,7 @@ fn mounted(state: &mut DeviceState, ok: bool) {
         SWITCHED.store(true, core::sync::atomic::Ordering::Relaxed);
         IDLE_STATUS.store(GD_PAUSE, core::sync::atomic::Ordering::Relaxed);
     }
+    set_last_read_fad(0);
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
     // Whatever was mounted by name before is gone; `mount_named` records its
@@ -1783,13 +1796,22 @@ pub const GD_PLAY: u8 = 0x03;
 /// SECNR): standby from power-on -- the boot mount included -- until the
 /// first successful image switch, pause after one (D2, stock GDEMU 6.0:
 /// records 02/05/06 img=0 vs every `img=n` after `52 82 n`). CD_READ leaves
-/// it alone (no stock record shows REQ_STAT after a read without a switch or
-/// a Dreamcast reset in between). CD_SEEK stop (types other than 4) sets
-/// standby again, as SECNR already did.
+/// it alone (stock stays pause after its reads, seq 17/18 `RS_REQ_STAT`, and
+/// standby after a cold power-on's BIOS reads). CD_SEEK stop (types other
+/// than 4) sets standby again, as SECNR already did.
 static IDLE_STATUS: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(GD_STANDBY);
 /// An image was switched in since power-on: the idle head is the switch's
 /// park position (`discimg::atapi::idle_fad`, D4), not FAD 150.
 static SWITCHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Where the last CD_READ since the mount left the head
+/// (`discimg::atapi::read_end_fad`), 0 = none: REQ_STAT / GET_SCD report it
+/// once switched (`discimg::atapi::rest_fad`; stock seq 17/18). A mount and
+/// DEVICE RESET put it back to 0 (the park position).
+static LAST_READ_FAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn set_last_read_fad(fad: u32) {
+    LAST_READ_FAD.store(fad, core::sync::atomic::Ordering::Relaxed);
+}
 
 fn idle_status() -> u8 {
     IDLE_STATUS.load(core::sync::atomic::Ordering::Relaxed)
@@ -2260,6 +2282,10 @@ async fn handle_cd_read(
     // Mode 2 track, either on an audio track is CHECK 5/64/00 (D8, D9, R144).
     let track = gdi.track_for_lba(lba);
     if let Some(t) = track {
+        // The head goes to the start whatever follows (stock seq 17: a type
+        // refused 5/64/00 leaves REQ_STAT at the start FAD); past the last
+        // sector once the transfer is through (below).
+        set_last_read_fad(starting_fad);
         if discimg::atapi::cd_read_type_mismatch(packet[1], t.mode()) {
             warn!("{}: CD_READ type {=u8:#x} does not fit the track", label, packet[1]);
             finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, discimg::atapi::ASC_ILLEGAL_MODE);
@@ -2331,6 +2357,8 @@ async fn handle_cd_read(
         // The card failed under the read: MEDIUM ERROR for the REQUEST SENSE
         // that follows the error status the stream posted.
         state.pending_sense_key = 0x03;
+    } else {
+        set_last_read_fad(discimg::atapi::read_end_fad(starting_fad, count));
     }
     if raw_out() {
         // What is staged is laid out 2,352 apart: not a cache entry, and no
@@ -4536,11 +4564,13 @@ fn build_req_stat_reply() -> [u8; 10] {
 }
 
 /// Idle head position (D4): FAD 150 until the first switch, then the
-/// mounted image's park position (GDI: track 3's start).
+/// mounted image's park position (GDI: track 3's start), or where the last
+/// CD_READ since the mount ended (`LAST_READ_FAD`).
 fn idle_fad() -> u32 {
     let switched = SWITCHED.load(core::sync::atomic::Ordering::Relaxed);
     let is_cdi = matches!(gdi_ref(), Some(g) if g.is_cdi);
-    discimg::atapi::idle_fad(mounted_tracks(), is_cdi, switched)
+    let last = LAST_READ_FAD.load(core::sync::atomic::Ordering::Relaxed);
+    discimg::atapi::rest_fad(mounted_tracks(), is_cdi, switched, last)
 }
 
 /// Build a 6-byte REQ_SES reply describing one session (0-indexed).

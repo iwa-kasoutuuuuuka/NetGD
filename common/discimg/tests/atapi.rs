@@ -701,6 +701,43 @@ fn the_stock_record_of_a_cdi_after_a_switch() {
 }
 
 #[test]
+fn the_stock_record_of_the_head_after_cd_read() {
+    // seq 17/18 RS_REQ_STAT: the IP_READ (7 sectors, type 0x24), then a
+    // same-folder re-switch that changes nothing. GDI 03: read from 45150,
+    // the head is past the 7th sector (45157), still paused, track 3.
+    let g = stock_gdi03();
+    let last = read_end_fad(45150, 7);
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, last));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_GDROM, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("018f41030100b0650000")[..]);
+    // CDI 04 (same track layout as the dcload CDI): Mode 1 asked of the Mode 2
+    // track at 0x2E4C, refused before any sector -> the start FAD, track 2.
+    let c = dcload_cdi();
+    let last = read_end_fad(0x2E4C, 0);
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, last));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("012f410201002e4c0000")[..]);
+    // img=0 after a Dreamcast reset (remount, then the BIOS boots dcload): the
+    // last read ended at lead-out - 2.
+    let (fad, tr) = head_position(&c, AudioState::Standby, 0, rest_fad(&c, true, true, 0x05017A));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, DISC_FORMAT_CDROM_XA, 0, fad, tr);
+    assert_eq!(&stat[..], &hex("012f41020105017a0000")[..]);
+    // GET_SCD follows the same head.
+    let mut r = [0u8; 100];
+    let (fad, tr) = head_position(&g, AudioState::Standby, 0, rest_fad(&g, false, true, 45157));
+    assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
+    assert_eq!(&r[..14], &hex("0015000e4103010000070000b065")[..]);
+    // No read since the mount (0), and before any switch (cold power-on:
+    // standby at 150 whatever the BIOS read): the park rules of idle_fad.
+    assert_eq!(rest_fad(&g, false, true, 0), 45150);
+    assert_eq!(rest_fad(&c, true, true, 0), 150);
+    assert_eq!(rest_fad(&c, true, false, 0x05017A), 150);
+    assert_eq!(rest_fad(&g, false, false, 45157), 150);
+    // CD-DA keeps its own position.
+    assert_eq!(head_position(&g, AudioState::Paused, 1000, rest_fad(&g, false, true, 45157)).0, 1000);
+}
+
+#[test]
 fn identify_packet_is_the_stock_80_bytes() {
     // stock_20261122_08_identify.txt, probe=IDENTIFY_PACKET: 80 bytes, in the
     // order gdprobe stores them (each 16-bit data word little-endian) (D16).
