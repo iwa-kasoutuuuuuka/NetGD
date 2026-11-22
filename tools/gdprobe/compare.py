@@ -27,6 +27,10 @@ Record format (see README_ja.md): one line per probe,
     mounted folder, no reset)  and  DR_IDLE idle_ms=500 / DR_SW_DEVRESET delay_ms=0 ... / DR_SW_REGPOLL / DR_SW_POLL /
     DR_SW_RESULT ... ua_28=0|1   (seq 17: DEVICE RESET with no switch command). Same matching and timing rules as R148;
     ua_28 (UNIT ATTENTION 6/28/00 seen) is compared exactly.
+img=3 probe=DC10_IDLE / DC10_SW_DEVRESET / DC10_CMD_TUR / DC10_CMD_REQ_STAT / DC10_CMD_REQ_ERROR / DC10_CMD_POLL / DC10_CMD_RESULT
+    (seq 20: commands 10 ms (50, 100) after an ATA DEVICE RESET; CMD_TUR and CMD_POLL carry rc/status/err/sense/secnr/altst,
+    CMD_RESULT has ready / ready_ms = time from the reset to the first READY). ready_ms is a timing (ratio note only);
+    rc, status, err, sense, secnr, altst and ready are compared exactly (secnr / altst only when both records have them).
 Lines starting with '#' are header/trailer comments and are ignored.
 
 Image assumptions (the `--image` check):
@@ -125,11 +129,11 @@ def to_int(s, default=None):
 FIELDS_EXACT = ('rc', 'status', 'err', 'irr', 'bytes')
 # fields of event lines that are timings (compared by ratio, never as exact differences)
 TIMING_FIELDS = ('us', 't_ms', 'poll', 'polls', 'changes', 'min_us', 'max_us', 'kib_s',
-                 'sample', 'samples', 'reset_us', 'idle_ms')   # sample(s) / reset_us: R148 SW_REGPOLL / SW_DEVRESET
+                 'sample', 'samples', 'reset_us', 'idle_ms', 'ready_ms')   # sample(s) / reset_us: R148 SW_REGPOLL / SW_DEVRESET
 NO_COMPARE = ('img', 'probe', '_line', 'cdb', 'data')
 # fields added later (cdbst = ALTSTATUS in the CDB phase, secnr = GD-ROM sector-number status register): compared
 # only when BOTH records have them, so older records still compare cleanly
-OPTIONAL_FIELDS = ('cdbst', 'secnr')
+OPTIONAL_FIELDS = ('cdbst', 'secnr', 'altst')
 
 
 def diff_hex(a, b, limit=8):
@@ -194,7 +198,7 @@ def compare_records(ea, eb, ratio_limit=TIMING_RATIO_DEFAULT, ignore_timing=Fals
         if parts:
             diffs.append('%s: %s' % (name, ' | '.join(parts)))
         if not ignore_timing:
-            for f in ('us', 't_ms', 'kib_s'):
+            for f in ('us', 't_ms', 'kib_s', 'ready_ms'):
                 va, vb = to_int(a.get(f)), to_int(b.get(f))
                 r = ratio(va, vb)
                 if r is None:

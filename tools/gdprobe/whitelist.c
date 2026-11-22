@@ -48,7 +48,7 @@ const wl_ata_entry wl_ata_table[] = {
     { "DEVICE_RESET", 0x08, WL_ATA_DEVRESET,
       "ATA (ATA-4 8.7, mandatory for packet devices): resets the device's interface/protocol state; no data, "
       "nothing written to the medium; addressed to the selected (master) device only, DEVICE_SELECT is never "
-      "written. Only for the R148 swap-window probe (switch=on and swap_devreset=on or devreset_only=on)" },
+      "written. Only for the R148 swap-window probe (switch=on and swap_devreset=on, devreset_only=on or devreset_cmd=on)" },
 };
 const int wl_ata_count = (int)(sizeof(wl_ata_table) / sizeof(wl_ata_table[0]));
 

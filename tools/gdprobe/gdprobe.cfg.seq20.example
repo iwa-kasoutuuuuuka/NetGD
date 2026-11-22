@@ -1,0 +1,29 @@
+# gdprobe run configuration for seq 20: what does the STOCK GDEMU answer to commands sent DURING the re-detect
+# after an ATA DEVICE RESET? (NetGD answers NOT READY 2/04/01; KOS cdrom_reinit_ex may treat sense key 2 as "no disc".)
+# Copy to <host folder>/gdprobe.cfg. See README_ja.md, "seq 20 の実行計画".
+
+label=stock
+seq=20
+
+# 4 = Mode 2 Form 1 CDI, 3 = GDI, 7 = the empty folder (NO DISC). Back to the dcload-ip disc at the end.
+switch=on
+images=4,3,7
+return_to=2
+switch_timeout_ms=5000
+
+# the earlier swap-window probes: all off this time
+swap_regpoll=off
+swap_devreset=off
+swap_reswitch=off
+devreset_only=off
+
+# after each image battery, for each delay: 500 ms idle, DEVICE RESET, wait <delay> ms, TUR / REQ_STAT / REQ_ERROR,
+# then TUR every 10 ms until READY (max 2 s)
+devreset_cmd=on
+devreset_cmd_ms=10,50,100
+
+# information only: no per-image read battery
+cdread_flags_test=off
+throughput=off
+seek=off
+identify=off

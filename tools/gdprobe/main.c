@@ -130,6 +130,40 @@ int main(int argc, char **argv)
              cfg.swap_reswitch, (unsigned long)cfg.swap_reswitch_wait_ms, cfg.devreset_only,
              (unsigned long)cfg.devreset_only_wait_ms);
     header(h);
+    n = (size_t)snprintf(h, sizeof(h), "config devreset_cmd=%d devreset_cmd_ms=", cfg.devreset_cmd);
+    for (i = 0; i < cfg.n_devreset_cmd && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.devreset_cmd_ms[i]);
+    header(h);
+    /* keys that change which probes run (or where), not printed above; old records lack this line */
+    snprintf(h, sizeof(h), "config cdread_flags_test=%d seek_span=%lu switch_timeout_ms=%lu", cfg.do_cdread_flags,
+             (unsigned long)cfg.seek_span, (unsigned long)cfg.switch_timeout_ms);
+    header(h);
+    n = (size_t)snprintf(h, sizeof(h), "config head_probe=%d head_flags=0x%02x head_late_ms=%lu head_idle_ms=%lu head_scd=%d head_counts=",
+                         cfg.head_probe, cfg.head_flags, (unsigned long)cfg.head_late_ms, (unsigned long)cfg.head_idle_ms,
+                         cfg.head_scd);
+    for (i = 0; i < cfg.n_head_counts && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.head_counts[i]);
+    header(h);
+    n = (size_t)snprintf(h, sizeof(h), "config gap_probe=%d gap_flags=0x%02x gap_late_ms=%lu gap_scd=%d gap_track_end=%lu gap_count0=%d gap_leadout=",
+                         cfg.gap_probe, cfg.gap_flags, (unsigned long)cfg.gap_late_ms, cfg.gap_scd,
+                         (unsigned long)cfg.gap_track_end, cfg.gap_count0);
+    for (i = 0; i < cfg.n_gap_leadout && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.gap_leadout[i]);
+    n += (size_t)snprintf(h + n, sizeof(h) - n, " gap_low=");
+    for (i = 0; i < cfg.n_gap_low && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.gap_low[i]);
+    header(h);
+    n = (size_t)snprintf(h, sizeof(h), "config gap_crc=%d pregap_probe=%d pregap_cross=%d pregap_low=", cfg.gap_crc,
+                         cfg.pregap_probe, cfg.pregap_cross);
+    for (i = 0; i < cfg.n_pregap_low && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.pregap_low[i]);
+    n += (size_t)snprintf(h + n, sizeof(h) - n, " pregap_offs=");
+    for (i = 0; i < cfg.n_pregap_offs && n < sizeof(h) - 8; i++)
+        n += (size_t)snprintf(h + n, sizeof(h) - n, "%s%d", i ? "," : "", cfg.pregap_offs[i]);
+    header(h);
+    snprintf(h, sizeof(h), "config risky_cross=%s ctl_probe=%d",
+             cfg.risky_cross == GP_RISKY_END ? "end" : cfg.risky_cross == GP_RISKY_OFF ? "off" : "inline", cfg.ctl_probe);
+    header(h);
     sink_sync(NULL);
 
     /* Without cdrom_init the G1 bus protection may still be closed: every
