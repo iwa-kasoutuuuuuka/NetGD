@@ -2519,8 +2519,27 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - **/pc/ の fread（`-f` あり、括弧内は R166 の `-f` なし）**：1 回あたり 1 KiB 0.93 ms（25.8）、4 KiB 1.48 ms（25.8）、16 KiB 3.19 ms（27.8）、64 KiB 13.8 ms（33.8）→ 1 KiB 1,074 KB/s（38）、4 KiB 2,693 KB/s（154）、**16 KiB 5,009 KB/s**（575）、64 KiB 4,639 KB/s（1,894）。固定費は約 0.9 ms、残りはおよそ 4〜5 MB/s の転送。64 KiB が 16 KiB より少し遅いのは、64 KiB で PARTBIN の欠けの再送が起きている可能性（未確認）。
 - SH-4 の CRC-32・FNV-1a は R166 と同じ（18,162・16,881 KB/s、両方 8,753 KB/s）。
 - **スレッドで重ねる**：直列 2,716 KB/s → 重ねて 2,950 KB/s（**+9 %**、読み込みだけ 4,474、計算だけ 9,099）。`-f` で読み込みの待ちが減ると、わずかに重なる。
-- G2 への意味：dcload の /pc/ を送り手にするなら `-f`・16 KiB 単位で約 5 MB/s（BBA の ELF 送信 4.3〜5.5 MB/s と同程度）。CRC と FNV を両方計算すると約 2.7 MB/s が上限になるので、片方にする（FNV だけで約 17 MB/s）か計算の場所を考える。g2-perf-plan の中心の見積もり（0.88 MB/s）は `-f` なしの値に近く、`-f` ありでは書き込み側（SD・G1）が律速になりうる。
+- G2 への意味：dcload の /pc/ を送り手にするなら `-f`・16 KiB 単位で約 5 MB/s（BBA の ELF 送信 4.3〜5.5 MB/s と同程度）。読み込み（`-f`・16 KiB）と CRC・FNV の両方の計算を直列にすると約 2.7 MB/s（計算だけなら両方で約 8.7 MB/s が上限、R167 の訂正：計算そのものが 2.7 MB/s で頭打ちになるわけではない）。片方だけにすると直列の鎖は約 2〜2.5 割速くなる見込み（推定）。g2-perf-plan の中心の見積もり（0.88 MB/s）は `-f` なしの値に近く、`-f` ありでは書き込み側（SD・G1）が律速になりうる。
 - 関連：R166、`docs/research/g2-perf-plan.md`。
+
+### R168 取り込みの準備：merge/batch8（batch7 + 8 本）とローカル CI（Opus・比較のセッション）
+
+- `merge/batch7`（main `e4995981` から）：docs/r146-r159、docs/g2-perf-plan、ci/size-gate（`tools/fwsize/check.py --gate-2e`：`.image_pad` の手前までの使用量を 122,880 と比べる。リンカーと同じ点で失敗）、tools/ci-local（この PC で build.yaml と同じ確認、約 17〜30 分）、fix/name-trim-cfg（VT の扱いの統合、256 B を超える GAME.CFG は最後の改行まで）、fix/audio-cdi-format（R155）、feat/fpga-regs（R163）、feat/gdprobe-seq17、feat/pinfind-supra（R162）、fix/r159-devreset（R163、レビューの修正 `528ed203`）。ローカル CI で確認（netgd-send の 1 件は Windows の予約ポートによる不安定、後で修正）。
+- `merge/batch8`（batch7 から）：fix/test-robustness（netgd-send の予約ポート、netgd-fwupd の CRLF）、fix/expect-cdbst-carry（テストだけ）、docs/g2-perf-plan-m0（R166・R167 の実測）、fix/sdmmc-lfn-panic（embedded-sdmmc 0.9.0 を同梱し LFN・BPB の 0 除算・範囲外クラスタ・循環するディレクトリを直す、R165）、feat/fatrd-host（自前の FAT 読み込み、ホストだけ）、fix/fat-crafted-card（fat.rs の細工カード対策）、fix/head-pos-sticky-err（REQ_STAT のヘッド位置・ERROR の保持、FPGA の変更込み）、tools/ci-local-steps。
+- レビュー：fix/sdmmc-lfn-panic・fix/fat-crafted-card・fix/head-pos-sticky-err・feat/fpga-regs・fix/r159-devreset・fix/name-trim-cfg・ci/size-gate はすべて Fable がレビューし、指摘を直した。
+- 確認：`merge/batch8` `e872dee7` でローカル CI 38 / 38 OK（約 17 分）、その後 `1e7cf7fe`（ci-local の手順の追加）で関係する手順を確認。2E release-z の使用量 117,232 B、上限 122,880 B まで 5,648 B。
+- 実機：NetGD はまだ実機で動かしていない。純正との差は R152 の総点検の方法で、記録 15〜20 について REQ_STAT・ERROR・DEVICE RESET・同じフォルダへの再切替がすべて一致（D10・D14・D15 と予測の限界を除く）。
+- 関連：R146〜R167。
+
+### R169 Supra の af_map の RETIMING が FF のイネーブルと同期リセットを壊す（ピン探しと本体コア）（Sonnet・Opus）
+
+- ピン探しのゲートレベル・シミュレーション（`feat/pinfind-gatesim`、`32c9e8e9`、Sonnet）：`gatesim.py` が Icarus Verilog 12.0 で動く（`alta_sim.v` から要るモジュールだけ取り出す）。段階 0 と osc の短縮版（`gen.py --prescale 1 --start 8`）で同時に Low は最大 1 本。ただし配置配線後は 1 周で止まらず、最後のボール 131 を駆動しないことが分かった。
+- 原因（`733d293f`、Opus）：**Supra 2026.03.b0 の `af_map.tcl` が既定で走らせる RETIMING（dfflegalize の前の Yosys 0.61 `abc -markgroups -dff -D 100`）**。ABC は FF を素のラッチとして扱い、イネーブルと同期リセットをあとで付け直すので、イネーブル中だけ効く同期リセット（`$sdffce`）が常に効くリセット（`$sdffe`）になり、`scorr`・`retime` が誤ったモデルで回路を変える。マップ直後の .vqm で既に誤り（Yosys の途中段を書き出して、RETIMING の前は正・後は誤と確認）。最小再現 `if (en) c <= (c == 131) ? 0 : c + 1;`。Supra のシミュレーション用モデルにも欠陥（`dffeas` が ena・sclr・sload を無視、`cycloneive_lcell_comb` の cin が未接続）。
+- ピン探しの修正：コアの 1 周の終わりを FSM の外に書き直し、`build.sh` は `PinFind.pre_map.asf` に `set RETIMING "None"`、map.log で DFFLEGALIZE の前に ABC があれば止める。osc の短縮版は 132 本すべて駆動し 1,436.5 µs で停止（.vqm と RTL のパッドの変化 8,977 行が一致）、段階 0 合格、ring も初めて判定でき合格（1,781.2 µs で停止）。
+- **本体コア（`fix/agm-no-retiming`、`406272f3`、Opus）**：RETIMING ありでは **`core.cdda.pair_valid`（定数 1 をセットする FF）が消えて音声 FIFO が読まれず CDDA が無音**、`$sdffce` の 2 個のうち `cdda.shift[0]` は右チャンネルの LSB が常に 0（`cdda.sdat` は影響なし）。`fpga/agm/build.sh` も同じ方法で RETIMING を止めた。マップ後の .vqm（fixio の前）を直したセルモデルで上位から動かし、RTL とトレース 1,782 行が一致（RETIMING ありは無音、FIFO の量は 16 のまま）。
+- 比較（仮ピン、既定のシード / シード 1）：LUT 2,060 → 2,241、FF 1,107 → 1,115、48 MHz 系 Fmax 90.6 / 91.3 → 97.9 / 92.7 MHz、LZMA 40.5 → 42.1 KB。**R99・R106・R158 の大きさ・資源は RETIMING ありの値**。配置配線後と実機は未確認。
+- 両方とも `merge/batch8` に取り込み済み（`f59d3a57`）、ピン探しのテストは通過。
+- 関連：R99、R106、R145、R158、R162。
 
 ## 判断の記録（Decisions）
 
