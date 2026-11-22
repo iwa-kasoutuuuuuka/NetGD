@@ -99,10 +99,14 @@
  *                          and, with dma_pio_ref, the SAME range read by PIO (..._PIO, CRC compared) and its _POS line
  *   dma_data=on            data-track cases      dma_audio=off   audio-track cases (7 x 2352 = 16464 is not a multiple of 32)
  *   dma_counts=1,2,7,16    sector counts (up to 6 values, 1..16)
- *   dma_modes=exact,floor,pad   DMA length programmed (only differs when the sector bytes are not a multiple of 32):
+ *   dma_modes=exact        (seq 25c: exact only; floor / pad are opt-in and run in a last phase, see below)
+ *                          DMA length programmed (only differs when the sector bytes are not a multiple of 32):
  *                          exact = the sector bytes as they are, floor = rounded DOWN to 32 (the drive keeps the rest:
  *                          it is drained by PIO and recorded, drain= / tail= / tail_ok=), pad = rounded UP to 32
  *                          (stock's drive sends no more than the sector, so the engine may wait forever, seq 25 record).
+ *                          floor and pad are RISKY: stock wedged on floor (record 26: the drive stayed BSY with the last
+ *                          16 bytes of the sector, every later command timed out). They run only after every image's normal
+ *                          cases and the data throughput, one image at a time again, before return_to (seq 25c).
  *                          Tried in this order. A DMA that does not complete stops only its own (data|audio, mode) kind
  *                          (DM_STOP slot=..), not the other modes, kinds or the data throughput; 6 incomplete DMAs
  *                          in one run stop all DMA cases (seq 25b)

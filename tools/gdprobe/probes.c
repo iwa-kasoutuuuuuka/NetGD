@@ -1281,7 +1281,7 @@ static void dma_case(runner *r, hp_state *s, char kind, uint8_t flags, uint32_t 
     int mi = (exp % 32 == 0) ? 0 : (mode == GP_DMA_PAD ? 1 : mode == GP_DMA_FLOOR ? 3 : 2);
     int slot = DMA_SLOT(kind == 'A' ? 1 : 0, mi);
     const char *mn = dma_mode_names[mi];
-    char nm[48], lb[40], ex[1100], df[560], cr[260], sn[24];
+    char nm[48], lb[40], ex[1200], df[560], cr[260], sn[24], ov[72];
     int ok;
     if (r->abort)
         return;
@@ -1309,9 +1309,15 @@ static void dma_case(runner *r, hp_state *s, char kind, uint8_t flags, uint32_t 
     }
     dma_fields(df, sizeof(df), &dl);
     crc_fields(cr, sizeof(cr), r->dbuf, ext < exp ? ext : exp, count, ssz);
-    snprintf(ex, sizeof(ex), "kind=%s flags=0x%02x fad=%lu count=%lu mode=%s exp=%lu dma_len=%lu extent=%lu ext_ok=%d pad_written=%d over=%d sense=%s %s%s",
+    ov[0] = 0;
+    if (ext > dlen) {   /* what the engine wrote past the length it was given (the guard area): first 32 bytes */
+        uint32_t on = ext - dlen;
+        rec_hex(ov, r->dbuf + dlen, on < 32 ? on : 32);
+    }
+    snprintf(ex, sizeof(ex), "kind=%s flags=0x%02x fad=%lu count=%lu mode=%s exp=%lu dma_len=%lu extent=%lu ext_ok=%d pad_written=%d over=%d over_n=%lu over_hex=%s sense=%s %s%s",
              kind == 'A' ? "audio" : "data", flags, (unsigned long)fad, (unsigned long)count, mn, (unsigned long)exp,
-             (unsigned long)dlen, (unsigned long)ext, ext >= exp, ext > exp, ext > dlen, sn, df, cr);
+             (unsigned long)dlen, (unsigned long)ext, ext >= exp, ext > exp, ext > dlen,
+             (unsigned long)(ext > dlen ? ext - dlen : 0), ov[0] ? ov : "-", sn, df, cr);
     res.total = ext;
     res.stored = 0;
     p.img = r->img; p.name = nm; p.extra = ex; p.cdb = c; p.res = &res; p.data = NULL;
@@ -1340,6 +1346,19 @@ static void dma_case(runner *r, hp_state *s, char kind, uint8_t flags, uint32_t 
         hp_note_abort(r, s);
         snprintf(pl, sizeof(pl), "%s_PIO", lb);
         hp_pos(r, s, pl, 1, fad, count, NULL);
+        if (ext > dlen && !r->abort) {     /* are the bytes past dma_len the start of the next sector? */
+            uint8_t nc[12];
+            gd_result nr;
+            uint32_t on = ext - dlen, k = on < 32 ? on : 32;
+            char nf[100], nn[56];
+            cdb_read(nc, flags, fad + count, 1);
+            send_cmd(r, nc, BUFSZ, read_timeout(r), &nr);
+            snprintf(nf, sizeof(nf), "fad=%lu over_n=%lu next_rc=%s over_eq_next=%s", (unsigned long)(fad + count),
+                     (unsigned long)on, rec_rc_name(nr.rc),
+                     (nr.rc == GD_OK && nr.stored >= dlen - exp + k) ? (memcmp(r->dbuf + dlen, r->buf + (dlen - exp), k) == 0 ? "1" : "0") : "-");
+            snprintf(nn, sizeof(nn), "DM_%s_OVER", lb);
+            out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, nn, nf), 0);
+        }
     }
     sync_out(r);
 }
@@ -1422,7 +1441,19 @@ static void dma_throughput(runner *r, uint32_t ip, uint32_t lim)
  *                                     run when the bytes are already a multiple of 32), then the _PIO re-read
  *   throughput                        DM_TP_* (dma_throughput)
  * Every read is FAD addressed, at most 16 sectors, inside one track; the first DMA that does not complete stops the lot. */
-static void dma_probe(runner *r)
+static int dma_risky_mode(int md) { return md == GP_DMA_PAD || md == GP_DMA_FLOOR; }
+static int dma_has_risky(const gp_config *c)
+{
+    int i;
+    for (i = 0; i < c->n_dma_modes; i++)
+        if (dma_risky_mode(c->dma_mode_list[i]))
+            return 1;
+    return 0;
+}
+
+/* phase 0: the normal cases (aligned lengths once as "al", unaligned ones in the non-risky modes) and the throughput;
+ * phase 1: only the risky modes (pad, floor), called after everything else */
+static void dma_probe(runner *r, int phase)
 {
     hp_state s;
     uint32_t d = r->toc_ip, e = r->toc_ip_end, a = r->toc_audio, ae = r->toc_audio_end;
@@ -1439,10 +1470,11 @@ static void dma_probe(runner *r)
     s.scd = r->cfg->dma_scd;
     data_ok = r->cfg->dma_data && d && e > d && e - d >= 256;
     aud_ok = r->cfg->dma_audio && a && ae > a && ae - a >= 64;
-    say(r, "DMA probe...");
-    event(r, "DM_START", "data_fad=%lu data_end=%lu audio_fad=%lu audio_end=%lu data_cases=%d audio_cases=%d flags=0x%02x",
+    say(r, phase ? "DMA probe, risky modes..." : "DMA probe...");
+    event(r, phase ? "DM_RISKY_START" : "DM_START", "data_fad=%lu data_end=%lu audio_fad=%lu audio_end=%lu data_cases=%d audio_cases=%d flags=0x%02x",
           (unsigned long)d, (unsigned long)e, (unsigned long)a, (unsigned long)ae, data_ok, aud_ok, r->cfg->dma_flags);
-    hp_pos(r, &s, "BASE", 0, 0, 0, NULL);
+    if (phase == 0)
+        hp_pos(r, &s, "BASE", 0, 0, 0, NULL);
     for (k = 0; k < 2 && !r->abort; k++) {
         uint32_t lo = k ? a : d, len = k ? ae - a : e - d;
         if (!(k ? aud_ok : data_ok))
@@ -1456,13 +1488,19 @@ static void dma_probe(runner *r)
             if (fad + n > lo + len)
                 fad = lo + len - n;
             for (m = 0; m < r->cfg->n_dma_modes && !r->abort; m++) {
-                dma_case(r, &s, k ? 'A' : 'D', r->cfg->dma_flags, fad, n, r->cfg->dma_mode_list[m]);
-                if ((n * ssz) % 32 == 0)
-                    break;      /* pad == exact: one run */
+                int md = r->cfg->dma_mode_list[m];
+                if ((n * ssz) % 32 == 0) {      /* pad == exact == floor: one run, in phase 0 */
+                    if (phase == 0)
+                        dma_case(r, &s, k ? 'A' : 'D', r->cfg->dma_flags, fad, n, md);
+                    break;
+                }
+                if (dma_risky_mode(md) != (phase == 1))
+                    continue;
+                dma_case(r, &s, k ? 'A' : 'D', r->cfg->dma_flags, fad, n, md);
             }
         }
     }
-    if (r->cfg->dma_throughput && !r->abort && !r->dma_stop[DMA_SLOT(0, 0)] && !dma_all_stopped(r)) {
+    if (phase == 0 && r->cfg->dma_throughput && !r->abort && !r->dma_stop[DMA_SLOT(0, 0)] && !dma_all_stopped(r)) {
         uint32_t ip = r->cfg->ip_fad ? r->cfg->ip_fad : (r->ip_fad ? r->ip_fad : d);
         if (d && ip)
             dma_throughput(r, ip, e);
@@ -2016,7 +2054,7 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
                 if (cfg->head_probe)
                     head_probe(r);
                 if (cfg->dma_probe && !r->abort)
-                    dma_probe(r);
+                    dma_probe(r, 0);
                 /* seq 22: reads at the TOC's edges */
                 if ((cfg->gap_probe || cfg->pregap_probe || cfg->ctl_probe) && !r->abort)
                     gap_probe(r);
@@ -2042,6 +2080,15 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
             if (battery(r, 0) && !r->abort)
                 risky_phase(r);
         }
+        /* seq 25c: the risky DMA modes (pad, floor), after everything else, one image at a time */
+        for (i = 0; cfg->dma_probe && dma_has_risky(cfg) && i < cfg->n_images && !r->abort; i++) {
+            int n = cfg->images[i];
+            snprintf(msg, sizeof(msg), "risky DMA modes, image %d...", n);
+            say(r, msg);
+            switch_to(r, n, n, cfg->swap_regpoll, -1, SK_NORMAL);
+            if (battery(r, 0) && !r->abort)
+                dma_probe(r, 1);
+        }
         if (cfg->return_to > 0 && !r->abort)
             switch_to(r, cfg->return_to, cfg->return_to, 0, -1, SK_NORMAL);
     } else {
@@ -2051,11 +2098,13 @@ int gp_run(const gd_ops *ops, const gp_config *cfg, const gp_sink *sink)
             if (cfg->head_probe)
                 head_probe(r);
             if (cfg->dma_probe && !r->abort)
-                dma_probe(r);
+                dma_probe(r, 0);
             if ((cfg->gap_probe || cfg->pregap_probe || cfg->ctl_probe) && !r->abort)
                 gap_probe(r);
             if (cfg->pregap_probe && cfg->risky_cross == GP_RISKY_END && !r->abort)
                 risky_phase(r);
+            if (cfg->dma_probe && dma_has_risky(cfg) && !r->abort)
+                dma_probe(r, 1);
         }
     }
     event(r, "END", "abort=%d", r->abort);

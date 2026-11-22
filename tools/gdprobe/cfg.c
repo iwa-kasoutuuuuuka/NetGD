@@ -59,8 +59,8 @@ void gp_config_defaults(gp_config *c)
     c->dma_data = 1;
     c->dma_counts[0] = 1; c->dma_counts[1] = 2; c->dma_counts[2] = 7; c->dma_counts[3] = 16;
     c->n_dma_counts = 4;
-    c->dma_mode_list[0] = GP_DMA_EXACT; c->dma_mode_list[1] = GP_DMA_FLOOR; c->dma_mode_list[2] = GP_DMA_PAD;
-    c->n_dma_modes = 3;
+    c->dma_mode_list[0] = GP_DMA_EXACT;
+    c->n_dma_modes = 1;
     c->dma_flags = 0x20;
     c->dma_pio_ref = 1;
     c->dma_timeout_ms = 3000;
