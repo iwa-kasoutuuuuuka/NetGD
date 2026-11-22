@@ -614,6 +614,96 @@ pub fn swap_secnr(phase: SwapPhase, medium: bool, disc_format: u8) -> u8 {
     }
 }
 
+/// What a running NOT READY window is: the tray cycle of an image switch, or
+/// the re-detect a DEVICE RESET starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowKind {
+    /// After `52 82 n` to another folder (or any mount): open, detect, done.
+    Switch,
+    /// After ATA DEVICE RESET (0x08): detect, done -- never the open `0x06`
+    /// ([`device_reset_window`]).
+    Redetect,
+}
+
+/// How long the re-detect after DEVICE RESET lasts: GDEMU.INI detect_time,
+/// the swap window's detect phase (`detect_ms`; [`SWAP_DETECT_MS`] without
+/// the key). Stock GDEMU 6.0: SECNR `0x00` at the reset and the final byte
+/// 147-154 ms later with detect_time = 150 (R155, R159, seq 17), about
+/// 401 ms later with detect_time = 400 (seq 18, open_time 150), so it is
+/// detect_time, not open_time and not a fixed time.
+pub const fn device_reset_redetect_ms(detect_ms: u32) -> u32 {
+    detect_ms
+}
+
+/// The window an ATA DEVICE RESET (0x08) leaves running, as `(open_ms,
+/// detect_ms)` for [`swap_phase`] from the reset: no open phase, then the
+/// re-detect. Stock GDEMU 6.0 (R155, R159, seq 17) does this on every DEVICE
+/// RESET -- inside a switch's window, after a same-folder re-switch, and with
+/// no switch at all: SECNR `0x00` at once (never `0x06`), the final byte
+/// detect_time later, then one UNIT ATTENTION 6/28/00 with a medium (seq 17
+/// `DR_`: `ua_28=1`; an empty folder stays 2/3A/00). A reset inside a
+/// switch's window replaces it, and ends the same way.
+pub const fn device_reset_window(detect_ms: u32) -> (u32, u32) {
+    (0, device_reset_redetect_ms(detect_ms))
+}
+
+/// Status (ALTSTATUS) a DEVICE RESET completes with: `0x00`, DRDY clear,
+/// until the next command -- the re-detect's end does not change it (R155,
+/// R159: through 1,000 and 2,300 ms of polling).
+pub const DEVICE_RESET_STATUS: u8 = 0x00;
+/// Error register after DEVICE RESET: diagnostic code 0x01, "no error"
+/// (R155, R159). Bit 0 needs a bitstream with the MCU-writable ERROR bits
+/// 0-1 (feat/fpga-regs); an older one shows 0x00.
+pub const DEVICE_RESET_ERROR: u8 = 0x01;
+/// Interrupt reason after DEVICE RESET (the signature's sector count, 0x01).
+pub const DEVICE_RESET_IRR: u8 = 0x01;
+
+/// SECNR for a window of `kind` in `phase`. A switch's window is
+/// [`swap_secnr`] (it ends paused: stock's `0xX1` after `52 82`). The
+/// re-detect after DEVICE RESET is busy `0x00` and then the byte at rest:
+/// the disc format with `idle_status` (the status REQ_STAT reports idle, D2)
+/// -- stock's records only show it after a switch, i.e. paused, where the two
+/// agree -- or NO DISC `0x07` with no medium.
+pub fn window_secnr(kind: WindowKind, phase: SwapPhase, medium: bool, disc_format: u8, idle_status: u8) -> u8 {
+    match (kind, phase) {
+        (WindowKind::Redetect, SwapPhase::Done) if medium => (disc_format & 0xF0) | (idle_status & 0x0F),
+        _ => swap_secnr(phase, medium, disc_format),
+    }
+}
+
+/// How the last mount attempt by folder name ended (for [`same_folder_reswitch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountOutcome {
+    /// An image mounted.
+    Mounted,
+    /// The folder exists and has nothing to mount: stock accepts it and
+    /// reports no medium (D12).
+    NoImage,
+    /// Anything else: no such folder, a parse error, a card read error. The
+    /// next `52 82 n` must try again.
+    Failed,
+}
+
+/// Whether `52 82` / `52 81` to the folder `staged` is a same-folder
+/// re-switch, which stock GDEMU 6.0 treats as a no-op (R159; seq 17 `RS_`:
+/// no window, SECNR and ALTSTATUS flat, no UNIT ATTENTION -- `ua_28=0`, the
+/// next TUR is READY --, REQ_STAT's state and head position unchanged).
+///
+/// `last` is the last mount attempt's folder name and outcome (`None` once
+/// any other mount -- the default, a hard-reset remount -- has run). Only
+/// the same folder, compared by name (so `04` and `0004` stay different
+/// folders), and only while the drive still holds what that attempt left:
+/// the image (`medium`) after [`MountOutcome::Mounted`], the empty folder's
+/// no medium (`empty_slot`) after [`MountOutcome::NoImage`]. A failed attempt,
+/// an eject or a write session never makes one: the host can retry.
+pub fn same_folder_reswitch(staged: &str, last: Option<(&str, MountOutcome)>, medium: bool, empty_slot: bool) -> bool {
+    match last {
+        Some((name, MountOutcome::Mounted)) => medium && !staged.is_empty() && name == staged,
+        Some((name, MountOutcome::NoImage)) => !medium && empty_slot && !staged.is_empty() && name == staged,
+        _ => false,
+    }
+}
+
 /// SECNR to put back after a host bus reset (or when a swap window is cut
 /// short) outside a swap window, from the byte the FPGA left latched.
 ///

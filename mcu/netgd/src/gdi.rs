@@ -795,17 +795,20 @@ fn walk_to(d: &mut RootDir<'_>, want: &str, path: &mut ImagePath) -> Result<(), 
                 hit = Some(entry.name.clone());
             }
         });
+        // No such folder (`NoImageDir`), unlike a folder with nothing to
+        // mount in it (`NoGdiFile`, stock's empty folder): `ide.rs` lets a
+        // re-switch be a no-op only after the latter (R159).
         let Some(short) = hit else {
-            return Err(GdiError::NoGdiFile);
+            return Err(GdiError::NoImageDir);
         };
         if path.push(short.clone()).is_err() {
             warn!("gdi: '{}' is deeper than {} levels", want, MAX_PATH_PARTS);
-            return Err(GdiError::NoGdiFile);
+            return Err(GdiError::NoImageDir);
         }
         d.change_dir(short).map_err(|_| GdiError::OpenImageDir)?;
     }
     if path.is_empty() {
-        return Err(GdiError::NoGdiFile);
+        return Err(GdiError::NoImageDir);
     }
     Ok(())
 }
@@ -1436,7 +1439,7 @@ pub enum GdiError {
     ReadGdiFile,
     #[allow(dead_code)]
     LbaOutOfRange,
-    #[allow(dead_code)]
+    /// No folder by that name (`walk_to`).
     NoImageDir,
     NoGdiFile,
     BadCdi,

@@ -5,6 +5,8 @@
 //!                                   [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test] [--raw-sectors]
 //!                                   [--no-throughput] [--tp-batches 64] [--tp-sectors 16]
 //!                                   [--no-seek] [--seek-n 16] [--seek-span 50000] [--no-reads] [--sw-only]
+//!                                   [--regpoll] [--devreset MS] [--reswitch] [--devreset-only] [--old-bitstream]
+//!                                   [--window OPEN,DETECT]
 //!
 //! What it does: loads the image the way `mcu/netgd` does (the same `discimg` parsers, the same
 //! boot-area / session rules, GDI track sizes from the files) and answers each probe of tools/gdprobe
@@ -73,12 +75,20 @@ struct Opts {
     sw_only: bool,
     /// gdprobe `swap_regpoll=1`: the command-free register poll after the switch (R154).
     regpoll: bool,
-    /// gdprobe `swap_devreset`: a DEVICE RESET this many ms after the switch (implies the register poll; probe
-    /// names get the prefix `R<ms>_`, and REQ_STAT / REQ_ERROR follow the polls).
+    /// gdprobe `swap_devreset`: `52 82 n` again for the folder just switched to (a same-folder re-switch), and a
+    /// DEVICE RESET this many ms into the register poll (probe names get the prefix `R<ms>_`, and REQ_STAT /
+    /// REQ_ERROR follow the polls). Use with --switch.
     devreset_ms: Option<u32>,
-    /// The swap window's open / detect lengths (GDEMU.INI open_time / detect_time; the probe card's 150 / 150),
-    /// for where a DEVICE RESET lands. The register poll assumes the window (and the restarted one) is over
-    /// before gdprobe's polls start (1,000 ms, or reset + 300 ms).
+    /// gdprobe seq 17 `swap_reswitch`: `52 82 n` again with no reset (`RS_`). Replaces --switch.
+    reswitch: bool,
+    /// gdprobe seq 17 `devreset_only`: a DEVICE RESET with no switch command (`DR_`). Replaces --switch.
+    devreset_only: bool,
+    /// The bitstream keeps MCU-written ERROR bits 0-1 (feat/fpga-regs), so DEVICE RESET's ERROR 0x01 shows;
+    /// `--old-bitstream` predicts 0x00 there.
+    err_lo: bool,
+    /// The swap window's open / detect lengths (GDEMU.INI open_time / detect_time; the probe card's 150 / 150).
+    /// The re-detect after DEVICE RESET lasts detect_time. The register poll assumes the window (and the
+    /// re-detect) is over before gdprobe's polls start (1,000 ms, or reset + 300 ms).
     window: (u32, u32),
 }
 
@@ -89,7 +99,8 @@ fn usage() -> ! {
          \x20             [--header] [--end] [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test] [--raw-sectors]\n\
          \x20             [--no-throughput] [--tp-batches N] [--tp-sectors N] [--no-seek] [--seek-n N]\n\
          \x20             [--seek-span N] [--no-reads] [--sw-only]
-                       [--regpoll] [--devreset MS] [--window OPEN,DETECT]"
+                       [--regpoll] [--devreset MS] [--reswitch] [--devreset-only] [--old-bitstream]
+                       [--window OPEN,DETECT]"
     );
     std::process::exit(2)
 }
@@ -130,6 +141,9 @@ fn parse_args() -> Opts {
         sw_only: false,
         regpoll: false,
         devreset_ms: None,
+        reswitch: false,
+        devreset_only: false,
+        err_lo: true,
         window: (150, 150),
     };
     let mut a = std::env::args().skip(1);
@@ -163,6 +177,9 @@ fn parse_args() -> Opts {
             "--sw-only" => o.sw_only = true,
             "--regpoll" => o.regpoll = true,
             "--devreset" => o.devreset_ms = Some(num(&val())),
+            "--reswitch" => o.reswitch = true,
+            "--devreset-only" => o.devreset_only = true,
+            "--old-bitstream" => o.err_lo = false,
             "--window" => {
                 let v = val();
                 let (a, b) = v.split_once(',').unwrap_or_else(|| usage());
@@ -836,11 +853,10 @@ fn sw_poll(o: &mut Out, r: &Res, sense: &str, secnr: Option<u8>) {
     o.secnr = secnr;
 }
 
-/// gdprobe's command-free register poll (`swap_regpoll`, R154) and its DEVICE RESET variant, as NetGD answers.
+/// gdprobe's command-free register poll after a switch (`swap_regpoll`, R154), as NetGD answers.
 struct RegPoll {
     open_ms: u32,
     detect_ms: u32,
-    reset_ms: Option<u32>,
 }
 
 /// One `SW_REGPOLL` line: ALTSTATUS / ERROR / interrupt reason / SECNR.
@@ -852,63 +868,79 @@ fn regpoll_line(o: &mut Out, altst: u8, err: u8, irr: u8, secnr: Option<u8>) {
     o.event("SW_REGPOLL", &f);
 }
 
-/// The register poll after an accepted `52 82 n`: one line per change. Until the reset (or for the whole poll)
-/// the registers are those `52 82` completed with (ALTSTATUS 0x50, ERROR 0x00 -- `complete(0, ..)` --, IRR 3)
-/// and SECNR walks the window (ide.rs `mounted`, then `ide_task`'s timer): the old byte, `0x06`, `0x00`, the
-/// final one. A DEVICE RESET is modelled as NetGD answers it, not as stock does (R157: stock's rule is unknown;
-/// ERROR 0x01 cannot be produced by the FPGA, whose error register has no bit 0): ide.rs CMD_DEVICE_RESET
-/// reloads the signature (IRR 1, 14/EB) with SECNR at rest (the window's byte at that moment, `rest_secnr`),
-/// completes with status 0x50 / error 0x00 and leaves the window running, so SECNR walks on to the final byte.
-/// Ends with the window over.
+/// The register poll after an accepted `52 82 n` to another folder: one line per change. The registers are those
+/// `52 82` completed with (ALTSTATUS 0x50, ERROR 0x00 -- `finish_ok` --, IRR 3) and SECNR walks the window (ide.rs
+/// `mounted`, then `ide_task`'s timer): the old byte, `0x06`, `0x00`, the final one. Ends with the window over.
 fn regpoll_lines(o: &mut Out, rp: &RegPoll, medium: bool, disc_format: u8) {
     use atapi::SwapPhase::*;
-    let phases = [(0u32, Open), (rp.open_ms, Detect), (rp.open_ms + rp.detect_ms, Done)];
+    let _ = (rp.open_ms, rp.detect_ms);
     let mut last = o.secnr;
     regpoll_line(o, 0x50, 0, 0x03, last);
-    for (start, phase) in phases {
-        if rp.reset_ms.map_or(false, |r| start >= r) {
-            break;
-        }
+    for phase in [Open, Detect, Done] {
         let v = Some(atapi::swap_secnr(phase, medium, disc_format));
         if v != last {
             regpoll_line(o, 0x50, 0, 0x03, v);
             last = v;
         }
     }
-    if let Some(r) = rp.reset_ms {
-        // The window's byte at the reset; the first sample after it is always written.
-        let at = Some(atapi::swap_secnr(atapi::swap_phase(r, rp.open_ms, rp.detect_ms), medium, disc_format));
-        let mut f = format!(
-            "delay_ms={} t_ms=- rc=ok reset_us=- bsy_seen=1 altst=0x50 err=0x00 irr=0x01",
-            r
-        );
-        if let Some(v) = at {
-            f.push_str(&format!(" secnr=0x{:02x}", v));
-        }
-        f.push_str(" bcl=0x14 bch=0xeb");
-        o.event("SW_DEVRESET", &f);
-        regpoll_line(o, 0x50, 0, 0x01, at);
-        last = at;
-        for (start, phase) in phases {
-            if start <= r {
-                continue;
-            }
-            let v = Some(atapi::swap_secnr(phase, medium, disc_format));
-            if v != last {
-                regpoll_line(o, 0x50, 0, 0x01, v);
-                last = v;
-            }
-        }
-    }
     o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
 }
 
-/// `switch_to`: `52 82 n`, then TUR / REQ_ERROR polls, one line per change of state. With an image or an
-/// empty folder the swap window plays out (`atapi::swap_phase`): no medium, becoming ready, then UNIT
+/// An ATA DEVICE RESET `delay_ms` into gdprobe's register poll, as NetGD answers it (ide.rs CMD_DEVICE_RESET,
+/// R159): the signature (IRR 1, 14/EB), status 0x00, ERROR 0x01 -- 0x00 on a bitstream without the MCU-writable
+/// ERROR bits 0-1 (`err_lo` false) --, SECNR busy `0x00` at once (the re-detect, `atapi::device_reset_window`),
+/// then the byte at rest when the re-detect (detect_time) ends; status and ERROR stay until the next command.
+/// Assumes the re-detect is over before gdprobe's polls start. Returns the final SECNR.
+fn devreset_lines(o: &mut Out, delay_ms: u32, detect_ms: u32, medium: bool, disc_format: u8, err_lo: bool) -> u8 {
+    use atapi::{SwapPhase, WindowKind::Redetect};
+    let err = if err_lo { atapi::DEVICE_RESET_ERROR } else { 0 };
+    let (op, det) = atapi::device_reset_window(detect_ms);
+    // After a switch the drive idles paused (D2).
+    let busy = atapi::window_secnr(Redetect, atapi::swap_phase(0, op, det), medium, disc_format, atapi::DRIVE_PAUSE);
+    let done = atapi::window_secnr(Redetect, SwapPhase::Done, medium, disc_format, atapi::DRIVE_PAUSE);
+    let (st, irr) = (atapi::DEVICE_RESET_STATUS, atapi::DEVICE_RESET_IRR);
+    o.event(
+        "SW_DEVRESET",
+        &format!(
+            "delay_ms={} t_ms=- rc=ok reset_us=- bsy_seen=1 altst=0x{:02x} err=0x{:02x} irr=0x{:02x} secnr=0x{:02x} bcl=0x14 bch=0xeb",
+            delay_ms, st, err, irr, busy
+        ),
+    );
+    regpoll_line(o, st, err, irr, Some(busy));
+    if done != busy {
+        regpoll_line(o, st, err, irr, Some(done));
+    }
+    o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
+    done
+}
+
+/// REQ_STAT and REQ_ERROR once a reset / re-switch section is READY (or not): read-only, like the battery.
+/// NetGD's head is the park position after a switch (`atapi::idle_fad`); it does not follow CD_READ.
+fn state_lines(o: &mut Out, disc: Option<&Disc>) {
+    let rs = cdb_simple(0x10, 0, 0, 10);
+    let re = cdb_simple(0x13, 0, 0, 10);
+    match disc {
+        Some(d) => {
+            let fad = atapi::idle_fad(&d.tracks, d.is_cdi, true);
+            let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, fad);
+            let stat = atapi::req_stat_reply(AudioState::Standby, atapi::DRIVE_PAUSE, atapi::disc_format(&d.tracks, d.is_cdi), 0, fad, track);
+            o.probe("REQ_STAT", None, Some(&rs), &cut(&stat, 10), true);
+            o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(0, 0, 0)), true);
+        }
+        None => {
+            let (asc, ascq) = atapi::ASC_NO_MEDIUM;
+            o.probe("REQ_STAT", None, Some(&rs), &Res::not_ready(), true);
+            o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(atapi::SENSE_NOT_READY, asc, ascq)), true);
+        }
+    }
+}
+
+/// `switch_to`: `52 82 n` to another folder, then TUR / REQ_ERROR polls, one line per change of state. With an image
+/// or an empty folder the swap window plays out (`atapi::swap_phase`): no medium, becoming ready, then UNIT
 /// ATTENTION and READY -- or no medium again, until gdprobe's switch timeout. A refused mount leaves the old
 /// image (and its already-consumed UNIT ATTENTION) in place. With the register poll (`rp`) the polls only
-/// start once the window is over. A DEVICE RESET switch ends with REQ_STAT and REQ_ERROR.
-fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8, rp: Option<&RegPoll>, disc: Option<&Disc>) {
+/// start once the window is over.
+fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8, rp: Option<&RegPoll>) {
     let c = cdb_mount(n);
     let fmt = |(asc, ascq): (u8, u8), key: u8| format!("{}/{:02x}/{:02x}", key, asc, ascq);
     let nr = atapi::SENSE_NOT_READY;
@@ -933,36 +965,79 @@ fn switch_lines(o: &mut Out, n: u32, target: Target, disc_format: u8, rp: Option
                 }
             }
             let done = Some(atapi::swap_secnr(atapi::SwapPhase::Done, medium, disc_format));
-            if medium {
-                sw_poll(o, &Res::ua(), &fmt(atapi::ASC_MEDIUM_CHANGED, atapi::SENSE_UNIT_ATTENTION), done);
-                sw_poll(o, &Res::ok(&[]), "none", done);
-                true
-            } else {
-                sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(atapi::SwapPhase::Done), nr), done);
-                false
-            }
+            ready_polls(o, medium, done)
         }
     };
     o.event("SW_RESULT", &format!("n={} rc={} t_ms=- polls=- changes=-", n, if ready { "ok" } else { "timeout" }));
-    if rp.map_or(false, |r| r.reset_ms.is_some()) {
-        // The drive's state block and sense once READY (or not): read-only, like the battery.
-        let rs = cdb_simple(0x10, 0, 0, 10);
-        let re = cdb_simple(0x13, 0, 0, 10);
-        match disc {
-            Some(d) if target != Target::Empty => {
-                let fad = atapi::idle_fad(&d.tracks, d.is_cdi, true);
-                let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, fad);
-                let stat = atapi::req_stat_reply(AudioState::Standby, atapi::DRIVE_PAUSE, atapi::disc_format(&d.tracks, d.is_cdi), 0, fad, track);
-                o.probe("REQ_STAT", None, Some(&rs), &cut(&stat, 10), true);
-                o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(0, 0, 0)), true);
-            }
-            _ => {
-                let (asc, ascq) = atapi::ASC_NO_MEDIUM;
-                o.probe("REQ_STAT", None, Some(&rs), &Res::not_ready(), true);
-                o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(nr, asc, ascq)), true);
-            }
+}
+
+/// The polls once a window (switch or re-detect) is over: with a medium its UNIT ATTENTION, then READY; without
+/// one NOT READY 2/3A/00 until gdprobe's timeout. Returns whether it became READY.
+fn ready_polls(o: &mut Out, medium: bool, secnr: Option<u8>) -> bool {
+    let fmt = |(asc, ascq): (u8, u8), key: u8| format!("{}/{:02x}/{:02x}", key, asc, ascq);
+    if medium {
+        sw_poll(o, &Res::ua(), &fmt(atapi::ASC_MEDIUM_CHANGED, atapi::SENSE_UNIT_ATTENTION), secnr);
+        sw_poll(o, &Res::ok(&[]), "none", secnr);
+        true
+    } else {
+        sw_poll(o, &Res::not_ready(), &fmt(atapi::not_ready_asc(atapi::SwapPhase::Done), atapi::SENSE_NOT_READY), secnr);
+        false
+    }
+}
+
+/// What a section for the folder already mounted does (gdprobe, after a switch and its battery).
+#[derive(Clone, Copy, PartialEq)]
+enum Same {
+    /// `R<ms>_` (records 15/16): `52 82 n` again, a DEVICE RESET `ms` into the register poll.
+    ReswitchReset(u32),
+    /// `RS_` (seq 17): `52 82 n` again, no reset.
+    Reswitch,
+    /// `DR_` (seq 17): 500 ms idle, no switch command, a DEVICE RESET.
+    ResetOnly,
+}
+
+/// A same-folder section as NetGD answers it now (R159, seq 17). The re-switch is a no-op (ide.rs
+/// `gdemu_mount_staged`, `atapi::same_folder_reswitch`): `52 82` completes with 0x50 / 0x00, no window, SECNR flat,
+/// no UNIT ATTENTION. A DEVICE RESET re-detects (`devreset_lines`) and raises the UNIT ATTENTION with a medium.
+/// Ends with REQ_STAT / REQ_ERROR. `disc` None = the empty folder.
+fn same_folder_lines(o: &mut Out, n: u32, kind: Same, detect_ms: u32, disc_format: u8, err_lo: bool, disc: Option<&Disc>) {
+    let medium = disc.is_some();
+    let old = o.secnr;
+    match kind {
+        Same::ResetOnly => o.event("IDLE", "idle_ms=500"),
+        _ => {
+            o.probe("SW_CMD", Some(&format!("n={}", n)), Some(&cdb_mount(n)), &Res::ok(&[]), false);
+            regpoll_line(o, 0x50, 0, 0x03, old);
         }
     }
+    let reset = match kind {
+        Same::ReswitchReset(ms) => Some(ms),
+        Same::ResetOnly => Some(0),
+        Same::Reswitch => None,
+    };
+    let ready = match reset {
+        Some(ms) => {
+            let done = devreset_lines(o, ms, detect_ms, medium, disc_format, err_lo);
+            ready_polls(o, medium, Some(done))
+        }
+        None => {
+            o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
+            if medium {
+                sw_poll(o, &Res::ok(&[]), "none", old);
+            } else {
+                let (asc, ascq) = atapi::ASC_NO_MEDIUM;
+                sw_poll(o, &Res::not_ready(), &format!("{}/{:02x}/{:02x}", atapi::SENSE_NOT_READY, asc, ascq), old);
+            }
+            medium
+        }
+    };
+    let mut f = format!("n={} rc={} t_ms=- polls=- changes=-", n, if ready { "ok" } else { "timeout" });
+    if !matches!(kind, Same::ReswitchReset(_)) {
+        // gdprobe's seq 17 sections say whether a 6/28/00 came.
+        f.push_str(&format!(" ua_28={}", (reset.is_some() && medium) as u8));
+    }
+    o.event("SW_RESULT", &f);
+    state_lines(o, disc);
 }
 
 fn main() {
@@ -1006,18 +1081,27 @@ fn main() {
             Target::Image
         };
         let fmt = disc.as_ref().map_or(0, |d| atapi::disc_format(&d.tracks, d.is_cdi));
-        let rp = (opt.regpoll || opt.devreset_ms.is_some()).then(|| RegPoll {
-            open_ms: opt.window.0,
-            detect_ms: opt.window.1,
-            reset_ms: opt.devreset_ms,
-        });
-        if let Some(r) = opt.devreset_ms {
-            o.pfx = format!("R{}_", r);
+        match opt.devreset_ms {
+            // gdprobe resets only after an accepted switch, to the folder already mounted.
+            Some(r) if target != Target::Missing => {
+                o.pfx = format!("R{}_", r);
+                same_folder_lines(&mut o, opt.img as u32, Same::ReswitchReset(r), opt.window.1, fmt, opt.err_lo, disc.as_ref());
+            }
+            _ => {
+                let rp = (opt.regpoll || opt.devreset_ms.is_some())
+                    .then(|| RegPoll { open_ms: opt.window.0, detect_ms: opt.window.1 });
+                switch_lines(&mut o, opt.img as u32, target, fmt, rp.as_ref());
+            }
         }
-        switch_lines(&mut o, opt.img as u32, target, fmt, rp.as_ref(), disc.as_ref());
+        o.pfx.clear();
+    } else if opt.reswitch || opt.devreset_only {
+        let fmt = disc.as_ref().map_or(0, |d| atapi::disc_format(&d.tracks, d.is_cdi));
+        let (pfx, kind) = if opt.reswitch { ("RS_", Same::Reswitch) } else { ("DR_", Same::ResetOnly) };
+        o.pfx = pfx.into();
+        same_folder_lines(&mut o, opt.img as u32, kind, opt.window.1, fmt, opt.err_lo, disc.as_ref());
         o.pfx.clear();
     }
-    if !opt.sw_only {
+    if !opt.sw_only && !opt.reswitch && !opt.devreset_only {
         match &disc {
             Some(d) => {
                 // A switch consumes the UNIT ATTENTION in its polls; a bare run on a freshly booted unit sees it.

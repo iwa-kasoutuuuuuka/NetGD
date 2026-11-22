@@ -219,30 +219,54 @@ class ExpectTest(unittest.TestCase):
         self.assertNotIn('secnr', one(3, 'SW_CMD'))                     # the boot disc's SECNR is not known
 
     def test_regpoll_and_device_reset_as_netgd_answers(self):
-        # gdprobe swap_regpoll / swap_devreset (R154). The predictor prints what NetGD puts on the bus, not stock's
-        # answer (R157: stock's DEVICE RESET rule is unknown; the FPGA error register has no bit 0): status 0x50,
-        # error 0x00, IRR 1, signature 14/EB, SECNR at rest (the window's byte at the reset), the window running on.
+        # gdprobe swap_regpoll / swap_devreset (R154), as NetGD answers since R159: the R<ms>_ switch is a
+        # same-folder re-switch (a no-op: SECNR flat, ALTSTATUS 0x50), then DEVICE RESET re-detects: status 0x00,
+        # error 0x01, IRR 1, 14/EB, SECNR 0x00 at once and the byte at rest detect_time later, then UNIT
+        # ATTENTION (records 15 / 16, seq 17).
         text = expect_sd.predict(self.card, images=[3, 4, 7], return_to=0, regpoll=True, devreset=(50, 200))
         _, entries = compare.parse_record(text)
         get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
         self.assertEqual([e['secnr'] for e in get(4, 'SW_REGPOLL')], ['0x81', '0x06', '0x00', '0x21'])
         self.assertEqual([e['altst'] for e in get(4, 'SW_REGPOLL')], ['0x50'] * 4)
-        for pfx, at, walk in (('R50_', '0x06', ['0x00']), ('R200_', '0x00', [])):
+        for pfx in ('R50_', 'R200_'):
             for img, final in ((3, '0x81'), (4, '0x21'), (7, '0x07')):
-                before = [final, '0x06'] + (['0x00'] if at == '0x00' else [])    # the new switch's own walk up to the reset
                 rst = get(img, pfx + 'SW_DEVRESET')[0]
                 self.assertEqual((rst['altst'], rst['err'], rst['irr'], rst['secnr'], rst['bcl'], rst['bch']),
-                                 ('0x50', '0x00', '0x01', at, '0x14', '0xeb'))
+                                 ('0x00', '0x01', '0x01', '0x00', '0x14', '0xeb'))
                 polls = get(img, pfx + 'SW_REGPOLL')
-                self.assertEqual([e['secnr'] for e in polls], before + [at] + walk + [final])
-                self.assertEqual([e['altst'] for e in polls], ['0x50'] * len(polls))
-                self.assertEqual([e['err'] for e in polls], ['0x00'] * len(polls))
-                self.assertEqual([e['irr'] for e in polls][-1], '0x01')
+                self.assertEqual([e['secnr'] for e in polls], [final, '0x00', final])   # no 0x06: no window
+                self.assertEqual([e['altst'] for e in polls], ['0x50', '0x00', '0x00'])
+                self.assertEqual([e['err'] for e in polls], ['0x00', '0x01', '0x01'])
+                self.assertEqual([e['irr'] for e in polls], ['0x03', '0x01', '0x01'])
                 sw = get(img, pfx + 'SW_POLL')
                 self.assertEqual(sw[0]['sense'], '2/3a/00' if img == 7 else '6/28/00')
+                self.assertNotIn('ua_28', get(img, pfx + 'SW_RESULT')[0])
                 self.assertEqual(len(get(img, pfx + 'REQ_STAT')), 1)
                 self.assertEqual(len(get(img, pfx + 'REQ_ERROR')), 1)
         self.assertTrue(get(4, 'R50_REQ_STAT')[0]['data'].startswith('012f01'))
+        # A bitstream without ERROR bit 0 shows 0x00 there.
+        old = expect_sd.predict(self.card, images=[4], return_to=0, devreset=(50,), passthrough=['--old-bitstream'])
+        _, oe = compare.parse_record(old)
+        self.assertEqual([e['err'] for e in oe if e['probe'] == 'R50_SW_DEVRESET'], ['0x00'])
+
+    def test_reswitch_and_devreset_only_as_netgd_answers(self):
+        # gdprobe seq 17: RS_ (52 82 n for the mounted folder) is a no-op, no UNIT ATTENTION; DR_ (DEVICE RESET
+        # with no switch) re-detects and raises the UNIT ATTENTION with a medium; the empty folder stays 2/3A/00.
+        text = expect_sd.predict(self.card, images=[3, 7], return_to=0, regpoll=True, reswitch=True,
+                                 devreset_only=True)
+        _, entries = compare.parse_record(text)
+        get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
+        for img, final, medium in ((3, '0x81', True), (7, '0x07', False)):
+            self.assertEqual([e['secnr'] for e in get(img, 'RS_SW_REGPOLL')], [final])
+            self.assertEqual(get(img, 'RS_SW_POLL')[0]['sense'], 'none' if medium else '2/3a/00')
+            self.assertEqual(get(img, 'RS_SW_RESULT')[0]['ua_28'], '0')
+            self.assertEqual(get(img, 'DR_IDLE')[0]['idle_ms'], '500')
+            rst = get(img, 'DR_SW_DEVRESET')[0]
+            self.assertEqual((rst['delay_ms'], rst['altst'], rst['err'], rst['secnr']), ('0', '0x00', '0x01', '0x00'))
+            self.assertEqual([e['secnr'] for e in get(img, 'DR_SW_REGPOLL')], ['0x00', final])
+            self.assertEqual(get(img, 'DR_SW_POLL')[0]['sense'], '6/28/00' if medium else '2/3a/00')
+            self.assertEqual(get(img, 'DR_SW_RESULT')[0]['ua_28'], '1' if medium else '0')
+        self.assertEqual(get(3, 'DR_REQ_STAT')[0]['data'], '018f41030100b05e0000')
 
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer

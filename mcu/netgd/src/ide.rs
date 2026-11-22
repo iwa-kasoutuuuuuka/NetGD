@@ -878,7 +878,8 @@ pub async fn ide_task(
         // stays idle and a swap still lands immediately. While a swap window
         // still has a phase to go, also wake at its end: stock moves SECNR
         // by time (0x06, 0x00 at open_time, 0xX1 / 0x07 at open + detect,
-        // R144) whether or not the host sends anything.
+        // R144) whether or not the host sends anything; the same
+        // timer ends DEVICE RESET's re-detect (0x00, then the byte at rest).
         let woke = match swap_window_deadline() {
             Some(at) => matches!(
                 select(embassy_atsam3::gpio::pioa_wait_irq(), Timer::at(at)).await,
@@ -1096,12 +1097,31 @@ async fn handle(
         // 0x08, and hold BSY for ten seconds waiting for a CDB on 0xA0 (the
         // FPGA only opens the CDB phase on the primary) (R89 A7).
         CMD_DEVICE_RESET if role == Role::Packet => {
+            // Stopping CD-DA also puts the head back where a fresh mount
+            // leaves it (`idle_fad`): stock's REQ_STAT after a reset shows
+            // the park position (seq 17 `DR_`: CDI `01 2f 01 01 01 00 00 96`,
+            // GDI `01 8f 41 03 01 00 b0 5e`), whatever was read before.
             crate::cdda::stop();
-            // Soft reset: reload ATAPI signature, return to idle, no error.
-            // The swap window keeps running (stock's rule is not known, R157).
+            // Stock re-detects on every DEVICE RESET, window or not (R155,
+            // R159, seq 17): SECNR 0x00 now, the byte at rest detect_time
+            // later (`ide_task`'s timer, which writes SECNR only), then the
+            // UNIT ATTENTION. Not while the host holds the card for a write
+            // session: no medium there, and nothing to detect.
+            // After a host EJECT (no medium, not the empty slot) this still
+            // runs: the drive answers 2/04/01 for detect_time and then
+            // 2/3A/00 again (stock has no eject to compare with).
+            if !write_session_active() {
+                start_device_reset_redetect(state);
+            }
+            // The signature (IRR 1, 14/EB) with SECNR at rest -- the
+            // re-detect's busy 0x00 (`rest_secnr`).
             dev.load_atapi_signature();
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
+            // Status 0x00 (DRDY clear) and error 0x01 until the next command:
+            // nothing between commands writes either (R159). Error bit 0
+            // needs the bitstream's MCU-writable ERROR bits 0-1; an older one
+            // shows 0x00.
+            dev.set_error(discimg::atapi::DEVICE_RESET_ERROR);
+            dev.set_status_intrq(discimg::atapi::DEVICE_RESET_STATUS);
             dev.ack_command();
         }
         CMD_SET_FEATURES => {
@@ -1391,6 +1411,9 @@ fn mounted(state: &mut DeviceState, ok: bool) {
     }
     MEDIA_PRESENT.store(ok, core::sync::atomic::Ordering::Relaxed);
     EMPTY_SLOT.store(!ok, core::sync::atomic::Ordering::Relaxed);
+    // Whatever was mounted by name before is gone; `mount_named` records its
+    // own attempt after this.
+    unsafe { LAST_MOUNT = None };
     open_swap_window(state);
     // The window starts now: SECNR shows the tray open, format nibble 0
     // (stock `0x06`, R144), until `drive_not_ready` moves it on. The format
@@ -1461,23 +1484,57 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
     invalidate_cd_read_cache();
 
-    let ok = match crate::gdi::load_by_name(disk_sectors(), name) {
+    let (ok, outcome) = match crate::gdi::load_by_name(disk_sectors(), name) {
         Ok(g) => {
             mount_gdi(g);
             if let Some(g) = gdi_ref() {
                 prefetch_ip_bin(g).await;
             }
-            true
+            (true, discimg::atapi::MountOutcome::Mounted)
         }
         Err(e) => {
             warn!("{}: mount '{}' failed: {:?}", label, name, e);
             unsafe { GDI = None };
-            false
+            // Only "the folder has nothing to mount" (`NoGdiFile`, after the
+            // walk into it) is stock's empty folder; no such folder
+            // (`NoImageDir`), a parse or card error stays retryable.
+            let outcome = if matches!(e, crate::gdi::GdiError::NoGdiFile) {
+                discimg::atapi::MountOutcome::NoImage
+            } else {
+                discimg::atapi::MountOutcome::Failed
+            };
+            (false, outcome)
         }
     };
     mounted(state, ok);
+    record_mount_attempt(name, outcome);
     info!("{}: mounted '{}' ({})", label, name, ok);
     ok
+}
+
+/// The last mount by folder name (`mount_named`): the name it was asked for
+/// and how it ended. `None` after any other mount (`mounted` clears it).
+/// Only `ide_task` touches it. What `gdemu_mount_staged` asks before
+/// treating `52 82 n` as a same-folder re-switch
+/// (`discimg::atapi::same_folder_reswitch`): `gdi::mounted_number` is the
+/// last folder walked to, which a failure before that walk (no such folder,
+/// a card error) leaves pointing at the previous one.
+static mut LAST_MOUNT: Option<discimg::atapi::MountOutcome> = None;
+static mut LAST_MOUNT_NAME: heapless::String<{ gamecfg::MAX_NEXT }> = heapless::String::new();
+
+fn record_mount_attempt(name: &str, outcome: discimg::atapi::MountOutcome) {
+    // SAFETY: `ide_task` only; `name` may be MOUNT_NAME, a different static.
+    let n = unsafe { &mut *core::ptr::addr_of_mut!(LAST_MOUNT_NAME) };
+    n.clear();
+    // A name too long to keep is recorded as a failure: never a no-op.
+    let fits = n.push_str(name).is_ok();
+    unsafe { LAST_MOUNT = Some(if fits { outcome } else { discimg::atapi::MountOutcome::Failed }) };
+}
+
+/// The last mount by name, for `discimg::atapi::same_folder_reswitch`.
+fn last_mount() -> Option<(&'static str, discimg::atapi::MountOutcome)> {
+    let outcome = unsafe { LAST_MOUNT }?;
+    Some((unsafe { &*core::ptr::addr_of!(LAST_MOUNT_NAME) }.as_str(), outcome))
 }
 
 async fn swap_media(state: &mut DeviceState, label: &'static str) -> bool {
@@ -1514,6 +1571,9 @@ struct SwapWindow {
     at: Instant,
     open_ms: u32,
     detect_ms: u32,
+    /// A switch's tray cycle, or the re-detect of a DEVICE RESET (no open
+    /// phase; ends with the byte at rest, `discimg::atapi::window_secnr`).
+    kind: discimg::atapi::WindowKind,
 }
 static mut SWAP_WINDOW: Option<SwapWindow> = None;
 
@@ -1526,9 +1586,38 @@ static mut SWAP_WINDOW: Option<SwapWindow> = None;
 fn open_swap_window(state: &mut DeviceState) {
     let (open_ms, detect_ms) = crate::gdi::ini()
         .swap_window_ms(discimg::atapi::SWAP_OPEN_MS, discimg::atapi::SWAP_DETECT_MS);
-    unsafe { SWAP_WINDOW = Some(SwapWindow { at: Instant::now(), open_ms, detect_ms }) };
+    unsafe {
+        SWAP_WINDOW = Some(SwapWindow { at: Instant::now(), open_ms, detect_ms, kind: discimg::atapi::WindowKind::Switch })
+    };
     state.unit_attention = false;
     state.clear_sense();
+}
+
+/// ATA DEVICE RESET (0x08): start the re-detect, replacing any window that is
+/// running (`discimg::atapi::device_reset_window`; stock does this on every
+/// DEVICE RESET, R155, R159, seq 17). SECNR goes busy `0x00` now (the
+/// caller's `load_atapi_signature` writes `rest_secnr`), `ide_task`'s timer
+/// puts up the byte at rest when it ends, and the next command after that
+/// gets the UNIT ATTENTION with a medium (`drive_not_ready`; seq 17 `DR_`
+/// shows 6/28/00 after a reset with no switch) or no medium for good. A UNIT
+/// ATTENTION or sense still pending goes now, as on a switch: the re-detect
+/// raises its own. Its length is GDEMU.INI detect_time, as stock's
+/// (`discimg::atapi::device_reset_redetect_ms`; seq 18: detect_time 400 ->
+/// the final byte at ~401 ms).
+fn start_device_reset_redetect(state: &mut DeviceState) {
+    let (_, detect_ms) = crate::gdi::ini()
+        .swap_window_ms(discimg::atapi::SWAP_OPEN_MS, discimg::atapi::SWAP_DETECT_MS);
+    let (open_ms, detect_ms) = discimg::atapi::device_reset_window(detect_ms);
+    unsafe {
+        SWAP_WINDOW = Some(SwapWindow { at: Instant::now(), open_ms, detect_ms, kind: discimg::atapi::WindowKind::Redetect })
+    };
+    state.unit_attention = false;
+    state.clear_sense();
+}
+
+/// SECNR for window `sw` in `phase` (`discimg::atapi::window_secnr`).
+fn sw_secnr(sw: &SwapWindow, phase: discimg::atapi::SwapPhase) -> u8 {
+    discimg::atapi::window_secnr(sw.kind, phase, media_present(), mounted_disc_format(), idle_status())
 }
 
 /// End the window now (hard reset, eject, write session). A medium still in
@@ -1536,9 +1625,9 @@ fn open_swap_window(state: &mut DeviceState) {
 /// busy nibble a command already put in SECNR is taken down (a window ended
 /// before any command leaves SECNR as it was, as on the hard reset paths).
 fn cancel_swap_window(state: &mut DeviceState) {
-    if unsafe { (*core::ptr::addr_of_mut!(SWAP_WINDOW)).take() }.is_none() {
+    let Some(sw) = (unsafe { (*core::ptr::addr_of_mut!(SWAP_WINDOW)).take() }) else {
         return;
-    }
+    };
     let medium = media_present();
     if medium {
         state.medium_changed();
@@ -1546,7 +1635,7 @@ fn cancel_swap_window(state: &mut DeviceState) {
     let dev = IdeDevice::primary();
     let st = (dev.read(REG_LBA_LOW_MID) & 0x0F) as u8;
     if st == discimg::atapi::DRIVE_OPEN || st == discimg::atapi::DRIVE_BUSY {
-        dev.set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Done, medium, mounted_disc_format()));
+        dev.set_secnr(sw_secnr(&sw, discimg::atapi::SwapPhase::Done));
     } else {
         // Whatever the status, the format nibble was held at 0 in the window;
         // with no medium left (EJECT, write session) NO DISC 0x07.
@@ -1564,7 +1653,7 @@ fn window_elapsed_ms(sw: &SwapWindow) -> u32 {
 fn window_secnr() -> Option<u8> {
     let sw = unsafe { (*core::ptr::addr_of!(SWAP_WINDOW)).as_ref() }?;
     let phase = discimg::atapi::swap_phase(window_elapsed_ms(sw), sw.open_ms, sw.detect_ms);
-    Some(discimg::atapi::swap_secnr(phase, media_present(), mounted_disc_format()))
+    Some(sw_secnr(sw, phase))
 }
 
 /// SECNR at rest (start-up, DEVICE RESET): the window's byte inside one;
@@ -1612,7 +1701,7 @@ fn drive_not_ready(dev: &IdeDevice, state: &mut DeviceState) -> Option<(u8, u8)>
     };
     let phase = discimg::atapi::swap_phase(window_elapsed_ms(sw), sw.open_ms, sw.detect_ms);
     // Format nibble 0 through the window, the disc's once it is over (R144).
-    dev.set_secnr(discimg::atapi::swap_secnr(phase, medium, mounted_disc_format()));
+    dev.set_secnr(sw_secnr(sw, phase));
     if phase == SwapPhase::Done {
         *w = None;
         if medium {
@@ -3063,6 +3152,20 @@ async fn handle_gdemu_cmd(
 /// nothing to mount with status 0x50, D12); the swap window tells the host.
 async fn gdemu_mount_staged(dev: &IdeDevice, state: &mut DeviceState, label: &'static str) {
     let name = unsafe { &*core::ptr::addr_of!(MOUNT_NAME) };
+    // The folder already mounted (an image, or the empty folder's no medium):
+    // stock does nothing at all (R159, seq 17 `RS_`) -- no window, SECNR and
+    // ALTSTATUS flat, no UNIT ATTENTION, REQ_STAT's state and head kept --
+    // so nothing is reloaded, CD-DA is not stopped and the cache stays. Only
+    // when the last mount attempt was this very folder name and it mounted
+    // (or found the folder empty) and the drive still holds that; after a
+    // failed attempt, an eject or a write session it mounts again.
+    let empty_slot = EMPTY_SLOT.load(core::sync::atomic::Ordering::Relaxed);
+    if discimg::atapi::same_folder_reswitch(name.as_str(), last_mount(), media_present(), empty_slot) {
+        info!("{}: GDEMU re-switch to the mounted folder '{}': nothing to do", label, name.as_str());
+        clear_mount_name();
+        finish_ok(dev);
+        return;
+    }
     let _ = mount_named(state, label, name.as_str()).await;
     // `0x52` stages through the same buffer as MOUNT_NAME: leave nothing
     // behind for a later WSESSION_END 2 to mount.
