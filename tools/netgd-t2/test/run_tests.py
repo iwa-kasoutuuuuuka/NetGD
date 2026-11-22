@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zlib
 
@@ -219,7 +220,7 @@ class Base(unittest.TestCase):
         names = {k.lower(): k for k in fc.folder_files("/" + folder)}
         for n, d in zip(["disc.gdi", "track01.bin", "track02.raw", "track03.bin"], datas):
             self.assertEqual(fc.read_file("/%s/%s" % (folder, names[n])), d, n)
-        self.assertFalse([p for p in fc.files if p.lower().endswith((".ngp", ".ckp"))])
+        self.assertFalse([p for p in fc.files if p.lower().startswith("/%s/" % folder.lower()) and p.lower().endswith((".ngp", ".ckp"))])
         return fc
 
 
@@ -491,6 +492,180 @@ class TestChecksums(Base):
         self.check_folder(img, "03", datas)
 
 
+def data_frame(datas, w, seq, off=None, n=None, cut=None):
+    idx, _z, woff, wn = w
+    off = woff if off is None else off
+    n = wn if n is None else n
+    return ngtp.build_frame(ngtp.DATA, struct.pack("<HHQ", idx, 0, off) + datas[idx][off:off + n], seq=seq)
+
+
+class TestProtocol(Base):
+    """the receiver's checks on the PC's DATA frames (menu-app.md 8.3), with a raw client"""
+
+    def raw_put(self, srv, text, datas, answer, hold=1):
+        """PUT; WANTs are collected until `hold` are outstanding (or the file has no more chunks), then
+        answer(pending, seq) returns the bytes to send.  -> (kind, payload, lines): kind DONE / ERROR / LOST"""
+        c = srv.client()
+        c.hello(CODE)
+        seq = c.send(ngtp.PUT, put_payload(text))
+        pending, lines = [], []
+        while True:
+            try:
+                t, fl, sq, p = c.recv()
+            except ngtp.ConnectionLost:
+                return "LOST", b"", lines
+            if t == ngtp.LINE:
+                lines.append(p.decode())
+            elif t == ngtp.WANT:
+                w = struct.unpack("<HHQI", p)
+                pending.append(w)
+                if len(pending) >= hold or w[2] + w[3] >= len(datas[w[0]]):
+                    out = answer(pending, seq)
+                    pending = []
+                    try:
+                        for i, part in enumerate(out if isinstance(out, list) else [out]):
+                            if i:
+                                time.sleep(0.3)         # the receiver has taken the earlier part before this one comes
+                            c._send(part)
+                    except ngtp.ConnectionLost:
+                        return "LOST", b"", lines
+            elif t == ngtp.DONE:
+                return "DONE", p, lines
+            elif t == ngtp.ERROR:
+                return "ERROR", p, lines
+
+    def resume_and_check(self, srv, img, text, datas, expect_file=None):
+        c = srv.client()
+        c.hello(CODE)
+        res = c.put(text, Src(datas), mode=ngtp.PUT_RESUME, tag="0002")
+        self.assertTrue(res.ok, res.lines)
+        if expect_file:
+            self.assertTrue(any(l.startswith("NGD:RESUME") and "file=%d" % expect_file in l for l in res.lines), res.lines)
+        c.finish()
+        srv.finish()
+        self.check_folder(img, "03", datas)
+        return res
+
+    def ok_answer(self, datas):
+        return lambda pending, seq: b"".join(data_frame(datas, w, seq) for w in pending)
+
+    def test_data_after_a_short_data_is_refused(self):
+        # depth 2: track03 chunk A gets 10 bytes (= its end), chunk B 64 KiB: B must not become bytes 10.. of the file
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img, "--want", "65536", "--depth", "2")
+        ok = self.ok_answer(datas)
+
+        def answer(pending, seq):
+            if pending[0][0] == 3 and len(pending) == 2:
+                return [data_frame(datas, pending[0], seq, n=10), data_frame(datas, pending[1], seq)]
+            return ok(pending, seq)
+        kind, p, lines = self.raw_put(srv, text, datas, answer, hold=2)
+        self.assertEqual((kind, p[:6]), ("ERROR", b"ESTATE"), (p, lines))
+        self.assertIn(b"after a short DATA", p)
+        self.assertFalse([l for l in lines if l.startswith("NGD:FILE") and "file=4 " in l], lines)
+        self.resume_and_check(srv, img, text, datas, expect_file=4)
+
+    def test_out_of_order_data_is_refused(self):
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img, "--want", "16384", "--depth", "3")
+
+        def answer(pending, seq):
+            if len(pending) >= 2:
+                return data_frame(datas, pending[1], seq)     # the answer to the second WANT comes first
+            return data_frame(datas, pending[0], seq)
+        kind, p, lines = self.raw_put(srv, text, datas, answer, hold=3)
+        self.assertEqual((kind, p[:6]), ("ERROR", b"ESTATE"), (p, lines))
+        self.resume_and_check(srv, img, text, datas)
+
+    def test_offset_mismatch_is_refused(self):
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img)
+        kind, p, lines = self.raw_put(srv, text, datas, lambda pend, seq: data_frame(datas, pend[0], seq, off=pend[0][2] + 1))
+        self.assertEqual((kind, p[:6]), ("ERROR", b"ESTATE"), (p, lines))
+        self.resume_and_check(srv, img, text, datas)
+
+    def test_oversized_data_is_refused(self):
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img, "--want", "1000")
+
+        def answer(pending, seq):
+            w = pending[0]
+            if w[0] == 2:                                   # track02 is 70000 B: 1001 bytes for a 1000-byte WANT
+                return data_frame(datas, w, seq, n=w[3] + 1)
+            return data_frame(datas, w, seq)
+        kind, p, lines = self.raw_put(srv, text, datas, answer)
+        self.assertEqual((kind, p[:6]), ("ERROR", b"ESTATE"), (p, lines))
+        self.resume_and_check(srv, img, text, datas, expect_file=3)
+
+    def test_huge_length_field_is_refused(self):
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img)
+
+        def answer(pending, seq):
+            return b"NGT1" + bytes([ngtp.DATA, 0, 0, 0]) + struct.pack("<II", seq, 0xFFFFFFF0)    # the header only
+        kind, p, lines = self.raw_put(srv, text, datas, answer)
+        self.assertEqual((kind, p[:6]), ("ERROR", b"EPROTO"), (p, lines))
+        # and as a request header
+        c = srv.client()
+        c._send(b"NGT1" + bytes([ngtp.PING, 0, 0, 0]) + struct.pack("<II", 1, 0xFFFFFFFF))
+        t, fl, sq, p = c.recv()
+        self.assertEqual((t, p[:6]), (ngtp.ERROR, b"EPROTO"))
+        self.resume_and_check(srv, img, text, datas)
+
+    def test_resume_from_a_checkpoint_inside_a_file(self):
+        # checkpoints every 64 KiB: stopping in track03 (140001 B) leaves offset 65536 or 131072, so resume reopens the
+        # file at off > 0 and the WANTs start there
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img, "--ckp", "65536", "--want", "16384", "--depth", "2")
+        c = srv.client()
+        c.hello(CODE)
+        src = Src(datas)
+        src.abort = lambda: sum(src.sizes) > len(datas[0]) + len(datas[1]) + len(datas[2]) + 100000
+        res = c.put(text, src, abort=src.abort)
+        self.assertEqual(res.error, "ESTOP", res.lines)
+        src2 = Src(datas)
+        offs = []
+        orig = src2.read
+
+        def rd(idx, off, n):
+            offs.append((idx, off))
+            return orig(idx, off, n)
+        src2.read = rd
+        res = c.put(text, src2, mode=ngtp.PUT_RESUME, tag="0002")
+        self.assertTrue(res.ok, res.lines)
+        m = [re.search(r"file=(\d+) offset=(\d+)", l) for l in res.lines if l.startswith("NGD:RESUME")]
+        self.assertTrue(m and m[0], res.lines)
+        self.assertEqual(m[0].group(1), "4")
+        self.assertIn(int(m[0].group(2)), (65536, 131072))
+        self.assertEqual(offs[0], (3, int(m[0].group(2))))
+        c.finish()
+        srv.finish()
+        self.check_folder(img, "03", datas)
+
+    def test_verify_after_an_aborted_put_is_not_stopped(self):
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img, "--tcpfix")
+        c = srv.client()
+        c.hello(CODE)
+        self.assertTrue(c.put(text, Src(datas)).ok)
+        text4, datas4 = self.gdi_set(folder="04")
+        src = Src(datas4, abort_at=3)
+        self.assertEqual(c.put(text4, src, abort=src.abort, tag="0002").error, "ESTOP")
+        res = c.verify("03")
+        self.assertTrue(res.ok, res.lines)
+        self.assertFalse([l for l in res.lines if l.startswith("NGD:STOP")], res.lines)
+        c.finish()
+        srv.finish()
+        self.check_folder(img, "03", datas)
+
+
 class TestWriteGate(Base):
     def refused(self, *opts):
         img = self.card()
@@ -509,14 +684,37 @@ class TestWriteGate(Base):
         self.assertEqual(self.sha(img), before)
         return srv, sim, res.lines
 
-    def test_stock_gdemu_gets_one_version_query_and_nothing_else(self):
-        srv, sim, lines = self.refused("--nofw")
-        self.assertEqual(sim["packets"], 1, srv.text)            # the one E0 03 VERSION, asked once
-        self.assertTrue(any("not NetGD" in l for l in lines), lines)
+    def test_stock_gdemu_gets_only_the_recorded_52_00(self):
+        # the stock model answers 52 00 like record 08 (5.20.5 / 2.5.0); it must never see an 0xE0 packet
+        srv, sim, lines = self.refused("--stock", "--trace")
+        self.assertEqual((sim["packets"], sim["e0"]), (1, 0), srv.text)
+        self.assertEqual(re.findall(r"^FW (.*)$", srv.text, re.M), ["52 00 00 00 00 00 00 00 00 00 00 00"])
+        self.assertLessEqual(sim["probe_limit"], 3000)
+        self.assertTrue(any("GDEMU 5.20.5 is not NetGD" in l for l in lines), lines)
         self.assertEqual(srv.end["fw_ok"], 0)
+
+    def test_stock_after_unit_attention_repeats_52_00_only(self):
+        srv, sim, lines = self.refused("--stock", "--ua")
+        self.assertEqual((sim["packets"], sim["e0"]), (2, 0), srv.text)
+
+    def test_no_answer_to_52_00_sends_nothing_else(self):
+        srv, sim, lines = self.refused("--nofw")
+        self.assertEqual((sim["packets"], sim["e0"]), (1, 0), srv.text)
+        self.assertTrue(any("did not answer 52 00" in l for l in lines), lines)
+
+    def test_another_gdemu_version_gets_no_e0(self):
+        srv, sim, lines = self.refused("--gdemu-version", "0x05140000")
+        self.assertEqual((sim["packets"], sim["e0"]), (1, 0), srv.text)
+
+    def test_e0_is_never_repeated_on_unit_attention(self):
+        srv, sim, lines = self.refused("--ua-on-e0")
+        self.assertEqual((sim["packets"], sim["e0"]), (2, 1), srv.text)
+        self.assertLessEqual(sim["probe_limit"], 3000)
+        self.assertTrue(any("no OGDM VERSION" in l for l in lines), lines)
 
     def test_netgd_without_write_session_caps(self):
         srv, sim, lines = self.refused("--caps", "1")
+        self.assertEqual((sim["packets"], sim["e0"]), (2, 1), srv.text)
         self.assertTrue(any("checksum" in l for l in lines), lines)
 
     def test_no_drive_build_never_sends_a_packet(self):
@@ -525,7 +723,7 @@ class TestWriteGate(Base):
 
     def test_hello_and_ping_do_not_touch_the_drive(self):
         img = self.card()
-        srv = Serve(self, img, "--nofw", "--idle-exit-ms", "1500")
+        srv = Serve(self, img, "--stock", "--idle-exit-ms", "1500")
         c = srv.client()
         c.hello(CODE)
         c.send(ngtp.PING)
@@ -621,7 +819,7 @@ class TestPushCli(Base):
         img = self.card()
         before = self.sha(img)
         gdi, _ = self.make_gdi()
-        srv = Serve(self, img, "--nofw", "--idle-exit-ms", "2000")
+        srv = Serve(self, img, "--stock", "--idle-exit-ms", "2000")
         r = self.push(srv, gdi, "--slot", "5")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         srv.finish()

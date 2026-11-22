@@ -23,11 +23,19 @@ PC の `tools/netgd-send`（`push` / `remote`）が NGTP（`docs/design/menu-app
 どちらも `make T2_WANT=… T2_DEPTH=…` で変えられる（1〜65536 B、1〜4）。受信バッファ（＝TCP の窓）は `T2_RCVBUF`（既定 20480、listen の前に設定）。
 同時数 2 では、受け手は 2 つ目の WANT を出したまま SD に書くので、PC は次の塊をその間に送れる。DATA は WANT の順に返すこと（netgd-send はそうしている）。ファイルが変わる前と DONE の前には、残った WANT の DATA を読み捨てる。
 
-### 書き込みの関門（純正 GDEMU では何も書かない）
+### 書き込みの関門（純正 GDEMU では何も書かない、`E0` も送らない）
 
-- 書き込みセッションを開く前に、ドライブに **VERSION（`E0 03`、読むだけ）を 1 回だけ** 問い合わせる。`OGDM` で、機能ビットに SESSION と CHECKSUM が両方あるときだけ書く。それ以外は `NGD:ERROR session code=EFW` と `DONE EFW` を返し、**以後ドライブには何も送らない**（ホスト試験で、純正の模型に送るパケットは 1 個だけと確かめている）。
-- HELLO・PING・合言葉違いではドライブに触れない。問い合わせは最初の STATFS／LIST／PUT／DELETE／VERIFY のとき。
-- `make T2_NO_DRIVE=1` はドライブに 1 パケットも送らない（ネットだけの確認用。書き込みは全部断る）。
+最初の STATFS／LIST／PUT／DELETE／VERIFY のときに 1 回だけ、`fw_probe_netgd`（`../netgd-recv/src/fwctl.c`）でドライブを確かめる。
+
+1. **`52 00 00 00 00 00 00 00 00 00 00 00`（GDEMU_VERSION）**：gdprobe が純正 GDEMU 6.0 に送って記録したのと同じ CDB（`docs/research/probe-records/stock_20261122_08_identify.txt`：8 バイト `00 00 05 02 00 05 20 05` = ブートローダ 2.5.0・ファーム 5.20.5）。UNIT ATTENTION のときだけ同じものをもう 1 回。
+2. ファームの語が **NetGD の値 5.20.0（`00 00 20 05`、`mcu/netgd/src/ide.rs` の `GDEMU_COMPAT_VERSION`）のときだけ** `E0 03`（VERSION）を 1 回。UNIT ATTENTION でも繰り返さない。`OGDM` で、機能ビットに SESSION と CHECKSUM が揃っていれば書く。
+3. それ以外はすべて `NGD:ERROR session code=EFW msg=...` と `DONE EFW`。以後ドライブには何も送らない。
+
+- **純正（記録どおりの応答）が受け取るのは `52 00` の 1 個だけ**（UNIT ATTENTION があれば 2 個）。ホスト試験で、純正の模型への 0xE0 が 0 個であることを確かめている。
+- IDENTIFY PACKET と REQ_MODE は使わない。NetGD はわざと純正と同じバイトを返すので、区別できない。
+- どのパケットも `fw_xfer_limit_ms` = 3000 ms で打ち切る（`fwxfer_kos.c`。既定の待ちは BSY 30 秒を含めて最大約 39 秒）。確認全体は最悪約 9 秒で、netgd-send の時間切れより短い。
+- 残る危険：5.20.0 と名乗る純正のファームがあれば、`E0 03` が 1 個届く（記録は 5.20.5）。
+- HELLO・PING・合言葉違いではドライブに触れない。`make T2_NO_DRIVE=1` はドライブに 1 パケットも送らない（ネットだけの確認用。書き込みは全部断る）。
 - KOS の cdrom ドライバは使わない（`INIT_CDROM` なし。netgd-recv と同じ）。
 
 ### BBA の立ち上げ
@@ -67,4 +75,9 @@ DreamSDK は書き換えない（tcpfix は `$(KOS_BASE)/kernel/net/net_tcp.c` �
 py -3 tools/netgd-t2/test/run_tests.py
 ```
 
-22 件：既定の窓（16 KiB × 1、64 KiB × 2）、半端な WANT（5000 B × 3）、WANT が 2 つ同時に出ていること、PC の中止フラグと再開、B での中止、PC の切断とつなぎ直し、電源断と再開、ファイルの CRC 不一致と上書き、フレームの CRC 不一致、DATA の後半が届かず FIN が来た場合（EOF をファイルの終わりと取らない）、純正（`--nofw`）・機能ビット不足・`--no-drive` で何も書かない、HELLO・PING でドライブに触れない、待ち時間の上限、B での終了、BBA なし、`netgd-send.py push`。
+33 件：
+- 窓：16 KiB × 1、64 KiB × 2、半端な WANT（5000 B × 3）、WANT が 2 つ同時に出ていること。
+- DATA の検査：短い DATA の後のデータ（ESTATE、書かない）、順番違い、オフセット違い、WANT より長い DATA、長さの欄が大きすぎる（EPROTO）、DATA の後半が届かず FIN が来た場合（EOF をファイルの終わりと取らない）、フレームの CRC 不一致。
+- 中止と再開：PC の中止フラグと再開、中止の後の VERIFY が止まらないこと、B での中止、PC の切断とつなぎ直し、電源断と再開、ファイルの途中のチェックポイント（`--ckp 65536`）からの再開、ファイルの CRC 不一致と上書き。
+- 書き込みの関門：純正（`52 00` だけ、UA のときは 2 個、E0 なし、3 秒の上限）、`52 00` に応答なし、別の版の GDEMU、E0 03 への UA を繰り返さない、機能ビット不足、`--no-drive`、HELLO・PING でドライブに触れない、合言葉違い。
+- その他：待ち時間の上限、B での終了、BBA なし、`netgd-send.py push`（素の TCP と tcpfix）、純正への push が終了コード 1 で何も書かないこと。

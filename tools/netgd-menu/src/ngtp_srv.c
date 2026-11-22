@@ -148,6 +148,12 @@ static int32_t take_data(ngtp_srv_t *s)
         send_error(s, s->seq, "ESTATE", "DATA does not match the WANT (file, offset or length)");
         return -1;
     }
+    if (s->src_eof && dlen > 0) {
+        /* an earlier DATA was short (= the end of the file, menu-app.md 8.3): anything after it would land at the
+           wrong offset.  Refuse before a byte of it reaches the core. */
+        send_error(s, s->seq, "ESTATE", "DATA after a short DATA (the end of the file)");
+        return -1;
+    }
     if (h.flags & NGTP_F_ABORT) s->abort_asked = 1;
     if (dlen < s->q[s->qh].len) s->src_eof = 1;     /* the PC's file is shorter than the manifest says */
     s->qh = (s->qh + 1) % NGTP_DEPTH_MAX;
@@ -301,7 +307,6 @@ static ng_err_t do_put(ngtp_srv_t *s, const ng_sink_t *sk, const uint8_t *p, uin
     src.ctx = s; src.open = src_open; src.read = src_read; src.close = src_close;
     s->nq = s->qh = 0;
     s->held_len = s->held_pos = 0;
-    s->abort_asked = 0;                     /* a stop the PC asked for ends that PUT only, not the next one on the link */
     e = ng_put(sk, tag, &man, mftext, n - 8, &src, mode);
     drain_wants(s);                         /* no DATA may follow the DONE */
     ng_cfg.force = 0;
@@ -317,6 +322,7 @@ static int serve_request(ngtp_srv_t *s, const ngtp_hdr_t *h, const uint8_t *p, u
     int finish = 0;
 
     s->seq = h->seq;
+    s->abort_asked = 0;                     /* the PC's stop (a DATA flag) ends that operation only, not the next one */
     if (h->type == NGTP_HELLO) { do_hello(s, h->seq, p, n); return 0; }
     if (!s->hello) { send_error(s, h->seq, "ESTATE", "HELLO first"); return 0; }
     if (h->type == NGTP_DATA) { send_error(s, h->seq, "ESTATE", "DATA without a WANT"); return 0; }

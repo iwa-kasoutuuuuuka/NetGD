@@ -24,12 +24,17 @@
 #define IN8(a)      (*(volatile uint8_t *)(a))
 #define IN16(a)     (*(volatile uint16_t *)(a))
 
+uint32_t fw_xfer_limit_ms;
+static uint64_t deadline;           /* fw_xfer_limit_ms: the whole command ends by then (0 = no limit) */
+
 /* wait until (status & mask) == want; 0 ok, -1 timeout */
 static int wait_for(uint8_t mask, uint8_t want, uint32_t ms)
 {
     uint64_t t0 = timer_ms_gettime64();
-    while ((IN8(G1_ALTSTATUS) & mask) != want)
-        if (timer_ms_gettime64() - t0 > ms) return -1;
+    while ((IN8(G1_ALTSTATUS) & mask) != want) {
+        uint64_t t = timer_ms_gettime64();
+        if (t - t0 > ms || (deadline && t > deadline)) return -1;
+    }
     return 0;
 }
 
@@ -39,6 +44,7 @@ int fw_xfer(const uint8_t pkt[12], void *data, uint32_t alloc, uint32_t *got, ui
     uint8_t st;
     if (got) *got = 0;
     if (err) *err = 0;
+    deadline = fw_xfer_limit_ms ? timer_ms_gettime64() + fw_xfer_limit_ms : 0;
     if (g1_ata_mutex_lock() != 0) return -1;
     ngdev_watch_begin();
     g1_ata_select_device(G1_ATA_MASTER);

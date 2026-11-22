@@ -75,7 +75,7 @@ static void draw(t2_app_t *a)
     if (!a->cfg.drive) snprintf(l, sizeof l, "drive: not used (T2_NO_DRIVE build): no writes");
     else if (!a->fw_checked) snprintf(l, sizeof l, "drive: checked at the first write");
     else if (a->fw_ok) snprintf(l, sizeof l, "drive: NetGD OGDM/%u %.24s", (unsigned)a->fw.proto, a->fw.fwstr);
-    else snprintf(l, sizeof l, "drive: NOT NetGD - writing refused");
+    else snprintf(l, sizeof l, "drive: NOT NetGD - writing refused (52 00 fw %08X)", (unsigned)a->gd_fw);
     nm_screen_row(s, 5, l, a->fw_checked && !a->fw_ok ? NM_ATTR_WARN : NM_ATTR_NORMAL);
     if (a->srv.client[0]) {
         snprintf(l, sizeof l, "client %.32s", a->srv.client);
@@ -181,9 +181,18 @@ int t2_gate(t2_app_t *a, char *why, size_t whyn)
         return 0;
     }
     if (!a->fw_checked) {
-        /* One VERSION query (E0 03, read only).  Asked once: a drive that is not NetGD gets no other packet from us. */
+        /* Asked once (fw_probe_netgd, fwctl.h): 52 00 as the stock record has it, and E0 03 only when 52 00 says NetGD.
+           A drive that is not NetGD gets no other packet from us. */
+        uint32_t bw = 0, fw = 0;
+        int r;
         a->fw_checked = 1;
-        if (fw_version(&a->fw) != 0) snprintf(a->fw_why, sizeof a->fw_why, "the drive is not NetGD (no OGDM VERSION): will not write");
+        r = fw_probe_netgd(&a->fw, &bw, &fw);
+        a->gd_fw = fw;
+        if (r == FW_PROBE_NOANSWER) snprintf(a->fw_why, sizeof a->fw_why, "the drive did not answer 52 00: will not write");
+        else if (r == FW_PROBE_OTHER)
+            snprintf(a->fw_why, sizeof a->fw_why, "GDEMU %x.%02x.%x is not NetGD: will not write", (unsigned)(fw >> 24),
+                     (unsigned)((fw >> 16) & 0xFF), (unsigned)((fw >> 8) & 0xFF));
+        else if (r != FW_PROBE_NETGD) snprintf(a->fw_why, sizeof a->fw_why, "no OGDM VERSION: not NetGD, will not write");
         else if ((a->fw.caps & (FW_CAP_SESSION | FW_CAP_CHECKSUM)) != (FW_CAP_SESSION | FW_CAP_CHECKSUM))
             snprintf(a->fw_why, sizeof a->fw_why, "NetGD without write session / checksum: will not write");
         else { a->fw_ok = 1; a->srv.fw = &a->fw; }

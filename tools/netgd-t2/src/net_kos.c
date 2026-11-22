@@ -129,7 +129,8 @@ void t2_net_shutdown(void)
     nm_net_close_client();
     nm_net_stop();
     if (dcls_up) { fs_dclsocket_shutdown(); dcls_up = 0; }
-    if (net_started) net_shutdown();
+    /* never while the net_init() thread may still run (it timed out): KOS would tear the stack down under it */
+    if (net_started && g_net_done) net_shutdown();
     net_started = 0;
 }
 

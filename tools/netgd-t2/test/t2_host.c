@@ -12,6 +12,7 @@
 #include "nm_plat.h"
 #include "plat_host.h"
 #include "simdisk.h"
+#include "ng.h"
 
 static t2_app_t app;
 static int confirm_mode;            /* 1 = A while the question is on the screen, 2 = B */
@@ -21,9 +22,10 @@ static uint64_t t_listen;
 static void sim_summary(void)
 {
     printf("SIM cmd_writes=%llu sector_writes=%llu begin=%d end=%d unsess=%d violations=%llu packets=%d endmode=%d "
-           "mount_in_session=%d session=%d\n",
+           "mount_in_session=%d session=%d e0=%d probe_limit=%u\n",
            (unsigned long long)sim_cmd_writes, (unsigned long long)sim_sector_writes, sim_begin_calls, sim_end_calls,
-           sim_unsessioned_writes, (unsigned long long)sim_violations, sim_packets, sim_end_mode, sim_mount_in_session, sim_session);
+           sim_unsessioned_writes, (unsigned long long)sim_violations, sim_packets, sim_end_mode, sim_mount_in_session, sim_session,
+           sim_e0_packets, (unsigned)sim_probe_limit_max);
     fflush(stdout);
 }
 
@@ -51,6 +53,7 @@ int main(int argc, char **argv)
     const char *img;
     uint32_t sectors, timeout_ms = 120000;
     int do_dump = 0;
+    uint32_t ckp = 0;
     uint64_t t0;
     if (argc < 4 || strcmp(argv[1], "serve")) {
         fprintf(stderr, "usage: t2_host serve <img> <sectors> --port P --code C [options]\n");
@@ -69,6 +72,11 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--depth") && v) { cfg.depth = atoi(v); i++; }
         else if (!strcmp(a, "--tcpfix")) { }
         else if (!strcmp(a, "--nofw")) sim_fw_dead = 1;
+        else if (!strcmp(a, "--stock")) sim_stock = 1;
+        else if (!strcmp(a, "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
+        else if (!strcmp(a, "--ua-on-e0")) sim_ua_on_e0 = 1;
+        else if (!strcmp(a, "--gdemu-version") && v) { sim_fw_version = (uint32_t)strtoul(v, NULL, 0); i++; }
+        else if (!strcmp(a, "--ckp") && v) { ckp = (uint32_t)atol(v); i++; }
         else if (!strcmp(a, "--caps") && v) { sim_caps = (uint8_t)atoi(v); i++; }
         else if (!strcmp(a, "--no-drive")) cfg.drive = 0;
         else if (!strcmp(a, "--cut") && v) { sim_cut_after = atoll(v); i++; }
@@ -90,6 +98,7 @@ int main(int argc, char **argv)
     nm_host_buttons_hook = host_buttons;
     atexit(sim_summary);
     t2_init(&app, &cfg);
+    if (ckp) ng_cfg.ckp_bytes = ckp;            /* checkpoints inside a file: resume reopens it at off > 0 */
     t0 = nm_host_real_ms();
     for (;;) {
         int run = t2_step(&app);

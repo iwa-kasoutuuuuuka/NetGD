@@ -41,6 +41,7 @@ typedef struct {
     int fw_checked, fw_ok;
     ng_fwinfo_t fw;
     char fw_why[64];
+    uint32_t gd_fw;                 /* the firmware word of 52 00 (0 = none) */
     /* screen */
     char log[5][NM_COLS + 1];
     int nlog;
