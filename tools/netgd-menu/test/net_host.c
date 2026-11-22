@@ -29,7 +29,7 @@ typedef int sock_t;
 uint16_t nm_host_net_port;              /* listen here instead of the port asked for (0 = as asked) */
 int nm_host_net_nodev;                  /* nm_net_up answers "no BBA" */
 int nm_host_no_udp;                     /* nm_net_udp_listen fails */
-int nm_host_net_noaddr;                 /* nm_net_up answers "no IP address" this many more times (DHCP failed) */
+int nm_host_net_noaddr;                 /* nm_net_up answers "no IP address" (> 0): final, as KOS */
 int nm_host_net_up_calls;
 int nm_host_net_nolink;                 /* nm_net_up answers "no link" as KOS does when net_init returns -1: final, later
                                            calls give the same answer at once (KOS 2.3 cannot run net_init twice) */
@@ -39,7 +39,7 @@ uint32_t nm_net_rcvbuf = NM_NET_RCVBUF_DEFAULT;
 uint32_t nm_net_static_ip = NM_NET_STATIC_IP;
 uint32_t nm_net_arp_ms;
 static char net_why[72];
-static int net_final;
+static int net_final, net_final_rc;     /* as KOS: NODEV, NOADDR and NOLINK are final (DEAD); later calls repeat them */
 const char *nm_net_error(void) { return net_why; }
 int nm_net_final(void) { return net_final; }
 
@@ -68,6 +68,15 @@ void nm_host_real_sleep(uint32_t ms)
 #endif
 }
 
+static int host_final(int rc, const char *why, char *ip, size_t n)
+{
+    if (n) ip[0] = 0;
+    snprintf(net_why, sizeof net_why, "%s", why);
+    net_final = 1;
+    net_final_rc = rc;
+    return rc;
+}
+
 int nm_net_up(char *ip, size_t n)
 {
     static int started;
@@ -76,6 +85,7 @@ int nm_net_up(char *ip, size_t n)
     nm_screen_row_text(&nm_host_screen, 3, row);       /* what the user sees while this (possibly long) call runs */
     printf("NETUP call=%d screen3=|%s|\n", nm_host_net_up_calls, row);
     fflush(stdout);
+    if (net_final) { if (n) ip[0] = 0; return net_final_rc; }   /* net_why kept */
     net_why[0] = 0;
     if (nm_net_log) {                                       /* the UI shows the steps while the call runs */
         char r5[NM_COLS + 1], r7[NM_COLS + 1];
@@ -84,13 +94,8 @@ int nm_net_up(char *ip, size_t n)
         nm_screen_row_text(&nm_host_screen, 7, r7);
         printf("NETLOG screen5=|%s| screen7=|%s|\n", r5, r7);
     }
-    if (nm_host_net_nodev) { if (n) ip[0] = 0; snprintf(net_why, sizeof net_why, "BBA not found"); return NM_NET_NODEV; }
-    if (nm_host_net_nolink > 0 || net_final) {
-        net_final = 1;
-        if (n) ip[0] = 0;
-        snprintf(net_why, sizeof net_why, "%s", NM_NETUP_MSG_FINAL);
-        return NM_NET_NOLINK;
-    }
+    if (nm_host_net_nodev) return host_final(NM_NET_NODEV, "BBA not found", ip, n);
+    if (nm_host_net_nolink > 0) return host_final(NM_NET_NOLINK, NM_NETUP_MSG_FINAL, ip, n);
     if (!started) {
 #ifdef _WIN32
         WSADATA wd;
@@ -100,12 +105,7 @@ int nm_net_up(char *ip, size_t n)
 #endif
         started = 1;
     }
-    if (nm_host_net_noaddr > 0) {
-        nm_host_net_noaddr--;
-        if (n) ip[0] = 0;
-        snprintf(net_why, sizeof net_why, "No IP address (none built in)");
-        return NM_NET_NOADDR;
-    }
+    if (nm_host_net_noaddr > 0) return host_final(NM_NET_NOADDR, "No IP address (none built in)", ip, n);
     snprintf(ip, n, "127.0.0.1");
     return 0;
 }

@@ -402,15 +402,26 @@ class TestNetStart(UiBase):
         self.assertIsNotNone(m, r.text)
         self.assertIn("Starting network", m.group(1))
 
-    def test_no_bba_is_reported(self):
-        r = self.ui(self.lib(), "scan Y dump", "--slots", "2", "--nobba")
+    def test_no_bba_is_reported_and_final(self):
+        # KOS: no BBA is DEAD, like no link: Y:Network goes away and a second Y does not call nm_net_up
+        r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--nobba")
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
+        self.assertIn("BBA not found", NL.join(r.screens[0][1]))
         self.assertIn("BBA not found", NL.join(r.rows))
+        self.assertNotIn("Y:Network", NL.join(r.rows))
 
-    def test_second_y_retries_when_there_was_no_address(self):
+    def test_no_address_is_final_and_y_does_not_start_again(self):
         r = self.ui(self.lib(), "scan Y dump t:100 Y dump", "--slots", "2", "--noaddr", "1")
-        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 2)
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
         self.assertIn("No IP address", NL.join(r.screens[0][1]))
-        self.assertIn("127.0.0.1", NL.join(r.rows))                    # the transfer screen after the second Y
+        self.assertIn("No IP address", NL.join(r.rows))
+        self.assertNotIn("Y:Network", NL.join(r.rows))
+        self.assertNotIn("127.0.0.1", NL.join(r.rows))
+
+    def test_transfer_screen_ip_and_window(self):
+        r = self.ui(self.lib(), "scan Y dump", "--slots", "2")
+        self.assertEqual(len(re.findall(r"^NETUP call=", r.text, re.M)), 1, r.text)
+        self.assertIn("127.0.0.1", NL.join(r.rows))
         self.assertIn("window 16 KiB x 1 (stock tcp)", NL.join(r.rows))
 
     def test_no_dhcp_text_and_steps_on_the_screen(self):

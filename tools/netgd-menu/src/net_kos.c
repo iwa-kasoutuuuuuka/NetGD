@@ -42,6 +42,7 @@ static int lsock = -1, csock = -1, usock = -1;
 static uint16_t lport;          /* the port and SO_RCVBUF lsock was made with */
 static uint32_t lrcvbuf;
 static int lparked;             /* lsock stays listening between nm_net_stop and the next nm_net_listen (no accept) */
+#define NM_NET_DRAIN_MAX 4      /* queued connections dropped when a parked listener is used again */
 
 static uint64_t now_ms(void) { return timer_ms_gettime64(); }
 
@@ -58,6 +59,9 @@ static void set_if(netif_t *nif, uint32_t ip, uint32_t mask, uint32_t bcast, uin
 }
 
 static volatile int g_net_rc, g_net_done, g_net_running;
+/* net_init was started once in this program run: never again, not even after nm_net_shutdown (which clears `up`) -
+   KOS 2.3 can abort on a second one (nm_netup.h, init_again) */
+static int g_net_tried;
 static void *netinit_thd(void *arg) { (void)arg; g_net_rc = net_init(0); g_net_done = 1; g_net_running = 0; return NULL; }
 
 static uint64_t op_now(void *c) { (void)c; return now_ms(); }
@@ -77,6 +81,8 @@ static int op_init_start(void *c)
 {
     (void)c;
     if (g_net_running) return 0;                    /* never two net_init threads */
+    if (g_net_tried) return -1;                     /* never a second net_init (nm_net_up stops before this) */
+    g_net_tried = 1;
     g_net_done = 0;
     g_net_running = 1;
     /* detached: nothing joins it (it may outlive a timed-out wait); it only sets the flags above */
@@ -128,6 +134,13 @@ int nm_net_up(char *ip, size_t n)
         dbgio_disable();                            /* the console goes over the BBA: off once KOS owns it */
         dbgio_off = 1;
     }
+    if (g_net_tried && up.stage == NM_NETUP_NEW) {
+        /* NEW again after net_init ran: only after nm_net_shutdown (init_again is NULL).  Final, no second net_init. */
+        up.stage = NM_NETUP_DEAD;
+        up.err = NM_NET_NOLINK;
+        snprintf(up.why, sizeof up.why, "Network was stopped: restart the console");
+        return up.err;
+    }
     r = nm_netup_run(&up, &cfg, &ops);
     if (r != 0) return r;
     if (!was_up && cfg.dcload && up.arp_ok && !dcls_up) {
@@ -174,8 +187,9 @@ int nm_net_listen(uint16_t port)
     nm_net_stop();
     if (lsock >= 0 && lport == port && lrcvbuf == rb) {
         /* the parked listener again (no new SO_RCVBUF buffer to lose): drop what connected while it was parked - SYNs queued
-           without an answer, from a PC that has given up by now (lsock is non-blocking: this ends when the queue is empty) */
-        for (;;) {
+           without an answer, from a PC that has given up by now.  lsock is non-blocking and its backlog is 1; at most
+           NM_NET_DRAIN_MAX accepts all the same, so this can never spin */
+        for (int i = 0; i < NM_NET_DRAIN_MAX; i++) {
             int c = accept(lsock, NULL, NULL);
             if (c < 0) break;
             close(c);

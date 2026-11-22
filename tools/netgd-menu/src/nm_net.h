@@ -14,8 +14,10 @@
 int nm_net_up(char *ip, size_t n);
 /* the reason of the last failed nm_net_up, one screen line ("" when it did not fail) */
 const char *nm_net_error(void);
-/* 1 = the last nm_net_up failed for good: a later call would only give the same error (KOS: no BBA, no address, or a
-   net_init that returned "no link" - KOS 2.3 aborts on a second net_init, nm_netup.h).  The menu then offers no Y. */
+/* 1 = the last nm_net_up failed for good (KOS: any NM_NETUP_DEAD stage - no BBA, no address, a net_init that returned
+   "no link" (KOS 2.3 aborts on a second net_init, nm_netup.h), or a call after nm_net_shutdown; net_init never runs twice
+   in one program run).  A later call would only give the same error, so the menu hides Y:Network and Y only shows
+   the reason again. */
 int nm_net_final(void);
 /* the bring-up settings, set before the first nm_net_up */
 extern void (*nm_net_log)(const char *line);    /* every bring-up step (the screen); may be NULL */
