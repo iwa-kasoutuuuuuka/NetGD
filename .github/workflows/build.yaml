@@ -73,9 +73,11 @@ jobs:
           DEFMT_LOG: "off"
         run: cargo build --profile release-z --features sam3u2e,resident,sd-fast
 
-      # Size gate: fails (before the linker's own FLASH-overflow error would)
-      # when text+data exceeds the limit kept in tools/fwsize/check.py, and
-      # prints/records the margin. Standard-library Python, no cross binutils.
+      # Size gate: prints/records the flash margin (usage before .image_pad
+      # vs the 122,880-byte app area, limit kept in tools/fwsize/check.py).
+      # An overflow already fails the build step above (linker: region FLASH
+      # overflowed); this step adds the margin and runs when the build passes.
+      # Standard-library Python, no cross binutils.
       - name: Size gate (2E release-z)
         run: >
           python3 tools/fwsize/check.py
