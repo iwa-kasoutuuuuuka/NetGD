@@ -2494,6 +2494,25 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - g2bench（`feat/g2bench`、`dce4d753`、Dreamcast + BBA だけで `/pc/` の読み込みを測る）の最初の実行：4 KiB の fread が **38 KB/s**（1 回約 105 ms、最大 165 ms）。16 KiB で dc-tool-ip が `error: 10055`（WSAENOBUFS）で終了し、以降は測れなかった。原因の調査（`12bc191a`）：dcload の read は 1 回ごとに LOADBIN・PARTBIN（1440 B、10 個ごとに 1.8 ms 休み）・`-f` なしなら 25 ms の待ち・DONEBIN・RETVAL の往復 3 回で、大きさに関係ない固定費が大きい（残り約 80 ms は不明）。10055 は dc-tool-ip の `send_cmd` が WSAENOBUFS を致命的とみなすため。g2bench は CPU の測定を先に、読み込みを 1・4・16・64 KiB の順に各 30 秒、結果を毎回書くように直した。次は通常と `-Fast` で比べる。
 - 関連：R159〜R163、`docs/research/g2-perf-plan.md`（`docs/g2-perf-plan`）。
 
+### R165 自前の FAT 読み込み（ホストだけ）と、embedded_sdmmc 0.9.0 の panic（比較のセッション）
+
+- ブランチ `feat/fatrd-host`（`707d2bf8`・`34f7fac0`・`e70ae2b2`、main `e4995981` から）。`common/fatmap` だけ、feature `reader`（既定オフ）。ファームの像はバイト単位で変わらない。未取り込み。
+- 段階 0（差分テスト）：embedded-sdmmc 0.9.0（ファームと同じ版）を dev-dependency にし、bootcore の 34 個の試料と純 Rust の FAT32/16 イメージ生成器で比べる（`tests/oracle.rs` 13 件）。段階 2：no_std・alloc なしの `vol`・`dir`・`sfn`（`tests/reader.rs` 21 件）。fatmap 86 件が `fat16` あり・なしで通過。
+- embedded_sdmmc との違い（テストで固定、自前の方が正しいと判断）：一覧にボリュームラベルを出さない、248〜255 文字の名前を保つ、削除・壊れた断片で長い名前の連なりを切る（Windows と同じ）、バッファに入らない名前は「長い名前なし」、小さな FAT32（65,525 クラスタ未満）とスーパーフロッピーをマウントできる、先頭の孤立した上位サロゲートは U+FFFD。
+- **頑健性の問題**：embedded_sdmmc 0.9.0 は、13 文字いっぱいの断片のあとに孤立した UTF-16 サロゲートで始まる断片が続く長い名前で **panic する**（"Vec was full?!"、`tests/reader.rs` の `surrogates_match_sdmmc` の 6・8 で再現）。**細工したフォルダ名・ファイル名のカードで、今のファームはディレクトリの一覧や名前の探索中に落ちるはず**（実機では未確認）。段階 3 の前に対策（ファームの名前探索をこの読み込みに置き換える、または embedded_sdmmc の LFN の経路を避ける）を考える。
+- 大きさ（thumbv7m、opt-level z、fat LTO の試験用ハーネス）：FAT32 で約 2,440 B（うち約 580 B は fat.rs の mount / next_cluster と重複）、fat16 込みで約 2,670 B。walk は fat.rs の lookup（1,292 B）も置き換えられる。段階 5 での正味の削減は未測定。
+- 未実施：Windows で作ったカードのイメージ、GPT・mksdcard の試料（WSL に mkfs.fat・mtools が無い）。
+- 関連：R152、`sdmmc-replacement-design.md`（比較のセッションのメモ）。
+
+### R166 g2bench の 2 回目：/pc/ の読み込みと SH-4 の CRC・FNV の速さ（G2 の M0）（Opus）
+
+- `feat/g2bench`（`12bc191a`）を Dreamcast + BBA（dcload-ip 2.0.3、純正 GDEMU の構成、GD-ROM には触れない）で実行。結果：`H:\OpenGDEmu-g2bench\tools\g2bench\host\g2bench_002.txt`（`status=done`）。dc-tool-ip は通常（`-f` なし）。
+- **/pc/ の fread**：1 回あたりの時間は大きさにほぼ関係なく **約 26 ms**（1 KiB 25.8 ms、4 KiB 25.8 ms、16 KiB 27.8 ms、64 KiB 33.8 ms）→ 1 KiB 38 KB/s、4 KiB 154 KB/s、16 KiB 575 KB/s、**64 KiB 1,894 KB/s**（32 MiB を 17.3 秒、CRC 一致）。固定費 ≒ dc-tool-ip の `-f` なしの 25 ms の待ち（R164 の解析どおり）。stdio を通さない `read()` も同じ（4 KiB 153 KB/s）。今回は 16 KiB・64 KiB でも `error: 10055` は出なかった（1 回目の約 105 ms / 回と 10055 の理由は不明のまま）。
+- **SH-4（64 KiB バッファ）**：CRC-32 18,162 KB/s、FNV-1a 16,880 KB/s、両方で 8,753 KB/s（netgd-recv と同じ実装）。
+- **2 つのスレッドで読み込みと計算を重ねる**：直列 1,559 KB/s、重ねても 1,559 KB/s で**効果なし**（読み込みだけ 1,906 KB/s、計算だけ 8,746 KB/s）。dcload の /pc/ の呼び出しの間は、もう一方のスレッドも進まないとみられる（固まりはしない）。
+- G2 への意味：BBA 経由の送り手を dcload の /pc/ にすると、64 KiB 単位で上限は約 1.9 MB/s、計算と重ねられない。g2-perf-plan の「fread と書き込みの重ね」は dcload の /pc/ では使えない（netgd-send の本来の経路の UDP なら別）。次は `-Fast`（25 ms の待ちを外す）で比べる。
+- 関連：R164、`docs/research/g2-perf-plan.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
