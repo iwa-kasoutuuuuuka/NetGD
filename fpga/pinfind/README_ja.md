@@ -12,6 +12,8 @@ FPGA 自身にボールの番号を名乗らせて調べる。結果は `fpga/ag
 
 > **基板は替えがきかない。** 純正ファームはバックアップが無ければ戻せない。迷ったら進めない。
 
+> **最初の実機実行（段階 0）の手順は [`FIRST_RUN_ja.md`](FIRST_RUN_ja.md) のチェックリストに順番に並べてある。段階 0 / 1 のファームは `tools/pinfind/mkstage.ps1 -Stage 0|1` で作る（ファイル名に段階とビットストリームの SHA-256 の先頭 8 桁が入る。§3-4）。**
+
 ### 0-1 最初の実機実行の前に必須なこと（どれか 1 つでも欠けたら走らせない）
 
 1. **純正ファームのバックアップ**：`tools/fwbackup/README_ja.md` のとおり `check` → `UNLOCKED_2E` なら `dump` → 照合。
@@ -237,6 +239,11 @@ Supra が受け付けなかった場合の切り分け：
 `build.sh` が確かめないこと（人の仕事）：Supra の報告どおりにシリコンが動くこと、電気的なふるまい、基板（PS のピン・電源・プルアップ）、実機でのすべて。
 
 ### 3-4 ファームを作る・書く
+
+段階ごとのビットストリームとファームを一度に作り、ビットストリームの SHA-256 を表示するスクリプト：
+`powershell -File tools\pinfind\mkstage.ps1 -Stage 0`（段階 1 は `-Stage 1` = `mklist.py --max-drive 4` + 既定の設計、段階 2 は `-Stage 2` = 全ボール）。
+mklist → gen.py → `flock $HOME/supra.lock` つきの `build.sh` → `cargo build`（既定の target ディレクトリ）の順に走らせ、`tools/pinfind/out/netgd-pinfind-stage<N>-<sha8>.elf` と同名の `.txt`（SHA-256・大きさ）を出す（`out/` は管理外）。
+ファームは起動直後に `PF STAGE 0 (no outputs driven) bitstream sha256=…`（段階 0）か `PF STAGE 1-3 (DRIVES balls; NOT stage 0) …`（それ以外）を RTT に出す。
 
 ```sh
 cd mcu/netgd
