@@ -1424,6 +1424,23 @@ async fn load_media(state: &mut DeviceState) -> bool {
 /// and the swap window -- opened whether or not anything mounted, as stock does for
 /// an empty folder too (D12, D13).
 fn mounted(state: &mut DeviceState, ok: bool) {
+    mounted_state(state, ok);
+    show_window_open(ok);
+}
+
+/// The window's first byte: SECNR shows the tray open, format nibble 0 (stock
+/// `0x06`, R144), until `drive_not_ready` moves it on. The format of the new
+/// disc goes up when the window ends. Split from `mounted_state` so a
+/// host-commanded switch (`gdemu_mount_staged`) can complete its command
+/// first: stock answers `52 82`/`52 81` with status 0x50 and the old SECNR
+/// byte, and only then shows 0x06 (R155, R159-R161).
+fn show_window_open(ok: bool) {
+    IdeDevice::primary().set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Open, ok, 0));
+}
+
+/// `mounted` without the SECNR write: the interlock, the empty-slot flag and
+/// the swap window (which counts from here).
+fn mounted_state(state: &mut DeviceState, ok: bool) {
     if ok {
         // D2/D4: after a switch stock is paused, the head parked (GDI: track
         // 3's start, CDI: FAD 150), until the next power-on.
@@ -1437,10 +1454,6 @@ fn mounted(state: &mut DeviceState, ok: bool) {
     // own attempt after this.
     unsafe { LAST_MOUNT = None };
     open_swap_window(state);
-    // The window starts now: SECNR shows the tray open, format nibble 0
-    // (stock `0x06`, R144), until `drive_not_ready` moves it on. The format
-    // of the new disc goes up when the window ends.
-    IdeDevice::primary().set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Open, ok, 0));
 }
 
 /// Swap discs without the host's help: eject, mount the selection, load.
@@ -1502,6 +1515,14 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
 /// UNIT ATTENTION and re-reads the TOC. On failure the drive is left empty
 /// (`GDI = None`, no medium, `EMPTY_SLOT`). Returns whether an image mounted.
 async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -> bool {
+    let ok = mount_named_quiet(state, label, name).await;
+    show_window_open(ok);
+    ok
+}
+
+/// `mount_named` without the window's first SECNR byte: the caller writes it
+/// with `show_window_open` once its command has completed.
+async fn mount_named_quiet(state: &mut DeviceState, label: &'static str, name: &str) -> bool {
     crate::cdda::stop();
     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
     invalidate_cd_read_cache();
@@ -1528,7 +1549,7 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
             (false, outcome)
         }
     };
-    mounted(state, ok);
+    mounted_state(state, ok);
     record_mount_attempt(name, outcome);
     info!("{}: mounted '{}' ({})", label, name, ok);
     ok
@@ -3253,11 +3274,14 @@ async fn gdemu_mount_staged(dev: &IdeDevice, state: &mut DeviceState, label: &'s
         finish_ok(dev);
         return;
     }
-    let _ = mount_named(state, label, name.as_str()).await;
+    let ok = mount_named_quiet(state, label, name.as_str()).await;
     // `0x52` stages through the same buffer as MOUNT_NAME: leave nothing
     // behind for a later WSESSION_END 2 to mount.
     clear_mount_name();
+    // Stock completes the command first (status 0x50, SECNR still the old
+    // byte) and only then shows the window's 0x06 (R155, R159-R161).
     finish_ok(dev);
+    show_window_open(ok);
 }
 
 /// Sub-commands of [`OGDM_IMAGE_CTL`].
