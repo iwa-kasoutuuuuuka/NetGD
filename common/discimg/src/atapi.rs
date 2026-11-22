@@ -430,8 +430,10 @@ pub fn pregap_out_sectors(bytes: usize, zeros: u32, zero_bytes: usize, sector_by
 /// pregap at 11702); seq 22: the lead-out + 0 / 1 / 100 (CDI and GDI), the
 /// GDI's gap 1506 and 23328 -- while 1505 (last sector of audio track 2),
 /// 905 / 11851 / 45149 (pregaps) and 0 / 100 (track 1's pregap) read. NetGD
-/// does not serve pregap sectors yet: it refuses them 5/00/00 (stock's bytes
-/// there are not recorded). A start inside a track whose count runs past the
+/// serves a pregap start ([`pregap_read`]: zero sectors, then the track's own)
+/// and refuses only a start outside this rule. It runs BEFORE the sector-type
+/// check, so a typed read from a gap answers 5/21/00 like an untyped one
+/// (unmeasured on stock, follows the untyped rule). A start inside a track whose count runs past the
 /// track's end is refused too, ASC not measured (NetGD: 5/00/00).
 pub fn cd_read_start_outside<T: TrackInfo>(tracks: &[T], start_fad: u32) -> bool {
     !tracks.iter().any(|t| {
