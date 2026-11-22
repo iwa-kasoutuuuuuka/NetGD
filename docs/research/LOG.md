@@ -2377,7 +2377,7 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 記録：`docs/research/probe-records/stock_20261122_15_regpoll-devreset.txt`（`images=4,3,11,7`、`return_to=2`、`abort=0`）。`compare.py --manifest` は 547 件一致・不一致 0（イメージ 11 の 2 件も一致）。
 - 結論：
   - **コマンドを送らなくても SECNR は時間で進む**：`52 82 n` の約 3 ms 後に `0x06`、150 ms で `0x00`、300 ms で形式|1（CDI 04 = 0x21、GDI 03 = 0x81、音声だけの CDI 11 = 0x11）、空フォルダ 07 は `0x07`。**NetGD の `f0dccd36`（窓のタイマーで SECNR を書き直す）は純正と同じ**。ALTSTATUS はこの間 0x50 のまま。
-  - **窓の中の DEVICE RESET（0x08）**：50 ms・200 ms のどちらでも、BSY のあと ALTSTATUS `0x00`・ERROR `0x01`・割り込み理由 `0x01`・署名 `14 EB`、SECNR は**すぐに `0x00`**、そして**リセットから約 150 ms 後に最終の値**（0x21 / 0x81 / 0x11 / 0x07）。最初の `0x06` には戻らない。ALTSTATUS は次のコマンドまで `0x00`（DRDY = 0）。そのあとの TUR の流れ・UA・REQ_STAT は通常と同じ。
+  - **窓の中の DEVICE RESET（0x08）**【R157 で訂正：同じフォルダへの再切替のあとで、窓は見えていなかった】：50 ms・200 ms のどちらでも、BSY のあと ALTSTATUS `0x00`・ERROR `0x01`・割り込み理由 `0x01`・署名 `14 EB`、SECNR は**すぐに `0x00`**、そして**リセットから約 150 ms 後に最終の値**（0x21 / 0x81 / 0x11 / 0x07）。最初の `0x06` には戻らない。ALTSTATUS は次のコマンドまで `0x00`（DRDY = 0）。そのあとの TUR の流れ・UA・REQ_STAT は通常と同じ。
     **NetGD（R148 の `f0dccd36`）は窓の中の DEVICE RESET で窓の値（open 中なら `0x06`）を書くだけで、純正と違う**。純正は「DEVICE RESET で検出の段階（150 ms、`detect_time` と同じ値なので区別はまだ）をやり直す」ように見える。
   - **音声だけの CDI のディスク形式は 1（CD-ROM）**：SECNR `0x11`、REQ_STAT `01 1f 01 01 01 00 00 96`。**NetGD（R148）の推測 0（Flycast）は違う**。TOC は音声 2 本、REQ_SES(2) は CHECK。音声の CD_READ は R148 の規則どおり（0x20・0x10 は 2,352 B、0x24・0x28 は 5/64/00）。
 - 対応：音声だけの CDI のディスク形式を 1 にする。窓の中の DEVICE RESET は SECNR `0x00` にして、リセットから検出の段階をやり直す。DEVICE RESET のあとの ALTSTATUS（0x00）を NetGD でも確かめる。
@@ -2396,6 +2396,19 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 次の実機の回の準備：`H:\OpenGDEmu-probe4\tools\gdprobe\host\gdprobe.cfg` を seq 16（`images=4,3,7`、`swap_devreset_ms=600,2000`）にした。窓の外での同じイメージへの再切替（リセットまでの 600 ms・2,000 ms に窓を開くか）と、窓の外の DEVICE RESET と、ERROR レジスタを確かめる。
 - テスト：discimg 155 件、test_expect 15 件（1 件スキップ）、4 種類のビルドが成功。2E release-z はコード +56 B（パディングの境目を越えて像は +504 B、上限まで残り 5,888 B）。実機は未確認。
 - 関連：R148、R150、R155。
+
+### R157 R155・R156 の訂正：記録 15 の DEVICE RESET は「窓の中」ではなかった（Fable レビュー）
+
+- **訂正**：記録 15 の DEVICE RESET の 8 回は、どれも**いまマウントしているフォルダへの再切替**のあとで、純正の SECNR はリセットまで前の値のまま（`0x06`・`0x00` が一度も出ない。例：記録の 361〜363 行、R200 のイメージ 4 は 200 ms・99 サンプルで変化なし）。つまり純正は同じフォルダへの再切替で窓を開かない（か、SECNR に出さない）。**R155 の「窓の中の DEVICE RESET」という読みは誤り**で、測ったのは「窓の見えない DEVICE RESET」：SECNR はすぐ `0x00`、ALTSTATUS `0x00`・ERROR `0x01`、約 150 ms 後に最終の値、そのあと UA。
+- ありそうな純正の規則は「DEVICE RESET はいつでも検出をやり直す（約 150 ms）」。BIOS のリセットや KOS の `gdrom_init` のように窓の外で使われる場面が多い。seq 16（600 ms・2,000 ms でのリセット）で確かめる。150 ms が detect_time かどうかも未確定。
+- `fix/r155-stock`（`1bc2080a`）への判断：**音声だけの CDI = 1（`disc_format`）は正しい**（記録の SECNR 0x11）。**DEVICE RESET の部分（窓の中だけ検出をやり直す）は前提が違うので、seq 16 のあとまで取り込まない**。
+- ほかの指摘：
+  - ERROR 0x01 は今の FPGA では出せない（エラーレジスタはビット 2 と 4〜7 だけ、`ide_device.py` 721・1096〜1098 行）。予測（`expect.rs` 883 行）は 0x01 と書くので純正と「一致」に見えるが、実機の NetGD は 0x00。予測を 0x00 にするか、次のビットストリームでビット 0 を足す。R156 の「SW_DEVRESET はすべて一致」は予測の上だけの話。
+  - DEVICE RESET のあとの status 0x00（DRDY = 0）は FPGA 上は問題なし（次の PACKET の CDB フェーズは 0x08 で受け付ける）。
+  - 窓の中で繰り返しリセットすると、そのたびに detect_time だけ延びる（純正は不明）。
+  - 同じフォルダへの再切替で NetGD は窓を開く（`mounted()`）が、純正は開かない。これも seq 16 で確かめる。
+- 信頼度：記録の読み直しは確認済み。純正の規則は推測（seq 16 待ち）。
+- 関連：R155、R156。
 
 ## 判断の記録（Decisions）
 
