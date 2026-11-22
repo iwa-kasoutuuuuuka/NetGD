@@ -139,6 +139,8 @@ if want tests; then
                  common/sdfast common/fatmap common/stackmark common/pinfind; do
             step "test-$(echo "$c" | tr / -)" "$c" "cargo test"
         done
+        # Crafted-card tests of the vendored embedded-sdmmc (mcu/netgd/vendor/README.md).
+        step test-tools-sdmmc-robustness tools/sdmmc-robustness "cargo test"
         # .cargo/config.toml defaults to thumbv7m-none-eabi: name the host target.
         step test-mcu-fwupdater mcu/fwupdater "cargo test --lib --target $HOST"
     fi
@@ -167,6 +169,14 @@ if want tools; then
             skip tools-netgd-recv "gcc missing"; skip tools-netgd-menu "gcc missing"
         fi
         step tools-pinfind . "$PYPLAIN -m unittest discover -s tools/pinfind/tests -v"
+        # The flash size gate script (in the CI tools matrix).
+        step tools-fwsize . "$PYPLAIN -m unittest discover -s tools/fwsize/tests -v"
+        # not in the CI matrix, but present in the tree (needs cargo)
+        if command -v cargo >/dev/null 2>&1; then
+            step tools-netgd-expect . "$PYPLAIN tools/netgd-expect/test_expect.py"
+        else
+            skip tools-netgd-expect "cargo not found"
+        fi
         # not in the CI matrix; gen_msgs.py --check ignores CRLF vs LF, so it is safe on an autocrlf checkout.
         if command -v gcc >/dev/null 2>&1; then
             step tools-netgd-fwupd "$WT/tools/netgd-fwupd" "TMPDIR='$LOGDIR' sh tests/run_tests.sh"
