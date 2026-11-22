@@ -3,7 +3,7 @@
 `.github/workflows/build.yaml` と同じ確認をローカルで行う。マージ前にブランチを検証するための道具。
 
 ```sh
-sh tools/ci-local/run.sh                      # 全部 (約 15〜20 分)
+sh tools/ci-local/run.sh                      # 全部 (約 30 分。fpga 約 7 分を含む)
 sh tools/ci-local/run.sh --only tests         # Rust ホストテスト + gdprobe C テスト
 sh tools/ci-local/run.sh --only tools,fpga    # カンマ区切りで複数
 sh tools/ci-local/run.sh --worktree H:/other  # 別の worktree を検査
@@ -24,9 +24,9 @@ powershell -File tools\ci-local\run.ps1 --only builds   # PowerShell から
   2E の `release-z,resident,sd-fast` は text+data が 122,368 B 以下であることを検査し、余裕を表示する。
 - tests: `cargo test`(lzma, gamecfg, discimg, psload, bootcore, sdfast, fatmap, stackmark, pinfind)、
   fwupdater は `--lib --target <rustc のホスト>`(自動判定)、gdprobe の C テスト(作業コピー上で実行)。
-- tools: mksdcard, netgd-send, fwbackup(約 7 分、`FWBACKUP_TEST_WRAPPER=1`), fwimage, netgd-recv, netgd-menu, pinfind。
+- tools: mksdcard, netgd-send, fwbackup(約 12 分、`FWBACKUP_TEST_WRAPPER=1`), fwimage, netgd-recv, netgd-menu, pinfind。
   CI の対象外だが netgd-expect も実行する。netgd-fwupd は `CI_LOCAL_FWUPD=1` のときだけ実行(下記)。
-- fpga: Amaranth のシミュレーションと生成 Verilog のコミット済み確認。
+- fpga: Amaranth のシミュレーションと生成 Verilog のコミット済み確認（約 7 分、うち FIFO の等価性の確認が約 4.5 分）。Python は既定で本体のチェックアウトの `fpga/amaranth/amaranth_env`（`git rev-parse --git-common-dir` の親から探すので、worktree からでも見つかる）。Verilog の確認のあとは生成ファイルを元に戻す（不一致でも作業ツリーを汚さない）。
 
 ## 注意
 
@@ -36,7 +36,8 @@ powershell -File tools\ci-local\run.ps1 --only builds   # PowerShell から
 
 ## 既知の SKIP
 
-- fpga: amaranth が import できないと SKIP。CI と同じ版を入れた venv を使うなら
-  `pip install "amaranth==0.5.8" "amaranth-yosys==0.50.0.0.post123"` のうえで `CI_LOCAL_FPGA_PYTHON=<venvのpython>` を指定する。
+- fpga: 本体の `fpga/amaranth/amaranth_env` が無く、amaranth も import できないと SKIP。別の venv を使うなら
+  `pip install "amaranth==0.5.8" "amaranth-yosys==0.50.0.0.post123"` のうえで `CI_LOCAL_FPGA_PYTHON=<venvのpython>` を指定する
+  （版が違うと生成 Verilog の先頭の yosys の版が変わり、Verilog の確認が失敗する）。
   この PC では未導入のため SKIP。
 - tools-netgd-fwupd: CI に無く、`gen_msgs.py --check` がバイト比較なので CRLF 変換された Windows の checkout では必ず失敗する。そのため既定は SKIP。

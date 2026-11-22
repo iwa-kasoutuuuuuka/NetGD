@@ -181,19 +181,28 @@ fi
 
 # ---- FPGA simulation (needs amaranth==0.5.8; see README_ja.md) -------------
 if want fpga; then
+    # Default: the repo's Amaranth venv. It lives only in the main checkout
+    # (fpga/amaranth/amaranth_env), not in worktrees, so find that checkout
+    # as the parent of the shared git directory.
+    if [ -z "${CI_LOCAL_FPGA_PYTHON:-}" ]; then
+        MAINCO=$(cd "$WT" && cd "$(git rev-parse --git-common-dir)" 2>/dev/null && cd .. && pwd)
+        for cand in "$MAINCO/fpga/amaranth/amaranth_env/Scripts/python.exe" "$MAINCO/fpga/amaranth/amaranth_env/bin/python"; do
+            if [ -x "$cand" ]; then CI_LOCAL_FPGA_PYTHON="$cand"; break; fi
+        done
+    fi
     FPY="${CI_LOCAL_FPGA_PYTHON:-$PYNATIVE}"
     if [ -n "$FPY" ] && $FPY -c "import amaranth" >/dev/null 2>&1; then
         export AMARANTH_USE_YOSYS=builtin
         for t in test.py test_cdda.py test_timing.py test_top.py; do
             step "fpga-$t" fpga/amaranth "$FPY $t"
         done
-        step fpga-verilog-check fpga/amaranth "$FPY main.py && git diff --exit-code -- out/OpenGDEMUCore.v"
+        step fpga-verilog-check fpga/amaranth "$FPY main.py && git diff --exit-code -- out/OpenGDEMUCore.v; rc=\$?; git checkout -- out/OpenGDEMUCore.v; exit \$rc"
         for t in test.py test_cdda.py test_timing.py test_top.py; do
             step "fpga-ag16k-$t" fpga/amaranth "NETGD_FPGA_TARGET=ag16k $FPY $t"
         done
         step fpga-fifo-equiv fpga/amaranth "$FPY test_fifo.py"
         step fpga-pinfind fpga/pinfind "$FPY test_pinfind.py"
-        step fpga-ag16k-verilog-check fpga/amaranth "$FPY main.py --target ag16k && git diff --exit-code -- out/OpenGDEMUCore_ag16k.v"
+        step fpga-ag16k-verilog-check fpga/amaranth "$FPY main.py --target ag16k && git diff --exit-code -- out/OpenGDEMUCore_ag16k.v; rc=\$?; git checkout -- out/OpenGDEMUCore_ag16k.v; exit \$rc"
     else
         skip fpga "amaranth not importable (set CI_LOCAL_FPGA_PYTHON to a venv python)"
     fi
