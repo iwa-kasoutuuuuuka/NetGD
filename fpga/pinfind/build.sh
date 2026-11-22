@@ -13,8 +13,10 @@
 #   --timeout S            give up on place-and-route after S seconds (default 1200)
 #   --placement FILE       Supra report that lists the ball each I/O was PLACED on,
 #   --placement-regex RE   and a regex with (?P<port>..) and (?P<ball>..) for its lines
-#                          (needed when checkpnr.py cannot find the placement by itself;
-#                          README_ja.md 3-3)
+#                          (only when checkpnr.py cannot find the placement by itself;
+#                          with Supra 2026.03.b0 it reads alta_db/io.asf; README_ja.md 3-3)
+#   --sites-ref FILE       an earlier build's pinfind_ag16k.sites: every ball must be on
+#                          the same die site (coord_x/y/z of the routed netlist) as there
 #   --unused-ok PIN_xx,..  user-capable balls a human accepts as unused (recorded)
 #   --gate-sim             also simulate the routed netlist with Supra's models
 #                          (Icarus Verilog): at most one pad low at any time
@@ -23,8 +25,9 @@
 # Output: fpga/pinfind/output/pinfind_ag16k.rbf (the name the `pinfind`
 # firmware build embeds), pinfind_ag16k.params (params.txt + the bitstream's
 # size and POSIX cksum; the firmware's build.rs reads it) and
-# pinfind_ag16k.txt (report). The three are deleted first, so a failed build
-# leaves no bitstream behind.
+# pinfind_ag16k.txt (report), plus pinfind_ag16k.sites (port, ball, die site;
+# for --sites-ref). All are deleted first, so a failed build leaves no
+# bitstream behind.
 #
 # What this script checks, and stops on (R143 item 1):
 #   - the .rbf size and header; Supra errors other than the known pre-.asf
@@ -60,6 +63,7 @@ SEED=
 AF_TIMEOUT=1200
 PLACEMENT=
 PLACEMENT_RE=
+SITES_REF=
 UNUSED_OK=()
 GATE_SIM=0
 GATE_MS=300
@@ -74,10 +78,11 @@ while [ $# -gt 0 ]; do
         --timeout) AF_TIMEOUT=$2; shift 2 ;;
         --placement) PLACEMENT=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
         --placement-regex) PLACEMENT_RE=$2; shift 2 ;;
+        --sites-ref) SITES_REF=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
         --unused-ok) UNUSED_OK+=(--unused-ok "$2"); shift 2 ;;
         --gate-sim) GATE_SIM=1; shift ;;
         --gate-sim-ms) GATE_MS=$2; shift 2 ;;
-        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -101,6 +106,7 @@ case ${SEED:-0} in *[!0-9]*) die "--seed takes a number" ;; esac
 case $AF_TIMEOUT in ''|*[!0-9]*) die "--timeout takes seconds" ;; esac
 case $GATE_MS in ''|*[!0-9]*) die "--gate-sim-ms takes a number" ;; esac
 [ -z "$PLACEMENT" ] || [ -n "$PLACEMENT_RE" ] || die "--placement needs --placement-regex"
+[ -z "$SITES_REF" ] || [ -f "$SITES_REF" ] || die "--sites-ref $SITES_REF not found"
 
 param() { tr -d '\r' <"$GEN/params.txt" | sed -n "s/^$1 //p"; }
 N_DRIVE=$(param n_drive)
@@ -124,7 +130,7 @@ ns() { unshare -rn env SUPRA="$SUPRA_HOME" PATH="$SUPRA_HOME/bin:/usr/bin:/bin" 
 
 # No stale bitstream: whatever happens below, the old one is gone.
 OUT=$HERE/output
-rm -f "$OUT/pinfind_ag16k.rbf" "$OUT/pinfind_ag16k.params" "$OUT/pinfind_ag16k.txt"
+rm -f "$OUT/pinfind_ag16k.rbf" "$OUT/pinfind_ag16k.params" "$OUT/pinfind_ag16k.txt" "$OUT/pinfind_ag16k.sites"
 
 if [ -e "$WORK" ]; then
     [ -f "$WORK/.netgd-pinfind-work" ] || die "$WORK exists and is not a build.sh work directory; not touching it"
@@ -186,6 +192,7 @@ fi
 echo "== checkpnr (actual placement vs balls.txt, unused balls)"
 python3 -I "$HERE/checkpnr.py" --gen "$GEN" --work "$WORK" --pinmap "$PINMAP" \
     ${PLACEMENT:+--placement "$PLACEMENT" --placement-regex "$PLACEMENT_RE"} \
+    ${SITES_REF:+--sites-ref "$SITES_REF"} \
     ${UNUSED_OK[@]+"${UNUSED_OK[@]}"} --report "$WORK/checkpnr.txt" ||
     die "post-route check failed (checkpnr.txt): do not use this bitstream"
 
@@ -202,6 +209,7 @@ read -r CK CKN _ < <(cksum "$RBF")
 
 mkdir -p "$OUT"
 cp "$RBF" "$OUT/pinfind_ag16k.rbf"
+[ ! -f "$WORK/checkpnr.sites" ] || cp "$WORK/checkpnr.sites" "$OUT/pinfind_ag16k.sites"
 {
     tr -d '\r' <"$GEN/params.txt"
     echo "rbf_bytes $CKN"

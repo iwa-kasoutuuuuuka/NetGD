@@ -86,7 +86,9 @@ def build_args(argv=None):
     ap.add_argument("--win-bits", type=int, default=6)
     ap.add_argument("--ring-stages", type=int, default=31)
     ap.add_argument("--clkctrl", choices=["auto", "on", "off"], default="auto",
-                    help="explicit cycloneive_clkctrl on the core clock (auto: on for osc/ring)")
+                    help="explicit alta_gclksw on the core clock (auto = off). Supra 2026.03.b0 "
+                         "rejects it on AG16K ('no corresponding resource', then af_run crashes) and "
+                         "puts the clock on a global net by itself; cycloneive_clkctrl is unknown to its af_map")
     ap.add_argument("--io-attrs", action="store_true",
                     help="add Quartus-style I/O assignments to the .asf (minimum current strength, weak "
                          "pull-up on scanned balls, unused balls as tri-stated inputs). Whether Supra "
@@ -136,7 +138,7 @@ def generate(a):
     if src == "ring" and a.ring_stages % 2 == 0:
         sys.exit("gen.py: --ring-stages must be odd")
     prescale = 0 if a.stage0 else (DEFAULT_PRESCALE[src] if a.prescale is None else a.prescale)
-    clkctrl = (src in ("osc", "ring")) if a.clkctrl == "auto" else (a.clkctrl == "on")
+    clkctrl = a.clkctrl == "on"   # auto = off: see --clkctrl and src/pf_clock.v
     nd, nh, nc = len(drive), len(hold), len(probe)
 
     os.makedirs(a.out, exist_ok=True)
