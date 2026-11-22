@@ -411,6 +411,7 @@ static int switch_to(runner *r, int n, int tag)
     char ex[96];
     uint64_t t0, now;
     int ready = 0, polls = 0, changes = 0;
+    int last_secnr = -1;
     int last_rc = -1, last_st = -1, last_er = -1, last_sk = -1, last_asc = -1, last_ascq = -1;
     uint32_t timeout_ms_total;
     char msg[48];
@@ -425,7 +426,7 @@ static int switch_to(runner *r, int n, int tag)
 
     timeout_ms_total = r->cfg->switch_timeout_ms;
     while (!r->abort) {
-        int sk = -1, asc = -1, ascq = -1;
+        int sk = -1, asc = -1, ascq = -1, secnr_changed = 0;
         uint64_t t_ms;
         gd_result tr;
         memset(c, 0, 12);
@@ -462,17 +463,28 @@ static int switch_to(runner *r, int n, int tag)
                     ascq = r->buf[9];
                 }
             }
-            if (tr.rc != last_rc || tr.status != last_st || tr.error != last_er || sk != last_sk ||
+            {
+                int sn_now = tr.has_secnr ? tr.secnr : -1;
+                if (sn_now != last_secnr)
+                    secnr_changed = 1;
+                last_secnr = sn_now;
+            }
+            if (secnr_changed || tr.rc != last_rc || tr.status != last_st || tr.error != last_er || sk != last_sk ||
                 asc != last_asc || ascq != last_ascq) {
-                char f[120];
+                char f[140];
+                char sn[24], sec[16];
                 changes++;
-                char sn[24];
+                secnr_changed = 0;
                 if (sk < 0)
                     strcpy(sn, "none");
                 else
                     snprintf(sn, sizeof(sn), "%d/%02x/%02x", sk, asc, ascq);
-                snprintf(f, sizeof(f), "t_ms=%lu poll=%d rc=%s status=0x%02x err=0x%02x sense=%s",
-                         (unsigned long)t_ms, polls, rec_rc_name(tr.rc), tr.status, tr.error, sn);
+                if (tr.has_secnr)
+                    snprintf(sec, sizeof(sec), " secnr=0x%02x", tr.secnr);
+                else
+                    sec[0] = 0;
+                snprintf(f, sizeof(f), "t_ms=%lu poll=%d rc=%s status=0x%02x err=0x%02x sense=%s%s",
+                         (unsigned long)t_ms, polls, rec_rc_name(tr.rc), tr.status, tr.error, sn, sec);
                 out_line(r, rec_event_line(r->line, sizeof(r->line), r->img, "SW_POLL", f), 0);
                 last_rc = tr.rc; last_st = tr.status; last_er = tr.error;
                 last_sk = sk; last_asc = asc; last_ascq = ascq;

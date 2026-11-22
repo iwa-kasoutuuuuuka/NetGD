@@ -123,6 +123,27 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('sense 2/04/01 vs 2/3a/00', out)
 
+    def test_optional_cdbst_secnr_fields(self):
+        base = 'img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 %sus=1000\n'
+        old = self.write('old.txt', base % '')
+        new = self.write('new.txt', base % 'cdbst=0x58 secnr=0x82 ')
+        new2 = self.write('new2.txt', base % 'cdbst=0x50 secnr=0x82 ')
+        _, ents = compare.parse_record(base % 'cdbst=0x58 secnr=0x82 ')
+        self.assertEqual((ents[0]['cdbst'], ents[0]['secnr']), ('0x58', '0x82'))
+        rc, out, _ = run([old, new])           # old record without the fields: no difference
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = run([new, new])
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = run([new, new2])          # both have it: a real difference
+        self.assertEqual(rc, 1)
+        self.assertIn('cdbst 0x58 vs 0x50', out)
+        poll = 'img=3 probe=SW_POLL t_ms=1 poll=1 rc=check status=0x51 err=0x20 sense=2/04/01%s\n'
+        rc, out, _ = run([self.write('p1.txt', poll % ''), self.write('p2.txt', poll % ' secnr=0x81')])
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = run([self.write('p3.txt', poll % ' secnr=0x84'), self.write('p4.txt', poll % ' secnr=0x81')])
+        self.assertEqual(rc, 1)
+        self.assertIn('secnr 0x84 vs 0x81', out)
+
     CDR_A = (
         'img=3 probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302000b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'
         'img=3 probe=CDREAD_FLAGS flags=0x24 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302400b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'

@@ -260,5 +260,75 @@ class CardTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(out, '01', 'README.txt')))
 
 
+class VariantTests(unittest.TestCase):
+    """--set variants: 08 / 09 (GDI) and 10 (CDI with a Mode 1 data track, R137 g)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.d = os.path.join(cls.tmp.name, 'v')
+        rc, _ = run([cls.d, '--set', 'variants', '--small'])
+        assert rc == 0
+        with open(os.path.join(cls.d, m.MANIFEST_NAME)) as f:
+            cls.man = json.load(f)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_folders(self):
+        self.assertEqual(sorted(os.listdir(self.d)), ['08', '09', '10', m.MANIFEST_NAME])
+        self.assertEqual(sorted(self.man['images']), ['08', '09', '10'])
+
+    def test_image_10_is_mode1_cdi(self):
+        e = self.man['images']['10']
+        self.assertEqual((e['format'], e['sessions'], len(e['tracks'])), ('cdi', 2, 2))
+        a, t = e['tracks']
+        self.assertEqual((a['type'], t['type'], t['form'], t['sector_size'], t['ctrl'], t['start_lba']),
+                         ('audio', 'data', 'cdi_mode1_2352', 2352, 4, 11702))
+        data = open(os.path.join(self.d, '10', 'disc.cdi'), 'rb').read()
+        # stored data: raw Mode 1 sectors (sync, header with mode 1, user data, EDC, ECC)
+        for i in (0, 1, t['sector_count'] - 1):
+            off = t['file_offset'] + i * 2352
+            s = data[off:off + 2352]
+            self.assertEqual(s[0:12], m.SYNC)
+            self.assertEqual(s[15], 1)
+            self.assertEqual(s[12:15], m.msf_bytes(t['start_lba'] + i))
+            self.assertEqual(s[16:2064], m.user_data(10, 2, t['start_lba'] + i, 'NETGD PROBE 10' if i == 0 else None))
+            self.assertEqual(s, m.raw_mode1(t['start_lba'] + i, s[16:2064]))
+            self.assertEqual(m.sector_for(t, t['start_lba'] + i, 2352)[0], s)
+            self.assertEqual(m.sector_for(t, t['start_lba'] + i, 2048)[0], s[16:2064])
+        self.assertIsNone(m.sector_for(t, t['start_lba'], 2336)[0])      # no 2336-byte form for Mode 1
+        # descriptor: track mode 1 (Mode 1) and read mode 2 (2352 stored) for the last track, mode 0 / 2 for the audio track
+        dlen = struct.unpack('<I', data[-4:])[0]
+        desc = data[len(data) - dlen:]
+        self.assertEqual(desc[0], 2)
+        self.assertEqual(struct.unpack('<I', data[-8:-4])[0], 0x80000006)
+        self.assertEqual(e['data_bytes'] + dlen, len(data))
+        self.assertEqual(t['parsed_sector_count'], t['sector_count'] + 2)
+        # file size: audio (150 + 302) + data (150 + n + 2 postgap) sectors of 2352, then the descriptor
+        self.assertEqual(e['data_bytes'], (150 + 302 + 150 + t['sector_count'] + 2) * 2352)
+
+    def test_descriptor_mode_fields_differ_from_image_04(self):
+        # image 04 (Mode 2 Form 1, 2336) and image 10 differ in exactly the data track's mode fields
+        a = m.build_cdi(os.path.join(self.tmp.name, 'x4'), 4, m.cdi_spec_04(True))
+        b = m.build_cdi(os.path.join(self.tmp.name, 'x10'), 10, m.cdi_spec_10(True))
+        self.assertEqual(a['tracks'][1]['sector_size'], 2336)
+        self.assertEqual(b['tracks'][1]['sector_size'], 2352)
+        self.assertEqual(a['tracks'][1]['start_lba'], b['tracks'][1]['start_lba'])
+        da = open(os.path.join(self.tmp.name, 'x4', 'disc.cdi'), 'rb').read()
+        db = open(os.path.join(self.tmp.name, 'x10', 'disc.cdi'), 'rb').read()
+        ta = da[len(da) - struct.unpack('<I', da[-4:])[0]:]
+        tb = db[len(db) - struct.unpack('<I', db[-4:])[0]:]
+        self.assertEqual(len(ta), len(tb))
+        diff = [i for i in range(len(ta)) if ta[i] != tb[i]]
+        self.assertTrue(diff)
+        # only mode / size / length words differ (a handful of bytes), not the structure
+        self.assertLess(len(diff), 40, diff)
+
+    def test_gdi_variants_unchanged(self):
+        self.assertEqual([len(self.man['images'][n]['tracks']) for n in ('08', '09')], [5, 4])
+
+
 if __name__ == '__main__':
     unittest.main()

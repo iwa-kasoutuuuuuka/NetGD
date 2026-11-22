@@ -33,7 +33,7 @@ static void test_record(void)
     char line[REC_LINE_MAX];
     uint8_t cdb[12] = { 0x15, 0, 2, 0, 6 };
     uint8_t d[6] = { 1, 0, 3, 0xAF, 0x1E, 0x00 };
-    gd_result r = { GD_OK, 0x50, 0, 3, 6, 6, 1234 };
+    gd_result r = { GD_OK, 0x50, 0, 3, 6, 6, 1234, 0, 0, 0, 0 };
     rec_probe p = { 3, "REQ_SES_2", NULL, cdb, &r, d };
     size_t n = rec_probe_line(line, sizeof(line), &p);
     CHECK(!strcmp(line, "img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=6 data=010003af1e00 us=1234\n"));
@@ -55,7 +55,7 @@ static void test_record(void)
     /* data= is capped, bytes= keeps the true size */
     {
         static uint8_t big[2000];
-        gd_result rb = { GD_OK, 0x50, 0, 3, 2000, 2000, 1 };
+        gd_result rb = { GD_OK, 0x50, 0, 3, 2000, 2000, 1, 0, 0, 0, 0 };
         rec_probe pb = { 0, "BIG", NULL, NULL, &rb, big };
         char *l = malloc(REC_LINE_MAX);
         rec_probe_line(l, REC_LINE_MAX, &pb);
@@ -313,6 +313,8 @@ typedef struct {
     uint8_t cdflags;         /* cfg->cdread_flags, for the whitelist check */
     int pend_sk, pend_asc, pend_ascq;   /* sense for the next REQ_ERROR */
     int cd_reads[256];       /* CD_READ commands seen per CDB byte 1 */
+    int passive;             /* report cdbst / secnr like the hardware transport (R137 a, b) */
+    int secnr_flip_at;       /* virtual us after which SECNR changes while the drive is not ready (0 = never) */
 } fake;
 
 /* The raw 2352-byte Mode 1 sector the fake returns for flags 0x10: sync, header, mode 1, user data, zeroed EDC/ECC */
@@ -327,7 +329,7 @@ static void raw_sector(uint32_t fad, uint8_t out[2352])
 
 static uint8_t pat(uint32_t fad, uint32_t i) { return (uint8_t)(fad * 131u + i * 7u + 3u); }
 
-static int f_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap, uint32_t timeout_ms, gd_result *r)
+static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap, uint32_t timeout_ms, gd_result *r)
 {
     fake *f = ctx;
     uint8_t d[512];
@@ -420,6 +422,20 @@ data:
     for (i = 0; i < len && i < cap; i++) buf[i] = d[i];
     r->total = len; r->stored = len < cap ? len : cap;
     return r->rc;
+}
+/* The hardware transport adds two passive observations: ALTSTATUS in the CDB phase and SECNR at completion. */
+static int f_packet(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t cap, uint32_t timeout_ms, gd_result *r)
+{
+    fake *f = ctx;
+    int rc = f_packet0(ctx, cdb, buf, cap, timeout_ms, r);
+    if (f->passive && rc != GD_REFUSED && !f->stuck) {
+        int busy = f->not_ready_forever || f->now < f->ready_at;
+        r->cdbst = 0x58; r->has_cdbst = 1;
+        /* low nibble = drive status (1 = busy/seeking, 2 = standby), high nibble = disc format (8 = GD-ROM) */
+        r->secnr = (uint8_t)(0x80 | (busy ? ((f->secnr_flip_at && f->now >= (uint64_t)f->secnr_flip_at) ? 0x04 : 0x01) : 0x02));
+        r->has_secnr = 1;
+    }
+    return rc;
 }
 static int f_identify(void *ctx, uint8_t *buf, uint32_t t, gd_result *r)
 {
@@ -623,6 +639,38 @@ static void test_runner_switch(void)
     }
 }
 
+/* R137 a, b: cdbst / secnr in probe lines and SW_POLL; a SECNR change alone is a state change */
+static void test_runner_passive(void)
+{
+    static fake f;
+    gp_config c;
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\ntp_batches=1\nseek_n=2\nswitch_timeout_ms=2000\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(find_line("img=3 probe=IP_READ") && strstr(find_line("img=3 probe=IP_READ"), " rc=ok status=0x50 err=0x00 irr=0x03 bytes=14336 cdbst=0x58 secnr=0x82 data="));
+    CHECK(find_line("img=3 probe=SW_POLL") && strstr(g_rec, "sense=2/04/01 secnr=0x81"));
+    CHECK(strstr(g_rec, "sense=none secnr=0x82"));
+    CHECK(count_of("probe=SW_POLL") < 40);
+    /* SECNR alone changing (everything else equal) writes a new SW_POLL line */
+    {
+        static fake g;
+        memset(&g, 0, sizeof(g)); g.ua = 1; g.mounted = 2; g.empty_folder = 3; g.passive = 1;   /* folder 3 never ready */
+        g.secnr_flip_at = 1000000;       /* 1 s: SECNR 0x81 -> 0x84, status/error/sense unchanged */
+        gp_config_defaults(&c);
+        gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswitch_timeout_ms=2000\n");
+        run_fake(&g, &c);
+        CHECK(count_of("img=3 probe=SW_POLL") == 2);
+        CHECK(strstr(g_rec, "sense=2/3a/00 secnr=0x81") && strstr(g_rec, "sense=2/3a/00 secnr=0x84"));
+    }
+    /* without the passive fields (older transports) nothing is added */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswitch_timeout_ms=2000\n");
+    run_fake(&f, &c);
+    CHECK(!strstr(g_rec, "cdbst=") && !strstr(g_rec, "secnr="));
+}
+
 static void test_runner_no_switch_when_off(void)
 {
     static fake f;
@@ -679,6 +727,7 @@ int main(void)
     test_runner_plain();
     test_runner_cdread_flags();
     test_runner_switch();
+    test_runner_passive();
     test_runner_no_switch_when_off();
     test_runner_ip_fallback();
     test_runner_stuck();
