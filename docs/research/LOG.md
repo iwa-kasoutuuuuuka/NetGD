@@ -2410,6 +2410,17 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：記録の読み直しは確認済み。純正の規則は推測（seq 16 待ち）。
 - 関連：R155、R156。
 
+### R158 この PC で Supra の環境を作り、AG16K のビルドを再現した（Opus）
+
+- 担当：Opus（メインセッション）。ユーザーが WSL と Ubuntu 24.04.5 を入れた（PC の再起動で仮想マシン プラットフォームが有効に）。
+- Supra 2026.03.b0 の Linux 版を Internet Archive（`agm-micro/FPGA/2026.03/Supra-2026.03.b0-a052d0a8-all.tar.gz`、187,369,986 B、MD5 `6bf833a5…` はアーカイブの記録・R99 と一致）から `H:\Supra\` に取得し、WSL の `~/supra-linux/x/Supra-2026.03.b0` に展開。`bin/af`・`map/bin/yosys` の SHA-256 は `ag16k-supra-build.md` §1 と一致。
+- WSL に最初からあるもので足りた（`unshare`・`timeout`・`sha256sum`・`python3`・`xz`）。`unshare -rn` の中は `lo` だけ。メモリは約 3 GB なので、Supra は同時に 1 つだけ（エージェントには `flock ~/supra.lock` を使わせる）。
+- `fpga/agm/build.sh --work ~/agm-build`（仮ピン）の結果：ロジック 2,368 / 16,624（14 %）、LUT 2,035、FF 1,103、M9K 14、PLL 1、ピン 66。Fmax は 48 MHz 系 92.6 MHz、11.2896 MHz 系 159.4 MHz、`DC_DATA` の余裕 +3.4 ns。`.rbf` 552,352 B（SHA-256 `e7d514af…`）、LZMA 39,178 B。R106 の再現（資源 2,027 / 1,103、LZMA 39,857 B）とほぼ同じ（コアは R106 以降の変更を含む）。
+- 仮ピンのビットストリームなので基板には流さない（`output/` は gitignore）。
+- 次：ピン探し（`fpga/pinfind`）の初めての Supra ビルドと R145 の未解決点、FPGA のスロット 6 の下位バイト書き込み（R150）とエラーレジスタのビット 0（R157）をエージェントに割り当てた。
+- 信頼度：確認済み（このPC）。
+- 関連：R92〜R95、R99、R106。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
