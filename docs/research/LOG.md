@@ -2677,6 +2677,29 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 次：seq 25c（長さちょうどだけ、音声 1・2・7・16、速さ）。
 - 関連：R176、R181、R182。
 
+### R184 本体の FPGA の配置配線後のネットリストと RTL の一致（feat/agm-gatesim）（Opus）
+
+- `feat/agm-gatesim`（`30da7726`）：`fpga/agm/gatesim.py` と `gatesim_tb.v`、`build.sh --gate-sim`。配置配線後の `OpenGDEMU_routed.v`（Supra のモデルをその場で読む）と RTL を同じ上位のテストベンチ（MCU の全スロット、スロット 32・err_lo、ATA の PACKET と PIO、DMA の読み書き、CDDA）で動かし、ピンのトレースを比べる。
+- 仮ピン・RETIMING なしで **3,918 行が完全一致**（EXPECT FAIL 0、X 0、clock→Q 0.1 ns でも一致）。`--supra-retiming` では CDDA の FIFO が読まれない差（2,534 行）で止まり、検査が効くことも確認。
+- RTL のあいまいさ：ラッパの `audio_div` に初期値が無く RTL のシミュレーションで X のまま（スロット 18 が数えない）→ 初期値 0 を追加（資源は同じ）。`fpga/src/OpenGDEMU.v`（Cyclone II）にも同じ書き方が残る。
+- シミュレーションの注意：Yosys の出力の RTL は `-g2005`、Supra のネットリストは `-g2012` でないと正しく動かない。
+- 未確認：Supra のモデルがシリコンどおりであること、テストベンチが動かさない範囲（形式的な等価性検査ではない）、実機。
+- 関連：R169。
+
+### R185 G2 の転送：KOS の TCP の直しと独自の UDP 転送 g2x（feat/g2-transport・fix/g2-transport-review）（Opus・比較のセッション）
+
+- `feat/g2-transport`（`43e37535`）：(A) KOS の TCP の直し（`tools/kos-patches/net_tcp-rx-fix.patch`：順番どおりのセグメントだけ積む・重なりは切り詰める・`recv` で窓が半分空いたら窓の更新 ACK）。DreamSDK を変えずに直した `net_tcp.c` をアプリに一緒にリンクできる（KOS の `net_tcp.o` の外向きの名前は 2 つだけで、ライブラリの部品は取り込まれない。リンクのマップで確認）。(B) UDP の独自転送 g2x（1,400 B、データグラムごとの CRC、窓 64、選択 ACK、ペース配分）。推奨は (A) を先に（NGTP・netgd-send はそのまま、D6 の 64 KiB × 2 が使える）。比較は `docs/research/g2-transport.md`。
+- レビュー（比較のセッション）→ `fix/g2-transport-review`：**(A) の FIN の扱いの穴**（最後のデータが落ちたあとのデータ無しの FIN で、欠けたまま EOF になる）を直した（FIN も番号を 1 つ使う、`f02c1518`）。g2x の再送を 1 個だけ・30〜500 ms の倍々に（`6ba2a1c2`）、その修正が持ち込んだ Karn の曖昧さ（探りの再送の時刻で欠けを誤判定し 48 個を余計に再送）を直した（`9521e3e6`）。Makefile の `.DELETE_ON_ERROR`、転送の終わりの迷子への応答。ホストテスト（直した TCP の判定の模型、模擬の回線）。実機は未確認。
+- 関連：R175、R178。
+
+### R186 G2 の Dreamcast 側の受け手 netgd-t2（feat/ngtp-server）（Opus）
+
+- `feat/ngtp-server`（`324028e1`・レビュー対応 `f419e199`）：NGTP のサーバ本体はメニューの `ngtp_srv.c` に既にあった。単体の KOS アプリ `tools/netgd-t2`、WANT の大きさと同時数（`ngtp_srv_set_window`、素の TCP は 16 KiB × 1、直した TCP をリンクする `make tcpfix` は 64 KiB × 2）、DHCP を使わない BBA の立ち上げ、書き込みの関門を足した。
+- 書き込みの関門：まず純正に記録 08 と同じ `52 00`（GDEMU のバージョン、純正は 5.20.5 / 2.5.0）を送り、NetGD の 5.20.0 のときだけ `E0 03` を 1 回送る（純正に未知のベンダーコマンドを送らない）。NetGD で SESSION と CHECKSUM があるときだけ書く。`T2_NO_DRIVE=1` はドライブに何も送らない。
+- Fable のレビューの対応：短い DATA のあとのデータ付きの DATA は ESTATE（ずれた位置に書かない）、中止の印は要求ごとに消す、`net_init` が動いている間は `net_shutdown` を呼ばない、テストの追加。`ngtp_srv` の不具合（中止の印が次の PUT に残る）も直した。
+- ホストテスト netgd-t2 33 件・netgd-recv 53 件・netgd-menu 77 件・netgd-send 108 件。DreamSDK で 5 構成のビルド。実機は未確認（NetGD が載るまでは `T2_NO_DRIVE=1` 版でネットだけ確かめられる）。
+- 関連：R175、R178、R185、`docs/design/menu-app.md` §8.3。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
