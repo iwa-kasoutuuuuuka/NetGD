@@ -65,14 +65,80 @@ fn fold(c: u16) -> u16 {
     }
 }
 
-/// Encode `s` as UTF-16 into `out`. `None` if it does not fit.
-pub fn utf16_from_str(s: &str, out: &mut [u16]) -> Option<usize> {
+/// Decode the one UTF-8 sequence at the start of `s`: its code point and its
+/// length in bytes. `None` for an empty slice or a sequence that
+/// `core::str::from_utf8` would reject (stray continuation byte, overlong
+/// form, surrogate, above U+10FFFF, truncated).
+///
+/// A byte string is therefore valid UTF-8 exactly when this walks it to the
+/// end ([`utf8_valid`]); the host tests check that against `from_utf8`.
+///
+/// Why it exists: `from_utf8`, `str::chars` and `encode_utf16` together are
+/// over half a kilobyte of the firmware, and the names it handles are short.
+/// One shared, deliberately not inlined loop instead (the `gamecfg` parser
+/// uses it too).
+#[inline(never)]
+pub fn utf8_next(s: &[u8]) -> Option<(u32, usize)> {
+    let b0 = *s.first()? as u32;
+    if b0 < 0x80 {
+        return Some((b0, 1));
+    }
+    let (len, min, mut cp) = match b0 {
+        0xC0..=0xDF => (2, 0x80, b0 & 0x1F),
+        0xE0..=0xEF => (3, 0x800, b0 & 0x0F),
+        0xF0..=0xF7 => (4, 0x1_0000, b0 & 0x07),
+        _ => return None,
+    };
+    for i in 1..len {
+        let b = *s.get(i)? as u32;
+        if b & 0xC0 != 0x80 {
+            return None;
+        }
+        cp = (cp << 6) | (b & 0x3F);
+    }
+    // Overlong (C0/C1 leads, E0 80..9F, F0 80..8F), surrogates (ED A0..BF)
+    // and F4 90.. / F5..F7 leads all land outside the range their length may
+    // encode.
+    if cp < min || cp > 0x10_FFFF || (0xD800..=0xDFFF).contains(&cp) {
+        return None;
+    }
+    Some((cp, len))
+}
+
+/// Whether `s` is valid UTF-8: `core::str::from_utf8(s).is_ok()`, without it.
+pub fn utf8_valid(mut s: &[u8]) -> bool {
+    while !s.is_empty() {
+        match utf8_next(s) {
+            Some((_, len)) => s = &s[len..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Encode the UTF-8 in `s` as UTF-16 into `out`. `None` if it does not fit,
+/// or if `s` is not valid UTF-8 (callers pass a `str` or check first).
+pub fn utf16_from_utf8(mut s: &[u8], out: &mut [u16]) -> Option<usize> {
     let mut n = 0;
-    for u in s.encode_utf16() {
-        *out.get_mut(n)? = u;
+    while !s.is_empty() {
+        let (cp, len) = utf8_next(s)?;
+        s = &s[len..];
+        if cp >= 0x1_0000 {
+            let c = cp - 0x1_0000;
+            *out.get_mut(n)? = 0xD800 | (c >> 10) as u16;
+            n += 1;
+            *out.get_mut(n)? = 0xDC00 | (c & 0x3FF) as u16;
+        } else {
+            *out.get_mut(n)? = cp as u16;
+        }
         n += 1;
     }
     Some(n)
+}
+
+/// Encode `s` as UTF-16 into `out`. `None` if it does not fit.
+pub fn utf16_from_str(s: &str, out: &mut [u16]) -> Option<usize> {
+    utf16_from_utf8(s.as_bytes(), out)
 }
 
 /// Encode a name taken from a GDI line into UTF-16.
@@ -86,21 +152,30 @@ pub fn utf16_from_str(s: &str, out: &mut [u16]) -> Option<usize> {
 /// char above U+00FF cannot have come from a byte, so such a string is taken
 /// as-is.
 pub fn utf16_from_gdi_name(widened: &str, out: &mut [u16]) -> Option<usize> {
+    let w = widened.as_bytes();
     let mut bytes = [0u8; 128];
     let mut n = 0;
-    for ch in widened.chars() {
-        match (ch as u32 <= 0xFF, bytes.get_mut(n)) {
-            (true, Some(slot)) => *slot = ch as u8,
-            _ => return utf16_from_str(widened, out),
+    let mut i = 0;
+    // Un-widen at the byte level: a char up to U+00FF is one byte (up to
+    // U+007F) or C2/C3 plus one continuation byte, so no `str::chars`.
+    while let Some(&b) = w.get(i) {
+        let (v, step) = match b {
+            0..=0x7F => (b, 1),
+            0xC2 | 0xC3 => ((b << 6) | (*w.get(i + 1)? & 0x3F), 2),
+            // A char above U+00FF: not a widened byte, take the string as-is.
+            _ => return utf16_from_utf8(w, out),
+        };
+        match bytes.get_mut(n) {
+            Some(slot) => *slot = v,
+            None => return utf16_from_utf8(w, out),
         }
         n += 1;
+        i += step;
     }
-    // (`from_utf8` is already in the firmware; a hand-written decoder
-    // measured 230 bytes larger.)
-    match core::str::from_utf8(&bytes[..n]) {
-        Ok(s) => utf16_from_str(s, out),
-        Err(_) => utf16_from_str(widened, out),
-    }
+    // Valid UTF-8: what the author wrote. Otherwise Latin-1, which is the
+    // widened string itself.
+    let src = if utf8_valid(&bytes[..n]) { &bytes[..n] } else { w };
+    utf16_from_utf8(src, out)
 }
 
 /// What one directory entry turned out to be.

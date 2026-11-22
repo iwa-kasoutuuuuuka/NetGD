@@ -163,35 +163,35 @@ impl Ini {
         if !code.is_ascii() {
             return;
         }
-        let Ok(line) = core::str::from_utf8(code) else { return };
-        let line = crate::trim(line);
-        if line.is_empty() || line.starts_with('[') {
+        // ASCII from here on, so bytes and chars are the same thing.
+        let line = crate::trim_bytes(code);
+        if line.is_empty() || line[0] == b'[' {
             return;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        let Some(eq) = line.iter().position(|&b| b == b'=') else {
             return;
         };
-        let (key, value) = (crate::trim(key), crate::trim(value));
+        let (key, value) = (crate::trim_bytes(&line[..eq]), crate::trim_bytes(&line[eq + 1..]));
         let out = self;
-        if key.eq_ignore_ascii_case("open_time") {
+        if key.eq_ignore_ascii_case(b"open_time") {
             if let Some(v) = num(value) {
                 out.open_time = clamp(v, TIME_MIN as i32, TIME_MAX as i32) as u16;
                 out.open_time_set = true;
             }
-        } else if key.eq_ignore_ascii_case("detect_time") {
+        } else if key.eq_ignore_ascii_case(b"detect_time") {
             if let Some(v) = num(value) {
                 out.detect_time = clamp(v, TIME_MIN as i32, TIME_MAX as i32) as u16;
                 out.detect_time_set = true;
             }
-        } else if key.eq_ignore_ascii_case("image_tests") {
+        } else if key.eq_ignore_ascii_case(b"image_tests") {
             if let Some(v) = num(value) {
                 out.image_tests = v != 0;
             }
-        } else if key.eq_ignore_ascii_case("high_speed") {
+        } else if key.eq_ignore_ascii_case(b"high_speed") {
             if let Some(v) = num(value) {
                 out.high_speed = v != 0;
             }
-        } else if key.eq_ignore_ascii_case("reset_goto") {
+        } else if key.eq_ignore_ascii_case(b"reset_goto") {
             if let Some(v) = num(value) {
                 out.reset_goto = if (0..=RESET_GOTO_MAX as i32).contains(&v) {
                     v as u16
@@ -199,7 +199,7 @@ impl Ini {
                     0
                 };
             }
-        } else if key.eq_ignore_ascii_case("read_limit") {
+        } else if key.eq_ignore_ascii_case(b"read_limit") {
             if let Some(v) = num(value) {
                 out.read_limit = match v {
                     0 => 0,
@@ -231,16 +231,26 @@ fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
 
 /// A decimal integer, optionally signed, optionally quoted. Anything else is
 /// not a number (a leading `+` is accepted, hex is not).
-fn num(v: &str) -> Option<i32> {
-    let v = crate::trim(crate::trim(v).trim_matches('"'));
-    let (neg, digits) = match v.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, v.strip_prefix('+').unwrap_or(v)),
+fn num(v: &[u8]) -> Option<i32> {
+    // `trim_matches('"')`: every quote off both ends.
+    let mut v = crate::trim_bytes(v);
+    while let [b'"', rest @ ..] = v {
+        v = rest;
+    }
+    while let [rest @ .., b'"'] = v {
+        v = rest;
+    }
+    let v = crate::trim_bytes(v);
+    let (neg, digits) = match v {
+        [b'-', r @ ..] => (true, r),
+        [b'+', r @ ..] => (false, r),
+        _ => (false, v),
     };
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.len() > 9 {
+    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) || digits.len() > 9 {
         return None;
     }
-    let n: i32 = digits.parse().ok()?;
+    // At most nine digits: no overflow, so this is `str::parse` exactly.
+    let n = digits.iter().fold(0i32, |n, &d| n * 10 + (d - b'0') as i32);
     Some(if neg { -n } else { n })
 }
 

@@ -440,6 +440,7 @@ name = "gamecfg"
 version = "0.1.0"
 dependencies = [
  "defmt 0.3.100",
+ "fatmap",
  "heapless 0.8.0",
 ]
 

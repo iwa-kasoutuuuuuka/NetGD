@@ -431,13 +431,8 @@ pub fn reload_ini(num_blocks: u32) {
 fn entry_name(entry: &embedded_sdmmc::DirEntry, long: Option<&str>) -> String<MAX_NAME_CHARS> {
     let mut name: String<MAX_NAME_CHARS> = String::new();
     match long {
-        Some(l) if !l.is_empty() => {
-            for c in l.chars() {
-                if name.push(c).is_err() {
-                    break;
-                }
-            }
-        }
+        // Whole chars up to the limit, as pushing `l.chars()` did.
+        Some(l) if !l.is_empty() => name = gamecfg::fit(l.as_bytes()),
         _ => {
             for b in entry.name.base_name() {
                 let _ = name.push(*b as char);
@@ -478,7 +473,9 @@ where
     static mut CFG_BUF: [u8; 256] = [0; 256];
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(CFG_BUF) };
     let got = f.read(buf).unwrap_or(0);
-    gamecfg::Meta::parse(core::str::from_utf8(&buf[..got]).unwrap_or(""))
+    // Not UTF-8 as a whole: the defaults, as `from_utf8(..).unwrap_or("")`
+    // gave before (`parse_bytes` checks).
+    gamecfg::Meta::parse_bytes(&buf[..got])
 }
 
 /// The image named by `GDEMU.CFG` at the root of the card, if it names one.
@@ -503,9 +500,11 @@ pub fn configured_name(num_blocks: u32) -> Option<String<MAX_NAME_CHARS>> {
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
-        let mut parts = line.splitn(2, |c| *c == b'=');
-        let key = trim_ascii(parts.next()?);
-        let val = trim_ascii(parts.next()?);
+        // Split at the first `=`; a line without one ends the search, as
+        // `splitn(2, ..)` returning no second part did.
+        let eq = line.iter().position(|c| *c == b'=')?;
+        let key = trim_ascii(&line[..eq]);
+        let val = trim_ascii(&line[eq + 1..]);
         if !key.eq_ignore_ascii_case(b"image") {
             continue;
         }
@@ -548,12 +547,7 @@ static mut SELECTED_DIR: Option<ImagePath> = None;
 static mut SELECTED_NAME: Option<String<MAX_NAME_CHARS>> = None;
 
 fn remember(dir: ImagePath, name: &str) {
-    let mut n: String<MAX_NAME_CHARS> = String::new();
-    for c in name.chars() {
-        if n.push(c).is_err() {
-            break;
-        }
-    }
+    let n: String<MAX_NAME_CHARS> = gamecfg::fit(name.as_bytes());
     unsafe {
         SELECTED_DIR = Some(dir);
         SELECTED_NAME = Some(n);
@@ -689,11 +683,11 @@ pub fn folder_for_number(num_blocks: u32, n: u16) -> Option<String<MAX_NAME_CHAR
 /// The number of the mounted folder, if it is a numbered one.
 pub fn mounted_number() -> Option<u16> {
     let name = unsafe { &*core::ptr::addr_of!(SELECTED_NAME) }.as_ref()?;
-    let name = gamecfg::trim(name.as_str()).trim_end_matches('/');
-    if name.contains('/') {
+    let name = gamecfg::trim_slashes(gamecfg::trim_bytes(name.as_bytes()));
+    if name.contains(&b'/') {
         return None;
     }
-    discimg::slot::number_of(name.as_bytes())
+    discimg::slot::number_of(name)
 }
 
 /// The next numbered folder in `dir` from the mounted one, wrapping, with
@@ -755,14 +749,28 @@ pub fn folder_has_image(num_blocks: u32, name: &str) -> bool {
 /// char -- spells `name`, a long name held as UTF-8. The ordinary comparison
 /// sees two chars where the card has one non-ASCII char, so it never matches a
 /// non-ASCII folder. ASCII case-insensitive, no buffer.
-fn widened_eq(name: &str, part: &str) -> bool {
+///
+/// `part` is UTF-8 (a `/`-separated piece of a `str`) and is read at the byte
+/// level, without `str::chars`: a char up to U+007F is one byte, U+0080 to
+/// U+00FF is C2/C3 plus one, and any other lead byte is a char above U+00FF,
+/// which no widened byte can be.
+fn widened_eq(name: &str, part: &[u8]) -> bool {
     let mut bytes = name.bytes();
-    for c in part.chars() {
-        let cp = c as u32;
+    let mut i = 0;
+    while let Some(&b) = part.get(i) {
+        let (v, step) = match b {
+            0..=0x7F => (b, 1),
+            0xC2 | 0xC3 => match part.get(i + 1) {
+                Some(&c) => ((b << 6) | (c & 0x3F), 2),
+                None => return false,
+            },
+            _ => return false,
+        };
         match bytes.next() {
-            Some(b) if cp <= 0xFF && b.eq_ignore_ascii_case(&(cp as u8)) => {}
+            Some(x) if x.eq_ignore_ascii_case(&v) => {}
             _ => return false,
         }
+        i += step;
     }
     bytes.next().is_none()
 }
@@ -772,7 +780,7 @@ fn widened_eq(name: &str, part: &str) -> bool {
 /// `path`. Shared by `load_by_name` and `folder_has_image`.
 #[inline(never)]
 fn walk_to(d: &mut RootDir<'_>, want: &str, path: &mut ImagePath) -> Result<(), GdiError> {
-    for part in want.split('/').filter(|p| !p.is_empty()) {
+    for part in want.as_bytes().split(|&b| b == b'/').filter(|p| !p.is_empty()) {
         let mut lfn =
             embedded_sdmmc::LfnBuffer::new(unsafe { &mut *core::ptr::addr_of_mut!(LFN_STORE) });
         let mut hit: Option<ShortFileName> = None;
@@ -785,8 +793,7 @@ fn walk_to(d: &mut RootDir<'_>, want: &str, path: &mut ImagePath) -> Result<(), 
                 return;
             }
             let name = entry_name(entry, long);
-            if gamecfg::resolve(core::iter::once(name.as_str()), part).is_some()
-                || widened_eq(name.as_str(), part)
+            if gamecfg::name_matches(name.as_bytes(), part) || widened_eq(name.as_str(), part)
             {
                 hit = Some(entry.name.clone());
             }
@@ -881,12 +888,7 @@ fn resolve_name(num_blocks: u32, want: &str) -> Result<ImageRef, GdiError> {
     let Some((file, is_cdi)) = locate_image(&d) else {
         return Err(GdiError::NoGdiFile);
     };
-    let mut name: String<MAX_NAME_CHARS> = String::new();
-    for c in want.chars() {
-        if name.push(c).is_err() {
-            break;
-        }
-    }
+    let name: String<MAX_NAME_CHARS> = gamecfg::fit(want.as_bytes());
     Ok(ImageRef {
         dir: path,
         file,

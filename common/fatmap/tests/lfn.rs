@@ -476,3 +476,97 @@ fn gdi_name_decoding_edge_cases() {
     let n = utf16_from_gdi_name("a\u{4E2D}", &mut out).unwrap();
     assert_eq!(&out[..n], &[0x61, 0x4E2D]);
 }
+
+/// `utf8_valid` / `utf8_next` agree with `core::str::from_utf8` on every
+/// string of up to three bytes, and on four-byte strings over every lead and
+/// second byte with boundary continuation bytes.
+#[test]
+fn utf8_decoder_matches_from_utf8() {
+    let check = |s: &[u8]| {
+        let std_ok = core::str::from_utf8(s);
+        assert_eq!(utf8_valid(s), std_ok.is_ok(), "{s:02x?}");
+        if let Ok(t) = std_ok {
+            let c = t.chars().next().unwrap();
+            assert_eq!(utf8_next(s), Some((c as u32, c.len_utf8())), "{s:02x?}");
+        }
+    };
+    assert_eq!(utf8_next(&[]), None);
+    assert!(utf8_valid(&[]));
+    for a in 0..=255u8 {
+        check(&[a]);
+        for b in 0..=255u8 {
+            check(&[a, b]);
+            for c in 0..=255u8 {
+                check(&[a, b, c]);
+            }
+            for c in [0x00u8, 0x7F, 0x80, 0x8F, 0x90, 0xBF, 0xC0, 0xFF] {
+                for d in [0x00u8, 0x41, 0x80, 0xBF, 0xC0, 0xFF] {
+                    check(&[a, b, c, d]);
+                }
+            }
+        }
+    }
+}
+
+/// The previous `utf16_from_gdi_name` (chars + from_utf8 + encode_utf16),
+/// kept here as the reference the byte-level one must agree with.
+fn old_utf16_from_gdi_name(widened: &str, out: &mut [u16]) -> Option<usize> {
+    fn enc(s: &str, out: &mut [u16]) -> Option<usize> {
+        let mut n = 0;
+        for u in s.encode_utf16() {
+            *out.get_mut(n)? = u;
+            n += 1;
+        }
+        Some(n)
+    }
+    let mut bytes = [0u8; 128];
+    let mut n = 0;
+    for ch in widened.chars() {
+        match (ch as u32 <= 0xFF, bytes.get_mut(n)) {
+            (true, Some(slot)) => *slot = ch as u8,
+            _ => return enc(widened, out),
+        }
+        n += 1;
+    }
+    match core::str::from_utf8(&bytes[..n]) {
+        Ok(s) => enc(s, out),
+        Err(_) => enc(widened, out),
+    }
+}
+
+#[test]
+fn gdi_name_decoding_matches_the_old_implementation() {
+    let mut seed = 0x1234_5678u32;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        seed >> 8
+    };
+    let pool: &[char] = &['a', 'Z', ' ', '.', '\u{7f}', '\u{80}', '\u{bf}', '\u{c2}', '\u{c3}', '\u{e2}',
+        '\u{82}', '\u{ac}', '\u{f0}', '\u{9f}', '\u{ed}', '\u{a0}', '\u{ff}', '\u{4e2d}', '\u{1f4bf}'];
+    for round in 0..50_000 {
+        let len = (rnd() % 140) as usize;
+        let mut s = String::new();
+        for _ in 0..len {
+            // Mostly bytes; now and then a char above U+00FF.
+            let c = if round % 3 == 0 { pool[(rnd() as usize) % pool.len()] } else {
+                let k = (rnd() as usize) % (pool.len() - 2);
+                if rnd() % 4 == 0 { char::from((rnd() & 0xFF) as u8) } else { pool[k] }
+            };
+            s.push(c);
+        }
+        // Also real UTF-8, widened.
+        if round % 5 == 1 {
+            s = "日本語 é \u{1F4BF}".repeat((rnd() % 12) as usize).bytes().map(char::from).collect();
+        }
+        for cap in [0usize, 3, 13, 64, 255, 300] {
+            let mut a = vec![0u16; cap];
+            let mut b = vec![0u16; cap];
+            let ra = utf16_from_gdi_name(&s, &mut a);
+            let rb = old_utf16_from_gdi_name(&s, &mut b);
+            assert_eq!(ra, rb, "{s:?} cap {cap}");
+            if let Some(n) = ra {
+                assert_eq!(a[..n], b[..n], "{s:?} cap {cap}");
+            }
+        }
+    }
+}
