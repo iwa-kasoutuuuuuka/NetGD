@@ -2541,6 +2541,26 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 両方とも `merge/batch8` に取り込み済み（`f59d3a57`）、ピン探しのテストは通過。
 - 関連：R99、R106、R145、R158、R162。
 
+### R170 REQ_STAT のヘッド位置と ERROR の保持（fix/head-pos-sticky-err、R168 で取り込み済み）（Opus）
+
+- 担当：Opus（サブエージェント）。ブランチ `fix/head-pos-sticky-err`（`bd056e85`・`ab0206a4`・`923ca440`・レビューの修正 `be107575`）、`merge/batch8` 経由で main（`76047d42`）に取り込み済み。Fable がレビュー。
+- 純正の規則（記録 01〜20 を全部見直した）：REQ_STAT のバイトは [0] 状態、[1] 形式|0xF、[2] CTRL/ADR、[3] トラック、[4] インデックス（常に 01）、[5〜7] FAD。**CD_READ のあとは「開始 FAD + 転送したセクタ数」**（GDI 03：45150 から 7 セクタ → 0xB065 = 45157、CDI 04 で種別違い 5/64/00 のとき → 開始の 0x2E4C）。トラック・インデックス・CTRL はその FAD を含むトラックのもの。状態は 1（一時停止）のまま。マウントと DEVICE RESET で停止位置に戻り、同じフォルダへの再切替では変わらない。電源投入直後（切替前）は BIOS が読んでも待機・FAD 150、Dreamcast のリセット後は lead-out − 2（R130 の残りの説明）。実測は 2 例だけで、1 セクタ・途中で止まった読み込み・範囲外・CD_SEEK・GET_TOC のあとは未確認（seq 21 で確かめる）。
+- **ERROR は直前の CHECK の値を保持**（成功したコマンドでは消えない、記録 15〜20 のレジスタのポーリング）。gdprobe のコマンドごとの行の `err=0x00` は、成功のときに ERROR を読まないためで矛盾しない。
+- NetGD：`discimg::atapi::read_end_fad`・`read_head_start`・`rest_fad` と ide.rs の `LAST_READ_FAD`（ホストに実際に届いたセクタ数だけ進める、範囲外・転送前に断った読み込みでは動かさない、ハードリセットでは切替済み・一時停止・停止位置に、CD-DA を止めたらその位置）。FPGA は PACKET の書き込みで ERROR を消さない、ファームは成功時に ERROR を書かない（パケット側だけ）。古いビットストリームでは従来どおり成功後 0x00。
+- 予測（記録 15〜20）：REQ_STAT とレジスタのポーリングの ERROR はすべて一致。2E release-z は +256 B。実機は未確認。
+- 関連：R130、R156、R159〜R164、R168。
+
+### R171 merge/batch9：handle_packet の縮小・切替の完了の順番・予測の修正・ピン探しの段階 0 / 1 の作り直し（比較のセッション・Sonnet・Opus）
+
+- `perf/handle-packet-replies`（`2acc2dbc`・`b859095e`、比較のセッション）：決まった形の 8 つの応答（REQUEST_SENSE・REQ_STAT・REQ_MODE・REQ_ERROR・GET_TOC・REQ_SES・GET_SCD・VENDOR_71）を 1 つの `small_reply()` で作って 1 回の `send_data_in().await` にし（R152 の案 A）、4 か所を `finish_ok()` に（案 C）。送るバイト・エラーの経路・センスと UA を消す時機・レジスタの書き込み順は同じ（Opus が読んでレビュー）。2E のゲートの使用量 −448 B。4E は defmt の展開で約 600 B 増えたので、ログの重複を消して main 以下に戻した。案 B（`sweep`）は前提が違い見送り。
+- `fix/switch-complete-first`（`a9294be2`、Sonnet）：`52 82 n`・`52 81` で `mounted()` が SECNR 0x06 を書いてから `finish_ok` していたのを、完了（0x50、SECNR は前の値）→ 0x06 の順に（純正の記録 15〜18 のイメージへの切替と同じ）。窓の起点・UA・NOT READY は変えていない。純正は完了から 0x06 まで 3〜6 ms、NetGD は数 µs（未調整）。
+- `fix/switch-empty-folder`（比較のセッション）：空のフォルダ・媒体なしへの切替では、純正は 1 ms 以内に 0x06 を出す（記録 17 の img=7）ので、その場合だけ 0x06 を書いてから完了する（読み込むものが無いので早い、という仮説。実機未確認）。
+- `fix/expect-regpoll-dc`（`2827ad2c`、比較のセッション）：予測のレジスタのポーリングの最初のサンプルと、seq 20 の DEVICE RESET 中のコマンド（`--devreset-cmd`）。記録 20 の img=4 DC100 で純正の再検出が約 104 ms で終わった 1 回（他は 150 ms）は予測しない。
+- `docs/plan-batch8`（`59e38655`、Haiku）：PLAN.md の「いまの状態」と stock-gdemu-flow.md を R169 まで。
+- `feat/pinfind-stage0-v2`（`ff901f9a`、Sonnet）：R169 の RETIMING の修正のあとで段階 0・1 を作り直した。段階 0 のビットストリームは前と同じ（`f377fe36…`、ロジックが無いので RETIMING の影響なし）、段階 1（4 本）は `1a1136ef…`（前のものは使わない）。ゲートレベルのシミュレーション：段階 0 は 300 ms で Low 0 本、段階 1 の短縮版は 4 本すべて駆動・同時に Low 最大 1・1 周で停止。`FIRST_RUN_ja.md` に新しいハッシュと RETIMING の注意を書いた。
+- 確認：`merge/batch9` でローカル CI 41 / 41、2E のゲート 116,880 / 122,880（残り 6,000 B、空のフォルダの修正の前）。純正との総点検で記録 15〜18 の残りは予測の限界と D10・D14・D15 だけ（空のフォルダの修正のあと再確認）。
+- 関連：R152、R155、R159〜R170。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
