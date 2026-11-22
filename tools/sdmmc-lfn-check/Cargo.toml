@@ -1,0 +1,17 @@
+[package]
+name = "sdmmc-lfn-check"
+description = "Host test for the vendored embedded-sdmmc 0.9.0 long-name fix (mcu/netgd/vendor/README.md)"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+# The patched copy the firmware builds with (through [patch.crates-io] in
+# mcu/netgd/Cargo.toml), and the unpatched crates.io release to show what
+# the patch changes.
+embedded-sdmmc = { path = "../../mcu/netgd/vendor/embedded-sdmmc-0.9.0", default-features = false }
+embedded-sdmmc-upstream = { package = "embedded-sdmmc", version = "=0.9.0", default-features = false }
+gamecfg = { path = "../../common/gamecfg" }
+heapless = "0.8"

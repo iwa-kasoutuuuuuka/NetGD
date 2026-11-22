@@ -286,7 +286,10 @@ impl<'a> LfnBuffer<'a> {
         //
         // We cache the decoded chars into this array so we can iterate them
         // backwards. It's 60 bytes, but it'll have to do.
-        let mut char_vec: heapless::Vec<char, 13> = heapless::Vec::new();
+        // OpenGDEmu patch: 14, not 13. The decode below runs over the 13 units
+        // *plus* the surrogate carried over from the previous chunk, so a full
+        // chunk with a lone surrogate yields 14 chars and the `expect`s panicked.
+        let mut char_vec: heapless::Vec<char, 14> = heapless::Vec::new();
         // Now do the decode, including the unpaired surrogate (if any) from
         // last time (maybe it has a pair now!)
         let mut is_first = true;
