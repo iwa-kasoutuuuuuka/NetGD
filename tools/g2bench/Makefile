@@ -30,6 +30,9 @@ FIX_OBJS = main_net_fix.o net_tcp_fix.o g2n_core.o g2x_core.o g2b_core.o crc32.o
 KOS_NET_SRC = $(KOS_BASE)/kernel/net
 FIX_PATCH = ../kos-patches/net_tcp-rx-fix.patch
 
+# a failed recipe (the link-map check below, a bad patch) must not leave a fresh-looking target behind
+.DELETE_ON_ERROR:
+
 all: rm-elf $(TARGET)
 
 net: rm-net-elf $(NET_TARGET)
@@ -72,6 +75,15 @@ $(FIX_TARGET): $(FIX_OBJS)
 	@grep -q 'net_tcp_fix_wnd_updates' build-fix/tcpfix.map || { echo 'patched net_tcp.c not linked'; exit 1; }
 	@if grep -q 'libkallisti.a(net_tcp.o)' build-fix/tcpfix.map; then echo "KOS's own net_tcp.o was linked too"; exit 1; fi
 	@echo 'tcpfix: patched net_tcp.c linked, libkallisti.a(net_tcp.o) not pulled'
+
+# header dependencies (KOS's %.o: %.c rule knows only the .c)
+CRC_H = ../netgd-recv/src/crc32.h
+main.o: g2b_core.h $(CRC_H)
+main_net.o main_net_fix.o: g2b_core.h g2n_core.h g2x_core.h $(CRC_H)
+g2b_core.o: g2b_core.h $(CRC_H)
+g2n_core.o: g2n_core.h $(CRC_H)
+g2x_core.o: g2x_core.h $(CRC_H)
+crc32.o: $(CRC_H)
 
 # the very CRC-32 / FNV-1a netgd-recv uses
 crc32.o: ../netgd-recv/src/crc32.c
