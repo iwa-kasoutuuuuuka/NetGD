@@ -144,6 +144,44 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('secnr 0x84 vs 0x81', out)
 
+    REGPOLL = (
+        'img=3 probe=SW_CMD n=3 cdb=528203000000000000000000 rc=ok status=0x50 err=0x00 irr=0x03 bytes=0 us=1500\n'
+        'img=3 probe=SW_REGPOLL t_ms=1 sample=1 altst=0x50 err=0x00 irr=0x03 secnr=0x06\n'
+        'img=3 probe=SW_REGPOLL t_ms=151 sample=76 altst=0x50 err=0x00 irr=0x03 secnr=0x00\n'
+        'img=3 probe=SW_REGPOLL t_ms=301 sample=151 altst=0x50 err=0x00 irr=0x03 secnr=0x21\n'
+        'img=3 probe=SW_REGPOLL_END t_ms=1001 samples=500 changes=3 stop=time\n'
+        'img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=51 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x06 bcl=0x14 bch=0xeb\n'
+        'img=3 probe=R50_SW_REGPOLL t_ms=53 sample=26 altst=0x50 err=0x01 irr=0x01 secnr=0x06\n'
+        'img=3 probe=R50_SW_REGPOLL_END t_ms=1001 samples=499 changes=4 stop=time\n')
+
+    def test_regpoll_lines_timing_ignored(self):
+        _, ents = compare.parse_record(self.REGPOLL)
+        self.assertEqual([e['secnr'] for e in ents if e['probe'] == 'SW_REGPOLL'], ['0x06', '0x00', '0x21'])
+        a = self.write('a.txt', self.REGPOLL)
+        # other times, sample numbers and reset duration: no difference (timing at most a note)
+        t = (self.REGPOLL.replace('t_ms=151 sample=76', 't_ms=163 sample=80').replace('t_ms=301 sample=151', 't_ms=480 sample=230')
+             .replace('samples=500', 'samples=333').replace('reset_us=2000', 'reset_us=9000').replace('t_ms=53 sample=26', 't_ms=60 sample=29'))
+        rc, out, _ = run([a, self.write('b.txt', t)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('img=3 SW_REGPOLL#2: t_ms 301 -> 480', out)      # a timing note, not a difference
+        rc, out, _ = run([a, self.write('b2.txt', t), '--ignore-timing'])
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('TIMING', out)
+        # a different register value is a difference
+        rc, out, _ = run([a, self.write('c.txt', self.REGPOLL.replace('secnr=0x21', 'secnr=0x81'))])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=3 SW_REGPOLL#2: secnr 0x21 vs 0x81', out)
+        rc, out, _ = run([a, self.write('d.txt', self.REGPOLL.replace('bch=0xeb', 'bch=0x00'))])
+        self.assertEqual(rc, 1)
+        self.assertIn('img=3 R50_SW_DEVRESET: bch 0xeb vs 0x00', out)
+        rc, out, _ = run([a, self.write('e.txt', self.REGPOLL.replace('rc=ok reset_us', 'rc=timeout reset_us'))])
+        self.assertEqual(rc, 1)
+        self.assertIn('rc ok vs timeout', out)
+        # a record without the R148 lines (an older run): only-in-one-side, or nothing with --only-common
+        old = self.write('old.txt', self.REGPOLL.splitlines(True)[0])
+        rc, out, _ = run([old, a, '--only-common'])
+        self.assertEqual(rc, 0, out)
+
     CDR_A = (
         'img=3 probe=CDREAD_FLAGS flags=0x20 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302000b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'
         'img=3 probe=CDREAD_FLAGS flags=0x24 fad=45150 count=1 ssz=2048 crc=11111111 sense=none cdb=302400b05e00000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2048 us=21000\n'
@@ -352,6 +390,30 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn('8 match, 0 mismatch, 0 not checked', out)
 
+    def test_audio_only_image_11(self):
+        # R148: the variant image 11 (audio-only CDI). gdprobe runs only the CDREAD_FLAGS battery on its first
+        # audio track (FAD 150); 0x20 / 0x10 return 2352-byte PCM, 0x24 / 0x28 are CHECK (not checkable).
+        import json
+        d = os.path.join(self.tmp.name, 'v11')
+        self.mk.make_variants(d, only={11})
+        man_path = os.path.join(d, self.mk.MANIFEST_NAME)
+        with open(man_path) as f:
+            man = json.load(f)
+        t1 = man['images']['11']['tracks'][0]
+        crc = zlib.crc32(self.mk.audio_sector(0)) & 0xFFFFFFFF
+        text = ('img=11 probe=NO_DATA_TRACK audio_fad=150 reads=skipped\n'
+                'img=11 probe=CDREAD_FLAGS flags=0x20 fad=150 count=1 ssz=2352 crc=%08x sense=none cdb=302000000096000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2352 us=1\n'
+                'img=11 probe=CDREAD_FLAGS flags=0x24 fad=150 count=1 ssz=- crc=- sense=5/64/00 cdb=302400000096000000000100 rc=check status=0x51 err=0x50 irr=0x03 bytes=0 us=1\n'
+                'img=11 probe=CDREAD_FLAGS flags=0x10 fad=150 count=1 ssz=2352 crc=%08x sense=none cdb=301000000096000000000100 rc=ok status=0x50 err=0x00 irr=0x03 bytes=2352 us=1\n'
+                % (crc, crc))
+        self.assertEqual(t1['start_lba'], 0)
+        rc, out, _ = run(['--manifest', man_path, self.write(text)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('2 match, 0 mismatch, 0 not checked', out)
+        # a drive that answered 2048 bytes for an audio sector cannot be checked (and says why)
+        rc, out, _ = run(['--manifest', man_path, self.write(text.replace('flags=0x20 fad=150 count=1 ssz=2352', 'flags=0x20 fad=150 count=1 ssz=2048'))])
+        self.assertIn('audio track needs ssz 2352', out)
+
     def test_mismatch_reported_per_image_and_lba(self):
         text = self.hash_line(3, 45150, 2048) + self.hash_line(4, 11853, 2048, corrupt=True)
         rc, out, _ = run(['--manifest', self.manifest, self.write(text)])
@@ -417,6 +479,15 @@ class SampleFromCTests(unittest.TestCase):
         cdr = [e for e in ents if e['probe'] == 'CDREAD_FLAGS' and e['img'] == 3]
         self.assertEqual([e['flags'] for e in cdr], ['0x20', '0x24', '0x28', '0x10'])
         self.assertEqual([e['ssz'] for e in cdr], ['2048', '2048', '2048', '2352'])
+
+    def test_r148_sample_record_from_test_all(self):
+        p = os.environ.get('GDPROBE_SAMPLE_R148')
+        if not p or not os.path.exists(p):
+            self.skipTest('GDPROBE_SAMPLE_R148 (record dumped by test_all) not set')
+        rc, out, _ = run([p, p])
+        self.assertEqual(rc, 0, out)
+        _, ents = compare.parse_record(compare.read_text(p))
+        self.assertTrue(any(e['probe'] == 'NO_DATA_TRACK' for e in ents))
 
 
 if __name__ == '__main__':

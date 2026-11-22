@@ -13,7 +13,13 @@
 #include "../whitelist.h"
 
 static int g_checks;
-#define CHECK(c) do { g_checks++; if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); exit(1); } } while (0)
+static char *g_rec;
+static void fail_dump(void)
+{   /* GDPROBE_FAILDUMP=file: the record of the failing runner test, for debugging */
+    FILE *o = getenv("GDPROBE_FAILDUMP") && g_rec ? fopen(getenv("GDPROBE_FAILDUMP"), "wb") : NULL;
+    if (o) { fputs(g_rec, o); fclose(o); }
+}
+#define CHECK(c) do { g_checks++; if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fail_dump(); exit(1); } } while (0)
 
 /* ---------------------------------------------------------------- hash */
 static void test_hash(void)
@@ -315,6 +321,18 @@ typedef struct {
     int cd_reads[256];       /* CD_READ commands seen per CDB byte 1 */
     int passive;             /* report cdbst / secnr like the hardware transport (R137 a, b) */
     int secnr_flip_at;       /* virtual us after which SECNR changes while the drive is not ready (0 = never) */
+    /* R148 */
+    uint64_t mount_at;       /* virtual time of the last 52 82 */
+    uint64_t quiet_us;       /* no packet may arrive within this long after a mount (0 = not checked) */
+    int quiet_violations;
+    int resets;              /* ATA DEVICE RESETs seen */
+    uint64_t reset_t[8];     /* their time after the mount, us */
+    int reset_flag;          /* registers show the post-reset signature until the next packet */
+    int reset_timeout;       /* DEVICE RESET never clears BSY */
+    int regs_fail;           /* the register read reports a bus-lock failure */
+    int frozen_clock;        /* spin_us does not advance the clock */
+    int no_r148_ops;         /* an older transport: no regs / ata_reset / spin_us */
+    int audio_only_folder;   /* this folder holds an audio-only image (2 audio tracks, no data track) */
 } fake;
 
 /* The raw 2352-byte Mode 1 sector the fake returns for flags 0x10: sync, header, mode 1, user data, zeroed EDC/ECC */
@@ -337,6 +355,9 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
     memset(r, 0, sizeof(*r));
     f->cmds++;
     if (!wl_check_cfg(cdb, f->sw_enabled, f->cdflags)) f->sent_bad++;
+    if (f->quiet_us && f->n_mounts && !(cdb[0] == 0x52 && cdb[1] == 0x82) && f->now - f->mount_at < f->quiet_us)
+        f->quiet_violations++;
+    f->reset_flag = 0;
     if (f->stuck) {
         f->now += (uint64_t)timeout_ms * 1000u;
         r->rc = GD_TIMEOUT; r->us = (uint64_t)timeout_ms * 1000u; r->status = 0x80;
@@ -349,6 +370,7 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         int n = cdb[2] | (cdb[3] << 8);
         f->mounts[f->n_mounts++] = n;
         f->mounted = n;
+        f->mount_at = f->now;
         f->ua = 1;
         f->ready_at = f->now + 300000;          /* 300 ms to remount */
         f->not_ready_forever = (n == f->empty_folder);
@@ -378,6 +400,17 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         {
             static uint8_t toc[408];
             memset(toc, 0xFF, sizeof(toc));
+            if (f->mounted == f->audio_only_folder) {
+                /* single-session audio CD: SD area = track 1 at 150, track 2 at 752 (both ctrl 0x01); no HD area */
+                if (cdb[1] == 0) {
+                    toc[0] = 0x01; toc[1] = 0; toc[2] = 0; toc[3] = 150;
+                    toc[4] = 0x01; toc[5] = 0; toc[6] = 0x02; toc[7] = 0xF0;
+                    toc[404] = 0x01; toc[405] = 0; toc[406] = 0x06; toc[407] = 0x00;
+                }
+                for (i = 0; i < 408 && i < cap; i++) buf[i] = toc[i];
+                r->total = 408; r->stored = cap < 408 ? cap : 408;
+                return r->rc;
+            }
             if (cdb[1] == 0) { toc[0] = 0x41; toc[1] = 0; toc[2] = 0; toc[3] = 150; }
             toc[404] = 0x41; toc[405] = 0x08; toc[406] = 0x65; toc[407] = 0x1E; /* 549150 */
             if (cdb[1] == 1) { uint32_t tf = f->toc_fad ? f->toc_fad : 45150; toc[8] = 0x41; toc[9] = (uint8_t)(tf >> 16); toc[10] = (uint8_t)(tf >> 8); toc[11] = (uint8_t)tf; }
@@ -399,6 +432,17 @@ static int f_packet0(void *ctx, const uint8_t cdb[12], uint8_t *buf, uint32_t ca
         f->cd_reads[cdb[1]]++;
         f->now += 20000 + (uint64_t)cnt * 1000;
         r->us = 21500 + (uint64_t)cnt * 1000;
+        if (f->mounted == f->audio_only_folder) {
+            /* stock on audio (R144): 0x24 / 0x28 = 5/64/00, 0x20 / 0x10 = 2352-byte PCM */
+            if (cdb[1] & 0x0E) {
+                r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50;
+                f->pend_sk = 5; f->pend_asc = 0x64; f->pend_ascq = 0;
+                return r->rc;
+            }
+            for (s = 0; s < cnt * 2352 && s < cap; s++) buf[s] = (uint8_t)(fad + s);
+            r->total = cnt * 2352; r->stored = r->total < cap ? r->total : cap;
+            return r->rc;
+        }
         if ((cdb[1] == 0x28 && f->cd_typecheck) || (cdb[1] == 0x10 && f->cd_no_raw) ||
             (cdb[1] != 0x24 && f->cd_no_flags)) {
             r->rc = GD_CHECK; r->status = 0x51; r->error = 0x50;
@@ -446,11 +490,48 @@ static int f_identify(void *ctx, uint8_t *buf, uint32_t t, gd_result *r)
     r->total = r->stored = 512; r->status = 0x58;
     return 0;
 }
+/* R148 register model of the swap window (the stock sequence of R144 b): SECNR 0x06 (open) for 150 ms,
+ * 0x00 (busy) until 300 ms, then 0x21 (pause, CD-ROM XA) or 0x07 (no disc) for an empty folder. */
+static uint8_t f_secnr(fake *f)
+{
+    uint64_t t = f->now - f->mount_at;
+    if (!f->n_mounts) return 0x22;
+    if (t < 150000) return 0x06;
+    if (t < 300000) return 0x00;
+    return f->not_ready_forever ? 0x07 : (f->mounted == f->audio_only_folder ? 0x01 : 0x21);
+}
+static int f_regs(void *ctx, gd_regs *g)
+{
+    fake *f = ctx;
+    memset(g, 0, sizeof(*g));
+    if (f->regs_fail) return 1;
+    g->altst = 0x50; g->irr = 0x03; g->secnr = f_secnr(f);
+    if (f->reset_flag) { g->err = 0x01; g->irr = 0x01; g->bcl = 0x14; g->bch = 0xEB; }
+    return 0;
+}
+static int f_reset(void *ctx, uint32_t timeout_ms, gd_regs *after, uint32_t *us, int *bsy)
+{
+    fake *f = ctx;
+    if (f->resets < 8) f->reset_t[f->resets] = f->now - f->mount_at;
+    f->resets++;
+    if (f->reset_timeout) {
+        f->now += (uint64_t)timeout_ms * 1000u;
+        *us = timeout_ms * 1000u; *bsy = 1;
+        memset(after, 0, sizeof(*after)); after->altst = 0x80;
+        return GD_TIMEOUT;
+    }
+    f->now += 2000;
+    *us = 2000; *bsy = 0;
+    f->reset_flag = 1;
+    f->ua = 1;                   /* reset: UNIT ATTENTION 6/29/00 for the next command */
+    f_regs(ctx, after);
+    return GD_OK;
+}
+static void f_spin(void *ctx, uint32_t us) { fake *f = ctx; if (!f->frozen_clock) f->now += us; }
 static uint64_t f_now(void *ctx) { return ((fake *)ctx)->now; }
 static void f_sleep(void *ctx, uint32_t ms) { ((fake *)ctx)->now += (uint64_t)ms * 1000u; }
 
 /* sink capturing the record */
-static char *g_rec;
 static size_t g_rec_len;
 static int g_syncs, g_hash_lines;
 static void s_line(void *ctx, const char *s, size_t len, int is_hash)
@@ -466,7 +547,8 @@ static void s_sync(void *ctx) { (void)ctx; g_syncs++; }
 
 static int run_fake(fake *f, const gp_config *cfg)
 {
-    gd_ops ops = { f, f_packet, f_identify, f_now, f_sleep, NULL };
+    gd_ops ops = { f, f_packet, f_identify, f_now, f_sleep, NULL, f_regs, f_reset, f_spin };
+    if (f->no_r148_ops) { ops.regs = NULL; ops.ata_reset = NULL; ops.spin_us = NULL; }
     gp_sink sink = { NULL, s_line, s_sync };
     g_rec_len = 0; g_rec[0] = 0; g_syncs = 0; g_hash_lines = 0;
     f->sw_enabled = cfg->do_switch;
@@ -716,6 +798,272 @@ static void test_runner_stuck(void)
     CHECK(f.n_mounts == 0);
 }
 
+/* ---------------------------------------------------- R148 additions */
+static void test_cfg_r148(void)
+{
+    gp_config c;
+    gp_config_defaults(&c);
+    CHECK(!c.swap_regpoll && c.swap_regpoll_ms == 1000 && c.swap_regpoll_interval_ms == 2);
+    CHECK(!c.swap_devreset && c.n_devreset == 2 && c.devreset_ms[0] == 50 && c.devreset_ms[1] == 200);
+    gp_config_parse(&c, "swap_regpoll=on\nswap_regpoll_ms=50\nswap_regpoll_interval_ms=0\nswap_devreset=yes\n"
+                        "swap_devreset_ms=10, 300 ,4000\n");
+    CHECK(c.swap_regpoll && c.swap_regpoll_ms == 100 && c.swap_regpoll_interval_ms == 1);   /* clamped */
+    CHECK(c.swap_devreset && c.n_devreset == 3 && c.devreset_ms[0] == 10 && c.devreset_ms[1] == 300 &&
+          c.devreset_ms[2] == 4000);
+    CHECK(c.unknown_keys == 0);
+    gp_config_parse(&c, "swap_regpoll_ms=99999\nswap_regpoll_interval_ms=99\n");
+    CHECK(c.swap_regpoll_ms == 10000 && c.swap_regpoll_interval_ms == 50);
+    /* a bad list is rejected whole (the previous list stays) and counted */
+    gp_config_parse(&c, "swap_devreset_ms=1,2,3,4,5\n");
+    CHECK(c.n_devreset == 3 && c.unknown_keys == 1);
+    gp_config_parse(&c, "swap_devreset_ms=6000\n");
+    CHECK(c.n_devreset == 3 && c.unknown_keys == 2);
+    gp_config_parse(&c, "swap_devreset_ms=50,x\n");
+    CHECK(c.n_devreset == 3 && c.unknown_keys == 3);
+    gp_config_parse(&c, "swap_devreset_ms=\n");
+    CHECK(c.n_devreset == 3 && c.unknown_keys == 4);
+    gp_config_parse(&c, "swap_devreset_ms=-1\n");
+    CHECK(c.n_devreset == 3 && c.unknown_keys == 5);
+    gp_config_parse(&c, "swap_devreset_ms=0\nswap_regpoll=maybe\nswap_devreset=perhaps\n");
+    CHECK(c.n_devreset == 1 && c.devreset_ms[0] == 0 && c.unknown_keys == 7);
+    CHECK(c.swap_regpoll && c.swap_devreset);    /* unparsable bools leave the value */
+}
+
+static void test_whitelist_ata(void)
+{
+    int i, cmd;
+    for (i = 0; i < wl_ata_count; i++)
+        CHECK(wl_ata_table[i].why && wl_ata_table[i].why[0]);
+    for (cmd = 0; cmd < 256; cmd++) {
+        CHECK(wl_ata_check((uint8_t)cmd, 0, 0) == NULL);
+        CHECK((wl_ata_check((uint8_t)cmd, 1, 0) != NULL) == (cmd == 0xA1));
+        CHECK((wl_ata_check((uint8_t)cmd, 0, 1) != NULL) == (cmd == 0x08));
+        CHECK((wl_ata_check((uint8_t)cmd, 1, 1) != NULL) == (cmd == 0xA1 || cmd == 0x08));
+    }
+    /* DEVICE RESET is not a CDB: the packet whitelist still refuses opcode 0x08 */
+    {
+        uint8_t c[12] = { 0x08 };
+        CHECK(!wl_check(c, 1));
+    }
+}
+
+/* the value of `key=` in the first line that contains `needle`, or -1 */
+static long field_of(const char *needle, const char *key)
+{
+    const char *p = find_line(needle), *e, *k;
+    char pat[40];
+    if (!p) return -1;
+    e = strchr(p, '\n');
+    snprintf(pat, sizeof(pat), " %s=", key);
+    k = strstr(p, pat);
+    if (!k || (e && k > e)) return -1;
+    return strtol(k + strlen(pat), NULL, 0);
+}
+
+static void test_runner_regpoll(void)
+{
+    static fake f;
+    gp_config c;
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7; f.passive = 1;
+    f.quiet_us = 990000;      /* no packet within 990 ms of any mount except where noted below */
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,7\nreturn_to=2\nswap_regpoll=on\ntp_batches=1\nseek_n=2\nswitch_timeout_ms=3000\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 0);
+    /* the return_to switch has no register poll, so its TUR polls are the only packets in a quiet window */
+    CHECK(f.quiet_violations > 0);
+    CHECK(!find_line("img=2 probe=SW_REGPOLL"));
+    /* image 3: 0x06 -> 0x00 -> 0x21 by time alone, one line per change */
+    CHECK(count_of("img=3 probe=SW_REGPOLL ") == 3);
+    CHECK(find_line("img=3 probe=SW_REGPOLL t_ms=1 sample=1 altst=0x50 err=0x00 irr=0x03 secnr=0x06"));
+    CHECK(field_of("img=3 probe=SW_REGPOLL t_ms=1", "secnr") == 0x06);
+    CHECK(find_line("secnr=0x00\n") && find_line("img=3 probe=SW_REGPOLL t_ms=301 ") && strstr(find_line("img=3 probe=SW_REGPOLL t_ms=301 "), "secnr=0x21"));
+    CHECK(find_line("img=3 probe=SW_REGPOLL t_ms=151 "));
+    CHECK(find_line("img=3 probe=SW_REGPOLL_END t_ms=1001 ") && strstr(find_line("img=3 probe=SW_REGPOLL_END"), "changes=3 stop=time"));
+    {
+        long n = field_of("img=3 probe=SW_REGPOLL_END", "samples");
+        CHECK(n >= 490 && n <= 500);                 /* every 2 ms for ~1 s */
+    }
+    /* then the usual TUR / REQ_ERROR flow consumes the UNIT ATTENTION; its first poll is after the quiet second */
+    CHECK(field_of("img=3 probe=SW_POLL", "t_ms") >= 1000);
+    CHECK(find_line("img=3 probe=SW_POLL") > find_line("img=3 probe=SW_REGPOLL_END"));
+    CHECK(strstr(find_line("img=3 probe=SW_POLL"), "sense=6/29/00"));
+    CHECK(find_line("img=3 probe=SW_RESULT n=3 rc=ok"));
+    CHECK(find_line("img=3 probe=IP_READ"));
+    /* the empty folder ends in NO DISC */
+    CHECK(count_of("img=7 probe=SW_REGPOLL ") == 3 && strstr(g_rec, "irr=0x03 secnr=0x07\n"));
+    CHECK(find_line("img=7 probe=SW_RESULT n=7 rc=timeout t_ms=40"));   /* switch_timeout_ms counts after the poll */
+    CHECK(find_line("probe=END abort=0"));
+    /* without the image-loop poll nothing is quiet-checked: the default run has no violations of a 1 ms window */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.quiet_us = 990000;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswap_regpoll=on\nswap_regpoll_ms=1000\nthroughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0 && f.quiet_violations == 0);
+    /* swap_regpoll without switch=on does nothing */
+    memset(&f, 0, sizeof(f)); f.mounted = 2;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\nswap_regpoll=on\nswap_devreset=on\n");
+    CHECK(run_fake(&f, &c) == 0 && f.n_mounts == 0 && f.resets == 0 && !find_line("REGPOLL") && !find_line("DEVRESET"));
+}
+
+static void test_runner_devreset(void)
+{
+    static fake f;
+    gp_config c;
+    const char *p;
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,7\nreturn_to=2\nswap_devreset=on\ntp_batches=1\nseek_n=2\nswitch_timeout_ms=2000\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0);
+    /* 2 images x 2 delays; the plain switches have no poll (swap_regpoll=off) */
+    CHECK(f.resets == 4 && f.n_mounts == 3 + 4);
+    CHECK(f.mounts[0] == 3 && f.mounts[1] == 3 && f.mounts[2] == 3 && f.mounts[3] == 7 && f.mounts[6] == 2);
+    CHECK(f.reset_t[0] >= 49000 && f.reset_t[0] < 53000 && f.reset_t[1] >= 199000 && f.reset_t[1] < 203000);
+    CHECK(!find_line("img=3 probe=SW_REGPOLL"));
+    CHECK(find_line("img=3 probe=R50_SW_CMD n=3 cdb=528203"));
+    p = find_line("img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=51 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x06 bcl=0x14 bch=0xeb");
+    CHECK(p != NULL);
+    CHECK(find_line("img=3 probe=R200_SW_DEVRESET delay_ms=200 t_ms=201 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x00 bcl=0x14 bch=0xeb"));
+    /* the register poll before (open phase) and right after the reset (always written, then the change at 150 ms) */
+    CHECK(find_line("img=3 probe=R50_SW_REGPOLL t_ms=1 sample=1 altst=0x50 err=0x00 irr=0x03 secnr=0x06"));
+    CHECK(find_line("img=3 probe=R50_SW_REGPOLL t_ms=53 ") > p);
+    CHECK(strstr(find_line("img=3 probe=R50_SW_REGPOLL t_ms=53 "), "err=0x01 irr=0x01 secnr=0x06"));
+    CHECK(find_line("img=3 probe=R50_SW_REGPOLL t_ms=151 "));
+    CHECK(find_line("img=3 probe=R50_SW_REGPOLL_END t_ms=1001 "));
+    /* then the TUR flow: UNIT ATTENTION from the reset, READY; the state block afterwards */
+    CHECK(strstr(find_line("img=3 probe=R50_SW_POLL"), "sense=6/29/00"));
+    CHECK(find_line("img=3 probe=R50_SW_RESULT n=3 rc=ok"));
+    CHECK(find_line("img=3 probe=R50_REQ_STAT cdb=10000000") && find_line("img=3 probe=R50_REQ_ERROR cdb=13000000"));
+    CHECK(find_line("img=3 probe=R200_SW_RESULT n=3 rc=ok"));
+    /* order: battery of image 3, then its reset switches, then image 7 */
+    CHECK(find_line("img=3 probe=SEEK_01") < find_line("img=3 probe=R50_SW_CMD"));
+    CHECK(find_line("img=3 probe=R200_SW_RESULT") < find_line("img=7 probe=SW_CMD"));
+    /* the empty folder: reset in the window, NO DISC afterwards, the switch times out as a recorded result */
+    CHECK(find_line("img=7 probe=R50_SW_DEVRESET delay_ms=50") && find_line("img=7 probe=R200_SW_RESULT n=7 rc=timeout"));
+    CHECK(!find_line("img=2 probe=R"));
+    CHECK(find_line("probe=END abort=0"));
+
+    /* a delay past swap_regpoll_ms stretches the poll to delay + 300 ms */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswap_devreset=on\nswap_devreset_ms=1500\nthroughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.resets == 1 && f.reset_t[0] >= 1499000 && f.reset_t[0] < 1503000);
+    CHECK(find_line("img=3 probe=R1500_SW_REGPOLL_END t_ms=1801 "));
+
+    /* a reset that never clears BSY: recorded as rc=timeout, the run goes on (the TUR polls answer again) */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.reset_timeout = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=2\nswap_devreset=on\nthroughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.resets == 2 && count_of("_SW_DEVRESET") == 2);
+    CHECK(find_line("img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=51 rc=timeout reset_us=3000000 bsy_seen=1"));
+    CHECK(find_line("probe=END abort=0"));
+
+    /* a drive that does not answer the switch: no reset is ever sent after a failed 52 82 */
+    memset(&f, 0, sizeof(f)); f.stuck = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3,4\nreturn_to=2\nswap_devreset=on\nswap_regpoll=on\n");
+    CHECK(run_fake(&f, &c) == 1);
+    CHECK(f.resets == 0 && !find_line("REGPOLL") && find_line("probe=END abort=1"));
+
+    /* an older transport without register access: the poll and the reset are skipped, recorded once */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.no_r148_ops = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswap_devreset=on\nswap_devreset_ms=50\nswap_regpoll=on\nthroughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.resets == 0 && !find_line("DEVRESET"));
+    CHECK(find_line("img=3 probe=SW_REGPOLL_END t_ms=0 samples=0 changes=0 stop=no-register-access"));
+    CHECK(find_line("img=3 probe=R50_SW_REGPOLL_END t_ms=0 samples=0 changes=0 stop=no-register-access"));
+}
+
+static void test_runner_regpoll_safety(void)
+{
+    static fake f;
+    gp_config c;
+    /* the clock does not move while spinning: the iteration cap ends the poll */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.frozen_clock = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=3\nreturn_to=0\nswap_regpoll=on\nthroughput=off\nseek=off\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(find_line("img=3 probe=SW_REGPOLL_END") && strstr(find_line("img=3 probe=SW_REGPOLL_END"), "samples=3000 changes=1 stop=iteration-cap"));
+    CHECK(find_line("img=3 probe=SW_RESULT n=3 rc=ok") && find_line("probe=END abort=0"));
+    /* the bus lock fails: the poll stops at once */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.regs_fail = 1;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(find_line("img=3 probe=SW_REGPOLL_END t_ms=1 samples=0 changes=0 stop=bus-lock"));
+    CHECK(find_line("img=3 probe=SW_RESULT n=3 rc=ok"));
+}
+
+static void test_runner_audio_only(void)
+{
+    static fake f;
+    gp_config c;
+    /* image 11 = audio-only (REQ_SES 2 still answers 45150 in the fake: the TOC decides) */
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.audio_only_folder = 11; f.passive = 1;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=on\nimages=4,11,3\nreturn_to=2\nswap_regpoll=on\ntp_batches=1\nseek_n=2\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0);
+    CHECK(find_line("img=11 probe=NO_DATA_TRACK audio_fad=150 reads=skipped"));
+    CHECK(!find_line("img=11 probe=IP_READ") && !find_line("img=11 probe=TP_") && !find_line("img=11 probe=SEEK_"));
+    CHECK(!find_line("img=11 probe=HASH"));
+    CHECK(count_of("img=11 probe=CDREAD_FLAGS") == 4);
+    CHECK(find_line("img=11 probe=CDREAD_FLAGS flags=0x20 fad=150 count=1 ssz=2352"));
+    CHECK(find_line("img=11 probe=CDREAD_FLAGS flags=0x24 fad=150 count=1 ssz=- crc=- sense=5/64/00"));
+    CHECK(find_line("img=11 probe=CDREAD_FLAGS flags=0x28 fad=150 count=1 ssz=- crc=- sense=5/64/00"));
+    CHECK(find_line("img=11 probe=CDREAD_FLAGS flags=0x10 fad=150 count=1 ssz=2352"));
+    CHECK(find_line("img=11 probe=REQ_STAT") && find_line("img=11 probe=GET_TOC_0"));
+    CHECK(strstr(g_rec, "img=11 probe=SW_REGPOLL t_ms=301 sample=151 altst=0x50 err=0x00 irr=0x03 secnr=0x01"));
+    /* the images around it are unaffected */
+    CHECK(find_line("img=4 probe=IP_READ") && find_line("img=3 probe=IP_READ") && !find_line("img=3 probe=NO_DATA_TRACK"));
+    CHECK(find_line("probe=END abort=0"));
+    /* an explicit ip_fad still forces the reads (the drive's answers are recorded, nothing hangs) */
+    memset(&f, 0, sizeof(f)); f.mounted = 11; f.audio_only_folder = 11;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\nip_fad=150\ntp_batches=1\nseek_n=2\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(!find_line("NO_DATA_TRACK") && find_line("img=0 probe=IP_READ fad=150 count=7"));
+    CHECK(strstr(find_line("img=0 probe=IP_READ"), "rc=check"));
+    /* switch=off on the audio-only image, flag battery off: no reads at all */
+    memset(&f, 0, sizeof(f)); f.mounted = 11; f.audio_only_folder = 11;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, "switch=off\ncdread_flags_test=off\n");
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(find_line("img=0 probe=NO_DATA_TRACK audio_fad=150") && !find_line("CDREAD_FLAGS") && f.cd_reads[0x24] == 0);
+    if (getenv("GDPROBE_DUMP_R148")) {
+        FILE *o = fopen(getenv("GDPROBE_DUMP_R148"), "wb");
+        if (o) { fwrite(g_rec, 1, g_rec_len, o); fclose(o); }
+    }
+}
+
+/* The shipped R148 run configuration, end to end against the fake drive (run from tests/, as run_tests.sh does) */
+static void test_r148_example_cfg(void)
+{
+    static fake f;
+    static char text[4096];
+    gp_config c;
+    size_t n;
+    FILE *in = fopen("../gdprobe.cfg.r148.example", "rb");
+    CHECK(in != NULL);
+    n = fread(text, 1, sizeof(text) - 1, in);
+    fclose(in);
+    text[n] = 0;
+    gp_config_defaults(&c);
+    gp_config_parse(&c, text);
+    CHECK(c.unknown_keys == 0 && !strcmp(c.label, "stock") && c.seq == 15);
+    CHECK(c.do_switch && c.n_images == 4 && c.images[0] == 4 && c.images[1] == 3 && c.images[2] == 11 && c.images[3] == 7);
+    CHECK(c.return_to == 2 && c.swap_regpoll && c.swap_devreset && c.n_devreset == 2 && c.cdread_flags == 0x20);
+    memset(&f, 0, sizeof(f)); f.ua = 1; f.mounted = 2; f.empty_folder = 7; f.audio_only_folder = 11; f.passive = 1;
+    CHECK(run_fake(&f, &c) == 0);
+    CHECK(f.sent_bad == 0 && f.resets == 8 && f.n_mounts == 4 + 8 + 1);
+    CHECK(count_of("probe=SW_REGPOLL_END") == 4 && count_of("probe=R50_SW_DEVRESET") == 4 && count_of("probe=R200_SW_DEVRESET") == 4);
+    CHECK(find_line("img=11 probe=NO_DATA_TRACK") && find_line("img=4 probe=IP_READ") && find_line("img=3 probe=IP_READ"));
+    CHECK(find_line("img=2 probe=SW_RESULT n=2 rc=ok") && find_line("probe=END abort=0"));
+    CHECK(f.now < 120ull * 1000000u);        /* about a minute and a half of drive time in the fake */
+}
+
 int main(void)
 {
     g_rec = malloc(8u << 20);
@@ -731,6 +1079,13 @@ int main(void)
     test_runner_no_switch_when_off();
     test_runner_ip_fallback();
     test_runner_stuck();
+    test_cfg_r148();
+    test_whitelist_ata();
+    test_runner_regpoll();
+    test_runner_devreset();
+    test_runner_regpoll_safety();
+    test_runner_audio_only();
+    test_r148_example_cfg();
     printf("OK: %d checks passed\n", g_checks);
     return 0;
 }

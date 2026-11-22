@@ -39,6 +39,34 @@ const wl_entry wl_table[] = {
 };
 const int wl_count = (int)(sizeof(wl_table) / sizeof(wl_table[0]));
 
+/* ATA commands (COMMAND register). Both are opt-in; nothing here touches the medium or the firmware.
+ * Never present: every write / format / download-microcode / set-features / sleep / standby command, and
+ * EXECUTE DEVICE DIAGNOSTIC (0x90, which also resets the secondary device). */
+const wl_ata_entry wl_ata_table[] = {
+    { "IDENTIFY_PACKET_DEVICE", 0xA1, WL_ATA_IDENTIFY,
+      "ATA: returns the 80-byte identification block; read-only (config identify=on)" },
+    { "DEVICE_RESET", 0x08, WL_ATA_DEVRESET,
+      "ATA (ATA-4 8.7, mandatory for packet devices): resets the device's interface/protocol state; no data, "
+      "nothing written to the medium; addressed to the selected (master) device only, DEVICE_SELECT is never "
+      "written. Only for the R148 swap-window probe (switch=on and swap_devreset=on)" },
+};
+const int wl_ata_count = (int)(sizeof(wl_ata_table) / sizeof(wl_ata_table[0]));
+
+const wl_ata_entry *wl_ata_check(uint8_t command, int identify_enabled, int devreset_enabled)
+{
+    int i;
+    for (i = 0; i < wl_ata_count; i++) {
+        const wl_ata_entry *e = &wl_ata_table[i];
+        if (e->command != command)
+            continue;
+        if (e->optin == WL_ATA_IDENTIFY && identify_enabled)
+            return e;
+        if (e->optin == WL_ATA_DEVRESET && devreset_enabled)
+            return e;
+    }
+    return NULL;
+}
+
 static unsigned be16(const uint8_t *p) { return ((unsigned)p[0] << 8) | p[1]; }
 
 int wl_cdread_flags_probe_ok(uint8_t b)

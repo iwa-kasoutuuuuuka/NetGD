@@ -20,12 +20,24 @@
  *   cdread_flags_test=on   CDREAD_FLAGS battery: one sector read with CDB byte 1 = 0x20,0x24,0x28,0x10
  *   cdread_flags=0x24      CD_READ CDB byte 1 (bit 0 must stay 0 = FAD)
  *   timeout_ms=3000        per-command timeout
+ *
+ * R148 swap-window probes (only with switch=on; see README_ja.md):
+ *   swap_regpoll=off       on = after each `52 82 n` of the image loop send NO command for swap_regpoll_ms and only
+ *                          read ALTSTATUS / ERROR / interrupt reason / SECNR every swap_regpoll_interval_ms
+ *                          (SW_REGPOLL line per change), then the usual TUR / REQ_ERROR polling
+ *   swap_regpoll_ms=1000   length of that command-free poll (100..10000)
+ *   swap_regpoll_interval_ms=2   poll step (1..50)
+ *   swap_devreset=off      on = after each image's battery, switch to the same image again once per
+ *                          swap_devreset_ms value and issue ATA DEVICE RESET (0x08) that many ms after `52 82 n`
+ *                          (R<ms>_SW_* lines); the register poll runs before and after the reset
+ *   swap_devreset_ms=50,200   reset delays (up to 4 values, 0..5000)
  */
 #ifndef GDPROBE_CFG_H
 #define GDPROBE_CFG_H
 #include <stdint.h>
 
 #define GP_MAX_IMAGES 32
+#define GP_MAX_DEVRESET 4
 
 typedef struct {
     char label[32];
@@ -46,6 +58,12 @@ typedef struct {
     uint32_t ip_fad;
     uint8_t cdread_flags;
     uint32_t timeout_ms;
+    int swap_regpoll;     /* R148: command-free register poll after each image switch */
+    uint32_t swap_regpoll_ms;
+    uint32_t swap_regpoll_interval_ms;
+    int swap_devreset;    /* R148: extra switches with an ATA DEVICE RESET inside the window */
+    int devreset_ms[GP_MAX_DEVRESET];
+    int n_devreset;
     int unknown_keys;     /* lines that did not parse */
 } gp_config;
 

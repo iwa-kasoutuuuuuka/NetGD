@@ -277,8 +277,63 @@ class VariantTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_folders(self):
-        self.assertEqual(sorted(os.listdir(self.d)), ['08', '09', '10', m.MANIFEST_NAME])
-        self.assertEqual(sorted(self.man['images']), ['08', '09', '10'])
+        self.assertEqual(sorted(os.listdir(self.d)), ['08', '09', '10', '11', m.MANIFEST_NAME])
+        self.assertEqual(sorted(self.man['images']), ['08', '09', '10', '11'])
+
+    def test_image_11_is_audio_only_cdi(self):
+        e = self.man['images']['11']
+        self.assertEqual((e['format'], e['sessions'], len(e['tracks'])), ('cdi', 1, 2))
+        a1, a2 = e['tracks']
+        for t in (a1, a2):
+            self.assertEqual((t['type'], t['form'], t['sector_size'], t['ctrl'], t['session'], t['postgap']),
+                             ('audio', 'audio_2352', 2352, 0, 1, 0))
+            self.assertIsNone(t['ip_product'])
+        # LBA 0 (FAD 150) after the first pregap, the second track after its own 150-sector pregap
+        self.assertEqual((a1['start_lba'], a1['sector_count']), (0, 302))
+        self.assertEqual((a2['start_lba'], a2['sector_count']), (302 + 150, 402))
+        self.assertEqual(e['session_lengths'], [4500 + 6750 + 150 + 302 + 150 + 402])
+        data = open(os.path.join(self.d, '11', 'disc.cdi'), 'rb').read()
+        dlen = struct.unpack('<I', data[-4:])[0]
+        desc = data[len(data) - dlen:]
+        self.assertEqual(desc[0], 1)                                         # one session
+        self.assertEqual(struct.unpack('<H', desc[2:4])[0], 2)              # two tracks in it
+        self.assertEqual(struct.unpack('<I', data[-8:-4])[0], 0x80000006)
+        self.assertEqual(e['data_bytes'], (150 + 302 + 150 + 402) * 2352)
+        self.assertEqual(e['data_bytes'] + dlen, len(data))
+        for t in (a1, a2):
+            for i in (0, 1, t['sector_count'] - 1):
+                off = t['file_offset'] + i * 2352
+                self.assertEqual(data[off:off + 2352], m.audio_sector(t['start_lba'] + i))
+                self.assertEqual(m.sector_for(t, t['start_lba'] + i, 2352)[0], data[off:off + 2352])
+            self.assertIsNone(m.sector_for(t, t['start_lba'], 2048)[0])      # no user data in an audio track
+        # pregaps are zero sectors
+        self.assertEqual(data[:150 * 2352], bytes(150 * 2352))
+        # verify.py's content check agrees
+        sys.path.insert(0, os.path.join(HERE, '..'))
+        import verify
+        self.assertTrue(verify.is_audio_only(e))
+        self.assertFalse(verify.is_audio_only(self.man['images']['10']))
+        self.assertEqual(verify.check_audio_only_cdi(os.path.join(self.d, '11', 'disc.cdi'), e), [])
+
+    def test_only_selects_folders(self):
+        d = os.path.join(self.tmp.name, 'only11')
+        rc, out = run([d, '--set', 'variants', '--only', '11'])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(sorted(os.listdir(d)), ['11', m.MANIFEST_NAME])
+        with open(os.path.join(d, m.MANIFEST_NAME)) as f:
+            man = json.load(f)
+        self.assertEqual(sorted(man['images']), ['11'])
+        self.assertEqual(man['set'], 'variants')
+        # same bytes as the full variant set's 11 (its size does not depend on --small)
+        self.assertEqual(open(os.path.join(d, '11', 'disc.cdi'), 'rb').read(),
+                         open(os.path.join(self.d, '11', 'disc.cdi'), 'rb').read())
+        self.assertEqual(man['images']['11']['file_crc32'], self.man['images']['11']['file_crc32'])
+        rc, _ = run([os.path.join(self.tmp.name, 'o2'), '--set', 'variants', '--only', '12'])
+        self.assertNotEqual(rc, 0)
+        rc, _ = run([os.path.join(self.tmp.name, 'o3'), '--only', '11'])          # needs --set variants
+        self.assertNotEqual(rc, 0)
+        rc, _ = run([os.path.join(self.tmp.name, 'o4'), '--set', 'variants', '--only', 'x'])
+        self.assertNotEqual(rc, 0)
 
     def test_image_10_is_mode1_cdi(self):
         e = self.man['images']['10']

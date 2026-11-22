@@ -3,3 +3,4 @@ tests/test_all.exe
 *.elf
 *.o
 host/
+tests/gdprobe_sample*.txt

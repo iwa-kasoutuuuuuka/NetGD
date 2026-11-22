@@ -19,6 +19,10 @@ Record format (see README_ja.md): one line per probe,
     img=3 probe=CDREAD_FLAGS flags=0x28 fad=45150 count=1 ssz=2048|- crc=0badf00d|- sense=none|5/64/00 cdb=... rc=ok|check ...
         (the CD_READ byte-1 battery; compared per (img, flags). With --image/--manifest the lines that returned
         data are checked like HASH lines, including ssz 2352 = the whole raw sector if the image can provide it.)
+    img=3 probe=SW_REGPOLL t_ms=151 sample=76 altst=0x50 err=0x00 irr=0x03 secnr=0x00
+    img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=51 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x06 bcl=0x14 bch=0xeb
+        (R148: the command-free register poll after a switch and the DEVICE RESET variant. Matched in order
+        like SW_POLL; the timing fields t_ms / sample / samples / reset_us are notes only, never differences.)
 Lines starting with '#' are header/trailer comments and are ignored.
 
 Image assumptions (the `--image` check):
@@ -116,7 +120,8 @@ def to_int(s, default=None):
 # ------------------------------------------------------------------ compare
 FIELDS_EXACT = ('rc', 'status', 'err', 'irr', 'bytes')
 # fields of event lines that are timings (compared by ratio, never as exact differences)
-TIMING_FIELDS = ('us', 't_ms', 'poll', 'polls', 'changes', 'min_us', 'max_us', 'kib_s')
+TIMING_FIELDS = ('us', 't_ms', 'poll', 'polls', 'changes', 'min_us', 'max_us', 'kib_s',
+                 'sample', 'samples', 'reset_us')   # sample(s) / reset_us: R148 SW_REGPOLL / SW_DEVRESET
 NO_COMPARE = ('img', 'probe', '_line', 'cdb', 'data')
 # fields added later (cdbst = ALTSTATUS in the CDB phase, secnr = GD-ROM sector-number status register): compared
 # only when BOTH records have them, so older records still compare cleanly

@@ -29,10 +29,13 @@ Dreamcast（KallistiOS 2.3.0）上で動き、GD-ROM ドライブ（= **純正�
   | REQ_SES | 0x15 | セッション 0〜3 の開始位置を読む |
   | GET_SCD | 0x40 | サブコード Q（形式 0・1）を読む |
   | CD_READ | 0x30 | データセクタを読む（FAD 指定、1 回 64 セクタまで）。バイト1 は `0x20` / `0x24` / `0x28` / `0x10` と設定の `cdread_flags` の値だけ許可（`0x30`・`0xE6`・`0xF0`、MSF 指定の `0x11` などは拒否） |
-  | （レジスタの受動読み出し） | — | コマンドではない。ALTSTATUS（0xA05F7018、CDB フェーズの `cdbst`）と GD-ROM ステータス `SECNR`（0xA05F708C、`secnr`）を**読むだけ**。書くレジスタは FEATURES・バイト数・COMMAND・DATA のまま増えない |
+  | （レジスタの受動読み出し） | — | コマンドではない。ALTSTATUS（0xA05F7018、CDB フェーズの `cdbst`）と GD-ROM ステータス `SECNR`（0xA05F708C、`secnr`）を**読むだけ**。`swap_regpoll` では ERROR・割り込み理由も、`swap_devreset` のリセット直後はバイト数レジスタ（0xA05F7090/94）も読む。STATUS は読まない。書くレジスタは FEATURES・バイト数・COMMAND・DATA のまま増えない |
   | GDEMU バージョン | `52 00` | 8 バイトのバージョンを読む |
   | **GDEMU 切替（オプトイン）** | `52 82 n` | フォルダ n のイメージをマウントする。openMenu がゲームを起動するときと同じ。設定で `switch=on` のときだけ許可 |
   | IDENTIFY PACKET DEVICE（オプトイン） | ATA 0xA1 | 機器の識別文字列（GD-ROM は 80 バイトを返す）。設定で `identify=on` のときだけ |
+  | **DEVICE RESET（オプトイン、R148）** | ATA 0x08 | パケットデバイスのインターフェースの状態を初期化する（ATA-4 8.7）。データも媒体への書き込みも無い。設定で `switch=on` と `swap_devreset=on` のときだけ、切替の窓の中で 1 回ずつ。COMMAND レジスタへの書き込みで、DEVICE_SELECT には書かない |
+
+  ATA のコマンド（PACKET 以外）も 1 つの表（`whitelist.c` の `wl_ata_table`）にあるものだけ。0xA1 と 0x08 以外の 254 個は、どの設定でも通らない（ホストテストで全数確認）。
 
 - **送らないもの**：SET_MODE（0x12）、CD_OPEN（0x16）、CD_PLAY / SEEK / SCAN、書き込み・フォーマット系、`0x70` / `0x71`（セキュリティ）、
   その他すべてのベンダーコマンド、`0x52` の未知のサブコード（`81` 次／前も送らない）、セカンダリの IDE デバイスへの送信
@@ -109,6 +112,11 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
 | `cdread_flags` | `0x24` | CD_READ の CDB バイト1（bit 0 = MSF は常に 0 に強制）。許可リストは `0x20` `0x24` `0x28` `0x10` に加えてこの値だけ通す |
 | `cdread_flags_test` | `on` | `CDREAD_FLAGS` 試験（下記）。`off` で省略 |
 | `timeout_ms` | 3000 | コマンド 1 つのタイムアウト（読み出しは +2000 ms） |
+| `swap_regpoll` | `off` | **R148**。`on` で、`images` の各切替（`52 82 n`）のあと `swap_regpoll_ms` のあいだ**コマンドを送らず**レジスタだけを読み、変化を `SW_REGPOLL` に記録。そのあと通常の TUR / REQ_ERROR の流れ（`return_to` の切替には付けない）。`switch=on` のときだけ |
+| `swap_regpoll_ms` | 1000 | コマンドなしで観測する長さ（100〜10000）。`switch_timeout_ms` はこのあとから数える |
+| `swap_regpoll_interval_ms` | 2 | 読む間隔（1〜50 ms）。CPU のタイマーで待つ（バスには触れない） |
+| `swap_devreset` | `off` | **R148**。`on` で、各イメージの試験一式のあと、同じイメージへ `swap_devreset_ms` の値ごとにもう一度切り替え、`52 82 n` からその ms 後に ATA DEVICE RESET を送る（行の名前に `R<ms>_` が付く）。リセットの前後もレジスタを観測する。`switch=on` のときだけ |
+| `swap_devreset_ms` | `50,200` | リセットの時刻（最大 4 個、0〜5000 ms）。既定は open 段階（50）と detect 段階（200）。観測は少なくとも「時刻 + 300 ms」まで続ける。1 つでも不正な値があれば行全体を無視（数える） |
 
 ### 実行の流れ
 
@@ -121,6 +129,16 @@ make run DC_IP=192.168.10.2                              # または dc-tool-ip 
   3. 切替が失敗・タイムアウトしても**記録して次へ進む**（07 のような空フォルダの純正の応答を残すのが目的）。
      READY にならなかったイメージでは情報コマンド（TUR・REQ_ERROR・REQ_STAT・TOC・REQ_SES 等）だけを記録し、読み出し試験は飛ばす。
   4. 最後に `return_to` が有効ならそのフォルダへ切り替える（`SW_*` が `img=<return_to>` で残る）。
+- **`swap_regpoll=on`**（R148）：2 の `52 82 n` のすぐあと、`swap_regpoll_ms` のあいだ**パケットコマンドを 1 つも送らず**、
+  ALTSTATUS・ERROR・割り込み理由・SECNR を `swap_regpoll_interval_ms` ごとに読み、どれかが変わるたびに `SW_REGPOLL` を 1 行書く。
+  終わりに `SW_REGPOLL_END`、そのあと従来の TUR / REQ_ERROR の流れ（`SW_POLL`、UNIT ATTENTION はここで消える）。
+- **`swap_devreset=on`**（R148）：2 の試験一式のあと、同じ n に `swap_devreset_ms` の値ごとに切り替え直す（`R50_SW_CMD` など）。
+  `52 82 n` から指定の ms で DEVICE RESET を送り、BSY が下がるのを待って（上限 `timeout_ms`、最低 2 ms は見る）レジスタを `R50_SW_DEVRESET` に記録、
+  観測を続け（`R50_SW_REGPOLL`）、TUR / REQ_ERROR で READY を待ち（`R50_SW_POLL`・`R50_SW_RESULT`）、最後に `R50_REQ_STAT`・`R50_REQ_ERROR` を 1 回ずつ。
+  切替コマンドが `rc=ok` でなければ、リセットも観測もしない。
+- **データトラックの無いイメージ**（音声だけの CDI など）：TOC に有効なトラックがあってデータトラックが 1 つも無ければ、`NO_DATA_TRACK audio_fad=..` を書いて
+  `IP_READ`・スループット・シークを飛ばし、`CDREAD_FLAGS` だけを最初の音声トラックで行う（REQ_SES(2) が値を返しても TOC を優先。存在しない IP.BIN を読みに行かない）。
+  `ip_fad=` を指定すれば従来どおり読む（応答はそのまま記録。どの待ちにもタイムアウトがある）。
 
 ### 1 つのイメージごとの試験一式
 
@@ -185,6 +203,21 @@ img=3 probe=HASH fad=45150 ssz=2048 crc=0badf00d
     `SW_POLL` 行にも付き、**`secnr` だけが変わった場合も状態変化として 1 行書く**（R137 b）。
   - `compare.py` は `cdbst` / `secnr` を**両方の記録にあるときだけ**比べる（古い記録との比較は差分にならない）。
 - `HASH` = 読んだセクタごとの CRC-32（`ssz` = 1 セクタのバイト数。2048 = ユーザーデータ、2352 = 生セクタ）。
+- **R148 の行**（`swap_regpoll` / `swap_devreset`、データトラックの無いイメージ）：
+
+  ```
+  img=3 probe=SW_REGPOLL t_ms=1 sample=1 altst=0x50 err=0x00 irr=0x03 secnr=0x06
+  img=3 probe=SW_REGPOLL t_ms=151 sample=76 altst=0x50 err=0x00 irr=0x03 secnr=0x00
+  img=3 probe=SW_REGPOLL_END t_ms=1001 samples=500 changes=3 stop=time
+  img=3 probe=R50_SW_DEVRESET delay_ms=50 t_ms=51 rc=ok reset_us=2000 bsy_seen=0 altst=0x50 err=0x01 irr=0x01 secnr=0x06 bcl=0x14 bch=0xeb
+  img=11 probe=NO_DATA_TRACK audio_fad=150 reads=skipped
+  ```
+
+  - `t_ms` = `52 82 n` を送った時刻からのミリ秒、`sample` = 何回目の読み出しか。値（`altst`・`err`・`irr`・`secnr`）が変わったときだけ書く（リセットの直後は必ず 1 行）。
+  - `SW_REGPOLL_END` の `stop` = `time`（予定どおり）／`iteration-cap`（時計が進まないときの上限）／`bus-lock`（G1 の排他が取れない）／`abort`／`no-register-access`（古い転送層）。
+  - `SW_DEVRESET`：`delay_ms` = 設定の時刻、`t_ms` = 実際に送った時刻、`rc` = `ok`／`timeout`（BSY が下がらない）／`refused`（許可リスト）、
+    `reset_us` = 書き込みから BSY が下がるまで、`bsy_seen` = BSY を一度でも見たか、`bcl`/`bch` = バイト数レジスタ（ATAPI のシグネチャは 0x14/0xEB）。
+  - `compare.py` は SW_POLL と同じく出現順で対応づけ、`t_ms`・`sample`・`samples`・`reset_us` は時間として扱う（差分に数えない。比が大きければ「TIMING」の注記）。
 
 ## 比較（`compare.py`、Python 3 標準ライブラリのみ）
 
@@ -230,8 +263,8 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 | `hash.c/.h` | CRC-32（`zlib.crc32` と同じ） | あり |
 | `cfg.c/.h` | 設定ファイルの解析 | あり |
 | `compare.py` | 比較・イメージ照合 | あり（合成の記録と GDI） |
-| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` / `gdprobe.cfg.r137.example`（R137 の実行用） | ビルド、dc_auto のプリセット、設定の雛形 | — |
-| `tests/` | `sh tests/run_tests.sh`（gcc と python が要る。make は不要） | — |
+| `Makefile` / `build.ps1` / `profiles/gdprobe.ps1` / `gdprobe.cfg.example` / `gdprobe.cfg.r137.example`（R137 の実行用）/ `gdprobe.cfg.r148.example`（R148 の実行用） | ビルド、dc_auto のプリセット、設定の雛形 | — |
+| `tests/` | `sh tests/run_tests.sh`（gcc と python が要る。make は不要）。DreamSDK の `python` は環境変数を渡さないので、C の偽ドライブの記録を使う 2 件はスキップになる（Windows の `py tests/test_compare.py` なら通る） | — |
 
 ## ホストテストでできていないこと（実機で最初に確認すること）
 
@@ -303,3 +336,30 @@ python compare.py --raw track03.bin --raw-start-fad 45150 rec.txt   # 生のト�
 記録の照合：`python compare.py --manifest E:\variants_out\NETGD-PROBE-MANIFEST.json host\gdprobe_stock_....txt`（`img=10` の `HASH` と `CDREAD_FLAGS` が再計算で照合される。
 03〜06 を同じ記録で照合するときは、通常カードのマニフェストを別に渡す）。
 
+## R148 の実行計画（切替の窓をコマンドなしで観測・窓の中の DEVICE RESET・音声だけの CDI）
+
+**状態：用意しただけ。実機では未実行。** NetGD の R148（`feat/stock-rules`）が推測で書いた 3 点を、1 回の純正実行で確かめる。
+
+| 問い | NetGD（R148）の推測 | 記録のどこを見るか |
+|---|---|---|
+| 1. コマンドを送らなくても、純正の SECNR は時間だけで `0x06` → `0x00` → `0xX1`（空フォルダは `0x07`）と進むか | 時間で進める（`ide_task` のタイマー） | `SW_REGPOLL` 行の `t_ms` と `secnr`（`img=4`・`3`・`11`・`7`）。最後の `SW_REGPOLL` の値が READY の値か、`SW_POLL` の最初の行（`t_ms` ≥ 1000）が 2/04/01・6/28/00 のどちらか |
+| 2. 窓の中の DEVICE RESET の直後に純正が示す SECNR（open 段階 50 ms・detect 段階 200 ms） | 窓の中のリセットは窓の値（`window_secnr`）を書く | `R50_SW_DEVRESET`・`R200_SW_DEVRESET` 行の `secnr`・`altst`・`err`・`irr`・`bcl`/`bch`（シグネチャ 0x14/0xEB が出るか）、そのあとの `R50_SW_REGPOLL` の並び、`R50_SW_POLL` のセンス（6/29/00 が出るか）、`R50_REQ_STAT` |
+| 3. 音声だけの CDI のディスク形式 | 0x00（Flycast と同じ） | `img=11` の `REQ_STAT` の `data=` のバイト 1 の上位ニブル、各行の `secnr=` の上位ニブル、`SW_REGPOLL` の READY の値、`NO_DATA_TRACK` と `CDREAD_FLAGS`（音声 2,352 B） |
+
+準備：
+
+1. `python tools/mksdcard/mksdcard.py OUT --set variants --only 11` で `11`（約 2.4 MB、音声 2 トラックだけ、セッション 1 つ）を作り、
+   `python tools/mksdcard/verify.py OUT` で「audio only (no data track)」と出ることを確かめる。SD カードの既存の `01`〜`07`・`10` の横に **`11` だけ**をコピーし、MD5 を照合する。
+2. `gdprobe.cfg.r148.example` を `host\gdprobe.cfg` にコピーする（`label=stock`、`seq=15`、`images=4,3,11,7`、`return_to=2`、`swap_regpoll=on`、`swap_devreset=on`、`swap_devreset_ms=50,200`、`switch_timeout_ms=5000`、`cdread_flags=0x20`）。
+3. 実行は 1 回（`dc_auto.ps1 -Preset <このフォルダ>\profiles\gdprobe.ps1`）。所要は約 1〜2 分（空フォルダ 07 は 3 回とも 5 秒の上限まで待つ）。
+
+注意（安全）：
+
+- **新しく送るのは ATA DEVICE RESET（0x08）だけ**で、`swap_devreset=on` のときに限る（ATA の許可リスト `wl_ata_table`）。媒体にも SD にも何も書かない。
+  純正が `52 82` でイメージを読み込んでいる最中のリセットなので、純正の挙動は分からない。固まったら（`rc=timeout` が続き `ABORT`）Dreamcast の電源を入れ直す。
+  切替コマンド自体が失敗したとき（`SW_CMD` が `rc=ok` でない）は、リセットもレジスタの観測もしない。
+- レジスタの観測（`swap_regpoll`）は読むだけ（ALTSTATUS・ERROR・割り込み理由・SECNR、リセットのあとはバイト数レジスタも）。STATUS は読まない（割り込みを消さない）。
+- 純正が音声だけの CDI を受け付けない場合も、それ自体が結果（`img=11` の `SW_RESULT` と `REQ_ERROR`）。
+
+照合：`python compare.py --manifest <OUT>\NETGD-PROBE-MANIFEST.json host\gdprobe_stock_seq00015.txt` で `img=11` の `CDREAD_FLAGS`（`0x20`・`0x10` の PCM）を照合する
+（03〜05・10 は、それぞれのカードのマニフェストを別に渡す）。
