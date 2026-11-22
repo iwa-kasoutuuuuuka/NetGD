@@ -2513,6 +2513,15 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - G2 への意味：BBA 経由の送り手を dcload の /pc/ にすると、64 KiB 単位で上限は約 1.9 MB/s、計算と重ねられない。g2-perf-plan の「fread と書き込みの重ね」は dcload の /pc/ では使えない（netgd-send の本来の経路の UDP なら別）。次は `-Fast`（25 ms の待ちを外す）で比べる。
 - 関連：R164、`docs/research/g2-perf-plan.md`。
 
+### R167 g2bench の 3 回目：dc-tool-ip の `-f`（Fast）で /pc/ の読み込みは約 25 倍（Opus）
+
+- `feat/g2bench`（`12bc191a`）を `dc_auto.ps1 -Fast`（dc-tool-ip に `-f`）で実行。結果：`H:\OpenGDEmu-g2bench\tools\g2bench\host\g2bench_003.txt`（`status=done`、エラー・10055 なし、CRC 一致）。
+- **/pc/ の fread（`-f` あり、括弧内は R166 の `-f` なし）**：1 回あたり 1 KiB 0.93 ms（25.8）、4 KiB 1.48 ms（25.8）、16 KiB 3.19 ms（27.8）、64 KiB 13.8 ms（33.8）→ 1 KiB 1,074 KB/s（38）、4 KiB 2,693 KB/s（154）、**16 KiB 5,009 KB/s**（575）、64 KiB 4,639 KB/s（1,894）。固定費は約 0.9 ms、残りはおよそ 4〜5 MB/s の転送。64 KiB が 16 KiB より少し遅いのは、64 KiB で PARTBIN の欠けの再送が起きている可能性（未確認）。
+- SH-4 の CRC-32・FNV-1a は R166 と同じ（18,162・16,881 KB/s、両方 8,753 KB/s）。
+- **スレッドで重ねる**：直列 2,716 KB/s → 重ねて 2,950 KB/s（**+9 %**、読み込みだけ 4,474、計算だけ 9,099）。`-f` で読み込みの待ちが減ると、わずかに重なる。
+- G2 への意味：dcload の /pc/ を送り手にするなら `-f`・16 KiB 単位で約 5 MB/s（BBA の ELF 送信 4.3〜5.5 MB/s と同程度）。CRC と FNV を両方計算すると約 2.7 MB/s が上限になるので、片方にする（FNV だけで約 17 MB/s）か計算の場所を考える。g2-perf-plan の中心の見積もり（0.88 MB/s）は `-f` なしの値に近く、`-f` ありでは書き込み側（SD・G1）が律速になりうる。
+- 関連：R166、`docs/research/g2-perf-plan.md`。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
