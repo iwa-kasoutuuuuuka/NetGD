@@ -9,3 +9,5 @@ tests/test_net.exe
 tests/test_xport
 tests/test_xport.exe
 build-fix/
+tests/test_tcpfix
+tests/test_tcpfix.exe

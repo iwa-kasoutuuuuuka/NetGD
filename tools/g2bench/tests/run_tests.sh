@@ -24,3 +24,13 @@ gcc $FLAGS -O1 -fsanitize=address,undefined -o test_xport test_xport.c $XSRC 2>/
 ./test_xport xport_vec.bin
 python test_g2x.py xport_vec.bin
 rm -f xport_vec.bin
+# net_tcp-rx-fix.patch: a model of the patched process_pkt decisions (lost last segment + bare FIN, merged
+# retransmission, duplicates, RST/SYN, wraparound). The model's copied condition lines must be in the patch.
+gcc $FLAGS -fsanitize=address,undefined -o test_tcpfix test_tcpfix.c 2>/dev/null || gcc $FLAGS -o test_tcpfix test_tcpfix.c
+./test_tcpfix
+for l in 'seglen = (uint32_t)sz + ((flags & TCP_FLAG_FIN) ? 1 : 0);' '!(!(flags & (TCP_FLAG_RST | TCP_FLAG_SYN)) &&' \
+         'SEQ_GT(seq + seglen, s->nxt)))' 'if(sz && SEQ_LT(seq, s->nxt)) {' 'else if(seglen && seq != s->nxt) {'; do
+  sed 's/s->data\.rcv\./s->/g' ../../kos-patches/net_tcp-rx-fix.patch | grep -qF "$l" || { echo "patch lacks: $l"; exit 1; }
+  grep -qF "$l" test_tcpfix.c || { echo "model lacks: $l"; exit 1; }
+done
+echo "test_tcpfix: model lines match the patch"
