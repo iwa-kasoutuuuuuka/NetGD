@@ -2384,6 +2384,19 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - 信頼度：確認済み（実機）。
 - 関連：R126、R144、R148、R154。
 
+### R156 R155 の対応（音声だけの CDI = 1、窓の中の DEVICE RESET）と、記録 15 で見つかった新しい差（Opus）
+
+- 担当：Opus（サブエージェントが実装）。ブランチ `fix/r155-stock`、コミット `1bc2080a`（main `34b57a74` から）。未取り込み。Fable のレビュー中（2026-11-22 時点で結果待ち）。
+- 音声だけの CDI のディスク形式を 1（CD-ROM、SECNR 0x11）に。規則は GDI 0x80・Mode 2 があれば 0x20・それ以外の CDI は 0x10（`discimg::atapi::disc_format`）。
+- 窓の中の DEVICE RESET は、リセットの時刻から窓を検出の段階でやり直す（`swap_window_after_device_reset`、長さは detect_time。純正の 150 ms は open_time とも同じ値なので未区別）。SECNR はすぐ 0x00、detect_time 後に最終の値。完了は ALTSTATUS 0x00・ERROR 0x01（従来 0x50・0x00）。窓の外は変えていない。
+- 予測に `--regpoll`・`--devreset`・NO_DATA_TRACK を追加。記録 15 との差は REGPOLL 以外は D10・D14・D15 だけ。SW_DEVRESET と、そのあとの REQ_STAT・REQ_ERROR はすべて一致。
+- **新しい差（未対応）**：
+  - 純正は成功したコマンドのあとも ERROR レジスタに前の sense key（0x50 など）を残す（NetGD は 0x00）。gdprobe のコマンドごとの行では err=0x00 と出るので、レジスタのポーリングでだけ見える。
+  - 同じイメージへの再切替（R50・R200 の回）では、純正の SECNR は 0x06・0x00 を出さず前の値のまま（UA は来る）。NetGD はマウントのたびに窓を開く。純正の DEVICE RESET が窓に関係なく検出をやり直す可能性もある（データ無し）。
+- 次の実機の回の準備：`H:\OpenGDEmu-probe4\tools\gdprobe\host\gdprobe.cfg` を seq 16（`images=4,3,7`、`swap_devreset_ms=600,2000`）にした。窓の外での同じイメージへの再切替（リセットまでの 600 ms・2,000 ms に窓を開くか）と、窓の外の DEVICE RESET と、ERROR レジスタを確かめる。
+- テスト：discimg 155 件、test_expect 15 件（1 件スキップ）、4 種類のビルドが成功。2E release-z はコード +56 B（パディングの境目を越えて像は +504 B、上限まで残り 5,888 B）。実機は未確認。
+- 関連：R148、R150、R155。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
