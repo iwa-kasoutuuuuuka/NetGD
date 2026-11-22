@@ -437,8 +437,15 @@ fn sweep_matches_the_original_code() {
         for &(ns, os) in &states {
             let fad = if rnd(4) == 0 { rnd(400) as u32 } else { rnd(700000) as u32 };
             let repeat = rnd(256) as u8;
+            // A FAD no track holds (a gap, the lead-out) now names the next
+            // track (`head_track`, seq 21), not the original's open-ended
+            // lookup: pinned in the_head_in_a_gap_reports_the_next_track.
             let snap = Snapshot { status: os, repeat, fad };
             let (hf, ht) = head_position(&new, ns, fad, 150);
+            let lba = hf.saturating_sub(150);
+            if !track_for_lba(&new, lba).map_or(false, |t| lba - t.start_lba < t.sector_count) {
+                continue;
+            }
             let (of, ot) = oracle::head_position(&snap, Some(&og));
             assert_eq!(hf, of);
             assert_eq!(ht.map(|t| t.number), ot.map(|t| t.number));
@@ -739,24 +746,160 @@ fn the_stock_record_of_the_head_after_cd_read() {
 }
 
 #[test]
-fn a_read_moves_the_head_only_from_inside_a_track() {
+fn a_read_moves_the_head_from_anywhere_on_the_disc() {
     // GDI 03: data 0..599, audio 756..1355, data 45000..64999.
     let g = stock_gdi03();
     assert_eq!(read_head_start(&g, 45150, 7), Some(45150));
     assert_eq!(read_head_start(&g, 150, 1), Some(150));
     assert_eq!(read_head_start(&g, 150 + 599, 1), Some(749)); // last sector of track 1
-    assert_eq!(read_head_start(&g, 150 + 600, 1), None); // pregap before track 2
+    // No track holds these, the head still goes there (seq 21: stock moved
+    // it to a start in the CDI's gap between the sessions, refused 5/21/00).
+    assert_eq!(read_head_start(&g, 150 + 600, 1), Some(750)); // pregap before track 2
     assert_eq!(read_head_start(&g, 906, 1), Some(906)); // audio track 2
-    assert_eq!(read_head_start(&g, 150 + 2000, 1), None); // the gap between the areas
+    assert_eq!(read_head_start(&g, 150 + 2000, 1), Some(2150)); // the gap between the areas
     assert_eq!(read_head_start(&g, 150 + 64999, 1), Some(65149)); // last HD sector
+    // Not measured, kept: the lead-out and past it, count 0, below 150.
     assert_eq!(read_head_start(&g, 150 + 65000, 1), None); // lead-out
     assert_eq!(read_head_start(&g, 0xFF_FFFF, 1), None);
     assert_eq!(read_head_start(&g, 45150, 0), None); // count 0
     assert_eq!(read_head_start(&g, 0, 1), None); // below 150
     assert_eq!(read_head_start(&g, 149, 1), None);
+    assert_eq!(read_head_start(&[] as &[TrackDesc], 150, 1), None);
     // A request that starts in a track and runs past its end still moves it.
     assert_eq!(read_head_start(&g, 65149, 10), Some(65149));
     assert_eq!(read_end_fad(45150, 3), 45153);
+}
+
+#[test]
+fn the_head_in_a_gap_reports_the_next_track() {
+    let g = stock_gdi03();
+    let num = |fad| head_track(&g, fad).map(|t| t.number);
+    assert_eq!(num(150), Some(1));
+    assert_eq!(num(749), Some(1));
+    assert_eq!(num(750), Some(2)); // pregap of track 2 (not stored)
+    assert_eq!(num(1505), Some(2));
+    assert_eq!(num(1506), Some(3)); // the gap between the areas
+    assert_eq!(num(45149), Some(3));
+    assert_eq!(num(65149), Some(3));
+    assert_eq!(num(65150), Some(3)); // lead-out: the last track
+    assert!(head_track(&[] as &[TrackDesc], 150).is_none());
+    // Inside a track it is the open-ended lookup's answer.
+    for fad in [150u32, 600, 906, 1355 + 150, 45150, 60000] {
+        assert_eq!(num(fad), track_for_lba(&g, fad - 150).map(|t| t.number), "fad {}", fad);
+    }
+}
+
+#[test]
+fn only_a_start_no_track_holds_is_lba_out_of_range() {
+    let g = stock_gdi03();
+    assert!(!cd_read_start_outside(&g, 150));
+    assert!(!cd_read_start_outside(&g, 749));
+    assert!(cd_read_start_outside(&g, 750));
+    assert!(!cd_read_start_outside(&g, 906));
+    assert!(cd_read_start_outside(&g, 2150));
+    assert!(!cd_read_start_outside(&g, 65149));
+    assert!(cd_read_start_outside(&g, 65150));
+    assert_eq!(ASC_LBA_OUT_OF_RANGE, (0x21, 0x00));
+}
+
+/// CDI 04 / 10 of the seq 21 card as NetGD parses them: audio track 1 with
+/// its 302 sectors (FAD 150..451), session 2's data track at FAD 11852
+/// (4,000 sectors + the 2-sector Form 2 postgap); 04 is Mode 2 (2,336 B a
+/// sector), 10 Mode 1.
+fn seq21_cdi(mode2: bool) -> Vec<TrackDesc> {
+    let mut a = t(1, 0, 0, 302);
+    a.session = 1;
+    let mut d = t(2, 11702, 4, 4002);
+    d.session = 2;
+    if mode2 {
+        d.sector_size = 2336;
+        d.mode = discimg::TRACK_MODE2;
+    } else {
+        d.mode = discimg::TRACK_MODE1;
+    }
+    vec![a, d]
+}
+
+/// REQ_STAT and GET_SCD format 1 at the rest head `last` (paused, switched).
+fn seq21_pos(tracks: &[TrackDesc], is_cdi: bool, fmt: u8, last: Option<u32>) -> ([u8; 10], [u8; 14]) {
+    let (fad, tr) = head_position(tracks, AudioState::Standby, 0, rest_fad(tracks, is_cdi, true, last));
+    let stat = req_stat_reply(AudioState::Standby, DRIVE_PAUSE, fmt, 0, fad, tr);
+    let mut r = [0u8; 100];
+    assert_eq!(get_scd_reply(1, AudioState::Standby, fad, tr, &mut r), 14);
+    let mut scd = [0u8; 14];
+    scd.copy_from_slice(&r[..14]);
+    (stat, scd)
+}
+
+#[test]
+fn the_stock_record_of_seq_21_head_position() {
+    // stock_20261122_21_head-position.txt, the HD_<case>_POS lines (REQ_STAT
+    // stat=, GET_SCD scd=). Every CD_READ, refused or not, puts the head at
+    // its start, then past the sectors it sent; the status stays pause.
+    for (mode2, fmt, b1) in [(true, DISC_FORMAT_CDROM_XA, "2f"), (false, DISC_FORMAT_CDROM, "1f")] {
+        let c = seq21_cdi(mode2);
+        let mut head = None;
+        let mut step = |fad: u32, count: u32, ok: bool| {
+            if let Some(s) = read_head_start(&c, fad, count) {
+                head = Some(if ok { read_end_fad(fad, count) } else { s });
+            }
+            seq21_pos(&c, true, fmt, head)
+        };
+        // HD_R1 / HD_R16 / HD_END1: start + count.
+        assert_eq!(step(12102, 1, true).0[..], hex(&format!("01{}410201002f470000", b1))[..]);
+        assert_eq!(step(12852, 16, true).0[..], hex(&format!("01{}4102010032440000", b1))[..]);
+        let (stat, scd) = step(15852, 1, true);
+        assert_eq!(stat[..], hex(&format!("01{}410201003ded0000", b1))[..]);
+        assert_eq!(scd[..], hex("0015000e410201000fa100003ded")[..]);
+        // HD_CHK24 on 04 (Mode 1 asked of the Mode 2 track) / HD_CHK28 on 10
+        // (Mode 2 Form 1 of the Mode 1 track): refused 5/64/00 -> the start.
+        let (flags, fad) = if mode2 { (0x24u8, 14353u32) } else { (0x28, 14853) };
+        assert!(cd_read_type_mismatch(flags, c[1].mode));
+        let (stat, scd) = step(fad, 7, false);
+        assert_eq!(fad3(&stat[5..8]), fad);
+        assert_eq!(scd[11..14], stat[5..8]);
+        // HD_AUD1 / HD_AUD7: FAD 3075 / 6001 lie between track 1's sectors
+        // and track 2, refused 5/21/00, and the head goes there; REQ_STAT
+        // names track 2 (CTRL 4). GET_SCD agrees except the relative field
+        // (stock 07 d6 7c, NetGD 0).
+        assert!(cd_read_start_outside(&c, 3075));
+        assert!(cd_read_start_outside(&c, 6001));
+        let (stat, scd) = step(3075, 1, false);
+        assert_eq!(stat[..], hex(&format!("01{}410201000c030000", b1))[..]);
+        assert_eq!(scd[4..7], hex("410201")[..]);
+        assert_eq!(scd[11..14], hex("000c03")[..]);
+        let (stat, scd) = step(6001, 7, false);
+        assert_eq!(stat[..], hex(&format!("01{}4102010017710000", b1))[..]);
+        assert_eq!(scd[11..14], hex("001771")[..]);
+    }
+
+    // GDI 03: HD_AUD1 (audio track 2, 2,352-byte sectors) -> 1057, track 2
+    // CTRL 0; HD_CHK28 (Mode 2 Form 1 of a Mode 1 track) refused -> 60150.
+    let g = stock_gdi03();
+    let (stat, scd) = seq21_pos(&g, false, DISC_FORMAT_GDROM, Some(read_end_fad(1056, 1)));
+    assert_eq!(stat[..], hex("018f0102010004210000")[..]);
+    assert_eq!(scd[..], hex("0015000e01020100009700000421")[..]);
+    assert!(cd_read_type_mismatch(0x28, g[2].mode));
+    let last = read_head_start(&g, 60150, 7);
+    assert_eq!(last, Some(60150));
+    let (stat, scd) = seq21_pos(&g, false, DISC_FORMAT_GDROM, last);
+    assert_eq!(stat[..], hex("018f41030100eaf60000")[..]);
+    assert_eq!(scd[..], hex("0015000e410301003a980000eaf6")[..]);
+
+    // CDI 11 (two audio tracks, 302 + 402 sectors, track 2 at FAD 602):
+    // HD_AUD7 from 376 -> 383, track 1.
+    let mut a = t(1, 0, 0, 302);
+    a.session = 1;
+    let mut b = t(2, 452, 0, 402);
+    b.session = 1;
+    let c11 = vec![a, b];
+    let (stat, scd) = seq21_pos(&c11, true, DISC_FORMAT_CDROM, Some(read_end_fad(376, 7)));
+    assert_eq!(stat[..], hex("011f01010100017f0000")[..]);
+    assert_eq!(scd[..], hex("0015000e0101010000e90000017f")[..]);
+}
+
+fn fad3(b: &[u8]) -> u32 {
+    ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32
 }
 
 #[test]

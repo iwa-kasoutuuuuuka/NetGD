@@ -356,6 +356,47 @@ class ExpectTest(unittest.TestCase):
         self.assertTrue(lget('DC200_CMD_REQ_STAT')[0]['data'].startswith('012f01'))
         self.assertEqual([e['sense'] for e in lget('DC200_CMD_POLL')], ['none'])
 
+    def test_head_probe_as_netgd_answers(self):
+        # gdprobe seq 21 (head_probe=1), stock_20261122_21_head-position.txt: every CD_READ puts the head at its
+        # start, refused or not, then past what it sent; TUR / GET_TOC / REQ_SES and idling leave it; pause always;
+        # GET_SCD agrees. CDI 04's audio cases (FAD 3075 / 6001) lie between track 1's sectors and track 2: refused
+        # 5/21/00, the head goes there, REQ_STAT names track 2.
+        text = expect_sd.predict(self.card, images=[4, 3], return_to=0,
+                                 passthrough=['--cdread-flags', '0x20', '--no-flags-test', '--no-throughput',
+                                              '--no-seek', '--head-probe'])
+        _, ents = compare.parse_record(text)
+        get = lambda img, probe: [e for e in ents if e['img'] == img and e['probe'] == probe]
+        for img in (4, 3):
+            start = get(img, 'HD_START')[0]
+            self.assertEqual((start['data_cases'], start['audio_cases']), ('1', '1'))
+            hd = [e for e in ents if e['img'] == img and e['probe'].startswith('HD_')]
+            names = [e['probe'] for e in hd]
+            for case in ('R1', 'R2', 'R7', 'R16', 'HIT', 'MID7', 'END7', 'END1', 'START7', 'CHK24', 'CHK28',
+                         'AUD1', 'AUD7'):
+                r = get(img, 'HD_' + case)[0]
+                pos = get(img, 'HD_%s_POS' % case)[0]
+                self.assertEqual(names.index('HD_%s_POS' % case), names.index('HD_' + case) + 1)
+                self.assertEqual(pos['st'], 'pause')
+                self.assertEqual(pos['scd_pos'], pos['pos'])
+                self.assertEqual(pos['late_pos'], pos['pos'])
+                if r['rc'] == 'ok':
+                    self.assertEqual(pos['d_end'], '+0', case)
+                else:
+                    self.assertEqual(pos['d_start'], '+0', case)
+            for case in ('TUR', 'TOC', 'SES'):
+                self.assertEqual(get(img, 'HD_%s_POS' % case)[0]['moved'], '0')
+            idle = get(img, 'HD_IDLE_POS')[0]
+            self.assertEqual((idle['idle_ms'], idle['moved']), ('2000', '0'))
+        self.assertEqual(get(4, 'HD_CHK24')[0]['sense'], '5/64/00')
+        self.assertEqual(get(3, 'HD_CHK28')[0]['sense'], '5/64/00')
+        for case, fad in (('AUD1', '3075'), ('AUD7', '6001')):
+            r, pos = get(4, 'HD_' + case)[0], get(4, 'HD_%s_POS' % case)[0]
+            self.assertEqual((r['fad'], r['rc'], r['sense']), (fad, 'check', '5/21/00'))
+            self.assertEqual((pos['pos'], pos['trk'], pos['moved']), (fad, '2', '1'))
+            self.assertTrue(pos['stat'].startswith('012f4102'), pos['stat'])
+        self.assertEqual(get(3, 'HD_AUD1_POS')[0]['trk'], '2')
+        self.assertEqual(get(3, 'HD_AUD1')[0]['ssz'], '2352')
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '

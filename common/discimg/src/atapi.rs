@@ -182,8 +182,27 @@ pub fn head_position<T: TrackInfo>(
         AudioState::Standby => idle_fad,
         _ => cdda_fad,
     };
-    let track = track_for_lba(tracks, fad.saturating_sub(150));
+    let track = head_track(tracks, fad);
     (fad, track)
+}
+
+/// The track REQ_STAT / GET_SCD report for a head at `fad`: the track whose
+/// sectors hold it, else -- a FAD in a gap with no sectors (a CDI's space
+/// between the sessions, a pregap the image does not store, the GDI's gap
+/// between the areas) -- the next track after it, else (the lead-out) the
+/// last track. Stock GDEMU 6.0 (seq 21, CDI 04 / 10: track 1 audio holds FAD
+/// 150..451, track 2 starts at 11852): after the reads refused 5/21/00 at FAD
+/// 3075 and 6001 REQ_STAT says `41 02 01` + the FAD (track 2, not track 1 as
+/// the open-ended [`track_for_lba`] would). That record cannot tell "the next
+/// track" from "the track of the head before" (track 2 there too); GET_SCD's
+/// relative field shows `07 d6 7c` for both FADs, which no rule here explains
+/// (NetGD sends 0). Tracks are in disc order.
+pub fn head_track<T: TrackInfo>(tracks: &[T], fad: u32) -> Option<&T> {
+    let lba = fad.saturating_sub(150);
+    match track_for_lba(tracks, lba) {
+        Some(t) if lba - t.start_lba() < t.sector_count() => Some(t),
+        _ => tracks.iter().find(|t| t.start_lba() > lba).or_else(|| tracks.last()),
+    }
 }
 
 /// The idle head position (no CD-DA started) for REQ_STAT / GET_SCD (D4).
@@ -222,22 +241,37 @@ pub fn read_end_fad(start_fad: u32, transferred: u32) -> u32 {
 }
 
 /// Whether a CD_READ of `count` sectors from `start_fad` moves the head to
-/// its start before anything is transferred, and so where to: only a request
-/// whose start lies inside a track (bounded by the track's sectors, not the
-/// open-ended [`track_for_lba`]) with at least one sector. A read refused
-/// for its sector type there still moves it (seq 17, CDI 04 at 0x2E4C). A
-/// start in the lead-out, in the GDI's gap between the areas, at FAD
-/// 0xFFFFFF or below 150, or a count of 0, leaves the head where it was
-/// (stock unmeasured; a command refused before CD_READ runs -- NOT READY,
-/// UNIT ATTENTION -- never gets here). FAD 0..149 never qualifies, so the
-/// head never rests below 150.
+/// its start before anything is transferred, and so where to: every request
+/// with at least one sector whose start lies on the disc -- FAD 150 up to the
+/// end of the last track --, refused or not. Stock GDEMU 6.0: a read refused
+/// for its sector type (5/64/00) leaves REQ_STAT at the start FAD (seq 17,
+/// CDI 04 at 0x2E4C; seq 21 `HD_CHK24` / `HD_CHK28` on CDI 04 / GDI 03 / CDI
+/// 10), and so does a read refused 5/21/00 because no track holds its start
+/// (seq 21 `HD_AUD1` / `HD_AUD7`, CDI 04 and 10: FAD 3075 / 6001, between the
+/// 302 sectors of audio track 1 and track 2 at 11852 -> pos 3075 / 6001; it
+/// used to be left where it was). Not measured, kept from before: a start in
+/// the lead-out or past it (FAD 0xFFFFFF), below 150, or a count of 0 leaves
+/// the head where it was (and so it never rests below 150). A command refused
+/// before CD_READ runs -- NOT READY, UNIT ATTENTION -- never gets here.
 pub fn read_head_start<T: TrackInfo>(tracks: &[T], start_fad: u32, count: u32) -> Option<u32> {
     if count == 0 || start_fad < 150 {
         return None;
     }
-    let lba = start_fad - 150;
-    let t = track_for_lba(tracks, lba)?;
-    (lba - t.start_lba() < t.sector_count()).then_some(start_fad)
+    let end = tracks.iter().map(|t| t.start_lba().wrapping_add(t.sector_count())).max()?;
+    (start_fad - 150 < end).then_some(start_fad)
+}
+
+/// Whether no track holds the sector at `start_fad` (bounded by each track's
+/// sectors, not the open-ended [`track_for_lba`]): a CD_READ from there is
+/// refused ILLEGAL REQUEST / LBA out of range, 5/21/00 ([`ASC_LBA_OUT_OF_RANGE`];
+/// stock seq 21, CDI 04 / 10 FAD 3075 and 6001, the space between the
+/// sessions). A start inside a track whose count runs past the track's end
+/// is refused too, ASC not measured (NetGD: 5/00/00).
+pub fn cd_read_start_outside<T: TrackInfo>(tracks: &[T], start_fad: u32) -> bool {
+    let lba = start_fad.saturating_sub(150);
+    !tracks
+        .iter()
+        .any(|t| lba >= t.start_lba() && lba - t.start_lba() < t.sector_count())
 }
 
 /// The head with no CD-DA started: the end of the last CD_READ since the
@@ -394,6 +428,9 @@ pub const ASC_NO_MEDIUM: (u8, u8) = (0x3A, 0x00);
 pub const ASC_ILLEGAL_MODE: (u8, u8) = (0x64, 0x00);
 pub const ASC_BECOMING_READY: (u8, u8) = (0x04, 0x01);
 pub const ASC_MEDIUM_CHANGED: (u8, u8) = (0x28, 0x00);
+/// ILLEGAL REQUEST / logical block address out of range (5/21/00): a CD_READ
+/// whose start no track holds ([`cd_read_start_outside`]; stock seq 21).
+pub const ASC_LBA_OUT_OF_RANGE: (u8, u8) = (0x21, 0x00);
 
 /// CD_READ / CD_READ2 byte 1, bits 3..1: the sector type the host expects.
 pub const CD_READ_TYPE_ANY: u8 = 0;

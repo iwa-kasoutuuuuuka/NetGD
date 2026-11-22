@@ -1869,7 +1869,7 @@ static SWITCHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool
 /// position).
 static LAST_READ_FAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(NO_HEAD);
 /// No FAD a read can leave (`read_head_start` needs a start of 150 or more
-/// inside a track, so the head is never 0..149 nor this).
+/// before the end of the last track, so the head is never 0..149 nor this).
 const NO_HEAD: u32 = u32::MAX;
 
 fn set_last_read_fad(fad: Option<u32>) {
@@ -2379,11 +2379,12 @@ async fn handle_cd_read(
     // track's mode, as on stock: Mode 2 Form 1 on a Mode 1 track, Mode 1 on a
     // Mode 2 track, either on an audio track is CHECK 5/64/00 (D8, D9, R144).
     let track = gdi.track_for_lba(lba);
-    // The head goes to the start of a request that starts inside a track,
-    // whatever follows (stock seq 17: a type refused 5/64/00 leaves REQ_STAT
-    // at the start FAD), and on by the sectors actually delivered (below). A
-    // start outside every track (lead-out, the GDI's gap between the areas,
-    // FAD 0xFFFFFF) or a count of 0 leaves it where it was.
+    // The head goes to the start of a request that starts on the disc,
+    // whatever follows (stock seq 17/21: refused 5/64/00 for its type, or
+    // 5/21/00 from a gap no track holds, REQ_STAT shows the start FAD), and
+    // on by the sectors actually delivered (below). A start in the lead-out
+    // or past it (FAD 0xFFFFFF), below 150, or a count of 0 leaves it where
+    // it was (stock unmeasured).
     let head_start = discimg::atapi::read_head_start(gdi.tracks(), starting_fad, count);
     if head_start.is_some() {
         set_last_read_fad(head_start);
@@ -2451,7 +2452,14 @@ async fn handle_cd_read(
             label, count, lba, available
         );
         clear_out_layout();
-        finish_illegal(dev, state);
+        // A start no track holds: LBA out of range, 5/21/00 (stock seq 21);
+        // past the end from inside a track: ASC 0 (stock unmeasured).
+        let asc = if discimg::atapi::cd_read_start_outside(gdi.tracks(), starting_fad) {
+            discimg::atapi::ASC_LBA_OUT_OF_RANGE
+        } else {
+            (0, 0)
+        };
+        finish_check(dev, state, discimg::atapi::SENSE_ILLEGAL_REQUEST, asc);
         return;
     }
     #[cfg(all(feature = "sd-multiblock", not(feature = "dma-pattern")))]
