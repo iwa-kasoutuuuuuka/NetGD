@@ -67,19 +67,33 @@ pub enum Target {
 /// and not 01 itself) about 01, so for a [`Target::Folder`] the last call was
 /// the one that answered `true` -- a caller can keep that lookup's result.
 pub fn mount_target<E: FnMut(u16) -> bool>(n: u16, mut exists: E) -> Target {
-    if n == 0 {
-        return Target::Refused;
+    match mount_target_checked(n, |k| Ok::<bool, core::convert::Infallible>(exists(k))) {
+        Ok(t) => t,
+        Err(never) => match never {},
     }
-    if exists(n) {
-        return Target::Folder(n);
+}
+
+/// [`mount_target`] for a lookup that can fail (an SD read error): the first
+/// error is returned as it is and nothing further is asked. A failed lookup is
+/// not "no such folder" -- the caller refuses the switch and keeps the mounted
+/// disc, instead of falling back to 01 or emptying the drive (R136).
+pub fn mount_target_checked<Er, E: FnMut(u16) -> Result<bool, Er>>(
+    n: u16,
+    mut exists: E,
+) -> Result<Target, Er> {
+    if n == 0 {
+        return Ok(Target::Refused);
+    }
+    if exists(n)? {
+        return Ok(Target::Folder(n));
     }
     if n > FALLBACK_MAX {
-        return Target::Refused;
+        return Ok(Target::Refused);
     }
-    if n != FALLBACK_FOLDER && exists(FALLBACK_FOLDER) {
-        Target::Folder(FALLBACK_FOLDER)
+    if n != FALLBACK_FOLDER && exists(FALLBACK_FOLDER)? {
+        Ok(Target::Folder(FALLBACK_FOLDER))
     } else {
-        Target::NoMedium
+        Ok(Target::NoMedium)
     }
 }
 

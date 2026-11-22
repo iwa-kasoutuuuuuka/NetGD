@@ -622,33 +622,49 @@ pub fn load_default(num_blocks: u32) -> Result<Gdi, GdiError> {
 ///
 /// Numbered means [`discimg::slot::number_of`] accepts the folder's 8.3 base
 /// name and it has no extension. One pass, no collection of the entries.
-fn for_each_slot<F: FnMut(u16, &embedded_sdmmc::DirEntry)>(num_blocks: u32, mut f: F) {
+///
+/// Returns whether the card could be read: `false` for a volume, root or
+/// directory read that failed (`f` may then have seen only some of the
+/// folders). A caller that must tell "no such folder" from "could not look"
+/// checks it (R136).
+fn for_each_slot<F: FnMut(u16, &embedded_sdmmc::DirEntry)>(num_blocks: u32, mut f: F) -> bool {
     let dev = HsmciBlockDevice::new();
     dev.set_num_blocks(num_blocks);
     let mgr = VolumeManager::new(dev, crate::blockdev::DummyClock);
-    let Ok(volume) = mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) else { return };
-    let Ok(root) = volume.open_root_dir() else { return };
-    let _ = root.iterate_dir(|entry| {
+    let Ok(volume) = mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) else { return false };
+    let Ok(root) = volume.open_root_dir() else { return false };
+    root.iterate_dir(|entry| {
         if !entry.attributes.is_directory() || !entry.name.extension().is_empty() {
             return;
         }
         if let Some(n) = discimg::slot::number_of(entry.name.base_name()) {
             f(n, entry);
         }
-    });
+    })
+    .is_ok()
 }
 
 /// The root folder numbered `n`, under the name `load_by_name` takes.
 /// With several folders of the same number (`01` and `001`) the first on the
-/// card wins.
-pub fn folder_for_number(num_blocks: u32, n: u16) -> Option<String<MAX_NAME_CHARS>> {
+/// card wins. `Err` = the card could not be read, which is not the same as
+/// `Ok(None)`, no such folder (R136).
+pub fn folder_lookup(num_blocks: u32, n: u16) -> Result<Option<String<MAX_NAME_CHARS>>, ()> {
     let mut found: Option<String<MAX_NAME_CHARS>> = None;
-    for_each_slot(num_blocks, |num, entry| {
+    let read = for_each_slot(num_blocks, |num, entry| {
         if num == n && found.is_none() {
             found = Some(entry_name(entry, None));
         }
     });
-    found
+    // A folder found before a later read error is still a folder.
+    if found.is_none() && !read {
+        return Err(());
+    }
+    Ok(found)
+}
+
+/// [`folder_lookup`] where a read error counts as no folder.
+pub fn folder_for_number(num_blocks: u32, n: u16) -> Option<String<MAX_NAME_CHARS>> {
+    folder_lookup(num_blocks, n).ok().flatten()
 }
 
 /// The number of the mounted folder, if it is a numbered one.
@@ -685,7 +701,9 @@ pub fn step_folder(
     discimg::slot::step_accepted(
         mounted_number(),
         dir,
-        |pick| for_each_slot(num_blocks, |num, _| pick.offer(num)),
+        |pick| {
+            let _ = for_each_slot(num_blocks, |num, _| pick.offer(num));
+        },
         |n| match folder_for_number(num_blocks, n) {
             Some(name) if folder_has_image(num_blocks, name.as_str()) => {
                 found = Some(name);

@@ -2620,7 +2620,9 @@ async fn handle_image_ctl(
 ///                whatever `reset_goto` says); 01 is then the selection, so
 ///                the button and `52 81` step on from it. With no folder 01
 ///                either the drive goes empty (no medium) and the selection
-///                stays as it was. A missing number past 999 is ILLEGAL
+///                stays as it was. A card that cannot be read during that
+///                lookup is not "no folder": ILLEGAL REQUEST, the disc stays.
+///                (R136) A missing number past 999 is ILLEGAL
 ///                REQUEST and leaves the current media untouched (stock: not
 ///                probed). A folder with nothing to mount (no image, or one
 ///                that fails to parse) is accepted like stock does (D12):
@@ -2668,10 +2670,16 @@ fn stage_folder(n: Option<u16>, dir: Option<discimg::slot::Step>) -> bool {
             // `mount_target` asks about 01 only after `n` came back empty,
             // so `found` ends up holding the folder that answered.
             let mut found = None;
-            let target = discimg::slot::mount_target(n, |k| {
-                found = crate::gdi::folder_for_number(blocks, k);
-                found.is_some()
+            let target = discimg::slot::mount_target_checked(n, |k| {
+                found = crate::gdi::folder_lookup(blocks, k)?;
+                Ok::<bool, ()>(found.is_some())
             });
+            // A card read error is not "no such folder": refuse and keep the
+            // disc, as before R132 (R136).
+            let Ok(target) = target else {
+                warn!("GDEMU mount: the card could not be read looking for {}", n);
+                return false;
+            };
             match target {
                 discimg::slot::Target::Folder(k) => {
                     if k != n {

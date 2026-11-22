@@ -1,4 +1,4 @@
-use discimg::slot::{mount_target, number_of, step_accepted, swap_allowed, Nearest, Step, Target};
+use discimg::slot::{mount_target, mount_target_checked, number_of, step_accepted, swap_allowed, Nearest, Step, Target};
 
 #[test]
 fn number_of_accepts_two_to_four_digits() {
@@ -216,4 +216,31 @@ fn numbers_outside_the_fallback_range() {
     assert_eq!(target_on(1000, &[1, 2], &mut 0), Target::Refused);
     assert_eq!(target_on(65535, &[1], &mut 0), Target::Refused);
     assert_eq!(target_on(0, &[1], &mut 0), Target::Refused);
+}
+
+/// R136: a card read error during the lookup is not "no such folder". It is
+/// passed up, so the caller refuses the switch and keeps the disc (before
+/// R128 a failed lookup refused; as `NoMedium` it unmounted the current disc
+/// on a transient SD error).
+#[test]
+fn read_error_in_the_lookup_is_not_a_missing_folder() {
+    let card = [1u16, 2, 3];
+    // The error on the number asked for: nothing further is asked.
+    let mut asked = vec![];
+    let r = mount_target_checked(50, |k| {
+        asked.push(k);
+        Err::<bool, ()>(())
+    });
+    assert_eq!(r, Err(()));
+    assert_eq!(asked, [50], "no fallback to 01 after an error");
+    // The error on the fallback lookup (n is genuinely missing, 01 unreadable).
+    let r = mount_target_checked(50, |k| if k == 50 { Ok(false) } else { Err(()) });
+    assert_eq!(r, Err(()));
+    // No error: the same answers as `mount_target` (R132).
+    let ok = |n| mount_target_checked(n, |k| Ok::<_, ()>(card.contains(&k)));
+    assert_eq!(ok(2), Ok(Target::Folder(2)));
+    assert_eq!(ok(50), Ok(Target::Folder(1)));
+    assert_eq!(ok(1000), Ok(Target::Refused));
+    let empty = mount_target_checked(50, |_| Ok::<_, ()>(false));
+    assert_eq!(empty, Ok(Target::NoMedium));
 }
