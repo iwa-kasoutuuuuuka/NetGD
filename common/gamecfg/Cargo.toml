@@ -12,4 +12,7 @@ defmt = ["dep:defmt", "heapless/defmt-03"]
 
 [dependencies]
 heapless = "0.8"
+# Only for `lfn::utf8_valid`: the firmware links fatmap already, and one UTF-8
+# check shared with it is smaller than `core::str::from_utf8`.
+fatmap = { path = "../fatmap" }
 defmt = { version = "0.3", optional = true }

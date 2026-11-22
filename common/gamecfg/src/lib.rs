@@ -96,28 +96,44 @@ impl Meta {
     /// fat-fingered a quote would be the wrong trade. Anything genuinely
     /// needed has a fallback.
     pub fn parse(text: &str) -> Self {
+        Self::parse_bytes(text.as_bytes())
+    }
+
+    /// [`Meta::parse`] on the raw file. Bytes that are not valid UTF-8 as a
+    /// whole give [`Meta::default`], which is what the firmware's
+    /// `parse(from_utf8(buf).unwrap_or(""))` did; this checks with
+    /// `fatmap::lfn::utf8_valid` instead, so the firmware carries no
+    /// `from_utf8`. Everything after that works on bytes: every delimiter is
+    /// ASCII, and a UTF-8 continuation byte never equals an ASCII one, so
+    /// splitting the bytes cuts exactly where splitting the `str` did.
+    pub fn parse_bytes(data: &[u8]) -> Self {
         let mut out = Meta::default();
-        for line in text.lines() {
-            let line = trim(strip_comment(line));
-            if line.is_empty() || line.starts_with('[') {
+        if !fatmap::lfn::utf8_valid(data) {
+            return out;
+        }
+        // `str::lines` splits at `\n` and drops one `\r` before it; `trim`
+        // drops that `\r` (and any other trailing ASCII space) anyway.
+        for line in data.split(|&b| b == b'\n') {
+            let line = trim_bytes(strip_comment(line));
+            if line.is_empty() || line[0] == b'[' {
                 continue;
             }
-            let Some((key, value)) = line.split_once('=') else {
+            let Some(eq) = line.iter().position(|&b| b == b'=') else {
                 continue;
             };
-            let key = trim(key);
-            let value = trim(value);
+            let key = trim_bytes(&line[..eq]);
+            let value = trim_bytes(&line[eq + 1..]);
 
             match key {
-                "title" => out.title = unquote(value).and_then(fit),
-                "boot" => out.boot = unquote(value).and_then(fit),
+                b"title" => out.title = unquote(value).map(fit),
+                b"boot" => out.boot = unquote(value).map(fit),
                 // `next_disk` accepted too: it is the obvious other name for
                 // this and costs one line to not be wrong about.
-                "next" | "next_disk" | "next_disc" => out.next = unquote(value).and_then(fit),
-                "type" => {
+                b"next" | b"next_disk" | b"next_disc" => out.next = unquote(value).map(fit),
+                b"type" => {
                     if let Some(v) = unquote(value) {
                         out.kind = match v {
-                            "elf" | "bin" | "prog" => Kind::Elf,
+                            b"elf" | b"bin" | b"prog" => Kind::Elf,
                             _ => Kind::Disc,
                         };
                     }
@@ -131,7 +147,7 @@ impl Meta {
 
 /// `str::trim` for the ASCII whitespace only: space, tab, LF, VT, FF, CR.
 ///
-/// One shared, deliberately not inlined copy. `str::trim` decodes UTF-8 and
+/// One shared, deliberately not inlined copy ([`trim_bytes`]). `str::trim` decodes UTF-8 and
 /// consults the Unicode `White_Space` table from both ends, and every call
 /// site got its own copy of that; `str::trim_ascii` is small but inlines, so
 /// the call sites of it together came out larger still. This is one loop,
@@ -140,22 +156,31 @@ impl Meta {
 /// What it gives up: a line padded with U+00A0 or U+3000 keeps the padding.
 /// These files are keys, numbers and quoted names; nothing in them is
 /// delimited by such a character.
-#[inline(never)]
 pub fn trim(s: &str) -> &str {
-    let b = s.as_bytes();
+    let t = trim_bytes(s.as_bytes());
+    // Only ASCII bytes were stepped over, so both ends are char boundaries.
+    // SAFETY: a sub-slice of a `str` cut at char boundaries is UTF-8.
+    unsafe { core::str::from_utf8_unchecked(t) }
+}
+
+/// [`trim`] on bytes: the same six ASCII whitespace bytes from both ends.
+/// The one copy the parsers here and the firmware share.
+#[inline(never)]
+pub fn trim_bytes(mut b: &[u8]) -> &[u8] {
     let ws = |c: u8| c == b' ' || (b'\t'..=b'\r').contains(&c);
-    let mut start = 0;
-    let mut end = b.len();
-    while start < end && ws(b[start]) {
-        start += 1;
+    while let [c, rest @ ..] = b {
+        if !ws(*c) {
+            break;
+        }
+        b = rest;
     }
-    while end > start && ws(b[end - 1]) {
-        end -= 1;
+    while let [rest @ .., c] = b {
+        if !ws(*c) {
+            break;
+        }
+        b = rest;
     }
-    // Only ASCII bytes were stepped over, so both ends are char boundaries
-    // and this is always `Some`; `get` rather than indexing keeps the
-    // boundary panic (and its message) out of the firmware.
-    s.get(start..end).unwrap_or(s)
+    b
 }
 
 #[cfg(test)]
@@ -196,12 +221,12 @@ mod trim_tests {
 }
 
 /// Drop a trailing `# comment`, but not a `#` inside quotes.
-fn strip_comment(line: &str) -> &str {
+fn strip_comment(line: &[u8]) -> &[u8] {
     let mut in_quotes = false;
-    for (i, c) in line.char_indices() {
+    for (i, &c) in line.iter().enumerate() {
         match c {
-            '"' => in_quotes = !in_quotes,
-            '#' if !in_quotes => return &line[..i],
+            b'"' => in_quotes = !in_quotes,
+            b'#' if !in_quotes => return &line[..i],
             _ => {}
         }
     }
@@ -209,28 +234,49 @@ fn strip_comment(line: &str) -> &str {
 }
 
 /// Take the inside of a quoted string, or a bare word as-is.
-fn unquote(v: &str) -> Option<&str> {
-    let v = trim(v);
-    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
-        Some(&v[1..v.len() - 1])
-    } else if v.is_empty() || v.starts_with('"') {
+fn unquote(v: &[u8]) -> Option<&[u8]> {
+    let v = trim_bytes(v);
+    match v {
+        [b'"', inner @ .., b'"'] => Some(inner),
         // An unterminated quote is a typo, not a value.
-        None
-    } else {
-        Some(v)
+        [] | [b'"', ..] => None,
+        _ => Some(v),
     }
 }
 
+/// Copy `s` into a `String<N>`, cut at the last char boundary that fits.
+///
 /// Truncate rather than reject: a title too long for the buffer is still a
-/// better label than the folder's 8.3 name.
-fn fit<const N: usize>(s: &str) -> Option<String<N>> {
+/// better label than the folder's 8.3 name. The same result as pushing
+/// `s.chars()` until one does not fit, which the firmware also does with its
+/// names (`gdi.rs`), hence public.
+///
+/// `s` is meant to be UTF-8 (a sub-slice of a `str` cut at char
+/// boundaries). Bytes that are not give an empty string, never a broken
+/// `String`.
+pub fn fit<const N: usize>(s: &[u8]) -> String<N> {
+    let head = fit_head(s, N);
     let mut out: String<N> = String::new();
-    for c in s.chars() {
-        if out.push(c).is_err() {
-            break;
-        }
+    // SAFETY: `fit_head` returns UTF-8 of at most `N` bytes.
+    let _ = unsafe { out.as_mut_vec() }.extend_from_slice(head);
+    out
+}
+
+/// The part of `s` [`fit`] keeps, for any capacity: one copy, not one per
+/// `N`.
+#[inline(never)]
+fn fit_head(s: &[u8], cap: usize) -> &[u8] {
+    let mut end = s.len().min(cap);
+    // Back off to a char boundary: never in front of a continuation byte.
+    while end > 0 && end < s.len() && s[end] & 0xC0 == 0x80 {
+        end -= 1;
     }
-    Some(out)
+    let head = &s[..end];
+    if fatmap::lfn::utf8_valid(head) {
+        head
+    } else {
+        &[]
+    }
 }
 
 #[cfg(test)]
@@ -288,14 +334,28 @@ next = \"Skies of Arcadia Disc 2\"
 /// Returns `None` when nothing matches, which is the right answer for a
 /// typo: the button does nothing rather than swapping to a surprise.
 pub fn resolve<'a>(names: impl Iterator<Item = &'a str>, want: &str) -> Option<usize> {
-    let want = trim(want).trim_end_matches('/');
-    names.enumerate().find_map(|(i, n)| {
-        (n.len() == want.len()
-            && n.chars()
-                .zip(want.chars())
-                .all(|(a, b)| a.eq_ignore_ascii_case(&b)))
-        .then_some(i)
-    })
+    names
+        .enumerate()
+        .find_map(|(i, n)| name_matches(n.as_bytes(), want.as_bytes()).then_some(i))
+}
+
+/// The test [`resolve`] applies to one name: `want`, trimmed and without
+/// trailing slashes, equals `name` up to ASCII case.
+///
+/// On bytes, which is the same answer the old char-by-char comparison gave
+/// for UTF-8 of equal length: ASCII case folding touches only ASCII bytes,
+/// and two non-ASCII chars are equal exactly when their bytes are.
+#[inline(never)]
+pub fn name_matches(name: &[u8], want: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(trim_slashes(trim_bytes(want)))
+}
+
+/// `s` without its trailing `/`s (`str::trim_end_matches('/')`).
+pub fn trim_slashes(mut s: &[u8]) -> &[u8] {
+    while let [rest @ .., b'/'] = s {
+        s = rest;
+    }
+    s
 }
 
 #[cfg(test)]
