@@ -5,7 +5,8 @@
 //!                                   [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test] [--raw-sectors]
 //!                                   [--no-throughput] [--tp-batches 64] [--tp-sectors 16]
 //!                                   [--no-seek] [--seek-n 16] [--seek-span 50000] [--no-reads] [--sw-only]
-//!                                   [--regpoll] [--devreset MS] [--reswitch] [--devreset-only] [--old-bitstream]
+//!                                   [--regpoll] [--devreset MS] [--reswitch] [--devreset-only] [--devreset-cmd MS]
+//!                                   [--old-bitstream]
 //!                                   [--window OPEN,DETECT]
 //!
 //! What it does: loads the image the way `mcu/netgd` does (the same `discimg` parsers, the same
@@ -88,6 +89,9 @@ struct Opts {
     reswitch: bool,
     /// gdprobe seq 17 `devreset_only`: a DEVICE RESET with no switch command (`DR_`). Replaces --switch.
     devreset_only: bool,
+    /// gdprobe seq 20 `devreset_cmd`: a DEVICE RESET, commands this many ms later, then TUR polls until READY
+    /// (`DC<ms>_`). Replaces --switch.
+    devreset_cmd_ms: Option<u32>,
     /// The bitstream keeps MCU-written ERROR bits 0-1 (feat/fpga-regs) and no longer clears ERROR on the PACKET
     /// write (fix/head-pos-sticky-err), so DEVICE RESET's ERROR 0x01 shows and ERROR stays sticky.
     /// `--old-bitstream` predicts a bitstream before both: 0x00 after DEVICE RESET, 0x00 after every packet command
@@ -106,8 +110,8 @@ fn usage() -> ! {
          \x20             [--header] [--end] [--ip-fad N] [--cdread-flags 0x24] [--no-flags-test] [--raw-sectors]\n\
          \x20             [--no-throughput] [--tp-batches N] [--tp-sectors N] [--no-seek] [--seek-n N]\n\
          \x20             [--seek-span N] [--no-reads] [--sw-only]
-                       [--regpoll] [--devreset MS] [--reswitch] [--devreset-only] [--old-bitstream]
-                       [--window OPEN,DETECT]"
+                       [--regpoll] [--devreset MS] [--reswitch] [--devreset-only] [--devreset-cmd MS]
+                       [--old-bitstream] [--window OPEN,DETECT]"
     );
     std::process::exit(2)
 }
@@ -152,6 +156,7 @@ fn parse_args() -> Opts {
         devreset_ms: None,
         reswitch: false,
         devreset_only: false,
+        devreset_cmd_ms: None,
         err_lo: true,
         window: (150, 150),
     };
@@ -190,6 +195,7 @@ fn parse_args() -> Opts {
             "--devreset" => o.devreset_ms = Some(num(&val())),
             "--reswitch" => o.reswitch = true,
             "--devreset-only" => o.devreset_only = true,
+            "--devreset-cmd" => o.devreset_cmd_ms = Some(num(&val())),
             "--old-bitstream" => o.err_lo = false,
             "--window" => {
                 let v = val();
@@ -917,13 +923,27 @@ fn regpoll_line(o: &mut Out, altst: u8, err: u8, irr: u8, secnr: Option<u8>) {
 
 /// The register poll after an accepted `52 82 n` to another folder: one line per change. The registers are those
 /// `52 82` completed with (ALTSTATUS 0x50, IRR 3, ERROR the last CHECK's -- sticky --) and SECNR walks the window (ide.rs
-/// `mounted`, then `ide_task`'s timer): the old byte, `0x06`, `0x00`, the final one. Ends with the window over.
+/// `show_window_open`, then `ide_task`'s timer): the old byte, `0x06`, `0x00`, the final one. Ends with the window over.
+///
+/// Order: for an image `gdemu_mount_staged` completes the command (`finish_ok`: status 0x50, INTRQ, SECNR still the
+/// old byte) and only then writes the window's `0x06` (stock's order, R155 / R159-R161). The old byte is therefore the
+/// state at completion; how long it stays visible is not modelled (NetGD writes `0x06` microseconds after the
+/// completion, stock a few ms), so a poll that starts 1 ms later may already see `0x06` first. For the empty folder /
+/// no medium it writes `0x06` before completing, so the poll starts at `0x06`.
+///
+/// NOTE: this matches stock in records 15-18 (images 3 / 4 / 11 show the old byte at sample 1 and `0x06` a few ms
+/// later, the empty folder 07 shows `0x06` already at sample 1). Likely stock completes first in both cases and the
+/// empty folder simply has nothing to load (hypothesis from the records, not verified).
 fn regpoll_lines(o: &mut Out, rp: &RegPoll, medium: bool, disc_format: u8) {
     use atapi::SwapPhase::*;
     let _ = (rp.open_ms, rp.detect_ms);
     let mut last = o.secnr;
     let err = o.err_reg;
-    regpoll_line(o, 0x50, err, 0x03, last);
+    if medium {
+        regpoll_line(o, 0x50, err, 0x03, last);
+    } else {
+        last = None;
+    }
     for phase in [Open, Detect, Done] {
         let v = Some(atapi::swap_secnr(phase, medium, disc_format));
         if v != last {
@@ -934,12 +954,12 @@ fn regpoll_lines(o: &mut Out, rp: &RegPoll, medium: bool, disc_format: u8) {
     o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
 }
 
-/// An ATA DEVICE RESET `delay_ms` into gdprobe's register poll, as NetGD answers it (ide.rs CMD_DEVICE_RESET,
-/// R159): the signature (IRR 1, 14/EB), status 0x00, ERROR 0x01 -- 0x00 on a bitstream without the MCU-writable
-/// ERROR bits 0-1 (`err_lo` false) --, SECNR busy `0x00` at once (the re-detect, `atapi::device_reset_window`),
-/// then the byte at rest when the re-detect (detect_time) ends; status and ERROR stay until the next command.
-/// Assumes the re-detect is over before gdprobe's polls start. Returns the final SECNR.
-fn devreset_lines(o: &mut Out, delay_ms: u32, detect_ms: u32, medium: bool, disc_format: u8, err_lo: bool) -> u8 {
+/// The ATA DEVICE RESET itself, as NetGD answers it (ide.rs CMD_DEVICE_RESET, R159): gdprobe's `SW_DEVRESET` line
+/// with the signature (IRR 1, 14/EB), status 0x00, ERROR 0x01 -- 0x00 on a bitstream without the MCU-writable
+/// ERROR bits 0-1 (`err_lo` false) --, SECNR busy `0x00` at once (the re-detect, `atapi::device_reset_window`).
+/// The reset's ERROR stays until the next CHECK; the head goes back to the park position. Returns (status, ERROR,
+/// IRR, the busy SECNR, the SECNR once the re-detect is over).
+fn devreset_signature(o: &mut Out, delay_ms: u32, detect_ms: u32, medium: bool, disc_format: u8, err_lo: bool) -> (u8, u8, u8, u8, u8) {
     use atapi::{SwapPhase, WindowKind::Redetect};
     let err = if err_lo { atapi::DEVICE_RESET_ERROR } else { 0 };
     let (op, det) = atapi::device_reset_window(detect_ms);
@@ -954,36 +974,123 @@ fn devreset_lines(o: &mut Out, delay_ms: u32, detect_ms: u32, medium: bool, disc
             delay_ms, st, err, irr, busy
         ),
     );
+    o.err_reg = err;
+    o.head = None;
+    (st, err, irr, busy, done)
+}
+
+/// An ATA DEVICE RESET `delay_ms` into gdprobe's register poll (`devreset_signature`), then the byte at rest when
+/// the re-detect (detect_time) ends; status and ERROR stay until the next command. Assumes the re-detect is over
+/// before gdprobe's polls start. Returns the final SECNR.
+fn devreset_lines(o: &mut Out, delay_ms: u32, detect_ms: u32, medium: bool, disc_format: u8, err_lo: bool) -> u8 {
+    let (st, err, irr, busy, done) = devreset_signature(o, delay_ms, detect_ms, medium, disc_format, err_lo);
     regpoll_line(o, st, err, irr, Some(busy));
     if done != busy {
         regpoll_line(o, st, err, irr, Some(done));
     }
-    // The reset's ERROR stays until the next CHECK; the head goes back to the park position (ide.rs).
-    o.err_reg = err;
-    o.head = None;
     o.event("SW_REGPOLL_END", "t_ms=- samples=- changes=- stop=time");
     done
 }
 
 /// REQ_STAT and REQ_ERROR once a reset / re-switch section is READY (or not): read-only, like the battery.
 /// The head is where the last CD_READ since the mount ended, else the switch's park position (`atapi::rest_fad`).
-fn state_lines(o: &mut Out, disc: Option<&Disc>) {
+/// `pre` goes before the probe names (`CMD_` in a seq 20 section).
+fn state_lines(o: &mut Out, disc: Option<&Disc>, pre: &str) {
     let rs = cdb_simple(0x10, 0, 0, 10);
     let re = cdb_simple(0x13, 0, 0, 10);
+    let (n_rs, n_re) = (format!("{}REQ_STAT", pre), format!("{}REQ_ERROR", pre));
     match disc {
         Some(d) => {
             let fad = atapi::rest_fad(&d.tracks, d.is_cdi, true, o.head);
             let (fad, track) = atapi::head_position(&d.tracks, AudioState::Standby, 0, fad);
             let stat = atapi::req_stat_reply(AudioState::Standby, atapi::DRIVE_PAUSE, atapi::disc_format(&d.tracks, d.is_cdi), 0, fad, track);
-            o.probe("REQ_STAT", None, Some(&rs), &cut(&stat, 10), true);
-            o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(0, 0, 0)), true);
+            o.probe(&n_rs, None, Some(&rs), &cut(&stat, 10), true);
+            o.probe(&n_re, None, Some(&re), &Res::ok(&atapi::req_error_reply(0, 0, 0)), true);
         }
         None => {
             let (asc, ascq) = atapi::ASC_NO_MEDIUM;
-            o.probe("REQ_STAT", None, Some(&rs), &Res::not_ready(), true);
-            o.probe("REQ_ERROR", None, Some(&re), &Res::ok(&atapi::req_error_reply(atapi::SENSE_NOT_READY, asc, ascq)), true);
+            o.probe(&n_rs, None, Some(&rs), &Res::not_ready(), true);
+            o.probe(&n_re, None, Some(&re), &Res::ok(&atapi::req_error_reply(atapi::SENSE_NOT_READY, asc, ascq)), true);
         }
     }
+}
+
+/// One TEST UNIT READY of a seq 20 section (gdprobe `dc_tur`: after a CHECK a REQ_ERROR fetches the sense, both
+/// unlogged; `altst=` is read after them, 0x50 as the last command ended good). `lead` = `delay_ms=N` (CMD_TUR)
+/// or `poll=-` (CMD_POLL).
+fn dc_tur(o: &mut Out, name: &str, lead: &str, r: &Res, sense: &str, secnr: u8) {
+    o.event(
+        name,
+        &format!(
+            "{} t_ms=- rc={} status=0x{:02x} err=0x{:02x} sense={} secnr=0x{:02x} altst=0x50",
+            lead,
+            if r.ok { "ok" } else { "check" },
+            r.status,
+            r.err,
+            sense,
+            secnr
+        ),
+    );
+    o.last_check = false;
+    o.packet_done(r.ok, r.err);
+    if !r.ok {
+        o.packet_done(true, 0); // the REQ_ERROR
+    }
+    o.secnr = Some(secnr);
+}
+
+/// gdprobe seq 20 `devreset_cmd` (`devreset_cmd_run`, prefix `DC<delay>_`), after the battery of the folder just
+/// switched to, as NetGD answers it: 500 ms idle, ATA DEVICE RESET (`devreset_signature`, no register poll),
+/// `delay_ms` later a TUR (`CMD_TUR`), REQ_STAT, REQ_ERROR, then a TUR every 10 ms until READY (`CMD_POLL` per
+/// change, at most 2 s) and `CMD_RESULT`. Inside the re-detect (detect_time from the reset,
+/// `atapi::device_reset_window`) the disc commands get NOT READY 2/04/01 with SECNR busy (ide.rs `drive_not_ready`,
+/// `atapi::not_ready_answer`; REQ_ERROR is served and reports it); the first command after it gets the UNIT
+/// ATTENTION with a medium (SECNR at rest), then READY; with no medium 2/3A/00 until gdprobe gives up. Time is not
+/// simulated: TUR, REQ_STAT and REQ_ERROR are taken to fall in the phase of `delay_ms` (a REQ_STAT that lands just
+/// past the re-detect's end is not modelled).
+fn devreset_cmd_lines(o: &mut Out, delay_ms: u32, detect_ms: u32, disc_format: u8, err_lo: bool, disc: Option<&Disc>) {
+    let medium = disc.is_some();
+    let fmt = |(asc, ascq): (u8, u8), key: u8| format!("{}/{:02x}/{:02x}", key, asc, ascq);
+    o.event("IDLE", "idle_ms=500");
+    let (_, _, _, busy, done) = devreset_signature(o, 0, detect_ms, medium, disc_format, err_lo);
+    let (op, det) = atapi::device_reset_window(detect_ms);
+    let in_redetect = atapi::swap_phase(delay_ms, op, det) != atapi::SwapPhase::Done;
+    let lead = format!("delay_ms={}", delay_ms);
+    let nr = atapi::SENSE_NOT_READY;
+    let ua = fmt(atapi::ASC_MEDIUM_CHANGED, atapi::SENSE_UNIT_ATTENTION);
+    let no_medium = fmt(atapi::ASC_NO_MEDIUM, nr);
+    if in_redetect {
+        let asc = atapi::ASC_BECOMING_READY;
+        dc_tur(o, "CMD_TUR", &lead, &Res::not_ready(), &fmt(asc, nr), busy);
+        o.probe("CMD_REQ_STAT", None, Some(&cdb_simple(0x10, 0, 0, 10)), &Res::not_ready(), true);
+        o.probe("CMD_REQ_ERROR", None, Some(&cdb_simple(0x13, 0, 0, 10)), &Res::ok(&atapi::req_error_reply(nr, asc.0, asc.1)), true);
+        // The re-detect ends: the next TUR gets the UNIT ATTENTION (or no medium for good).
+        if medium {
+            dc_tur(o, "CMD_POLL", "poll=-", &Res::ua(), &ua, done);
+            dc_tur(o, "CMD_POLL", "poll=-", &Res::ok(&[]), "none", done);
+        } else {
+            dc_tur(o, "CMD_POLL", "poll=-", &Res::not_ready(), &no_medium, done);
+        }
+    } else {
+        if medium {
+            dc_tur(o, "CMD_TUR", &lead, &Res::ua(), &ua, done);
+        } else {
+            dc_tur(o, "CMD_TUR", &lead, &Res::not_ready(), &no_medium, done);
+        }
+        state_lines(o, disc, "CMD_");
+        if medium {
+            dc_tur(o, "CMD_POLL", "poll=-", &Res::ok(&[]), "none", done);
+        }
+    }
+    o.event(
+        "CMD_RESULT",
+        &format!(
+            "delay_ms={} rc={} ready={} ready_ms=- t_ms=- polls=- changes=-",
+            delay_ms,
+            if medium { "ok" } else { "timeout" },
+            medium as u8
+        ),
+    );
 }
 
 /// `switch_to`: `52 82 n` to another folder, then TUR / REQ_ERROR polls, one line per change of state. With an image
@@ -1089,7 +1196,7 @@ fn same_folder_lines(o: &mut Out, n: u32, kind: Same, detect_ms: u32, disc_forma
         f.push_str(&format!(" ua_28={}", (reset.is_some() && medium) as u8));
     }
     o.event("SW_RESULT", &f);
-    state_lines(o, disc);
+    state_lines(o, disc, "");
 }
 
 fn main() {
@@ -1163,8 +1270,13 @@ fn main() {
         o.pfx = pfx.into();
         same_folder_lines(&mut o, opt.img as u32, kind, opt.window.1, fmt, opt.err_lo, disc.as_ref());
         o.pfx.clear();
+    } else if let Some(d) = opt.devreset_cmd_ms {
+        let fmt = disc.as_ref().map_or(0, |d| atapi::disc_format(&d.tracks, d.is_cdi));
+        o.pfx = format!("DC{}_", d);
+        devreset_cmd_lines(&mut o, d, opt.window.1, fmt, opt.err_lo, disc.as_ref());
+        o.pfx.clear();
     }
-    if !opt.sw_only && !opt.reswitch && !opt.devreset_only {
+    if !opt.sw_only && !opt.reswitch && !opt.devreset_only && opt.devreset_cmd_ms.is_none() {
         match &disc {
             Some(d) => {
                 // A switch consumes the UNIT ATTENTION in its polls; a bare run on a freshly booted unit sees it.

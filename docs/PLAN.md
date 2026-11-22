@@ -1,4 +1,4 @@
-# NetGD 計画（2026-11-20 立て直し、R159 まで反映）
+# NetGD 計画（2026-11-20 立て直し、R169 まで反映）
 
 NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。ドリームキャストの GD-ROM ドライブを
 置き換える基板（GDEMU 系）のファームウェアと FPGA コアを、オープンソースで作る。
@@ -13,22 +13,22 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 
 ## いまの状態（実測）
 
-**2026-11-22 時点（R146〜R160）**：
-- **main に取り込み済み**（main `449209f1`）：`feat/stock-rules`（`b664e29b`・`f0dccd36`、R148）、`fix/secnr-reset`（R150）、`fix/ctests-windows`（R149）、`feat/form2-sectors`（R151、既定オフ）、`docs/stock-audit`・`feat/expect-cdbst-secnr`（R152）、`perf/name-bytes`（R153）、`feat/gdprobe-r148`（R154）。R146 の 4 ブランチも取り込み済み（`482f9198`）。
-- **未取り込み（ブランチ）**：`fix/audio-cdi-format`（`755a6658`、音声だけの CDI = 形式 1。`fix/r155-stock` を置き換える。`fix/r155-stock` は取り込まない）、`feat/fpga-regs`（`db23bad6`・`dcc499a1`、スロット 32 の SECNR 下位バイト書き込みと ERROR の err_lo ビット 0〜1。Supra の AG16K ビルドは収まり 92 MHz）、`fix/r159-devreset`（作業中。同じフォルダへの再切替と DEVICE RESET、R159・R160）、`feat/gdprobe-seq17`（`6c548f3b`）、`feat/pinfind-supra`（作業中）、`tools/ci-local`（別セッション）。
-- **純正の規則**（記録から。詳細は `docs/research/stock-gdemu-flow.md`）：
-  - CHECK のあとの CDB フェーズの DRDY は直前のコマンドの最終 status に従う（R144 a の訂正、R147）。
-  - 切替中の SECNR は時間で進む（コマンドなし、R155）。音声だけの CDI のディスク形式は 1（R155）。
-  - 同じフォルダへの再切替は何もしない（窓なし・UA なし・位置も変わらない、R160）。DEVICE RESET は SECNR 0x00 のあと約 150 ms で最終の値に戻り、UA を出し、ヘッドをトラック 1 / FAD 150 に戻す（R160）。記録 15・16 の UA は DEVICE RESET から来ていた（R160）。記録 15 の「窓の中」は誤りだった（R157）。
-  - ERROR レジスタは成功のあとも前の sense key を残す（R156・R159）。
+**2026-11-22 時点（R146〜R169、main `76047d42`）**：
+- **main に取り込み済み**（`merge/batch7`・`merge/batch8`、R168）：
+  - 純正の規則：同じフォルダへの再切替（何もしない）、DEVICE RESET（再検出・UA・ヘッドを戻す）、REQ_STAT のヘッド位置、ERROR の前の sense key の保持（sticky ERROR）、音声だけの CDI のディスク形式 1（R155・R159〜R163）。
+  - FPGA：スロット 32（SECNR の下位バイトだけ書く）、ERROR の err_lo（ビット 0〜1）を PACKET の書き込みとリセットまで保持（R163）。
+  - SD・FAT：embedded-sdmmc 0.9.0 を同梱し、4 件の crash を直す（LFN・BPB の 0 除算・範囲外クラスタ・循環するディレクトリ、R165・R168）。`fat.rs` の細工カード対策（R168）、ホストだけの自前の FAT 読み込み（R165）。
+  - 名前の trim と GAME.CFG（256 B を超えるものは最後の改行まで、R168）。
+  - CI：fwsize ゲート（`tools/fwsize/check.py --gate-2e`）。2E `release-z` は 117,232 B で、上限 122,880 B まで 5,648 B（R168）。`tools/ci-local`（この PC で build.yaml と同じ確認、約 17 分、R168）。
+  - gdprobe：seq 17（`swap_reswitch`・`devreset_only`、R160）、seq 18（`detect_time = 400`、R161）。
+  - ピン探し：Supra での `pinfind` ビルドが通り、ゲートレベル・シミュレーションも通った（R162・R169）。
+  - g2bench の計測（R166・R167）：dcload の /pc/ の読み込みは 1 回あたり約 26 ms の固定費。`-f` ありで 16 KiB 約 5 MB/s。計測ツール（`feat/g2bench`）自体は main の外。
+- **Supra の RETIMING（R169）**：R99・R106・R158 の Supra の大きさ・資源は RETIMING ありの値で、そのままでは本体コアの CDDA が無音だった。`fix/agm-no-retiming` で RETIMING を止めた。新しい値は LUT 2,241、LZMA 42.1 KB、48 MHz 系の Fmax 97.9 / 92.7 MHz（R169）。配置配線後と実機は未確認。
 - **NetGD の対応状況**：
-  - DEVICE RESET の部分（窓の中だけ検出をやり直す変更）は前提が違うため取り込まない（R157）。DEVICE RESET と同じフォルダへの再切替の対応は `fix/r159-devreset` で作業中（R160 の結果に合わせる）。
-  - 窓の挙動（同じフォルダへの再切替で窓を開く、DEVICE RESET で窓の値を書く）は、main ではまだ純正と違う（R157・R159）。
-  - 残りの確認：150 ms が `detect_time` と同じか（seq 18、`detect_time = 400`、R160）。
-- **ツール**：C のテストは `py -3` で通る（R149。main に取り込み済み。R146 の失敗は MSYS の python が原因）。gdprobe の記録 15（REGPOLL・DEVICE RESET）・16（同じフォルダへの再切替・DEVICE RESET 600 / 2,000 ms）・17（同じフォルダへの再切替だけ・DEVICE RESET だけ、R160）を取得（R155・R159・R160）。
-- **FPGA**：スロット 32 の SECNR 下位バイト書き込み（R150 の隙間の対策）と、ERROR のビット 0〜1（R157・R159）は `feat/fpga-regs` にあり未取り込み。
-- **サイズ（2E `release-z` の `resident,sd-fast`）**：名前のバイト化（`perf/name-bytes`、R153）で残り 6,240 B（main）。`fix/r155-stock` の時点（R156）で残り 5,888 B。
-- **Supra**：この PC の WSL（Ubuntu 24.04.5）で Supra 2026.03.b0 が動き、AG16K のビルドを再現（R158）。仮ピンの `.rbf` のみ。基板には流さない。
+  - DEVICE RESET と同じフォルダへの再切替は、main で純正に合わせた（R159〜R161）。切替の窓は GDEMU.ini の値に従い、キーが無ければ 500 + 250 ms（R135）。
+  - DEVICE RESET の再検出中のコマンドには、純正も NetGD も NOT READY 2/04/01 を返す（R164）。
+  - 実機で未確認：起動時のリセット（BIOS・KOS）のあと、detect_time の間 NOT READY と UA が出ても起動できるか。
+- **gdprobe の seq 19・20 は main の外**：`devreset_cmd`（再検出中のコマンド、R164）は `feat/gdprobe-seq20`（`addeb4f6`）にある。
 
 **2026-11-21〜22 の実機の結果（R115〜R124）**：
 - **基板**：6.0 の SWD は 7 ピンヘッダの 4 = SWDIO、5 = SWCLK、7 = GND（導通で確定、R116）。CHIPID とロックの有無は SWD のアダプタ待ち（手順は `tools/fwbackup/README_ja.md`）。
@@ -40,7 +40,7 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
   残る差は D10（`0x10` の生セクタ 2,352 B。main に取り込み済み、R148）、D11（純正が拒む GDI の形、受け付けたまま）、D14（CDI の postgap のセクタ長。`feat/form2-sectors` は main に取り込み済み・既定オフ、R151）、D15（バージョン）。
   CD_READ の種別検査（D8・D9）は純正に合わせて取り込んだ（R134、main のコミット `aba48c5c`、実機未確認）。
 - **スタック**：2E の最も深い経路（マウント）は R131 で約 2 KB 減らし、余裕は約 230 B → 約 2.2 KB（静的な見積もり、R127・R131）。
-- **スタックの実測**：機能 `stack-hw`（既定はオフ）を付けると、リセット以降の最高水位を 0xE0 のサブコマンド 9 で読める。netgd-menu の情報画面（X）と netgd-recv の `NGD:STACK` 行に出る（R133）。ブランチ `feat/stack-highwater` にあり、main にはまだ入れていない。
+- **スタックの実測**：機能 `stack-hw`（既定はオフ）を付けると、リセット以降の最高水位を 0xE0 のサブコマンド 9 で読める。netgd-menu の情報画面（X）と netgd-recv の `NGD:STACK` 行に出る（R133）。`feat/stack-highwater` は main に取り込み済み。
 - **NetGD を実機で動かした確認はまだ無い**（G1・G2 の実機検証はこれから）。
 
 以下の表は 2026-11-20 時点（LOG R1〜R88）の PC 上のビルドとテストの結果。

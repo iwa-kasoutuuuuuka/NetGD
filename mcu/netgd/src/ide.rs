@@ -1424,6 +1424,23 @@ async fn load_media(state: &mut DeviceState) -> bool {
 /// and the swap window -- opened whether or not anything mounted, as stock does for
 /// an empty folder too (D12, D13).
 fn mounted(state: &mut DeviceState, ok: bool) {
+    mounted_state(state, ok);
+    show_window_open(ok);
+}
+
+/// The window's first byte: SECNR shows the tray open, format nibble 0 (stock
+/// `0x06`, R144), until `drive_not_ready` moves it on. The format of the new
+/// disc goes up when the window ends. Split from `mounted_state` so a
+/// host-commanded switch (`gdemu_mount_staged`) can complete its command
+/// first: stock answers `52 82`/`52 81` with status 0x50 and the old SECNR
+/// byte, and only then shows 0x06 (R155, R159-R161).
+fn show_window_open(ok: bool) {
+    IdeDevice::primary().set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Open, ok, 0));
+}
+
+/// `mounted` without the SECNR write: the interlock, the empty-slot flag and
+/// the swap window (which counts from here).
+fn mounted_state(state: &mut DeviceState, ok: bool) {
     if ok {
         // D2/D4: after a switch stock is paused, the head parked (GDI: track
         // 3's start, CDI: FAD 150), until the next power-on.
@@ -1437,10 +1454,6 @@ fn mounted(state: &mut DeviceState, ok: bool) {
     // own attempt after this.
     unsafe { LAST_MOUNT = None };
     open_swap_window(state);
-    // The window starts now: SECNR shows the tray open, format nibble 0
-    // (stock `0x06`, R144), until `drive_not_ready` moves it on. The format
-    // of the new disc goes up when the window ends.
-    IdeDevice::primary().set_secnr(discimg::atapi::swap_secnr(discimg::atapi::SwapPhase::Open, ok, 0));
 }
 
 /// Swap discs without the host's help: eject, mount the selection, load.
@@ -1502,6 +1515,14 @@ async fn service_swap_request(state: &mut DeviceState, label: &'static str) {
 /// UNIT ATTENTION and re-reads the TOC. On failure the drive is left empty
 /// (`GDI = None`, no medium, `EMPTY_SLOT`). Returns whether an image mounted.
 async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -> bool {
+    let ok = mount_named_quiet(state, label, name).await;
+    show_window_open(ok);
+    ok
+}
+
+/// `mount_named` without the window's first SECNR byte: the caller writes it
+/// with `show_window_open` once its command has completed.
+async fn mount_named_quiet(state: &mut DeviceState, label: &'static str, name: &str) -> bool {
     crate::cdda::stop();
     MEDIA_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
     invalidate_cd_read_cache();
@@ -1528,7 +1549,7 @@ async fn mount_named(state: &mut DeviceState, label: &'static str, name: &str) -
             (false, outcome)
         }
     };
-    mounted(state, ok);
+    mounted_state(state, ok);
     record_mount_attempt(name, outcome);
     info!("{}: mounted '{}' ({})", label, name, ok);
     ok
@@ -1960,13 +1981,6 @@ async fn handle_packet(
 
     let opcode = packet[0];
     info!("{}: ATAPI opcode 0x{:02x} packet={:?}", label, opcode, packet);
-    info!(
-        "{}: ATAPI 0x{:02x}  [{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
-        label, opcode,
-        packet[0], packet[1], packet[2], packet[3],
-        packet[4], packet[5], packet[6], packet[7],
-        packet[8], packet[9], packet[10], packet[11],
-    );
 
     // Not ready (swap window, no medium): what the command gets is decided
     // below, but an expiring window raises the new medium's UNIT ATTENTION
@@ -2065,43 +2079,21 @@ async fn handle_packet(
                     crate::cdda::stop();
                 }
             }
-            dev.set_irr(0x03);
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
+            finish_ok(dev);
         }
-        ATAPI_REQUEST_SENSE => {
-            // 18 bytes of fixed-format sense data. Allocation length is
-            // packet byte 4. Byte 2 reports the current sense key — we
-            // patch the canned reply with state.pending_sense_key so the
-            // host learns about the UA condition. Reading sense data
-            // clears any pending UNIT_ATTENTION condition per ATAPI spec.
-            let alloc = packet[4] as u16;
-            let mut sense = REQUEST_SENSE_REPLY;
-            sense[2] = state.pending_sense_key;
-            let n = core::cmp::min(alloc, sense.len() as u16);
-            let key = state.pending_sense_key;
-            send_data_in(dev, &sense[..n as usize]).await;
-            if discimg::atapi::sense_read_clears_ua(key) {
-                state.unit_attention = false;
-            }
-            state.clear_sense();
-        }
-        SEGA_REQ_STAT => {
-            let alloc = packet[4] as u16;
-            let reply = build_req_stat_reply();
-            let n = core::cmp::min(alloc, reply.len() as u16);
-            send_data_in(dev, &reply[..n as usize]).await;
-        }
-        SEGA_REQ_MODE => {
-            // packet[2] = offset, packet[4] = length into the 32-byte block
-            // stock GDEMU 6.0 returns for (0, 32) (R117): the BIOS reads
-            // (0, 10) and (18, 8) = "Rev 6.42". A window past the block, or
-            // an empty one, still aborts (stock not probed there).
-            match discimg::atapi::req_mode_reply(packet[2], packet[4]) {
-                Some(reply) => send_data_in(dev, reply).await,
-                None => {
-                    warn!("{}: REQ_MODE off={} len={} unsupported", label, packet[2], packet[4]);
-                    finish_illegal(dev, state);
+        // The fixed-size replies: built by `small_reply`, sent from one site.
+        ATAPI_REQUEST_SENSE | SEGA_REQ_STAT | SEGA_REQ_MODE | SEGA_REQ_ERROR
+        | SEGA_GET_TOC | SEGA_REQ_SES | SEGA_GET_SCD | SEGA_VENDOR_71 => {
+            let mut buf = [0u8; SMALL_REPLY_MAX];
+            if let Some(n) = small_reply(dev, state, label, &packet, &mut buf) {
+                send_data_in(dev, &buf[..n]).await;
+                // Reading the sense (REQUEST SENSE, REQ_ERROR) clears the
+                // condition, after the data has gone out.
+                if opcode == ATAPI_REQUEST_SENSE || opcode == SEGA_REQ_ERROR {
+                    if discimg::atapi::sense_read_clears_ua(state.pending_sense_key) {
+                        state.unit_attention = false;
+                    }
+                    state.clear_sense();
                 }
             }
         }
@@ -2170,97 +2162,14 @@ async fn handle_packet(
                 IDLE_STATUS.store(GD_STANDBY, core::sync::atomic::Ordering::Relaxed);
                 dev.set_secnr(secnr(GD_STANDBY));
             }
-            dev.set_irr(0x03);
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
+            finish_ok(dev);
         }
         SEGA_CD_OPEN | SEGA_CD_SCAN => {
             // No-data commands — just succeed. Status phase, no error.
             // Must assert INTRQ for the host's command-complete handler;
             // without this the BIOS waits forever after issuing CD_SEEK
             // post-REQ_SES and falls into CD_SCD spam.
-            dev.set_irr(0x03);
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
-        }
-        SEGA_REQ_ERROR => {
-            // F0, then the pending sense key (stock GDEMU 6.0, R117; this
-            // was all zeros) and its ASC/ASCQ (D7). Reading it clears the
-            // condition, as REQUEST SENSE does.
-            let alloc = packet[4] as u16;
-            let (asc, ascq) = state.pending_asc;
-            let reply = discimg::atapi::req_error_reply(state.pending_sense_key, asc, ascq);
-            let n = core::cmp::min(alloc, reply.len() as u16);
-            send_data_in(dev, &reply[..n as usize]).await;
-            if discimg::atapi::sense_read_clears_ua(state.pending_sense_key) {
-                state.unit_attention = false;
-            }
-            state.clear_sense();
-        }
-        SEGA_GET_TOC => {
-            // Sega GET_TOC packet: byte 1 selects the session/area
-            // (0 = SDA, 1 = HDA), bytes 3..4 = allocation length BE.
-            // Build a real TOC from the parsed GDI when we have one;
-            // fall back to ABRT if we don't (the BIOS shouldn't ever
-            // ask GET_TOC before a disc is present, but be safe).
-            if let Some(g) = gdi_ref() {
-                let area = packet[1] & 0x01;
-                let alloc = ((packet[3] as u16) << 8) | packet[4] as u16;
-                let mut toc = [0u8; 408];
-                g.build_toc(area, &mut toc);
-                // Dump first 32 bytes of TOC + the trailing 12 bytes
-                // (first/last/leadout) so we can compare against a known
-                // reference at the bench.
-                info!(
-                    "{} GET_TOC area={} hd={:02x}{:02x}{:02x}{:02x} {:02x}{:02x}{:02x}{:02x} t3={:02x}{:02x}{:02x}{:02x} f={:02x}{:02x}{:02x}{:02x} l={:02x}{:02x}{:02x}{:02x} lo={:02x}{:02x}{:02x}{:02x}",
-                    label, area,
-                    toc[0], toc[1], toc[2], toc[3],
-                    toc[4], toc[5], toc[6], toc[7],
-                    toc[8], toc[9], toc[10], toc[11],
-                    toc[396], toc[397], toc[398], toc[399],
-                    toc[400], toc[401], toc[402], toc[403],
-                    toc[404], toc[405], toc[406], toc[407],
-                );
-                let n = core::cmp::min(alloc as usize, toc.len());
-                let n_aligned = n & !1; // host expects 16-bit-aligned PIO; trim odd trailing byte
-                send_data_in(dev, &toc[..n_aligned]).await;
-            } else {
-                // Not reached: no image is no medium, answered above.
-                warn!("{}: GET_TOC with no GDI loaded", label);
-                finish_check(dev, state, discimg::atapi::SENSE_NOT_READY, discimg::atapi::ASC_NO_MEDIUM);
-            }
-        }
-        SEGA_REQ_SES => {
-            // Sega REQ_SES: packet[2] is a 0-indexed session number;
-            // BIOS asks for sessions 0..num_sessions and our reply
-            // describes that session's first track + start FAD. Session
-            // 0 = SDA, session 1 = HDA on a GD-ROM. Sessions outside
-            // the disc's range get CHECK CONDITION, ILLEGAL REQUEST (stock:
-            // status 0x11, error 0x50, D5/D6; this was ABRT with no key).
-            let alloc = packet[4] as u16;
-            let session = packet[2];
-            match build_req_ses_reply(gdi_ref(), session) {
-                Some(reply) => {
-                    info!(
-                        "{}: REQ_SES({}) -> {=[u8]:02x}", label, session, reply.as_slice()
-                    );
-                    let n = core::cmp::min(alloc as usize, reply.len());
-                    send_data_in(dev, &reply[..n]).await;
-                }
-                None => {
-                    info!(
-                        "{}: REQ_SES({}) out of range", label, session
-                    );
-                    finish_illegal(dev, state);
-                }
-            }
-        }
-        SEGA_GET_SCD => {
-            let alloc = ((packet[3] as u16) << 8) | packet[4] as u16;
-            let mut reply = [0u8; 100];
-            let len = build_get_scd_reply(packet[1] & 0x0F, &mut reply);
-            let n = core::cmp::min(alloc, len as u16);
-            send_data_in(dev, &reply[..n as usize]).await;
+            finish_ok(dev);
         }
         SEGA_CD_READ | SEGA_CD_READ2 => {
             handle_cd_read(dev, state, label, &packet, dma_requested, byte_limit).await;
@@ -2276,16 +2185,7 @@ async fn handle_packet(
             // (treated identically to TEST_UNIT_READY — `finish_packet_ok`).
             // Earlier this branch returned the 6-byte magic; that was
             // wrong, the magic is for 0x71 only.
-            dev.set_irr(0x03);
-            dev.set_error(0);
-            dev.set_status_intrq(STATUS_IDLE);
-        }
-        SEGA_VENDOR_71 => {
-            // Sega disc-auth challenge. The reply is a fixed 6-byte
-            // magic and the BIOS expects the full 6 bytes regardless
-            // of what's in packet[4] (per iceGDROM, which ignores the
-            // alloc-len field for this command).
-            send_data_in(dev, &VENDOR_HANDSHAKE_REPLY).await;
+            finish_ok(dev);
         }
         _ => {
             warn!("{}: unhandled ATAPI opcode 0x{:02x}", label, opcode);
@@ -2296,6 +2196,137 @@ async fn handle_packet(
     // deliberately no catch-all assert_intrq here. A second INTRQ after
     // the host has already read Status for the first one rides into its
     // next command as a spurious interrupt.
+}
+
+/// Largest `small_reply`: GET_TOC's 408 bytes.
+const SMALL_REPLY_MAX: usize = 408;
+
+/// Build the reply of one of the fixed-size data-in commands (REQUEST SENSE,
+/// REQ_STAT, REQ_MODE, REQ_ERROR, GET_TOC, REQ_SES, GET_SCD, vendor 0x71)
+/// into `buf` (zeroed by the caller) and return the byte count to send, cut
+/// to the allocation length. `None`: the command was completed here (CHECK
+/// CONDITION) and nothing is sent. `handle_packet` sends them all from one
+/// `send_data_in` site, which keeps flash down; what follows the send (the
+/// sense clear) stays there.
+#[inline(never)]
+fn small_reply(
+    dev: &IdeDevice,
+    state: &mut DeviceState,
+    label: &'static str,
+    packet: &[u8; 12],
+    buf: &mut [u8; SMALL_REPLY_MAX],
+) -> Option<usize> {
+    match packet[0] {
+        ATAPI_REQUEST_SENSE => {
+            // 18 bytes of fixed-format sense data. Allocation length is
+            // packet byte 4. Byte 2 reports the current sense key — we
+            // patch the canned reply with state.pending_sense_key so the
+            // host learns about the UA condition. Reading sense data
+            // clears any pending UNIT_ATTENTION condition per ATAPI spec
+            // (the caller, after the send).
+            let len = REQUEST_SENSE_REPLY.len();
+            buf[..len].copy_from_slice(&REQUEST_SENSE_REPLY);
+            buf[2] = state.pending_sense_key;
+            Some(core::cmp::min(packet[4] as usize, len))
+        }
+        SEGA_REQ_STAT => {
+            let reply = build_req_stat_reply();
+            buf[..reply.len()].copy_from_slice(&reply);
+            Some(core::cmp::min(packet[4] as usize, reply.len()))
+        }
+        SEGA_REQ_MODE => {
+            // packet[2] = offset, packet[4] = length into the 32-byte block
+            // stock GDEMU 6.0 returns for (0, 32) (R117): the BIOS reads
+            // (0, 10) and (18, 8) = "Rev 6.42". A window past the block, or
+            // an empty one, still aborts (stock not probed there).
+            match discimg::atapi::req_mode_reply(packet[2], packet[4]) {
+                Some(reply) => {
+                    buf[..reply.len()].copy_from_slice(reply);
+                    Some(reply.len())
+                }
+                None => {
+                    warn!("{}: REQ_MODE off={} len={} unsupported", label, packet[2], packet[4]);
+                    finish_illegal(dev, state);
+                    None
+                }
+            }
+        }
+        SEGA_REQ_ERROR => {
+            // F0, then the pending sense key (stock GDEMU 6.0, R117; this
+            // was all zeros) and its ASC/ASCQ (D7). Reading it clears the
+            // condition, as REQUEST SENSE does (the caller, after the send).
+            let (asc, ascq) = state.pending_asc;
+            let reply = discimg::atapi::req_error_reply(state.pending_sense_key, asc, ascq);
+            buf[..reply.len()].copy_from_slice(&reply);
+            Some(core::cmp::min(packet[4] as usize, reply.len()))
+        }
+        SEGA_GET_TOC => {
+            // Sega GET_TOC packet: byte 1 selects the session/area
+            // (0 = SDA, 1 = HDA), bytes 3..4 = allocation length BE.
+            // Build a real TOC from the parsed GDI when we have one;
+            // fall back to CHECK if we don't (the BIOS shouldn't ever
+            // ask GET_TOC before a disc is present, but be safe).
+            if let Some(g) = gdi_ref() {
+                let area = packet[1] & 0x01;
+                let alloc = ((packet[3] as usize) << 8) | packet[4] as usize;
+                let toc = buf;
+                g.build_toc(area, toc);
+                // Dump first 32 bytes of TOC + the trailing 12 bytes
+                // (first/last/leadout) so we can compare against a known
+                // reference at the bench.
+                info!(
+                    "{} GET_TOC area={} hd={=[u8]:02x} tail={=[u8]:02x}",
+                    label, area, &toc[..12], &toc[396..408]
+                );
+                let n = core::cmp::min(alloc, toc.len());
+                Some(n & !1) // host expects 16-bit-aligned PIO; trim odd trailing byte
+            } else {
+                // Not reached: no image is no medium, answered above.
+                warn!("{}: GET_TOC with no GDI loaded", label);
+                finish_check(dev, state, discimg::atapi::SENSE_NOT_READY, discimg::atapi::ASC_NO_MEDIUM);
+                None
+            }
+        }
+        SEGA_REQ_SES => {
+            // Sega REQ_SES: packet[2] is a 0-indexed session number;
+            // BIOS asks for sessions 0..num_sessions and our reply
+            // describes that session's first track + start FAD. Session
+            // 0 = SDA, session 1 = HDA on a GD-ROM. Sessions outside
+            // the disc's range get CHECK CONDITION, ILLEGAL REQUEST (stock:
+            // status 0x11, error 0x50, D5/D6; this was ABRT with no key).
+            let session = packet[2];
+            let reply = build_req_ses_reply(gdi_ref(), session);
+            // One log line for both outcomes: an empty reply = out of range.
+            info!(
+                "{}: REQ_SES({}) -> {=[u8]:02x}", label, session,
+                reply.as_ref().map_or(&[][..], |r| &r[..])
+            );
+            match reply {
+                Some(reply) => {
+                    buf[..reply.len()].copy_from_slice(&reply);
+                    Some(core::cmp::min(packet[4] as usize, reply.len()))
+                }
+                None => {
+                    finish_illegal(dev, state);
+                    None
+                }
+            }
+        }
+        SEGA_GET_SCD => {
+            let alloc = ((packet[3] as u16) << 8) | packet[4] as u16;
+            let reply: &mut [u8; 100] = (&mut buf[..100]).try_into().unwrap();
+            let len = build_get_scd_reply(packet[1] & 0x0F, reply);
+            Some(core::cmp::min(alloc, len as u16) as usize)
+        }
+        _ => {
+            // SEGA_VENDOR_71: Sega disc-auth challenge. The reply is a
+            // fixed 6-byte magic and the BIOS expects the full 6 bytes
+            // regardless of what's in packet[4] (per iceGDROM, which
+            // ignores the alloc-len field for this command).
+            buf[..VENDOR_HANDSHAKE_REPLY.len()].copy_from_slice(&VENDOR_HANDSHAKE_REPLY);
+            Some(VENDOR_HANDSHAKE_REPLY.len())
+        }
+    }
 }
 
 /// Sega CD_READ packet layout:
@@ -3243,11 +3274,27 @@ async fn gdemu_mount_staged(dev: &IdeDevice, state: &mut DeviceState, label: &'s
         finish_ok(dev);
         return;
     }
-    let _ = mount_named(state, label, name.as_str()).await;
+    let ok = mount_named_quiet(state, label, name.as_str()).await;
     // `0x52` stages through the same buffer as MOUNT_NAME: leave nothing
     // behind for a later WSESSION_END 2 to mount.
     clear_mount_name();
-    finish_ok(dev);
+    // An image: stock completes the command first (status 0x50, SECNR still
+    // the old byte) and only then shows the window's 0x06 (R155, R159-R161;
+    // record 17: secnr 0x21 at the first sample, 0x06 at 6 ms).
+    // The empty folder / no medium (nothing loaded): stock shows 0x06 already
+    // at the first sample (record 17: 0x06 at 1 ms, 0x00 at 152 ms, 0x07 at
+    // 302 ms). Stock likely completes first in both cases, but an empty
+    // folder has nothing to load so its window byte appears <1 ms later,
+    // while an image takes ~3-6 ms to load; writing 0x06 before completing
+    // is the closest model with our timing (hypothesis from the records,
+    // not verified).
+    if !ok {
+        show_window_open(ok);
+        finish_ok(dev);
+    } else {
+        finish_ok(dev);
+        show_window_open(ok);
+    }
 }
 
 /// Sub-commands of [`OGDM_IMAGE_CTL`].

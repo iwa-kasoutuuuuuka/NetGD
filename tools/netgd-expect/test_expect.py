@@ -306,6 +306,56 @@ class ExpectTest(unittest.TestCase):
             self.assertEqual(get(img, 'DR_SW_RESULT')[0]['ua_28'], '1' if medium else '0')
         self.assertEqual(get(3, 'DR_REQ_STAT')[0]['data'], '018f41030100b05e0000')
 
+    def test_regpoll_first_sample_old_byte_only_for_an_image(self):
+        # Into an image NetGD completes 52 82 before it writes the window's 0x06 (gdemu_mount_staged: finish_ok, then
+        # show_window_open): sample 1 is the old SECNR byte. Into the empty folder it writes 0x06 before completing:
+        # sample 1 is 0x06. Both as stock in records 15-18 (img=3/4/11 old byte first, the empty folder 07 0x06 first).
+        text = expect_sd.predict(self.card, images=[4, 3, 7], return_to=0, regpoll=True)
+        _, entries = compare.parse_record(text)
+        get = lambda img: [e['secnr'] for e in entries if e['img'] == img and e['probe'] == 'SW_REGPOLL']
+        self.assertEqual(get(3), ['0x21', '0x06', '0x00', '0x81'])
+        self.assertEqual(get(7), ['0x06', '0x00', '0x07'])
+
+    def test_devreset_cmd_as_netgd_answers(self):
+        # gdprobe seq 20 devreset_cmd (record 20): DEVICE RESET, then TUR / REQ_STAT / REQ_ERROR 10 / 50 / 100 ms
+        # later inside the re-detect (detect_time 150): NOT READY 2/04/01, SECNR 0x00; then UNIT ATTENTION and
+        # READY (the empty folder: 2/3A/00, no READY). The next switch's SW_CMD sees the last TUR's good end (0x58).
+        text = expect_sd.predict(self.card, images=[4, 3, 7], return_to=2, devreset_cmd=(10, 50, 100),
+                                 passthrough=['--cdread-flags', '0x24', '--no-throughput', '--no-seek',
+                                              '--no-flags-test'])
+        _, entries = compare.parse_record(text)
+        get = lambda img, probe: [e for e in entries if e['img'] == img and e['probe'] == probe]
+        self.assertEqual(get(4, 'IP_READ')[0]['rc'], 'check')
+        self.assertEqual(get(3, 'SW_CMD')[0]['cdbst'], '0x58')
+        for d in (10, 50, 100):
+            p = 'DC%d_' % d
+            for img, final, medium in ((4, '0x21', True), (3, '0x81', True), (7, '0x07', False)):
+                self.assertEqual(get(img, p + 'IDLE')[0]['idle_ms'], '500')
+                rst = get(img, p + 'SW_DEVRESET')[0]
+                self.assertEqual((rst['delay_ms'], rst['altst'], rst['err'], rst['irr'], rst['secnr']),
+                                 ('0', '0x00', '0x01', '0x01', '0x00'))
+                tur = get(img, p + 'CMD_TUR')[0]
+                self.assertEqual((tur['delay_ms'], tur['rc'], tur['err'], tur['sense'], tur['secnr'], tur['altst']),
+                                 (str(d), 'check', '0x20', '2/04/01', '0x00', '0x50'))
+                rs = get(img, p + 'CMD_REQ_STAT')[0]
+                self.assertEqual((rs['rc'], rs['err'], rs['cdbst'], rs['secnr']), ('check', '0x20', '0x58', '0x00'))
+                re_ = get(img, p + 'CMD_REQ_ERROR')[0]
+                self.assertEqual((re_['data'], re_['cdbst']), ('f0000200000000000401', '0x18'))
+                polls = get(img, p + 'CMD_POLL')
+                self.assertEqual([(e['sense'], e['secnr']) for e in polls],
+                                 [('6/28/00', final), ('none', final)] if medium else [('2/3a/00', final)])
+                res = get(img, p + 'CMD_RESULT')[0]
+                self.assertEqual((res['rc'], res['ready']), ('ok', '1') if medium else ('timeout', '0'))
+                self.assertEqual(res['ready_ms'], '-')
+        # Past detect_time the TUR itself gets the UNIT ATTENTION, REQ_STAT is READY at the park position.
+        late = expect_sd.predict(self.card, images=[4], return_to=0, devreset_cmd=(200,),
+                                 passthrough=['--no-throughput', '--no-seek'])
+        _, le = compare.parse_record(late)
+        lget = lambda probe: [e for e in le if e['probe'] == probe]
+        self.assertEqual(lget('DC200_CMD_TUR')[0]['sense'], '6/28/00')
+        self.assertTrue(lget('DC200_CMD_REQ_STAT')[0]['data'].startswith('012f01'))
+        self.assertEqual([e['sense'] for e in lget('DC200_CMD_POLL')], ['none'])
+
     def test_compare_other_record_with_only_common(self):
         # a stock-like record: one probe, real timings, a different REQ_SES(2) answer
         want = ('img=3 probe=REQ_SES_2 cdb=150002000600000000000000 rc=check status=0x11 err=0x50 irr=0x03 bytes=0 '
