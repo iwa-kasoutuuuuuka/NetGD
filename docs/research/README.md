@@ -15,6 +15,7 @@
 | [web-findings-2026-11.md](web-findings-2026-11.md) | web 調査：openMenu の `0x52` コマンド、GDEMU.ini、AG16K、KOS g1ata、CDI のセッション（R10） |
 | [../design/bba-sd-write.md](../design/bba-sd-write.md) | BBA 経由の SD 書き込みの設計（R8） |
 | [../design/g1-ag16k-port.md](../design/g1-ag16k-port.md) | G1 設計：GDEMU 6.0（AG16K）への FPGA 移植（設計のみ） |
+| [gdemu60-status-20261123.md](gdemu60-status-20261123.md) | **6.0 の実機の最新状況**：ERASE、census、線の試験、次の作業（2026-11-23） |
 | [gdemu60-bringup.md](gdemu60-bringup.md) | **6.0 を ERASE したあとの立ち上げ**（純正に戻れない前提）：ERASE が消すもの・直後の SWD と GPNVM、今（ロックのまま無電源で）できる測定、`census` → ピン探し → 実ピンのビットストリーム → NetGD の順番と止まる条件、用意するもの |
 | [ag16k-config.md](ag16k-config.md) | AG16K のコンフィグ方式（PS、ビット順、ローダーの変更設計） |
 | [ag16k-toolchain.md](ag16k-toolchain.md) | AG16K のビットストリームを作る道筋（Supra、オープンなツールの状況）（R69） |

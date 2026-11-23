@@ -7,14 +7,14 @@
 A fork of [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski.
 
 > [!WARNING]
-> **開発中です。NetGD のファームと FPGA コアは、まだ実機で動かしていません。**
-> （Dreamcast 側のツールは、純正 GDEMU の Dreamcast で試験を始めています。下の「実機での状況」を参照。）
+> **開発中です。NetGD 本体のファームと FPGA コアは、まだ実機で動かしていません。** GDEMU 6.0 で動いたのは、読むだけの診断ファームだけです。
+> （Dreamcast 側のツールは、純正 GDEMU の Dreamcast で試験しました。下の「実機での状況」を参照。）
 > （コード中のコメントには、上流が実機で確認した事柄も書かれています。）
 > 書き込むと純正ファームウェアは消え、元に戻す方法はありません（純正ファームは吸い出せません）。
 > 壊れても構わない基板以外には書き込まないでください。
 >
-> **Work in progress. The NetGD firmware and FPGA core have not been run on real hardware yet.**
-> (The Dreamcast-side tools are now being tested on a Dreamcast with a stock GDEMU; see "Hardware status" below.)
+> **Work in progress. The main NetGD firmware and FPGA core have not been run on real hardware yet.** Only a read-only diagnostic firmware has run on a GDEMU 6.0.
+> (The Dreamcast-side tools were tested on a Dreamcast with a stock GDEMU; see "Hardware status" below.)
 > (Some code comments describe things upstream verified on hardware.)
 > Flashing erases the stock firmware for good — it cannot be dumped, so there is no way back.
 > Only flash a board you can afford to lose.
@@ -23,7 +23,7 @@ A fork of [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) by Colton Pawielski
 
 | # | 目標 | Goal | 状況 / Status |
 |---|------|------|---------------|
-| **G1** | **GDEMU 6.0 基板で動く**（上流は v5.5 / v5.15b クローンのみ） | **Run on GDEMU 6.0 boards** (upstream targets v5.5 / v5.15b clones only) | 基板を調査済み：MCU は ATSAM3U2E、FPGA は **AGM AG16KDDF256**（v5.5 は Cyclone II）。FPGA の移植が本体。**6.0 への書き込みは未成功**：MCU はロック済みとみなし（SWD 無応答、LOG R177）、純正のバックアップは不可、ERASE は未実施 / **No 6.0 install has worked yet: the MCU is treated as locked (SWD silent, LOG R177), no stock backup is possible, ERASE has not been done.** Board surveyed: ATSAM3U2E MCU and an **AGM AG16KDDF256** FPGA instead of Cyclone II; the FPGA port is the main work |
+| **G1** | **GDEMU 6.0 基板で動く**（上流は v5.5 / v5.15b クローンのみ） | **Run on GDEMU 6.0 boards** (upstream targets v5.5 / v5.15b clones only) | 基板を調査済み：MCU は ATSAM3U2E、FPGA は **AGM AG16KDDF256**（v5.5 は Cyclone II）。FPGA の移植が本体。**開発用の 6.0 を ERASE し（純正は消失）、診断ファームの書き込みと実行に成功。NetGD 本体と FPGA は未実行** / **The development 6.0 was erased (stock firmware gone) and a diagnostic firmware now runs on it. The main NetGD firmware and FPGA core have not run yet.** Board surveyed: ATSAM3U2E MCU and an **AGM AG16KDDF256** FPGA instead of Cyclone II; the FPGA port is the main work |
 | **G2** | **ブロードバンドアダプタ（BBA）経由で SD カードにゲームイメージを書き込む**（本家 GDEMU では不可） | **Write game images to the SD card over the Broadband Adapter** (the original GDEMU cannot) | ファーム側（F1〜F8）、PC 側の netgd-send、Dreamcast 側の netgd-recv・netgd-t2・netgd-menu を実装済み。SD への書き込みの全体は実機未検証。BBA の転送の計測は実機で開始（下記） / Firmware fixes F1–F8, the PC tool netgd-send, and the Dreamcast apps netgd-recv, netgd-t2 and netgd-menu are in. The full write path to the SD card is not hardware-tested; BBA transfer measurements have started (below) |
 | **G3** | **本家 GDEMU と同等の機能を持ち、より高性能** | **Match the original GDEMU's features, with better performance** | 番号フォルダ方式、GDmenu / openMenu の切替コマンド `0x52`、`GDEMU.INI` を実装（実機未検証） / Numbered folders, the GDmenu / openMenu image command `0x52`, and `GDEMU.INI` are in (not yet hardware-tested) |
 
@@ -33,21 +33,35 @@ The full plan (phases, roles, open issues) is in [`docs/PLAN.md`](docs/PLAN.md) 
 
 ## 実機での状況 / Hardware status
 
-2026-11-23 時点。**NetGD のファームは載っていません。** 次の結果は、純正 GDEMU 6.0 + Dreamcast + BBA で Dreamcast 側のツールだけを動かしたものです。
+2026-11-23 時点。詳しくは [`docs/research/gdemu60-status-20261123.md`](docs/research/gdemu60-status-20261123.md)（日本語）にあります。
 
-As of 2026-11-23. **The NetGD firmware is not on the board.** These results come from running only the Dreamcast-side tools on a stock GDEMU 6.0 + Dreamcast + BBA.
+As of 2026-11-23. Details are in [`docs/research/gdemu60-status-20261123.md`](docs/research/gdemu60-status-20261123.md) (Japanese).
+
+### GDEMU 6.0 の立ち上げ / GDEMU 6.0 bring-up
+
+| 段階 / Step | 結果 / Result |
+|---|---|
+| ERASE / ERASE | 実施済み。この基板の純正ファームは消え、元に戻せません / Done. This board's stock firmware is gone for good |
+| SWD / SWD | ERASE の後は 100 kHz で接続でき、書き込みも可能 / Connects at 100 kHz after ERASE, and the flash can be written |
+| 診断ファーム census / Diagnostic firmware (census) | 動作。ボタンと SD の検出の線の変化を確認 / Runs. Changes on the button and SD-detect lines were observed |
+| 線の試験 / Line probe | PA25 → PB2 は nCONFIG → nSTATUS の動きと一致。**PA23（DATA0）と PA24（DCLK）は未確認** / PA25 → PB2 matches nCONFIG → nSTATUS. **PA23 (DATA0) and PA24 (DCLK) are unproven** |
+| FPGA のコンフィグ / FPGA configuration | 未実施 / Not done |
+| NetGD 本体の起動 / Booting the main NetGD firmware | 未実施 / Not done |
+
+### ERASE の前に純正 GDEMU 6.0 で試した Dreamcast 側のツール / Dreamcast tools tested on the stock GDEMU 6.0 before ERASE
 
 | 試験 / Test | 結果 / Result |
 |---|---|
-| KOS の TCP、16 KiB フレーム / KOS TCP, 16 KiB frames | 検査なし 2,139 KB/s、検査あり 1,570 KB/s（20 秒の制限で打ち切り） / 2,139 KB/s without checksums, 1,570 KB/s with (stopped by the 20 s limit) |
-| 独自の UDP 転送 g2x、32 MiB / Custom UDP transfer g2x, 32 MiB | 全 6 パスが壊れずに終了。CRC 検査なしで最高 2,602 KB/s、データグラムの CRC ありで最高 2,306 KB/s、PC で全体の CRC も照合して 1,848 KB/s / All 6 passes ended without corrupt data. Best 2,602 KB/s without CRC checks, 2,306 KB/s with datagram CRCs, 1,848 KB/s with the PC also verifying the whole-file CRC |
-| 直した KOS TCP（`tools/kos-patches`） / Patched KOS TCP | 16 KiB は通常の TCP と同等（2,099 KB/s）。**64 KiB フレームのパスで止まる問題を調査中** / 16 KiB matches the stock stack (2,099 KB/s). **A stop on the 64 KiB frame pass is under investigation** |
-| netgd-t2（ドライブを使わない版） / netgd-t2 (no-drive build) | **起動後すぐ終了して待ち受けに入らない問題を調査中** / **Exits soon after start without listening; under investigation** |
-| netgd-menu、gdprobe seq 25c | 未実行 / Not run yet |
+| KOS の TCP、16 KiB フレーム / KOS TCP, 16 KiB frames | 検査なし 2,139 KB/s、検査あり 1,570 KB/s / 2,139 KB/s without checksums, 1,570 KB/s with |
+| 独自の UDP 転送 g2x、32 MiB / Custom UDP transfer g2x, 32 MiB | 全 6 パスが壊れずに終了。最高 2,602 KB/s（CRC なし）、2,306 KB/s（データグラムの CRC）、1,848 KB/s（ファイル全体の CRC も照合） / All 6 passes ended without corrupt data. Best 2,602 KB/s (no CRC), 2,306 KB/s (datagram CRCs), 1,848 KB/s (whole-file CRC too) |
+| 直した KOS TCP（`tools/kos-patches`） / Patched KOS TCP | 全 6 パスを 2 回完走、CRC 一致。64 KiB × 2 で最高 2,306 KB/s（CRC なし）、1,652 KB/s（CRC あり）。停止の原因だった `poll()` のデッドロックは計測ツール側で回避 / All 6 passes completed twice with matching CRCs. Best 2,306 KB/s (no CRC) and 1,652 KB/s (CRC) at 64 KiB x 2. The `poll()` deadlock behind the earlier stop is avoided in the benchmark |
+| netgd-t2（ドライブを使わない版） / netgd-t2 (no-drive build) | 接続、ファーム更新の拒否、終了、dcload への復帰を確認。SD への書き込みは未確認 / Connection, firmware-update rejection, finish and return to dcload confirmed. SD writes not tested |
+| netgd-menu | 起動し、NetGD がないことを正しく表示 / Boots and correctly reports that NetGD is absent |
+| gdprobe seq 25c | 長さちょうどの G1 DMA 20 件がすべて完了 / All 20 exact-length G1 DMA reads completed |
 
-**GDEMU 6.0 への書き込みはまだできていません。** SWD のデバッグポートが応答せず、MCU はロック済みとみなしています（LOG R177）。実機の試験の手順は [`docs/research/hw-runbook.md`](docs/research/hw-runbook.md) にあります。
+純正ファームが消えたため、**NetGD が起動するまでこの基板では BBA の試験を再開できません。** 次の作業は、FPGA のコンフィグ線の確認（ピン探し）です。
 
-**NetGD cannot be installed on a GDEMU 6.0 yet.** Its SWD debug port does not answer, and the MCU is treated as locked (LOG R177). The hardware test procedure is in [`docs/research/hw-runbook.md`](docs/research/hw-runbook.md) (Japanese).
+With the stock firmware gone, **BBA tests on this board cannot resume until NetGD boots.** The next step is proving the FPGA configuration lines (pin finding).
 
 ## 構成 / Layout
 
@@ -160,7 +174,8 @@ Flashing (SWD probe setup, erasing the stock firmware, writing NetGD) is in [`IN
 | [`docs/PLAN.md`](docs/PLAN.md) | 計画：目標、フェーズ、役割分担、既知の地雷 | Plan: goals, phases, roles, known pitfalls |
 | [`docs/research/LOG.md`](docs/research/LOG.md) | **すべての調査・レビュー・判断の記録** | **Log of every investigation, review and decision** |
 | [`docs/research/`](docs/research/) | GDEMU 6.0 と本家機能の調査、web 調査（openMenu の `0x52`、AG16K、KOS g1ata など）、純正 GDEMU の調査フロー | Research on GDEMU 6.0 and the original's features, web findings, the stock-GDEMU probing workflow |
-| [`docs/research/hw-runbook.md`](docs/research/hw-runbook.md) | **実機の試験の手順と今の結果** | **Hardware test procedure and current results** |
+| [`docs/research/gdemu60-status-20261123.md`](docs/research/gdemu60-status-20261123.md) | **GDEMU 6.0 の実機の最新状況** | **Latest GDEMU 6.0 hardware status** |
+| [`docs/research/hw-runbook.md`](docs/research/hw-runbook.md) | 純正 GDEMU での実機試験の手順と結果 | Test procedure and results on the stock GDEMU |
 | [`docs/research/g2-transport.md`](docs/research/g2-transport.md) | BBA の転送（KOS の TCP の修正と g2x）の比較 | BBA transport: the KOS TCP fix compared with g2x |
 | [`docs/research/gdemu60-install-routes.md`](docs/research/gdemu60-install-routes.md) | GDEMU 6.0 に書き込む経路の検討 | Possible install routes for the GDEMU 6.0 |
 | [`docs/research/gdemu60-bringup.md`](docs/research/gdemu60-bringup.md) | GDEMU 6.0 の立ち上げ計画 | GDEMU 6.0 bring-up plan |
