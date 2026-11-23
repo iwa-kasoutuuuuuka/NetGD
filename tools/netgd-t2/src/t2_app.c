@@ -11,7 +11,6 @@
 
 
 #define CONFIRM_HOLD_MS 1000
-#define CONFIRM_MAX_MS  30000
 #define UI_EVERY_MS     200
 
 void t2_cfg_defaults(t2_cfg_t *c, int tcpfix)
@@ -25,6 +24,7 @@ void t2_cfg_defaults(t2_cfg_t *c, int tcpfix)
     c->idle_exit_ms = 15u * 60u * 1000u;
     c->drive = 1;
     c->tcpfix = tcpfix;
+    c->confirm_max_ms = 30000;
 }
 
 /* ---- the screen ---- */
@@ -85,7 +85,8 @@ static void draw(t2_app_t *a)
         snprintf(l, sizeof l, "%s: %s", a->state == T2_S_DONE ? "END" : "FAILED", result_text(a->result));
         nm_screen_row(s, 18, l, a->state == T2_S_FAILED ? NM_ATTR_WARN : NM_ATTR_NORMAL);
     } else {
-        nm_screen_row(s, 18, a->busy ? "B: stop safely (resume later)" : "B: close the session and leave", NM_ATTR_DIM);
+        nm_screen_row(s, 18, ng_btnguard_stuck(&a->bguard) ? "B is stuck: ignored. Finish from the PC or reset"
+                             : a->busy ? "B: stop safely (resume later)" : "B: close the session and leave", NM_ATTR_DIM);
     }
 }
 
@@ -129,29 +130,35 @@ static void hk_progress(void *ctx, const ng_ui_t *u)
 
 static int hk_stop(void *ctx)
 {
-    (void)ctx;
-    return ng_plat_user_stop();         /* KOS: B is down (netgd-menu plat_kos.c) */
+    t2_app_t *a = (t2_app_t *)ctx;
+    uint32_t pad = 0;
+    int odd = 0, down = ng_plat_user_stop(&pad, &odd);
+    return ng_btnguard_sample(&a->bguard, pad, down, odd, nm_plat_millis());
 }
 
-/* force on a protected folder: A held for a second allows it, B or 30 s refuses */
+/* force on a protected folder: A released and then held for a second allows it, B or 30 s refuses.  A pad that reports A all the
+   time never approves (ng_holdconfirm_t). */
 static int hk_confirm(void *ctx, const char *what, const char *folder)
 {
     t2_app_t *a = (t2_app_t *)ctx;
-    uint32_t t0 = nm_plat_millis(), down = 0;
+    uint32_t t0 = nm_plat_millis();
+    ng_holdconfirm_t hold;
     char l[NM_COLS + 1];
+    memset(&hold, 0, sizeof hold);
     for (;;) {
-        uint32_t b = nm_plat_buttons(), now = nm_plat_millis();
+        uint32_t b, pad = nm_plat_pad(&b), now = nm_plat_millis();
+        int odd = (b & NM_BTN_ODD) != 0;    /* implausible: B can still refuse, nothing can approve */
+        int refuse = ng_btnguard_sample(&a->bguard, pad, (b & NM_BTN_B) != 0, odd, now);
         draw(a);
         snprintf(l, sizeof l, "PC asks to %s the protected %.24s", what, folder);
         nm_screen_row(&a->scr, 9, l, NM_ATTR_WARN);
-        nm_screen_row(&a->scr, 10, "Hold A for 1 s to allow, B to refuse", NM_ATTR_WARN);
+        nm_screen_row(&a->scr, 10, ng_btnguard_stuck(&hold.g) ? "Release A, then hold it 1 s to allow"
+                                   : ng_btnguard_stuck(&a->bguard) ? "Hold A for 1 s to allow (B stuck: wait to refuse)"
+                                   : "Hold A for 1 s to allow, B to refuse", NM_ATTR_WARN);
         nm_plat_present(&a->scr);
-        if (b & NM_BTN_B) return 0;
-        if (b & NM_BTN_A) {
-            if (!down) down = now ? now : 1;
-            if (now - down >= CONFIRM_HOLD_MS) return 1;
-        } else down = 0;
-        if (now - t0 >= CONFIRM_MAX_MS) return 0;
+        if (refuse) return 0;
+        if (ng_holdconfirm_update(&hold, odd ? 0 : pad, (b & NM_BTN_A) != 0, now, CONFIRM_HOLD_MS)) return 1;
+        if (now - t0 >= a->cfg.confirm_max_ms) return 0;
         nm_plat_sleep(20);
     }
 }
@@ -228,7 +235,7 @@ static void leave(t2_app_t *a, int result)
 
 int t2_step(t2_app_t *a)
 {
-    uint32_t now;
+    uint32_t now, btn, pad;
     int b, ev;
     switch (a->state) {
     case T2_S_NETUP:
@@ -246,7 +253,8 @@ int t2_step(t2_app_t *a)
     case T2_S_SERVE:
         ev = ngtp_srv_service(&a->srv);
         now = nm_plat_millis();
-        b = (nm_plat_buttons() & NM_BTN_B) != 0;
+        pad = nm_plat_pad(&btn);
+        b = ng_btnguard_sample(&a->bguard, pad, (btn & NM_BTN_B) != 0, (btn & NM_BTN_ODD) != 0, now);
         if (ev & NGTP_EV_FINISH) { leave(a, T2_R_FINISH); present(a); return 1; }
         if (ev & NGTP_EV_REQUEST) a->b_was_down = b;        /* a B that stopped an operation does not also leave */
         if (b && !a->b_was_down && !a->busy) { leave(a, T2_R_USER); present(a); return 1; }

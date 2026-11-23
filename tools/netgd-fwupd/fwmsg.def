@@ -92,6 +92,7 @@ UI_CONFIRM_TITLE | Update NetGD with this image? | このイメージで NetGD �
 UI_CONFIRM_HOLD | Hold A + X + START + UP for 3 seconds to begin. | A + X + START + 上 を 3 秒間押し続けると開始します。
 UI_CONFIRM_CANCEL | B: cancel (nothing is sent) | B ボタン：中止（何も送りません）
 UI_HOLDING | Keep holding... | そのまま押し続けてください...
+UI_BTN_HELD | A button is held. Nothing is sent until released. | ボタンが押されたままです。離すまで何も送りません。
 UI_SENDING | Updating. DO NOT POWER OFF! | 更新中です。電源を切らないでください！
 UI_RESULT | Result | 結果
 UI_RESULT_FILE | Result file | 結果ファイル

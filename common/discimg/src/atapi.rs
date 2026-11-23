@@ -754,6 +754,65 @@ pub fn all_form2(buf: &[u8], head: usize, count: usize) -> bool {
     (0..count).all(|s| stored_is_form2(&buf[head + s * 2336..]))
 }
 
+/// Zero bytes to stage after a G1 DMA read of `total` bytes so the FIFO holds
+/// a whole number of 32-byte blocks. The FPGA grants DMARQ only for a whole
+/// block, so without these the tail of a 2,352 or 2,324 B sector is never
+/// granted. 0 for a multiple of 32.
+///
+/// Zeros match what stock's exact-length DMA leaves in host memory: 2,352 and
+/// 16,464 B end 16 B further on, and those 16 B read as zeros, not the next
+/// sector (probe record stock_20261123_27_dma-exact, images 3, 4, 11).
+///
+/// How many of them the host strobes is not known. That record shows memory,
+/// not bus cycles: it fits both a host that reads the whole last block and
+/// one that reads only the programmed 1,176 words. See [`DmaPadDrain`].
+pub const fn dma_pad_bytes(total: usize) -> usize {
+    total.wrapping_neg() & 31
+}
+
+/// Equal FIFO level reads [`DmaPadDrain`] wants. The firmware reads once per
+/// `Timer::after(1 ms)`, and at the 1 kHz tick one such sleep can be almost
+/// nothing, so three reads (two sleeps) span at least one whole tick.
+pub const DMA_PAD_SETTLE_READS: u8 = 3;
+
+/// Decides that a padded DMA read is over although pad words remain in the
+/// FIFO, for a host that stops at the programmed length.
+///
+/// With the whole request and its pad staged, a level of exactly the pad
+/// means every data word has left and no pad word has. A host that stops at
+/// its programmed length rests there. One that reads the whole last block
+/// passes that level once, inside a burst of 16 words or about 2 us, so a
+/// level that holds there for a millisecond is taken as a host that stopped.
+/// Equal reads also rule out a level torn by the asynchronous SMC read, which
+/// only happens while it is changing.
+///
+/// Known limit: a full-burst host that pauses for over 1-2 ms at exactly that
+/// level is cut off. Its data has all arrived, but DMA goes off under the
+/// rest of its burst. A pause at any other level is not affected.
+#[derive(Clone, Copy)]
+pub struct DmaPadDrain {
+    last: u16,
+    same: u8,
+}
+
+impl DmaPadDrain {
+    pub const fn new() -> Self {
+        Self { last: 0, same: 0 }
+    }
+
+    /// Feed one level read; true once only pad is left and it has settled.
+    /// Never true with `pad_bytes` 0 or an empty FIFO.
+    pub fn poll(&mut self, level: u16, pad_bytes: usize) -> bool {
+        if level == 0 || level as usize * 2 != pad_bytes {
+            self.same = 0;
+            return false;
+        }
+        self.same = if self.same != 0 && level == self.last { self.same.saturating_add(1) } else { 1 };
+        self.last = level;
+        self.same >= DMA_PAD_SETTLE_READS
+    }
+}
+
 /// In place: take `len` bytes from offset `off` of each of `count` stored
 /// sectors of `sec_size` bytes (the first `head` bytes into `buf`) and pack
 /// them from the front, `len` apart. Returns `count * len`. Needs

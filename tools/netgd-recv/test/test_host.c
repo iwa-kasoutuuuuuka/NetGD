@@ -34,6 +34,8 @@
 #include "fwctl.h"
 
 extern void (*ng_pc_cfg_hook)(void);
+extern int ng_pc_pad_healthy;
+extern int sim_b_stuck;
 extern ngblk_stats_t ngblk_stats;
 
 static struct { long ckp, read; int readback, slow, frag, force; long mountms; long headroom; } opt = { -1, -1, -1, 0, 0, 0, -1, -1 };
@@ -370,6 +372,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--frag")) opt.frag = 1;
         else if (!strcmp(argv[i], "--force")) opt.force = 1;
         else if (!strcmp(argv[i], "--stopafter")) sim_stop_after_polls = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--b-stuck")) sim_b_stuck = 1;
         else if (!strcmp(argv[i], "--pollms")) ng_pc_poll_ms = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quiet")) sim_quiet = 1;
         else if (!strcmp(argv[i], "--rflip")) sim_rflip_cmd = atoll(argv[++i]);
@@ -386,6 +389,7 @@ int main(int argc, char **argv)
     sim_protect_lba = 2048;
     ng_pc_cfg_hook = cfg_hook;
     ng_phase_hook = phase_hook;
+    ng_pc_pad_healthy = !sim_b_stuck;   /* --stopafter is a press on a healthy pad */
     rc = ng_pc_run(argv[5], NULL);
     printf("SIM rc=%d writes=%llu cmds=%llu violations=%llu unsess=%d fnvbad=%u retries=%u unverified=%u begin=%d end=%d "
            "endmode=%d endname=%s dead=%d rdmis=%u ua=%d defmounts=%d namedmounts=%d polls=%d rcmds=%llu rsecs=%llu\n",

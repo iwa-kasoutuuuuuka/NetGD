@@ -30,11 +30,14 @@ typedef struct {
 
 /* The data window (menu-app.md 8.3 WANT): the largest WANT and how many WANTs may be outstanding at once.
    Stock KOS 2.3 TCP: 16 KiB x 1 (R178: frames bigger than the receive window stall, a wider window corrupts the stream).
-   With the patched net_tcp.c linked in (tools/kos-patches, docs/research/g2-transport.md 3): 64 KiB x 2. */
+   With the patched net_tcp.c linked in (tools/kos-patches, docs/research/g2-transport.md 3) the design value is 64 KiB x 2, but
+   the default is 16 KiB x 1 there too for now: g2netbench pass p4 (the same 64 KiB x 2 shape) hung the real Dreamcast twice, cause
+   unknown, and p3 (64 KiB x 1) was slower than 16 KiB.  This avoids that shape; it does not fix the hang.  A build can still ask
+   for a window explicitly (netgd-t2: T2_WANT / T2_DEPTH, netgd-menu: NM_WANT / NM_DEPTH). */
 #define NGTP_WANT_STOCK   16384u
 #define NGTP_DEPTH_STOCK  1
-#define NGTP_WANT_TCPFIX  65536u
-#define NGTP_DEPTH_TCPFIX 2
+#define NGTP_WANT_TCPFIX  16384u
+#define NGTP_DEPTH_TCPFIX 1
 #define NGTP_DEPTH_MAX    4
 
 typedef struct {

@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../fwcore.h"
+#include "../fwconfirm.h"
 #include "../resout.h"
 #include "fakedev.h"
 
@@ -922,6 +923,7 @@ static void test_text(void)
     n = fw_text_wrap(fw_msg_euc(FWM_UI_WARN_SWD), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n <= 2);
     n = fw_text_wrap(fw_msg_euc(FWM_UI_WARN_UNTESTED), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n == 1);
     n = fw_text_wrap(fw_msg_euc(FWM_UI_CONFIRM_TITLE), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n == 1);
+    n = fw_text_wrap(fw_msg_euc(FWM_UI_BTN_HELD), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n == 1);     /* one row: ROWS - 2 */
     n = fw_text_wrap(fw_msg_euc(FWM_UI_WARN_NO_BITSTREAM), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n <= 2);
     for (id = FWM_OUT_OK; id <= FWM_OUT_IO_DIRTY; id++) {          /* result screen: a handful of rows */
         n = fw_text_wrap(fw_msg_euc(id), 50, &lines[0][0], sizeof lines[0], 12);
@@ -978,6 +980,68 @@ static void *w_open(const char *p, const char *m) { (void)p; (void)m; return g_w
 static size_t w_write(const void *p, size_t n, void *f) { (void)p; (void)f; g_w.writes++; g_w.total += n; if (n > g_w.max_write) g_w.max_write = n; return n; }
 static int w_flush(void *f) { (void)f; g_w.flushes++; return 0; }
 static int w_close(void *f) { (void)f; g_w.closes++; return 0; }
+
+/* the update confirmation: no stuck state of a pad may ever start a flash */
+static void test_confirm_gate(void)
+{
+    enum { COMBO = 0x0F, CANCEL = 0x10, HOLD = 3000 };
+    ng_holdconfirm_t c;
+    uint32_t t = 0;
+    int i, go = 0;
+    /* the combination stuck since before the screen */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* no pad / an implausible status (pad 0), whatever the bits */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 0, 0xFFFF, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* released, then the combination with the cancel button also down */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 10; i++, t += 30) go |= fw_confirm_step(&c, 1, 0, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO | CANCEL, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* a pad change during the hold: the new pad must release first */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 10; i++, t += 30) go |= fw_confirm_step(&c, 1, 0, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 50; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 2, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* three combination buttons stuck: pressing the fourth for the hold must not start anything */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 100; i++, t += 30) go |= fw_confirm_step(&c, 1, 0x07, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* the cancel button stuck is not a release either */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 100; i++, t += 30) go |= fw_confirm_step(&c, 1, CANCEL, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* an implausible pad next to a healthy one: nothing approves, the healthy pad's B is still seen */
+    {
+        fw_pads_t p;
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 1, 1, 0xFFFF, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        fw_pads_add(&p, 7, 1, CANCEL, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 0 && (p.b & CANCEL));
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 1, 1, 0xFFFF, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        fw_pads_add(&p, 7, 1, 0, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 0 && p.b == 0);
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 7, 0, 0, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 0);
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 7, 1, COMBO & 0x1F, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 7);
+    }
+    /* a real release and a full hold still works, and not before the hold is over */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 10; i++, t += 30) go |= fw_confirm_step(&c, 1, 0, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 100; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    CHECK(fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD));
+}
 
 static void test_resout(void)
 {
@@ -1041,6 +1105,7 @@ int main(void)
     test_resume();
     test_text();
     test_result_text();
+    test_confirm_gate();
     test_resout();
     test_golden();
     printf("netgd-fwupd host tests: %d checks passed\n", g_checks);

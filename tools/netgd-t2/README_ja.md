@@ -18,9 +18,11 @@ PC の `tools/netgd-send`（`push` / `remote`）が NGTP（`docs/design/menu-app
 | ビルド | 既定 | 理由 |
 |---|---|---|
 | `make`（KOS の TCP のまま） | 16 KiB × 1 | R178：窓より大きいフレームは止まりかけ、窓を広げると壊れる |
-| `make tcpfix`（直した `net_tcp.c` を一緒にリンク） | 64 KiB × 2 | `docs/research/g2-transport.md` §3。`../kos-patches/net_tcp-rx-fix.patch`（fix/g2-transport-review `f02c1518` の版、FIN を順番の検査に含める）をそのまま使う |
+| `make tcpfix`（直した `net_tcp.c` を一緒にリンク） | **当面 16 KiB × 1** | 64 KiB × 2 は g2netbench p4 と同じ形で、実機の Dreamcast が 2 回止まった（原因は未解明。この変更は止まる形を避けるだけで、直してはいない）。p3 の 64 KiB × 1 も 16 KiB より遅かった。`make tcpfix T2_WANT=65536 T2_DEPTH=2` で明示できる。`docs/research/g2-transport.md` §3。`../kos-patches/net_tcp-rx-fix.patch`（fix/g2-transport-review `f02c1518` の版、FIN を順番の検査に含める）をそのまま使う |
 
-どちらも `make T2_WANT=… T2_DEPTH=…` で変えられる（1〜65536 B、1〜4）。受信バッファ（＝TCP の窓）は `T2_RCVBUF`（既定 20480、listen の前に設定）。
+`make tcpfix T2_WANT=… T2_DEPTH=…` で変えられる（1〜65536 B、1〜4）。素の TCP のビルドでは無視され、16 KiB × 1 のまま。受信バッファ（＝TCP の窓）は `T2_RCVBUF`（既定 20480、listen の前に設定）。
+**B ボタン**：B は「離された」のを見てから数える。実機で B が押されっぱなしに見えるパッド（400/400 サンプル）があったため。パッドなしは「離された」に数えず、抜き差しや別のパッドではやり直し、離されたと見なすのは同じパッドで 4 サンプル以上かつ 120 ms 以上続けて上がっていたとき（`../netgd-recv/src/ng_btnguard.h`）。B が固まったままなら画面にそう出るので、PC から終えるかリセットする。強制の確認は、質問が出てから A をいったん離し、1 秒長押しすると許可になる（質問の前から押されている A、固まった A、全ボタン押下に見える状態では許可されない）。30 秒で拒否になる。
+
 同時数 2 では、受け手は 2 つ目の WANT を出したまま SD に書くので、PC は次の塊をその間に送れる。DATA は WANT の順に返すこと（netgd-send はそうしている）。ファイルが変わる前と DONE の前には、残った WANT の DATA を読み捨てる。
 
 ### 書き込みの関門（純正 GDEMU では何も書かない、`E0` も送らない）

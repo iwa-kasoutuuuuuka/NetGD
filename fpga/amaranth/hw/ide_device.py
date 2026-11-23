@@ -491,12 +491,12 @@ class IDEDevice(Elaboratable):
         # test_timing.py reproduces it at t0 = 110 ns. Asking for a whole burst
         # before granting one removes the race entirely.
         #
-        # This cannot deadlock a transfer on the Dreamcast: Holly's DMA length
-        # is in 32-byte units, so the host only ever asks for whole bursts, and
-        # the MCU stages whole sectors (512 or 2048 bytes). Whatever is left
-        # in the FIFO with nothing more coming is therefore a multiple of 16
-        # words -- and if that ever stops being true, the fix is to pad on the
-        # MCU side, not to lower this.
+        # This cannot starve a transfer on the Dreamcast only because the MCU
+        # pads: 2,352 / 2,324 B sectors need not total a multiple of 32, so
+        # stream_from_sd stages zeros up to the next 32-byte block. Whether
+        # Holly then strobes those zeros or stops at its programmed length is
+        # unmeasured (R183 fits both); the MCU's drain handles either, and
+        # DMA off drops DMARQ over any left (test_timing.py, dma_exact_*).
         #
         # But the threshold is only the *grant* condition. Holly, reading,
         # does react to DMARQ negating mid-burst: it ends the burst, keeps only

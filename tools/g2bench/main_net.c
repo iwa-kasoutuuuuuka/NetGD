@@ -28,7 +28,6 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -136,11 +135,41 @@ static uint32_t le32(const uint8_t *p)
 }
 
 /* ---- socket helpers ---- */
+/* Not poll(): KOS's poll() holds its mutex while it takes the socket mutex, and the BBA rx thread holds the socket
+   mutex while it takes the poll mutex (__poll_event_trigger). That AB-BA deadlock stopped the whole network on real
+   hardware (hang record 2026-11-23: mutex_cycle tid 1 -> tid 6 -> tid 1, on poll.c's _mutex).  1: data, EOF or a socket
+   error (the recv that follows reports it), 0: nothing within ms. */
 static int wait_readable(int fd, int ms)
 {
-    struct pollfd p = { fd, POLLIN, 0 };
-    int r = poll(&p, 1, ms);
-    return r > 0 ? 1 : (r == 0 ? 0 : -1);
+    uint64_t t0 = now_us();
+    uint8_t b;
+    for (;;) {
+        ssize_t r = recv(fd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (r >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return 1;
+        if (now_us() - t0 >= (uint64_t)ms * 1000u) return 0;
+        thd_sleep(1);
+    }
+}
+
+/* a connection within ms, as a blocking socket; -1 with errno (ETIMEDOUT: nobody came) */
+static int accept_within(int lfd, struct sockaddr *peer, socklen_t *pl, int ms)
+{
+    uint64_t t0 = now_us();
+    int fl = fcntl(lfd, F_GETFL, 0);
+    if (fl < 0 || fcntl(lfd, F_SETFL, fl | O_NONBLOCK) < 0) return -1;
+    for (;;) {
+        socklen_t n = *pl;
+        int c = accept(lfd, peer, &n);
+        if (c >= 0) {
+            int cf = fcntl(c, F_GETFL, 0);
+            if (cf >= 0) fcntl(c, F_SETFL, cf & ~O_NONBLOCK);
+            *pl = n;
+            return c;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+        if (now_us() - t0 >= (uint64_t)ms * 1000u) { errno = ETIMEDOUT; return -1; }
+        thd_sleep(10);
+    }
 }
 
 /* all n bytes, or -1 on error / close (errno 0) / timeout (ETIMEDOUT) */
@@ -702,10 +731,12 @@ int main(int argc, char **argv)
     say("listening on %s:%u; waiting for the PC sender", ip, G2N_TCP_PORT);
     stage("waiting for the PC sender");
 
-    if (wait_readable(lfd, WAIT_PC_MS) <= 0) { int r = fail("no PC connected"); shutdown_net(); return r; }
     struct sockaddr_in peer; socklen_t pl = sizeof peer;
-    g_fd = accept(lfd, (struct sockaddr *)&peer, &pl);
-    if (g_fd < 0) { say("accept failed errno=%d", errno); int r = fail("accept"); shutdown_net(); return r; }
+    g_fd = accept_within(lfd, (struct sockaddr *)&peer, &pl, WAIT_PC_MS);
+    if (g_fd < 0) {
+        if (errno == ETIMEDOUT) { int r = fail("no PC connected"); shutdown_net(); return r; }
+        say("accept failed errno=%d", errno); int r = fail("accept"); shutdown_net(); return r;
+    }
     say("PC connected");
     stage("handshake");
 

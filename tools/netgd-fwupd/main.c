@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "fwcore.h"
+#include "fwconfirm.h"
 #include "g1dev.h"
 #include "resout.h"
 
@@ -132,6 +133,21 @@ static uint32_t pad_buttons(void)
         if (st) b |= st->buttons;
     }
     return b;
+}
+
+/* For the confirmation: every pad, see fw_pads_t (KOS cooks buttons = ~raw: an all-zero reply reads as every button down). */
+static void pad_sample(fw_pads_t *p)
+{
+    int i;
+    memset(p, 0, sizeof *p);
+    for (i = 0; i < 4; i++) {
+        maple_device_t *c = maple_enum_type(i, MAPLE_FUNC_CONTROLLER);
+        cont_state_t *st;
+        if (!c) break;
+        st = (cont_state_t *)maple_dev_status(c);
+        fw_pads_add(p, (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u, st != NULL, st ? st->buttons : 0,
+                    CONT_DPAD_UP, CONT_DPAD_DOWN, CONT_DPAD_LEFT, CONT_DPAD_RIGHT, CONT_A | CONT_B | CONT_X | CONT_Y | CONT_START);
+    }
 }
 
 static void wait_start_and_exit(int code)
@@ -271,8 +287,10 @@ static void show_image_error(const fw_vres *res)
 static int confirm(void)
 {
     int row, i;
-    uint32_t held = 0;
-    uint32_t b;
+    uint32_t held, b, pad, now;
+    int bar_shown = 0;
+    ng_holdconfirm_t hold;
+    fw_pads_t pads;
     ui_title();
     row = 2;
     row = drawf(row, COL_WHITE, "%s: %s", fw_msg_euc(FWM_UI_DEVICE), g_model);
@@ -300,11 +318,29 @@ static int confirm(void)
     draw_wrap(ROWS - 1, COL_GREY, fw_msg_euc(FWM_UI_CONFIRM_CANCEL));
 
     /* the buttons must be let go first, so a press from the previous screen cannot count */
-    while (pad_buttons() & (COMBO | CONT_B)) thd_sleep(30);
+    /* A pad can report a button all the time: this then waits for ever, on purpose (never a way into the flash path), and says why */
+    {
+        uint32_t waited = 0;
+        int shown = 0;
+        while (pad_buttons() & (COMBO | CONT_B)) {
+            pad_sample(&pads);                  /* an implausible pad never lets this end: B on a healthy pad still cancels */
+            if (pads.bad && (pads.b & CONT_B)) return 0;
+            if (!shown && waited >= 1000) { draw_wrap(ROWS - 2, COL_YELLOW, fw_msg_euc(FWM_UI_BTN_HELD)); shown = 1; }
+            thd_sleep(30);
+            waited += 30;
+        }
+        if (shown) clear_rows(ROWS - 2, ROWS - 2);
+    }
+    memset(&hold, 0, sizeof hold);
     for (;;) {
-        b = pad_buttons();
-        if ((b & COMBO) == COMBO) {
-            held += 30;
+        pad_sample(&pads);
+        pad = fw_pads_id(&pads);
+        b = pads.b;
+        now = (uint32_t)timer_ms_gettime64();
+        if (fw_confirm_step(&hold, pad, b, COMBO, CONT_B, now, HOLD_MS)) return 1;
+        held = ng_holdconfirm_ms(&hold, now);
+        if (hold.holding) {
+            bar_shown = 1;
             clear_rows(ROWS - 2, ROWS - 2);
             {
                 char bar[34];
@@ -315,10 +351,9 @@ static int confirm(void)
                 bar[30] = 0;
                 drawf(ROWS - 2, COL_YELLOW, "[%s] %s", bar, fw_msg_euc(FWM_UI_HOLDING));
             }
-            if (held >= HOLD_MS) return 1;
         } else {
-            if (held) clear_rows(ROWS - 2, ROWS - 2);
-            held = 0;
+            if (bar_shown) clear_rows(ROWS - 2, ROWS - 2);
+            bar_shown = 0;
             if (b & CONT_B) return 0;
         }
         thd_sleep(30);

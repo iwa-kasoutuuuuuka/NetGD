@@ -488,6 +488,15 @@ class TestBasics(Base):
             self.assertEqual(fc.errors, [])
             self.assert_image(fc, "FLIP", exp, "flip %d" % k)
 
+    def test_b_stuck_does_not_stop_the_job(self):
+        # a pad that reports B from the first poll (real hardware: 400 of 400 samples) is not a request to stop
+        img = self.mkimage()
+        gdi = self.make_gdi("s", sizes=(100 * 2352, 50 * 2352, 60 * 2048))
+        self.prepare(gdi, "j", "BIGGAME", mode="resume", chunk_mib=1)
+        run = self.run_app(img, "j", "--pollms", "0", "--b-stuck")
+        self.assertEqual(run.rc, 0, run.text)
+        self.assertFalse(run.has("NGD:STOP"), run.text)
+
     def test_stop_and_resume_with_collect(self):
         MIB = 1 << 20
         img = self.mkimage()
