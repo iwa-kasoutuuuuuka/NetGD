@@ -29,7 +29,7 @@ R169 のとおり、Supra の af_map の RETIMING 段は「イネーブルのあ
 
 | 段階 | ビットストリーム SHA-256 | 生サイズ | LZMA | ファーム ELF（`tools/pinfind/out/`） | ELF サイズ |
 |---|---|---|---|---|---|
-| 0 | `f377fe36ddc9c7ffaf558c1335e2346751bd2076f103acbe4f394898224ca6a8` | 552,352 B | 1,699 B | `netgd-pinfind-stage0-f377fe36.elf`（SHA-256 `4eb84fbe739e6ff36a608bb4bb4e2ae941543baaa06264e3023498d09c587ba1`） | 492,932 B |
+| 0 | `f377fe36ddc9c7ffaf558c1335e2346751bd2076f103acbe4f394898224ca6a8` | 552,352 B | 1,699 B | **要再生成**：このブランチで `tools/pinfind/mkstage.ps1 -Stage 0` を実行して作り直す（以前の ELF は安全修正より前のもの。使わない） | 再生成後に確認 |
 | 1 | `1a1136ef82e940929078d39f57bb84a89f03eff7619a09924aab6a6486aafe21` | 552,352 B | 3,829 B | `netgd-pinfind-stage1-1a1136ef.elf`（SHA-256 `06c76d192d727c6d687d132051ef9f35eb3644461a02034ae8905140be166b1e`） | 563,972 B |
 
 ゲートレベルシミュレーション（`build.sh --gate-sim`、配置配線後のネットリスト、Icarus Verilog）は合格：
