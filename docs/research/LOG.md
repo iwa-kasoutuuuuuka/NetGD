@@ -2716,6 +2716,38 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - `b88b4c0d`：`finish_cmd` / `error_status_intrq` で −96 B。ERROR → STATUS+INTRQ → ack の書き込みの順は同じ。
 - 2E used 116,336（空き 6,544）。ci-local の builds・tests 19/19、test_expect OK、純正の記録との監査は main と同じ。Fable のレビューで振る舞いの変化なし。ただし ide.rs を通るホストテストはなく、待ちのループ 1 回あたり数十サイクル遅い分は実機で未計測。
 
+### R189 G2 の実機：g2x は全パス完走、TCP の停止は poll() のデッドロック（diag/p4-watchdog・merge/batch14）（Opus・比較のセッション・Fable）
+
+- g2x（2026-11-23、純正 GDEMU + BBA）：全パス完走、壊れたパケット 0。x1 は 20 秒の制限で終了。検査なし x4 が 2,602 KB/s、パケットごとの CRC ありの x2 が 2,306 KB/s、ファイル全体の CRC もありの x5 が 1,848 KB/s。PC の NIC はパブリックのプロファイルのままで UDP の ACK が届いた。
+- `g2netbench_tcpfix` は p3〜p4 で Dreamcast が止まった。止まる場所は実行ごとに違った。ハングの記録（SH-4 の WDT、`diag/p4-watchdog`）で **`mutex_cycle=tid 1 -> tid 6 -> tid 1`** を確認：アプリは `poll()` の mutex を持ってソケットの mutex を待ち、BBA の受信スレッドはソケットの mutex を持って `poll.c` の `_mutex` を待っていた。
+- 直し（`db72a13f`、batch14 では `669baf36`）：g2netbench は `poll()` を使わず、`MSG_PEEK | MSG_DONTWAIT` と非ブロッキングの accept で待つ。修正後は **全 6 パスを 2 回完走**、CRC 一致、ハングの記録なし。
+- TCP の値（2 回）：16 KiB × 1 は CRC あり 1,504 / なし 2,047〜2,063 KB/s、64 KiB × 1 は CRC あり 1,604、64 KiB × 2 は CRC あり 1,652 / なし 2,305〜2,306、32 KiB × 2 は CRC あり 1,646 KB/s。
+- メニューと netgd-t2 は `poll()` を使わないので、ソース上はこのデッドロックに当たらない。ただし 64 KiB × 2 を実機で通したのは g2netbench だけなので、tcpfix ビルドの既定は 16 KiB × 1 のままにする。
+
+### R190 コントローラーの B の押しっぱなしと確認操作の安全（fix/pad-held）（Opus・Fable のレビュー 3 回）
+
+- netgd-t2 がすぐ終わった原因は、実機の A0 の **B が物理的に押し込まれていた**こと（400/400 サンプルで B が下、ユーザーが戻したあと正常に動作）。戻したあと、`T2_NO_DRIVE` で接続・`EFW` の拒否・`finish`・dcload への復帰を実機で確認。
+- `fix/pad-held`：B は、同じパッドで 120 ms 以上・4 サンプル離れたのを見てから数える。上書きの確認は A の解放を見てからの長押しだけ。ありえない状態（全ビット押下など）は承認に使わない。ファーム更新の確認も全ボタンの解放を見てから。メニューのテストのポート選びも直した。
+- ホストテスト：netgd-t2 46、netgd-menu 105、netgd-recv 54、netgd-fwupd 1001。パッドの異常系の多くは実機未確認。
+
+### R191 純正の G1 DMA の長さちょうど（seq 25c、記録 27）と NetGD の 32 B に満たない末尾（fix/dma-non32）（Opus・Fable のレビュー 3 回）
+
+- 記録 `stock_20261123_27_dma-exact.txt`：純正は固まらず、20 件すべて `dma_done=1`。音声 2,352 B と 16,464 B の長さちょうどの DMA は PIO と一致し、書かれる範囲は要求 + 16 B、その 16 B は 0（次のセクタではない）。データの DMA は約 4.3 MiB/s。
+- NetGD の不具合（OI-04、RTL シミュレーションで再現）：FPGA は 16 ワードたまらないと DMARQ を出さないので、32 B の倍数でない読み込みは末尾が FIFO に残って止まっていた。
+- 直し：末尾を 0 で 32 B 境界まで埋める。バイト数と最後の FAD には含めない。Holly が最後のバーストを全部読む場合と長さちょうどで止まる場合の両方を扱い、FIFO が埋め草だけで動かないときは 1〜2 ms で完了する。2E used 116,752（空き 6,128）。
+- どちらの読み方かは、NetGD の実機のログ（`lvl=0` か `lvl=pad/2`）でしか決まらない。
+
+### R192 netgd-menu の純正での初回起動（Opus）
+
+- 実機で起動し、`fw 5.20.5` を読んで `NetGD firmware not found` の画面で止まった。純正は固まらず、SD も読まない。START で再起動して GDmenu に戻った（ディスクがあるので BIOS のメニューではない）。
+- 小さい直し候補：START の表示 `BIOS menu` は実際の動きと違う。このモニターでは最上段が上端にかかる。
+
+### R193 6.0 の SWD の追加調査と ERASE の判断（Opus・Fable）
+
+- ヘッダ 4・5 と R2・R1 の反対側のパッドの間は約 100〜108 kΩ。**直列かプルアップかは未確定**（どちらの見方にも合わない測定値がある）。
+- SWDIO のプルアップを切った debugprobe（`H:\PicoSWD`、リポジトリには入れない）で 5 kHz の `fwbackup check` も `NO_TARGET`。ロック・配線・JTAGSEL・Pico の故障は区別できない。
+- Fable の ERASE 前の監査は NO-GO（Pico が未検証、JTAGSEL/TST が未測定、dcload もこの GDEMU から起動）。ユーザーはこれを聞いたうえで、**リスクを承知で ERASE を進めると判断した**（2026-11-23）。実行はユーザーの物理作業で、**この記録の時点では未実施**。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
