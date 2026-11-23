@@ -1,4 +1,4 @@
-# NetGD 計画（2026-11-20 立て直し、R169 まで反映）
+# NetGD 計画（2026-11-20 立て直し、R188 まで反映）
 
 NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。ドリームキャストの GD-ROM ドライブを
 置き換える基板（GDEMU 系）のファームウェアと FPGA コアを、オープンソースで作る。
@@ -12,6 +12,20 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
 | **G3** | **本家 GDEMU と同等の機能を持ち、より高性能** | 機能差分表の全項目が「同等以上」。読み込み時間などの計測値が本家以上 |
 
 ## いまの状態（実測）
+
+**未解決の問題は [`docs/research/open-issues.md`](research/open-issues.md) に 1 つにまとめた**（重さ順、何が何を止めているか、誰ができるか）。
+
+**2026-11-23 追記（R180〜R188、main `cf63c921` 時点）**：
+- **ロック前提（R177・R180、2026-11-22 の判断）**：6.0 の MCU はロック済みとして扱う。SWD は応答が無いまま。ERASE はユーザーだけが決める（普段の手順として勧めない）。**NetGD は今も実機で一度も動いていない**。ERASE 後の立ち上げ計画（`docs/research/gdemu60-bringup.md`）、何も駆動しない `census` ファーム（`common/pincensus`）、SWD を使わない導入の道が無いことの調査（`docs/install-routes`）は main に取り込み済み。
+- **純正の規則（R181〜R183）**：プリギャップから始まる読み込みは次のトラックとして扱う。プリギャップの 0 のセクタは、そのトラックが送る大きさ（音声 2,352・Mode 1 2,048・CDI の Mode 2 は 2,324 B）。純正の DMA（seq 25・25b）：データトラックは動く。音声 1 セクタを長さちょうど（2,352 B）で DMA すると終わる（G1 DMA は 32 B 単位で書くので要求より 16 B 先まで書く）。32 B に切り下げた長さ（2,336 B）では純正が BSY のまま固まった（R176 の XEND に続く 2 つ目）。**NetGD の DMA が 32 の倍数でない長さを送り切れるかは未確認**（open-issues OI-04）。
+- **FPGA（R184）**：配置配線後のネットリストと RTL が、仮ピン・RETIMING なしで 3,918 行一致（`feat/agm-gatesim`、main に取り込み済み）。形式的な等価性ではない。
+- **G2 の転送（R185・R186）**：KOS の TCP の直し（`tools/kos-patches/net_tcp-rx-fix.patch`）と、独自の UDP の g2x（`tools/g2bench`）。Dreamcast 側の受け手 `tools/netgd-t2`（NGTP、`ngtp_srv`）。メニューの BBA の立ち上げは DHCP なし（R187）。2E は `WaitHost` で −1,888 B（R188）。2E `release-z` の `resident,sd-fast` は used 116,336 B・空き 6,544 B。
+- **2026-11-23 の実機の結果（純正 GDEMU 6.0 + Dreamcast + BBA。LOG にはまだ無い）**：
+  - `g2netbench`（g2x）：すべての計測が通った。最高 2,602 KB/s（`tools/g2bench/host/g2net_002.txt`）。
+  - `g2netbench_tcpfix`：p1・p2 は通り、p3（64 KiB のフレーム）の途中でアプリが終わった。**原因は調査中**（`diag/hw-exit`、main の外）。
+  - `netgd-t2`（`T2_NO_DRIVE=1`）：起動の約 10〜20 秒後に終わり、ポート 20039 は一度も開かなかった。**原因は調査中**。
+- **まだ実機で走らせていないもの**：netgd-menu の初回起動（純正の上。純正では NOFW の画面までしか進まない）、gdprobe seq 25c（純正が固まる可能性がある）。手順は `docs/research/hw-runbook.md`。
+- **既知の限界**：メニューの listen のソケットを残して使い回す方式の小さい危険（R187）、`WaitHost` の速さが実機で未計測で `ide.rs` を通るホストテストが無い（R188）、KOS の `poll()` とソケットのミューテックスのロック順の逆転（ソースを読んだだけ、open-issues OI-11）。
 
 **2026-11-22 追記（R170〜R179、merge/batch10 `8ea9c828` 時点）**：
 - **純正の読み込み・ヘッド・CTRL の規則（記録 21〜24、R172〜R176・R179）**：
@@ -29,16 +43,16 @@ NetGD は [OpenGDEMU](https://github.com/cepawiel/OpenGDEMU) のフォーク。�
   - FPGA：スロット 32（SECNR の下位バイトだけ書く）、ERROR の err_lo（ビット 0〜1）を PACKET の書き込みとリセットまで保持（R163）。
   - SD・FAT：embedded-sdmmc 0.9.0 を同梱し、4 件の crash を直す（LFN・BPB の 0 除算・範囲外クラスタ・循環するディレクトリ、R165・R168）。`fat.rs` の細工カード対策（R168）、ホストだけの自前の FAT 読み込み（R165）。
   - 名前の trim と GAME.CFG（256 B を超えるものは最後の改行まで、R168）。
-  - CI：fwsize ゲート（`tools/fwsize/check.py --gate-2e`）。2E `release-z` は 117,232 B で、上限 122,880 B まで 5,648 B（R168）。`tools/ci-local`（この PC で build.yaml と同じ確認、約 17 分、R168）。
+  - CI：fwsize ゲート（`tools/fwsize/check.py --gate-2e`）。2E `release-z` は 117,232 B で、上限 122,880 B まで 5,648 B（R168。R188 の時点では used 116,336 B・空き 6,544 B）。`tools/ci-local`（この PC で build.yaml と同じ確認、約 17 分、R168）。
   - gdprobe：seq 17（`swap_reswitch`・`devreset_only`、R160）、seq 18（`detect_time = 400`、R161）。
   - ピン探し：Supra での `pinfind` ビルドが通り、ゲートレベル・シミュレーションも通った（R162・R169）。
-  - g2bench の計測（R166・R167）：dcload の /pc/ の読み込みは 1 回あたり約 26 ms の固定費。`-f` ありで 16 KiB 約 5 MB/s。計測ツール（`feat/g2bench`）自体は main の外。
+  - g2bench の計測（R166・R167）：dcload の /pc/ の読み込みは 1 回あたり約 26 ms の固定費。`-f` ありで 16 KiB 約 5 MB/s。計測ツール（`feat/g2bench`）は R170〜R179 の取り込みで main に入った（2026-11-23 に確認）。
 - **Supra の RETIMING（R169）**：R99・R106・R158 の Supra の大きさ・資源は RETIMING ありの値で、そのままでは本体コアの CDDA が無音だった。`fix/agm-no-retiming` で RETIMING を止めた。新しい値は LUT 2,241、LZMA 42.1 KB、48 MHz 系の Fmax 97.9 / 92.7 MHz（R169）。配置配線後と実機は未確認。
 - **NetGD の対応状況**：
   - DEVICE RESET と同じフォルダへの再切替は、main で純正に合わせた（R159〜R161）。切替の窓は GDEMU.ini の値に従い、キーが無ければ 500 + 250 ms（R135）。
   - DEVICE RESET の再検出中のコマンドには、純正も NetGD も NOT READY 2/04/01 を返す（R164）。
   - 実機で未確認：起動時のリセット（BIOS・KOS）のあと、detect_time の間 NOT READY と UA が出ても起動できるか。
-- **gdprobe の seq 19・20 は main の外**：`devreset_cmd`（再検出中のコマンド、R164）は `feat/gdprobe-seq20`（`addeb4f6`）にある。
+- **gdprobe の seq 19・20**：`devreset_cmd`（再検出中のコマンド、R164）は `feat/gdprobe-seq20`（`addeb4f6`）にあり、merge/batch10 で main に取り込み済み（2026-11-23 に確認。以前の「main の外」は古い）。
 
 **2026-11-21〜22 の実機の結果（R115〜R124）**：
 - **基板**：6.0 の SWD は 7 ピンヘッダの 4 = SWDIO、5 = SWCLK、7 = GND（導通で確定、R116）。CHIPID とロックの有無は SWD のアダプタ待ち（手順は `tools/fwbackup/README_ja.md`）。
@@ -122,7 +136,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 **ソフト側の残り（実機なしでできるもの）**：
 - R88 で進行中：古いコメントの修正、`read_ip_header` の起動トラックの推定を起動領域の判定にそろえる、`trim` の共用（2E −0.5 KB）。
 - 2E のフラッシュの削減案 2（`opt-level="z"`、約 −7.5 KB）は、オプトインのプロファイル `release-z`・`release-z-hot-s` として用意済み（R98）。既定にするかは実機で速度を比べてから（`docs/research/flash-budget-2e.md` §7）。
-- NetGD 専用メニュー `tools/netgd-menu`：設計（R97）、手順 1〜8（R101）、手順 9 の UDP 探索と手順 11 の箱絵（R108）、レビュー（R104）の指摘の修正（R109）。手順 10（ファーム更新）と 12（実機の数字で決めるもの）が残る。KOS の層は CI でコンパイルを確かめるだけで、実機は未確認。
+- NetGD 専用メニュー `tools/netgd-menu`：設計（R97）、手順 1〜8（R101）、手順 9 の UDP 探索と手順 11 の箱絵（R108）、レビュー（R104）の指摘の修正（R109）。手順 10（ファーム更新）と 12（実機の数字で決めるもの）が残る（どちらも「実機の後」、open-issues OI-20）。KOS の層は CI でコンパイルを確かめるだけで、実機は未確認（初回の実行は `docs/research/hw-runbook.md` §5、まだ走らせていない）。R187 でメニューの BBA の立ち上げを DHCP なしにした。
 - v5.5 用の `OpenGDEMU.rbf` は、CI（`.github/workflows/fpga.yaml`、上流の公開の Quartus のイメージ）で作れる（R103）。リポジトリの rbf は R105 のもの（番号つき ack と Status）。2E の `resident,sd-fast` は `release-z` でしか入らないので、CI もそれで確かめる（R111）。
 - AG16K：Supra での手順は `fpga/agm/`（R106。WSL 上での再現は R158）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作ってファームに埋め込める（埋め込んでも約 10 KB 余る）。PS で流す時間は約 1.2〜1.7 秒と見積もった（実機で測る）。
 - `embedded_sdmmc` を自前の FAT に置き換える（−4〜−7 KB の見積もり、作業は大きい）。ビットストリームを埋め込むことになった場合に検討。
@@ -162,8 +176,8 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 - **G1-1 調査** — 済（上記）。6.0 基板の MCU / FPGA / 水晶 / ヘッダ配置を公開情報から洗い出し、v5.5 との差分を表にする。
 - **G1-2 実物確認（ユーザー）** — 部品の写真による確認は済（R6、R41）。SWD は済（7 ピンヘッダの 4 = SWDIO・5 = SWCLK・7 = GND、R115・R116）。UART・ERASE パッドの位置、PA23/24/25・PB1/2 が FPGA の方へ伸びているかは未（細いプローブが要る）。
 - **G1-3 移植** — 進行中。ボード差分を Cargo feature（`board-v55` / `board-v60`）で切り替え、FPGA ローダーは `common/psload` に切り出し済み（R57、ホストのみ）。FIFO のブロック RAM 対応は実装済み（R39）。
-  AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。**R99：Supra 2026.03（Linux 版、ネットワークなし）でビルドできた**。M9K 14 個、ロジック 13 %、LZMA 後 37,727 B。手順は `docs/research/ag16k-supra-build.md`（inout の後処理 `fixio.py` が必須、PLL は `alta_pllve`）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作れる。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。ピン探し（設計 2-4 の方法 2）の準備中（Supra の環境は R158 で動いた。`pinfind` の初回の Supra ビルドは未実施）。公開資料にはボール表・BSDL・PS のタイミングが無いが、Supra に `alta_osc` というプリミティブがあり、クロック源に使える可能性がある（周波数は不明、R136）。
-- **G1-4 実機起動** — 未。P5 の手順で書き込み → UART ログ → IDE バス動作確認。
+  AG16K のビットストリームは Supra が要る（R69。Quartus で EP4CE15F23 として合成 → Supra の Migrate、または `synth_agm` → `af`）。**R99：Supra 2026.03（Linux 版、ネットワークなし）でビルドできた**。M9K 14 個、ロジック 13 %、LZMA 後 37,727 B。手順は `docs/research/ag16k-supra-build.md`（inout の後処理 `fixio.py` が必須、PLL は `alta_pllve`）。6.0 の実際のピン配置が分かれば、基板用のビットストリームを作れる。6.0 の PS 用ピン 5 本は v5.5 の値を仮に使用（未確認）。ピン探し（設計 2-4 の方法 2）：Supra でのビルドとゲートレベルのシミュレーションは通った（R162・R169・R171。段階 0・1 は RETIMING 修正のあとで作り直し済み）。**実機では一度も走っていない**（ロック前提のため止まっている。open-issues OI-08）。公開資料にはボール表・BSDL・PS のタイミングが無いが、Supra に `alta_osc` というプリミティブがあり、クロック源に使える可能性がある（周波数は不明、R136）。
+- **G1-4 実機起動** — 未（ロック前提のため止まっている。open-issues OI-01〜OI-03）。P5 の手順で書き込み → UART ログ → IDE バス動作確認。
 - **ロック前提（R177、2026-11-22 の判断）**：6.0 の MCU はロック済みで、純正のバックアップは不可。ERASE は今は行わない（ユーザーの判断事項）。
   - **SWD が要る段階は止まっている**：G1-2 の SWD での CHIPID 確認とバックアップ、G1-4 の書き込み・UART ログ・IDE バス確認（ERASE をするまで SWD が使えない）。
   - **ハードウェア無しで進める分**：AG16K のビットストリームと `board-v60` ローダーのホスト側の検証・シミュレーション、ピン探し（`fpga/pinfind`）の準備、ファームの容量見積もり、NetGD のホストテスト、G2・G3 の PC 側ツール。
@@ -178,10 +192,10 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
   F1 書込中はボタン無効、F2 FLUSH CACHE、F3 MWDMA2 の公表、F4 LBA48 の書込の分割、F5 取り出し中のハードリセットで復帰、
   F6 書込セッション（IMAGE_CTL）、F7 MBR 保護、F8 書込データの FNV-1a 照合、F13 機能ビット。
   性能（F9〜F12）は計測後に判断。**未着手**（書込性能、マウント解除・再スキャン、FIFO/DMA の書込経路）。
-- **G2-3 コンソール側アプリ** — 実装済み：`tools/netgd-recv/`（KOS + FatFs、R48。指摘 11 項目の修正は R62）。`kos.yaml` で毎回ビルド（R87）。
+- **G2-3 コンソール側アプリ** — 実装済み：`tools/netgd-recv/`（KOS + FatFs、R48。指摘 11 項目の修正は R62）。NGTP の受け手は `tools/netgd-t2`（R186）とメニューの `ngtp_srv.c`。2026-11-23 の実機で `netgd-t2`（`T2_NO_DRIVE=1`）は起動の 10〜20 秒後に終わり、ポート 20039 が開かなかった（調査中、open-issues OI-07）。`kos.yaml` で毎回ビルド（R87）。
   マウント時の FAT の読み取りは R68（まとめ読み）と R80（`f_expand` の空き領域の表）で対策済み。
 - **G2-4 PC 側送信ツール** — 実装済み：`tools/netgd-send`（T1、R30）。dc_auto 用プリセットは `integrations/dcdevtools/netgd.ps1`。
-- **G2-5 実機検証** — 未。送信 → 保存 → 起動。転送速度の計測。
+- **G2-5 実機検証** — 未（NetGD への書き込みは OI-01〜OI-03 待ち）。転送だけは純正の GDEMU + BBA で計測した：g2x は最高 2,602 KB/s（2026-11-23）、素の KOS の TCP は 16 KiB で約 2 MB/s（R178）、直した TCP は p1・p2 まで通り p3（64 KiB）の途中で終了（調査中、OI-06）。方式（直した TCP か g2x か）は未決（OI-10）。送信 → 保存 → 起動はこれから。
 
 ### G3：本家同等 + 高性能
 - **G3-1 機能差分表** — 済：`docs/research/gdemu6-and-parity.md`（Sonnet 調査、R7）。
@@ -215,7 +229,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 
 ### P6：実機検証ループ（ユーザー + Opus）
 - 書き込み → UART/RTT ログ取得 → 解析 → 修正。G1-4・G2-5・G3-3 はここで回す。
-- 状態：**未実施**。上の「実装済み」はすべてここで初めて確かめる。
+- 状態：**未実施**（NetGD が実機で動いていないため。2026-11-23 までの実機の実行はすべて純正 GDEMU の上）。上の「実装済み」はすべてここで初めて確かめる。
 - 既知の要確認：上流で報告されていた IDE バスのビット化け（バスタイミング）。F5 の前提（書き込み中に Dreamcast が RSTn を動かさないこと、R16）。
   書き込み中の FWS=6 の必要性（正誤表 46.1.1.3、R59）。
 
@@ -260,7 +274,7 @@ G3-4（R72・R75）、FAT の実イメージ試験（R67・R70）、GDI の名�
 
 ## 将来の地雷メモ（レビューで判明）
 - slot 0・5・19 の3件は FPGA とファームの両方で対処した（`docs/design/mcu-fpga-handshake.md`、スロットの説明は `docs/AddressMapMCU.md`）。
-  **シミュレーションとビルドで確認しただけで、実機では未確認。新しい動作は `out/OpenGDEMUCore.v` からビットストリームを作り直してから有効**（同梱の `OpenGDEMU.rbf` は古いまま。古いビットストリームでは新しいファームも従来どおりに動く）。
+  **シミュレーションとビルドで確認しただけで、実機では未確認。新しい動作は `out/OpenGDEMUCore.v` からビットストリームを作り直してから有効**（同梱の `OpenGDEMU.rbf` は R103 で R105 のもの（番号つき ack と Status）に差し替え済み。古いビットストリームでは新しいファームも従来どおりに動く）。
   - slot 0：`ack_command` はコマンドの番号つきで ack する。取り込みより後に来たコマンドの COMMAND_PEND は消えない（R89 A-c の残り）。
   - slot 19：書き込みにビットごとのマスク（bit 12:8）。ファームは DMA モードと PIO フロー制御をまとめて1つの「転送モード」として書き（転送は DMA か PIO のどちらかなので、片方を立てるともう片方が消えるのは意図した動作）、FPGA が持つ PKT_PHASE には触らない。
   - slot 5：MCU からの書き込みは下位バイトだけ。`set_irr` は上位バイト（LBA48 の前回値）を消さない。
