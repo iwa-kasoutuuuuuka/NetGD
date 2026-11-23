@@ -58,6 +58,9 @@ ADDR_DEVICE = 6
 ADDR_COMMAND = 7
 CSN_CMD = 0b10
 CSN_IDLE = 0b11
+CSN_CTRL_ALT = 0b01
+ADDR_ALT_STATUS = 6
+ADDR_STATUS = 7
 
 MCU_HW_INFO = 0
 MCU_STATUS = 1
@@ -406,20 +409,31 @@ def dma_read_prestaged(sectors=2, abort=True):
 
 # -- transfers that are not a whole number of 32-byte bursts (OI-04) -----------
 #
-# Holly's G1 DMA moves whole 32-byte blocks: stock, asked for exactly 2,352 B,
-# completes and writes 2,368 (R183, DM_A1_exact extent=2368). So the host's
-# last burst wants 16 words even when the request ends inside it, and the
-# FPGA grants DMARQ only with 16 words in the FIFO. The MCU model below follows
-# stream_from_sd in ide.rs: prime, BSY + DMA mode, push the rest a chunk at a
-# time, pad, wait for the FIFO to drain (capped), DMA off, status + INTRQ.
+# The FPGA grants DMARQ only with 16 words in the FIFO, so the firmware pads a
+# read up to the next 32-byte block. What Holly does with the pad is NOT known.
+# Stock, asked for exactly 2,352 or 16,464 B, completes with memory written 16 B
+# further, those bytes zero (R183; probe record stock_20261123_27_dma-exact).
+# That is memory, not bus cycles, and fits two hosts, so every case runs both:
+#   "full"   strobes whole 16-word bursts, so it also takes the pad;
+#   "exact"  strobes only the programmed length (last burst 8 words for 2,352)
+#            and leaves the pad in the FIFO with DMARQ up.
+# Only hardware decides; the firmware's "drain done (lvl=...)" line shows it.
+#
+# The MCU model follows stream_from_sd: prime, BSY + DMA mode, push the rest a
+# chunk at a time, pad, then the drain loop with its 100-poll floor,
+# host_took_everything, the fast-complete path, the aborted checks and
+# DmaPadDrain. One firmware 1 ms poll is FW_POLL_NS here, to keep it cheap to
+# simulate; it is still several times one burst (about 2 us).
 
 DMA_BLOCK_BYTES = 32
-# The firmware's drain cap is 200 ms, far beyond any transfer here. Scaled so a
-# stall stays cheap to simulate: this much past the transfer's own bus time.
-DRAIN_CAP_NS = 150_000
-DMARQ_PATIENCE_NS = 100_000
-# The MCU primes the FIFO before arming DMA: up to 4,088 words at 125 ns.
+FW_POLL_NS = 5_000
+FW_MIN_WAIT_POLLS = 100
+FW_CAP_POLLS = 200
+DMA_PAD_SETTLE_READS = 3
 FIRST_DMARQ_NS = 2_000_000
+HOST_GIVES_UP_NS = 3_000_000
+MCU_CMD_FEAT = 4
+XFER_MASK = 0x0F00
 
 
 def dma_pad_bytes(total):
@@ -427,128 +441,280 @@ def dma_pad_bytes(total):
     return -total % DMA_BLOCK_BYTES
 
 
+class PadDrain:
+    """discimg::atapi::DmaPadDrain."""
+
+    def __init__(self):
+        self.last, self.same = 0, 0
+
+    def poll(self, level, pad_bytes):
+        if level == 0 or level * 2 > pad_bytes:
+            self.same = 0
+            return False
+        self.same = self.same + 1 if self.same and level == self.last else 1
+        self.last = level
+        return self.same >= DMA_PAD_SETTLE_READS
+
+
 def exact_words(nbytes):
     return [(i * 0x9E37 + 0x4321) & 0xFFFF or 1 for i in range(nbytes // 2)]
 
 
-def dma_read_exact(chunks, pad=True, host_bytes=None, sd_latency_ns=20_000, expect="done"):
-    """A DMA read of sum(chunks) bytes against a Holly that moves 32-byte blocks.
+def dma_read_exact(chunks, model, pad=True, host_bytes=None, fast=True,
+                   sd_latency_ns=20_000, late_pad_ns=0, host_start_ns=0,
+                   pause_last_ns=0, abort=False, next_cmd=False, expect="done"):
+    """A DMA read of sum(chunks) bytes against one host model.
 
-    `chunks` are the firmware's staging rounds. `host_bytes` is the length the
-    host programmed (default: exactly the transfer). `expect`:
-      "done"  every block granted, data intact, FIFO empty, clean completion;
-      "stall" the last block is never granted and the MCU's drain cap ends the
-                command with the tail still in the FIFO;
-      "short" the host stops early (floor length) and the device still
-                completes rather than hanging.
+    `chunks` are the firmware's staging rounds, `host_bytes` the length the
+    host programmed (default: the transfer), `fast` the `fast-complete` feature.
+    `late_pad_ns` delays the pad, `host_start_ns` the host's first burst,
+    `pause_last_ns` its last. `abort` writes a new command while the pad is in
+    the FIFO; `next_cmd` runs a second read after the completion. `expect`:
+      "done"  all data delivered, clean completion;
+      "stall" no pad: the tail is never granted, the poll cap ends the command;
+      "short" the host stops early and the device still completes.
     """
+    assert model in ("full", "exact")
     total = sum(chunks)
     want = exact_words(total)
     host_len = total if host_bytes is None else host_bytes
-    blocks = (host_len + DMA_BLOCK_BYTES - 1) // DMA_BLOCK_BYTES
     pad_bytes = dma_pad_bytes(total) if pad else 0
-    drain_cap_ns = DRAIN_CAP_NS + total * 100 + sd_latency_ns * len(chunks)
+    if model == "full":
+        host_words = (host_len + DMA_BLOCK_BYTES - 1) // DMA_BLOCK_BYTES * HOLLY_BURST_WORDS
+    else:
+        host_words = host_len // 2
+    if abort:
+        # Stop inside the pad: all data taken, and for "full" two pad words.
+        host_words = total // 2 + (2 if model == "full" else 0)
+    second = pattern(7)
 
     async def host_tb(ctx, top, res):
         host = Host(ctx, top)
         host.dev = top.core.dev0
+        core = top.core
         await host.reset()
         await host.delay(2000)
         await host.pio_write(CSN_CMD, ADDR_DEVICE, 0x00)
         await host.pio_write(CSN_CMD, ADDR_COMMAND, 0xC8)
-        got, stalled = [], False
-        for b in range(blocks):
-            try:
-                await host.wait_dmarq(DMARQ_PATIENCE_NS if b else FIRST_DMARQ_NS)
-            except AssertionError:
-                stalled = True
+        got, stalled, paused = [], False, False
+        waited_first = False
+        while len(got) < host_words:
+            waited = 0
+            while not ctx.get(core.io_IDE_DMARQ):
+                if ctx.get(core.io_IDE_INTRQ) or waited > HOST_GIVES_UP_NS:
+                    stalled = True
+                    break
+                await host.delay(20)
+                waited += 20
+            if stalled:
                 break
+            if not waited_first:
+                waited_first = True
+                await host.delay(host_start_ns)
+            if pause_last_ns and not paused and host_words - len(got) <= HOLLY_BURST_WORDS:
+                paused = True
+                await host.delay(pause_last_ns)
             await host.delay(host.t["tLR"])
-            burst = await host.dma_read_burst(HOLLY_BURST_WORDS)
+            burst = await host.dma_read_burst(min(HOLLY_BURST_WORDS, host_words - len(got)))
             if burst is None:
                 stalled = True
                 break
             got += [v & 0xFFFF for v in burst]
             await host.delay(100)
         res["got"], res["stalled"] = got, stalled
-        res["aborted"] = host.aborted_bursts
-        waited = 0
-        while not ctx.get(top.core.io_IDE_INTRQ) and waited < 2 * drain_cap_ns:
-            await host.delay(50)
-            waited += 50
-        res["intrq"] = bool(ctx.get(top.core.io_IDE_INTRQ))
-        res["status"] = (await host.pio_read(CSN_CMD, 7)) & 0xFF
+        res["aborted_bursts"] = host.aborted_bursts
+        if abort:
+            await host.delay(300)
+            await host.pio_write(CSN_CMD, ADDR_COMMAND, 0xC8)
+            await host.delay(FW_POLL_NS * 6)
+            res["intrq"] = bool(ctx.get(core.io_IDE_INTRQ))
+            res["dmarq_after"] = ctx.get(core.io_IDE_DMARQ)
+            res["level_after"] = ctx.get(core.dev0.dbg_rfifo_level)
+            res["status"] = (await host.pio_read(CSN_CTRL_ALT, ADDR_ALT_STATUS)) & 0xFF
+            return
+        latency = 0
+        while not ctx.get(core.io_IDE_INTRQ) and latency < HOST_GIVES_UP_NS:
+            await host.delay(200)
+            latency += 200
+        res["latency_ns"] = latency
+        res["intrq"] = bool(ctx.get(core.io_IDE_INTRQ))
+        res["status"] = (await host.pio_read(CSN_CMD, ADDR_STATUS)) & 0xFF
         await host.delay(500)
-        res["dmarq_after"] = ctx.get(top.core.io_IDE_DMARQ)
-
-    async def push_paced(mcu, words, depth):
-        # push_buf, but giving up like push_buf_to_fifo if the host has gone.
-        i = idle = 0
-        while i < len(words):
-            room = max(0, depth - (await mcu.read(MCU_RFIFO_LEVEL) + 4))
-            if room == 0:
-                await mcu.delay(1000)
-                idle += 1000
-                assert idle < DRAIN_CAP_NS, "host stopped draining during the push"
-                continue
-            idle = 0
-            n = min(room, len(words) - i)
-            await mcu.push(words[i:i + n])
-            i += n
+        res["dmarq_after"] = ctx.get(core.io_IDE_DMARQ)
+        res["level_after"] = ctx.get(core.dev0.dbg_rfifo_level)
+        if next_cmd:
+            await host.delay(FW_POLL_NS)
+            res["dmarq_idle"] = ctx.get(core.io_IDE_DMARQ)
+            await host.pio_write(CSN_CMD, ADDR_COMMAND, 0xC8)
+            res["got2"] = [v & 0xFFFF for v in await host.dma_read(len(second))]
 
     async def mcu_tb(ctx, top, res):
         mcu = Mcu(ctx, top, dev=0)
         depth = top.core.dev0.read_fifo_depth
+
+        async def take():
+            await mcu_wait_command(mcu, timeout_ns=10_000_000)
+            return (await mcu.read(MCU_HW_INFO)) & 0xFF00
+
+        def posted(val, token):
+            return val | (token & 0x8000) | ((token << 1) & 0x7E00)
+
+        async def is_aborted():
+            hw = await mcu.read(MCU_HW_INFO)
+            return bool(hw & 0x2) and bool((await mcu.read(MCU_CMD_FEAT)) & 0xFF)
+
+        async def push_paced(words):
+            i = idle = 0
+            while i < len(words):
+                if await is_aborted():
+                    return False
+                room = max(0, depth - (await mcu.read(MCU_RFIFO_LEVEL) + 4))
+                if room == 0:
+                    await mcu.delay(1000)
+                    idle += 1000
+                    assert idle < HOST_GIVES_UP_NS, "host stopped draining during the push"
+                    continue
+                idle = 0
+                n = min(room, len(words) - i)
+                await mcu.push(words[i:i + n])
+                i += n
+            return True
+
         await mcu.delay(800)
         await mcu.write(MCU_STATUS, 0x50)
-        await mcu_wait_command(mcu)
+        token = await take()
         first = want[:chunks[0] // 2]
         primed = min(depth - 8, len(first))
         await mcu.push(first[:primed])
-        await mcu.write(MCU_STATUS, 0xD0)                        # BSY|DRDY|DSC
-        await mcu.write(MCU_DMA_MODE, 1)
-        await mcu.write(MCU_HW_INFO, 0)
-        await push_paced(mcu, first[primed:], depth)
+        level_after_prime = await mcu.read(MCU_RFIFO_LEVEL)
+        await mcu.write(MCU_STATUS, posted(0xD0, token))         # BSY|DRDY|DSC
+        await mcu.write(MCU_DMA_MODE, XFER_MASK | 1)
+        await mcu.write(MCU_HW_INFO, token)
+        pushed_all = await push_paced(first[primed:])
         off = len(first)
         for c in chunks[1:]:
             await mcu.delay(sd_latency_ns)
-            await push_paced(mcu, want[off:off + c // 2], depth)
+            pushed_all = pushed_all and await push_paced(want[off:off + c // 2])
             off += c // 2
-        await push_paced(mcu, [0] * (pad_bytes // 2), depth)
-        waited = 0
+        if late_pad_ns:
+            await mcu.delay(late_pad_ns)
+        pad_pushed = 0
+        if pushed_all and pad_bytes:
+            pushed_all = await push_paced([0] * (pad_bytes // 2))
+            pad_pushed = pad_bytes if pushed_all else 0
+
         level = await mcu.read(MCU_RFIFO_LEVEL)
-        while level and waited < drain_cap_ns:
-            await mcu.delay(1000)
-            waited += 1000
+        took_all = pushed_all and primed > 0 and level == 0
+        min_wait = 0 if took_all else FW_MIN_WAIT_POLLS
+        peak, pulled, zeros = level_after_prime, False, 0
+        drain = PadDrain()
+        polls = FW_CAP_POLLS
+        first_gone = None
+        for i in range(FW_CAP_POLLS):
+            if await is_aborted():
+                polls = i
+                break
             level = await mcu.read(MCU_RFIFO_LEVEL)
-        res["left_words"] = level
-        await mcu.write(MCU_DMA_MODE, 0)
-        await mcu.write(MCU_STATUS, 0x50 | 0x0100)
+            if first_gone is None and level * 2 <= pad_pushed:
+                first_gone = i
+            if level > peak:
+                peak = level
+            elif level < peak:
+                pulled = True
+            zeros = zeros + 1 if level == 0 else 0
+            waived = fast and pulled and zeros >= 2
+            if (i >= min_wait and level == 0) or waived or drain.poll(level, pad_pushed):
+                polls = i
+                break
+            await mcu.delay(FW_POLL_NS)
+        res["polls"] = polls
+        res["polls_after_data"] = polls - first_gone if first_gone is not None else None
+        if await is_aborted():
+            res["mcu_aborted"] = True
+            await mcu.write(MCU_DMA_MODE, XFER_MASK)
+            return
+        res["mcu_aborted"] = False
+        leftover = await mcu.read(MCU_RFIFO_LEVEL)
+        res["left_words"] = leftover
+        res["delivered"] = min(total, max(0, total + pad_pushed - leftover * 2))
+        await mcu.write(MCU_DMA_MODE, XFER_MASK)
+        await mcu.write(MCU_STATUS, posted(0x50 | 0x0100, token))
+        if next_cmd:
+            token = await take()
+            res["level_at_next"] = await mcu.read(MCU_RFIFO_LEVEL)
+            await mcu.push(second)
+            await mcu.write(MCU_STATUS, posted(0xD0, token))
+            await mcu.write(MCU_DMA_MODE, XFER_MASK | 1)
+            await mcu.write(MCU_HW_INFO, token)
 
     def check(res):
-        got, n = res["got"], min(len(res["got"]), len(want))
+        got = res["got"]
+        n = min(len(got), len(want))
         problem = classify(got[:n], want[:n])
         assert problem is None, problem
-        print(f"        {total} B (host {host_len}, pad {pad_bytes}): host got "
-              f"{len(got) * 2} B, FIFO left {res['left_words']} words, "
-              f"stalled={res['stalled']} status={res['status']:#04x} intrq={res['intrq']}")
-        assert res["aborted"] == 0, "DMARQ negated inside a burst"
+        assert res["aborted_bursts"] == 0, "DMARQ negated inside a burst"
+        assert not res["dmarq_after"], "DMARQ still up after the command ended"
+        assert res["level_after"] == 0 or not abort, "abort left words in the FIFO"
+        if abort:
+            print(f"        {model}: {total} B, abort in the pad: host got {len(got) * 2} B, "
+                  f"polls={res['polls']} level={res['level_after']} status={res['status']:#04x}")
+            assert res["mcu_aborted"], "the MCU did not see the abort"
+            assert not res["intrq"], "completion posted over the new command"
+            assert res["status"] & 0x80, "the new command must keep BSY"
+            return
+        print(f"        {model}{'' if fast else ' (no fast-complete)'}: {total} B (host {host_len}, "
+              f"pad {pad_bytes}): host got {len(got) * 2} B, FIFO left {res['left_words']} words, "
+              f"delivered {res['delivered']}, polls {res['polls']} "
+              f"({res['polls_after_data']} after the data), status {res['status']:#04x}")
         assert res["intrq"] and res["status"] == 0x50, "no clean completion"
-        assert not res["dmarq_after"], "DMARQ still up after completion"
         if expect == "done":
-            assert not res["stalled"], "host never got its last block"
-            assert len(got) == blocks * HOLLY_BURST_WORDS
-            assert res["left_words"] == 0
+            assert not res["stalled"], "host never got its data"
+            assert len(got) == host_words
+            assert res["delivered"] == total
+            assert res["left_words"] == (0 if model == "full" else pad_bytes // 2)
             assert all(w == 0 for w in got[len(want):]), "pad is not zero"
+            assert res["polls"] < FW_CAP_POLLS, "ran to the drain cap"
+            if model == "exact" and pad_bytes:
+                assert res["polls_after_data"] <= DMA_PAD_SETTLE_READS, "pad did not settle promptly"
         elif expect == "stall":
-            assert res["stalled"], "expected the last block to starve"
+            assert res["stalled"], "expected the tail to starve"
             assert len(got) == total // DMA_BLOCK_BYTES * HOLLY_BURST_WORDS
             assert res["left_words"] == (total % DMA_BLOCK_BYTES) // 2
+            assert res["polls"] == FW_CAP_POLLS
         else:
-            assert not res["stalled"] and len(got) == blocks * HOLLY_BURST_WORDS
+            assert not res["stalled"] and len(got) == host_words
             assert res["left_words"] == (total + pad_bytes - host_len) // 2
+            assert res["delivered"] == host_len
+            assert res["polls"] == FW_CAP_POLLS, "must not end early with data queued"
+        if next_cmd:
+            assert not res["dmarq_idle"], "DMARQ up between commands"
+            assert res["level_at_next"] == 0, "pad survived the next Command write"
+            problem = classify(res["got2"], second)
+            assert problem is None, f"next command: {problem}"
 
     return host_tb, mcu_tb, check
+
+
+def oi04_cases():
+    cases = []
+    for model in ("full", "exact"):
+        m = model
+        cases += [
+            (f"dma_exact_{m}_2352_unpadded_stalls", dma_read_exact([2352], m, pad=False, expect="stall")),
+            (f"dma_exact_{m}_2352", dma_read_exact([2352], m)),
+            (f"dma_exact_{m}_2352_no_fast", dma_read_exact([2352], m, fast=False)),
+            (f"dma_exact_{m}_2324", dma_read_exact([2324], m)),
+            (f"dma_exact_{m}_16464_two_chunks", dma_read_exact([5 * 2352, 2 * 2352], m)),
+            (f"dma_exact_{m}_mixed_2324_2048", dma_read_exact([2324 + 2048], m)),
+            (f"dma_exact_{m}_4704_no_pad", dma_read_exact([4704], m)),
+            (f"dma_exact_{m}_floor_2336", dma_read_exact([2352], m, host_bytes=2336, expect="short")),
+            (f"dma_exact_{m}_late_pad", dma_read_exact([2352], m, late_pad_ns=40_000)),
+            (f"dma_exact_{m}_slow_host", dma_read_exact([2352], m, host_start_ns=60_000)),
+            (f"dma_exact_{m}_pause_before_last", dma_read_exact([2352], m, pause_last_ns=60_000)),
+            (f"dma_exact_{m}_abort_in_pad", dma_read_exact([2352], m, abort=True)),
+            (f"dma_exact_{m}_next_command", dma_read_exact([2352], m, next_cmd=True)),
+        ]
+    return cases
 
 
 TESTBENCHES = [
@@ -557,16 +723,7 @@ TESTBENCHES = [
     ("dma_read_refill_race_t0_120", dma_read_refill_race(t0=120)),
     ("dma_read_refill_race_t0_100", dma_read_refill_race(t0=100)),
     ("dma_read_refill_race_t0_80", dma_read_refill_race(t0=80)),
-    # OI-04. Without the pad the last partial block is never granted.
-    ("dma_exact_2352_unpadded_stalls", dma_read_exact([2352], pad=False, expect="stall")),
-    ("dma_exact_2324_unpadded_stalls", dma_read_exact([2324], pad=False, expect="stall")),
-    ("dma_exact_2352", dma_read_exact([2352])),
-    ("dma_exact_2324", dma_read_exact([2324])),
-    ("dma_exact_4704_no_pad_needed", dma_read_exact([4704])),
-    ("dma_exact_16464_two_chunks", dma_read_exact([5 * 2352, 2 * 2352])),
-    ("dma_exact_mixed_2324_2048", dma_read_exact([2324 + 2048])),
-    ("dma_floor_2336_of_2352_completes", dma_read_exact([2352], host_bytes=2336, expect="short")),
-]
+] + oi04_cases()
 
 
 def run_one(name, test):
@@ -585,8 +742,11 @@ def run_one(name, test):
     sim.add_testbench(host_wrapper)
     sim.add_testbench(mcu_wrapper)
     os.makedirs("vcd", exist_ok=True)
-    with sim.write_vcd(f"vcd/timing_{name}.vcd"):
+    if name.startswith("dma_exact_"):      # many long, idle-heavy runs
         sim.run()
+    else:
+        with sim.write_vcd(f"vcd/timing_{name}.vcd"):
+            sim.run()
     check(res)
 
 

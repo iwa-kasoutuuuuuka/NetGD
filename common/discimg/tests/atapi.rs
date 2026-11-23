@@ -1764,3 +1764,25 @@ fn dma_pad_rounds_up_to_a_32_byte_block() {
         assert!(dma_pad_bytes(total) <= 30);
     }
 }
+
+#[test]
+fn dma_pad_drain_needs_a_settled_level_of_only_pad() {
+    let settled = |reads: &[u16], pad: usize| {
+        let mut d = DmaPadDrain::new();
+        reads.iter().position(|&l| d.poll(l, pad))
+    };
+    // A host that stopped at the programmed length: 8 pad words stay.
+    assert_eq!(settled(&[8, 8, 8], 16), Some(2));
+    assert_eq!(settled(&[1200, 40, 8, 8, 8], 16), Some(4));
+    // Still moving through the pad (a host reading the last block).
+    assert_eq!(settled(&[8, 7, 6, 5, 4, 3, 2, 1, 0], 16), None);
+    assert_eq!(settled(&[8, 8, 7, 7, 0], 16), None);
+    // Data still queued, however long it sits: a slow host is left alone.
+    assert_eq!(settled(&[9; 20], 16), None);
+    assert_eq!(settled(&[16; 20], 16), None);
+    // An empty FIFO is the existing path's business, as is any unpadded read.
+    assert_eq!(settled(&[0; 20], 16), None);
+    assert_eq!(settled(&[8; 20], 0), None);
+    // Leaving the pad range restarts the count.
+    assert_eq!(settled(&[8, 8, 9, 8, 8, 8], 16), Some(5));
+}
