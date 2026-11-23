@@ -1747,3 +1747,45 @@ fn pregap_zero_sectors_take_the_tracks_size_form2_on_mode2() {
         }
     }
 }
+
+#[test]
+fn dma_pad_rounds_up_to_a_32_byte_block() {
+    // (bytes, pad): audio 1/2/7 sectors, Form 2, a mixed pregap read, and
+    // lengths that must stay untouched.
+    for (total, pad) in [
+        (2352, 16), (4704, 0), (16464, 16), (2324, 12), (2 * 2324, 24),
+        (8 * 2324, 0), (2324 + 2048, 12), (10 * 2324 + 6 * 2048, 24),
+        (0, 0), (512, 0), (2048, 0), (14336, 0), (32768, 0),
+    ] {
+        assert_eq!(dma_pad_bytes(total), pad, "{total}");
+        assert_eq!((total + pad) % 32, 0);
+    }
+    for total in (0..4096).step_by(2) {
+        assert!(dma_pad_bytes(total) <= 30);
+    }
+}
+
+#[test]
+fn dma_pad_drain_needs_a_settled_level_of_only_pad() {
+    let settled = |reads: &[u16], pad: usize| {
+        let mut d = DmaPadDrain::new();
+        reads.iter().position(|&l| d.poll(l, pad))
+    };
+    // A host that stopped at the programmed length: 8 pad words stay.
+    assert_eq!(settled(&[8, 8, 8], 16), Some(2));
+    assert_eq!(settled(&[1200, 40, 8, 8, 8], 16), Some(4));
+    // Still moving through the pad (a host reading the last block).
+    assert_eq!(settled(&[8, 7, 6, 5, 4, 3, 2, 1, 0], 16), None);
+    assert_eq!(settled(&[8, 8, 7, 7, 0], 16), None);
+    // Part of the pad taken: a full-burst host paused inside its last burst.
+    assert_eq!(settled(&[4; 20], 16), None);
+    assert_eq!(settled(&[7; 20], 16), None);
+    // Data still queued, however long it sits: a slow host is left alone.
+    assert_eq!(settled(&[9; 20], 16), None);
+    assert_eq!(settled(&[16; 20], 16), None);
+    // An empty FIFO is the existing path's business, as is any unpadded read.
+    assert_eq!(settled(&[0; 20], 16), None);
+    assert_eq!(settled(&[8; 20], 0), None);
+    // Leaving the pad range restarts the count.
+    assert_eq!(settled(&[8, 8, 9, 8, 8, 8], 16), Some(5));
+}

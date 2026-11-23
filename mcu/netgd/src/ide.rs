@@ -479,8 +479,8 @@ impl IdeDevice {
     /// Reading, the FPGA only raises DMARQ with a whole 16-word Holly burst
     /// in the FIFO (a grant with fewer let the host outrun the refill and
     /// read stale words). So data staged for a DMA read must total a multiple
-    /// of 32 bytes or its tail never drains -- true of every whole-sector
-    /// path today; pad here if a caller ever stages anything else.
+    /// of 32 bytes or its tail is never granted. 2,048 and 512 B sectors do;
+    /// 2,352 and 2,324 B ones need not, and `stream_from_sd` pads those.
     ///
     /// This sets the whole transfer mode: PIO flow control goes off with it.
     /// A command moves its data by DMA or by PIO, never both, so the two are
@@ -3667,6 +3667,29 @@ async fn stream_from_sd(
         pushed_all = n == chunk.len();
         sectors_done += this;
     }
+    // Round the FIFO up to a whole 32-byte block (OI-04): the FPGA grants DMARQ
+    // only for a whole block. Only after the whole request is staged. Whether
+    // the host then strobes the pad or stops at its programmed length is not
+    // known (`DmaPadDrain`); the drain below ends correctly for either, and
+    // its log line (lvl=0 or lvl=pad/2) tells which one this host is.
+    let mut pad_bytes = 0usize;
+    if pushed_all && sectors_done == count {
+        let pad = discimg::atapi::dma_pad_bytes(pushed_bytes);
+        if pad != 0 {
+            let words = (pad / 2) as u16;
+            let depth = dev.fifo_depth_words();
+            match wait_host(dev, &mut || depth.saturating_sub(dev.read_fifo_level_hi() + 4) >= words, 5_000).await {
+                Ok(_) => {
+                    let push_reg = unsafe { dev.base.add(REG_DATA_FIFO) };
+                    for _ in 0..words {
+                        unsafe { write_volatile(push_reg, 0) };
+                    }
+                    pad_bytes = pad;
+                }
+                Err(_) => pushed_all = false,
+            }
+        }
+    }
     if !pushed_all {
         info!("  host stopped draining mid-stream (lvl={})", dev.read_fifo_level());
     }
@@ -3709,6 +3732,7 @@ async fn stream_from_sd(
     // stall here means the host abandoned the DMA, not that it paused.
     let mut last_lvl = u16::MAX;
     let mut stalled_ms = 0u32;
+    let mut pad_drain = discimg::atapi::DmaPadDrain::new();
     // Feature `fast-complete`: the floor above guards against an empty FIFO
     // meaning "the host has not started yet". A FIFO seen *falling* to empty
     // does not mean that -- the host demonstrably pulled everything -- so the
@@ -3746,7 +3770,9 @@ async fn stream_from_sd(
         let waived_done = pulled && zeros >= 2;
         #[cfg(not(feature = "fast-complete"))]
         let waived_done = false;
-        if (i >= min_wait_ms && lvl == 0) || waived_done { break; }
+        // The higher of two reads, so a level torn low cannot count as the pad.
+        let pad_lvl = if pad_bytes != 0 { lvl.max(dev.read_fifo_level()) } else { lvl };
+        if (i >= min_wait_ms && lvl == 0) || waived_done || pad_drain.poll(pad_lvl, pad_bytes) { break; }
         if lvl != last_lvl {
             if stalled_ms >= 20 {
                 info!("  drain: resumed after {} ms stall (lvl={})", stalled_ms, lvl);
@@ -3775,11 +3801,13 @@ async fn stream_from_sd(
     // total overstates delivery whenever push_buf_to_fifo bailed out early --
     // that is what made a transfer the host never touched report
     // "delivered=6152" instead of 0.
+    // The pad is not in `pushed_bytes`: a host that took some of it still took
+    // no more than the data.
     let staged_total = pushed_bytes;
-    let delivered = staged_total.saturating_sub((leftover as usize) * 2);
+    let delivered = (staged_total + pad_bytes).saturating_sub((leftover as usize) * 2).min(staged_total);
     info!(
-        "  drain done (lvl={}, delivered={}/{} of {} requested) fnv1a={:08x}",
-        leftover, delivered, staged_total, total_bytes, hash
+        "  drain done (lvl={}, pad={} B, delivered={}/{} of {} requested) fnv1a={:08x}",
+        leftover, pad_bytes, delivered, staged_total, total_bytes, hash
     );
     // Disarm DMA mode now that the host has drained as much as it
     // wanted. If we leave it armed and the FIFO has stray data left,
