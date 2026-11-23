@@ -479,8 +479,8 @@ impl IdeDevice {
     /// Reading, the FPGA only raises DMARQ with a whole 16-word Holly burst
     /// in the FIFO (a grant with fewer let the host outrun the refill and
     /// read stale words). So data staged for a DMA read must total a multiple
-    /// of 32 bytes or its tail never drains -- true of every whole-sector
-    /// path today; pad here if a caller ever stages anything else.
+    /// of 32 bytes or its tail never drains. 2,048 and 512 B sectors do; 2,352
+    /// and 2,324 B ones need not, and `stream_from_sd` pads those with zeros.
     ///
     /// This sets the whole transfer mode: PIO flow control goes off with it.
     /// A command moves its data by DMA or by PIO, never both, so the two are
@@ -3509,6 +3509,10 @@ pub async fn prefetch_ip_bin(gdi: &'static crate::gdi::Gdi) {
     }
 }
 
+/// Zeros for the end of a DMA read (`dma_pad_bytes`, at most 30 B). In RAM, as
+/// every other source of the DMAC push; never written.
+static mut DMA_PAD: [u16; 15] = [0; 15];
+
 async fn stream_from_sd(
     dev: &IdeDevice,
     gdi: &'static crate::gdi::Gdi,
@@ -3667,6 +3671,19 @@ async fn stream_from_sd(
         pushed_all = n == chunk.len();
         sectors_done += this;
     }
+    // Round the FIFO up to a whole 32-byte block (OI-04): the FPGA grants DMARQ
+    // only for a whole block, and Holly reads one even when the request ends
+    // inside it. Only after the whole request is staged. The pad is not data:
+    // `delivered` below is capped at the request.
+    if pushed_all && sectors_done == count {
+        let pad = discimg::atapi::dma_pad_bytes(pushed_bytes);
+        if pad != 0 {
+            let zeros = unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(DMA_PAD) as *const u8, pad) };
+            let n = push_buf_to_fifo(dev, zeros).await;
+            pushed_bytes += n;
+            pushed_all = n == pad;
+        }
+    }
     if !pushed_all {
         info!("  host stopped draining mid-stream (lvl={})", dev.read_fifo_level());
     }
@@ -3776,7 +3793,7 @@ async fn stream_from_sd(
     // that is what made a transfer the host never touched report
     // "delivered=6152" instead of 0.
     let staged_total = pushed_bytes;
-    let delivered = staged_total.saturating_sub((leftover as usize) * 2);
+    let delivered = staged_total.saturating_sub((leftover as usize) * 2).min(total_bytes);
     info!(
         "  drain done (lvl={}, delivered={}/{} of {} requested) fnv1a={:08x}",
         leftover, delivered, staged_total, total_bytes, hash

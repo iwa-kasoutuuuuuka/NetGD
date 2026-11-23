@@ -404,12 +404,168 @@ def dma_read_prestaged(sectors=2, abort=True):
     return host_tb, mcu_tb, check
 
 
+# -- transfers that are not a whole number of 32-byte bursts (OI-04) -----------
+#
+# Holly's G1 DMA moves whole 32-byte blocks: stock, asked for exactly 2,352 B,
+# completes and writes 2,368 (R183, DM_A1_exact extent=2368). So the host's
+# last burst wants 16 words even when the request ends inside it, and the
+# FPGA grants DMARQ only with 16 words in the FIFO. The MCU model below follows
+# stream_from_sd in ide.rs: prime, BSY + DMA mode, push the rest a chunk at a
+# time, pad, wait for the FIFO to drain (capped), DMA off, status + INTRQ.
+
+DMA_BLOCK_BYTES = 32
+# The firmware's drain cap is 200 ms, far beyond any transfer here. Scaled so a
+# stall stays cheap to simulate: this much past the transfer's own bus time.
+DRAIN_CAP_NS = 150_000
+DMARQ_PATIENCE_NS = 100_000
+# The MCU primes the FIFO before arming DMA: up to 4,088 words at 125 ns.
+FIRST_DMARQ_NS = 2_000_000
+
+
+def dma_pad_bytes(total):
+    """discimg::atapi::dma_pad_bytes."""
+    return -total % DMA_BLOCK_BYTES
+
+
+def exact_words(nbytes):
+    return [(i * 0x9E37 + 0x4321) & 0xFFFF or 1 for i in range(nbytes // 2)]
+
+
+def dma_read_exact(chunks, pad=True, host_bytes=None, sd_latency_ns=20_000, expect="done"):
+    """A DMA read of sum(chunks) bytes against a Holly that moves 32-byte blocks.
+
+    `chunks` are the firmware's staging rounds. `host_bytes` is the length the
+    host programmed (default: exactly the transfer). `expect`:
+      "done"  every block granted, data intact, FIFO empty, clean completion;
+      "stall" the last block is never granted and the MCU's drain cap ends the
+                command with the tail still in the FIFO;
+      "short" the host stops early (floor length) and the device still
+                completes rather than hanging.
+    """
+    total = sum(chunks)
+    want = exact_words(total)
+    host_len = total if host_bytes is None else host_bytes
+    blocks = (host_len + DMA_BLOCK_BYTES - 1) // DMA_BLOCK_BYTES
+    pad_bytes = dma_pad_bytes(total) if pad else 0
+    drain_cap_ns = DRAIN_CAP_NS + total * 100 + sd_latency_ns * len(chunks)
+
+    async def host_tb(ctx, top, res):
+        host = Host(ctx, top)
+        host.dev = top.core.dev0
+        await host.reset()
+        await host.delay(2000)
+        await host.pio_write(CSN_CMD, ADDR_DEVICE, 0x00)
+        await host.pio_write(CSN_CMD, ADDR_COMMAND, 0xC8)
+        got, stalled = [], False
+        for b in range(blocks):
+            try:
+                await host.wait_dmarq(DMARQ_PATIENCE_NS if b else FIRST_DMARQ_NS)
+            except AssertionError:
+                stalled = True
+                break
+            await host.delay(host.t["tLR"])
+            burst = await host.dma_read_burst(HOLLY_BURST_WORDS)
+            if burst is None:
+                stalled = True
+                break
+            got += [v & 0xFFFF for v in burst]
+            await host.delay(100)
+        res["got"], res["stalled"] = got, stalled
+        res["aborted"] = host.aborted_bursts
+        waited = 0
+        while not ctx.get(top.core.io_IDE_INTRQ) and waited < 2 * drain_cap_ns:
+            await host.delay(50)
+            waited += 50
+        res["intrq"] = bool(ctx.get(top.core.io_IDE_INTRQ))
+        res["status"] = (await host.pio_read(CSN_CMD, 7)) & 0xFF
+        await host.delay(500)
+        res["dmarq_after"] = ctx.get(top.core.io_IDE_DMARQ)
+
+    async def push_paced(mcu, words, depth):
+        # push_buf, but giving up like push_buf_to_fifo if the host has gone.
+        i = idle = 0
+        while i < len(words):
+            room = max(0, depth - (await mcu.read(MCU_RFIFO_LEVEL) + 4))
+            if room == 0:
+                await mcu.delay(1000)
+                idle += 1000
+                assert idle < DRAIN_CAP_NS, "host stopped draining during the push"
+                continue
+            idle = 0
+            n = min(room, len(words) - i)
+            await mcu.push(words[i:i + n])
+            i += n
+
+    async def mcu_tb(ctx, top, res):
+        mcu = Mcu(ctx, top, dev=0)
+        depth = top.core.dev0.read_fifo_depth
+        await mcu.delay(800)
+        await mcu.write(MCU_STATUS, 0x50)
+        await mcu_wait_command(mcu)
+        first = want[:chunks[0] // 2]
+        primed = min(depth - 8, len(first))
+        await mcu.push(first[:primed])
+        await mcu.write(MCU_STATUS, 0xD0)                        # BSY|DRDY|DSC
+        await mcu.write(MCU_DMA_MODE, 1)
+        await mcu.write(MCU_HW_INFO, 0)
+        await push_paced(mcu, first[primed:], depth)
+        off = len(first)
+        for c in chunks[1:]:
+            await mcu.delay(sd_latency_ns)
+            await push_paced(mcu, want[off:off + c // 2], depth)
+            off += c // 2
+        await push_paced(mcu, [0] * (pad_bytes // 2), depth)
+        waited = 0
+        level = await mcu.read(MCU_RFIFO_LEVEL)
+        while level and waited < drain_cap_ns:
+            await mcu.delay(1000)
+            waited += 1000
+            level = await mcu.read(MCU_RFIFO_LEVEL)
+        res["left_words"] = level
+        await mcu.write(MCU_DMA_MODE, 0)
+        await mcu.write(MCU_STATUS, 0x50 | 0x0100)
+
+    def check(res):
+        got, n = res["got"], min(len(res["got"]), len(want))
+        problem = classify(got[:n], want[:n])
+        assert problem is None, problem
+        print(f"        {total} B (host {host_len}, pad {pad_bytes}): host got "
+              f"{len(got) * 2} B, FIFO left {res['left_words']} words, "
+              f"stalled={res['stalled']} status={res['status']:#04x} intrq={res['intrq']}")
+        assert res["aborted"] == 0, "DMARQ negated inside a burst"
+        assert res["intrq"] and res["status"] == 0x50, "no clean completion"
+        assert not res["dmarq_after"], "DMARQ still up after completion"
+        if expect == "done":
+            assert not res["stalled"], "host never got its last block"
+            assert len(got) == blocks * HOLLY_BURST_WORDS
+            assert res["left_words"] == 0
+            assert all(w == 0 for w in got[len(want):]), "pad is not zero"
+        elif expect == "stall":
+            assert res["stalled"], "expected the last block to starve"
+            assert len(got) == total // DMA_BLOCK_BYTES * HOLLY_BURST_WORDS
+            assert res["left_words"] == (total % DMA_BLOCK_BYTES) // 2
+        else:
+            assert not res["stalled"] and len(got) == blocks * HOLLY_BURST_WORDS
+            assert res["left_words"] == (total + pad_bytes - host_len) // 2
+
+    return host_tb, mcu_tb, check
+
+
 TESTBENCHES = [
     ("dma_read_prestaged", dma_read_prestaged()),
     ("dma_read_prestaged_noabort", dma_read_prestaged(abort=False)),
     ("dma_read_refill_race_t0_120", dma_read_refill_race(t0=120)),
     ("dma_read_refill_race_t0_100", dma_read_refill_race(t0=100)),
     ("dma_read_refill_race_t0_80", dma_read_refill_race(t0=80)),
+    # OI-04. Without the pad the last partial block is never granted.
+    ("dma_exact_2352_unpadded_stalls", dma_read_exact([2352], pad=False, expect="stall")),
+    ("dma_exact_2324_unpadded_stalls", dma_read_exact([2324], pad=False, expect="stall")),
+    ("dma_exact_2352", dma_read_exact([2352])),
+    ("dma_exact_2324", dma_read_exact([2324])),
+    ("dma_exact_4704_no_pad_needed", dma_read_exact([4704])),
+    ("dma_exact_16464_two_chunks", dma_read_exact([5 * 2352, 2 * 2352])),
+    ("dma_exact_mixed_2324_2048", dma_read_exact([2324 + 2048])),
+    ("dma_floor_2336_of_2352_completes", dma_read_exact([2352], host_bytes=2336, expect="short")),
 ]
 
 

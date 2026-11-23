@@ -754,6 +754,15 @@ pub fn all_form2(buf: &[u8], head: usize, count: usize) -> bool {
     (0..count).all(|s| stored_is_form2(&buf[head + s * 2336..]))
 }
 
+/// Zero bytes to stage after a G1 DMA read of `total` bytes so the FIFO holds
+/// a whole number of 32-byte blocks. Holly moves whole blocks (stock, asked
+/// for exactly 2,352 B, completes and writes 2,368: R183) and the FPGA grants
+/// DMARQ only for a whole block, so without these the last partial block of
+/// a 2,352 or 2,324 B sector is never granted. 0 for a multiple of 32.
+pub const fn dma_pad_bytes(total: usize) -> usize {
+    total.wrapping_neg() & 31
+}
+
 /// In place: take `len` bytes from offset `off` of each of `count` stored
 /// sectors of `sec_size` bytes (the first `head` bytes into `buf`) and pack
 /// them from the front, `len` apart. Returns `count * len`. Needs

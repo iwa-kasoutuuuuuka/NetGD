@@ -1747,3 +1747,20 @@ fn pregap_zero_sectors_take_the_tracks_size_form2_on_mode2() {
         }
     }
 }
+
+#[test]
+fn dma_pad_rounds_up_to_a_32_byte_block() {
+    // (bytes, pad): audio 1/2/7 sectors, Form 2, a mixed pregap read, and
+    // lengths that must stay untouched.
+    for (total, pad) in [
+        (2352, 16), (4704, 0), (16464, 16), (2324, 12), (2 * 2324, 24),
+        (8 * 2324, 0), (2324 + 2048, 12), (10 * 2324 + 6 * 2048, 24),
+        (0, 0), (512, 0), (2048, 0), (14336, 0), (32768, 0),
+    ] {
+        assert_eq!(dma_pad_bytes(total), pad, "{total}");
+        assert_eq!((total + pad) % 32, 0);
+    }
+    for total in (0..4096).step_by(2) {
+        assert!(dma_pad_bytes(total) <= 30);
+    }
+}
