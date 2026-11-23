@@ -2748,6 +2748,24 @@ Opus による検証の有無、関連ファイルを書く。詳細な文書が
 - SWDIO のプルアップを切った debugprobe（`H:\PicoSWD`、リポジトリには入れない）で 5 kHz の `fwbackup check` も `NO_TARGET`。ロック・配線・JTAGSEL・Pico の故障は区別できない。
 - Fable の ERASE 前の監査は NO-GO（Pico が未検証、JTAGSEL/TST が未測定、dcload もこの GDEMU から起動）。ユーザーはこれを聞いたうえで、**リスクを承知で ERASE を進めると判断した**（2026-11-23）。実行はユーザーの物理作業で、**この記録の時点では未実施**。
 
+### R194 6.0 の ERASE・census・線の確認（diag/census-probe）（Opus・Fable）
+
+- 2026-11-23、ユーザーがリスクを承知で ERASE を実行。半田なしで、ERASE のパッド（GND まで約 15 kΩ）とヘッダ 1 番（3.3 V）を線でつないだ。純正ファームは消え、元に戻せない。
+- ERASE 後は SWD が 100 kHz で安定し、CHIPID 0x281A0761、ロックなし、確認した範囲のフラッシュは FF、GPNVM は 0。census の書き込み後は GPNVM1 = 1。
+- census：`agree=6 disagree=0`。ただし 96 本中 94 本が High で、未接続の線も電荷で High に読めるため、この値は PB1 の Low とボタン以外の証拠にならない。実機の操作で PA20（ボタン）、PA1（SD 検出）、カード挿入時の PA3〜PA7 の変化を確認。
+- メイン水晶は census の 30 秒窓の実測から約 12.0 MHz。`CKGR_MCFR` の値がずれるのは、低速クロックが内蔵 RC のため。
+- 線の確認（`diag/census-probe` 2796f509、未統合）：PA23、PA24、PA25、PB2 をオープンドレインで 1 本ずつ約 0.8 ms Low に引き、ぶつかりはなし。**PA25 を Low にすると PB2 が変化**し、nCONFIG → nSTATUS の見方と一致。PB1 は Low のまま。PA23 / PA24 は反応がなく、DATA0 / DCLK かは未確定。PA0 は Low なので駆動していない。
+- 初版（a6fc5f20）は `Primask::Active` の意味を逆に読み、最初の線のあと割り込みが戻らず止まった。線は放されていた。
+- Pico の debugprobe は、対象に電源が入った状態で `probe-rs download` のあと通信が固まる（再現）。Pico を抜き、Dreamcast の電源を入れ直してから挿し直すと回復する。原因は未解明。
+- 実機のファームは census に戻した。
+
+### R195 ピン探しファームを失敗時に安全にする（fix/pinfind-safe・fix/pinfind-guard）（Opus・Sonnet・Fable）
+
+- 修正前は起動直後から PA23 / PA24 / PA25 を駆動し、失敗時も PA23 / PA24 を駆動したままだった。
+- 修正後は事前チェックが通るまで 3 本とも入力のまま。PA25 は Low に引くだけで、PB2 の High → Low（Low の間は複数回確認）→ High、CONF_DONE の Low、PA23 / PA24 の High を確認してから PA23 / PA24 を出力にする。期限切れは PB2 の Low と区別する。すべての失敗経路で PA23 / PA24 を先に放す。
+- ホストテストとローカル CI（43/43）は成功。通常の 2E イメージは be721235 と同一。実機では未実行。
+- Fable の判定は、統合は GO、stage 0 の実機実行は NO-GO。ビットストリームが未生成で、Dreamcast に挿したままでは未使用ピンが G1 と衝突した場合に電流が制限されない。
+
 ## 判断の記録（Decisions）
 
 | 日付 | 判断 | 理由 | 決めた人 |
