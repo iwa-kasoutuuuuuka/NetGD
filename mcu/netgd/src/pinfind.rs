@@ -21,25 +21,33 @@
 //! Nothing here is used by the normal firmware; the feature is off by default.
 //! Not run on hardware.
 //!
-//! Safety, MCU side (LOG R143):
-//! * The MCU drives nothing but nCONFIG, and DCLK / DATA0 only while
-//!   configuring. Right after a successful configuration DATA0 (PA23) and,
-//!   unless the design is clocked from G1 (`--clock ball:PIN_G1`), DCLK (PA24)
-//!   go back to input + pull-up. Every other PIO line is an input with pull-up
-//!   from the start (`prepare_pins`, and `init` sets up no SMC / UART / PCK0 /
-//!   HSMCI pins: embassy-atsam3 `no-board-io`). No LED.
-//! * The FPGA is never left running: a failed or short load drives nCONFIG
-//!   low and stops (no retry); a SysTick hook drives nCONFIG low by itself
-//!   when the time limit passes, whatever the main loop is doing; the panic,
-//!   HardFault and default handlers drive nCONFIG low first; an MCU line held
-//!   low far longer than any frame can (a stopped clock) ends the run.
+//! Safety, MCU side (LOG R143; order in `psload::guarded`):
+//! * Until every software check has passed (GPBR3, bitstream present, full
+//!   decode, length, CRC) PA23, PA24 and PA25 are inputs. `McuPins::new`,
+//!   which would drive them, is not called in this build.
+//! * PA25 (nCONFIG) only ever sinks: its output latch stays 0 and it moves by
+//!   OER / ODR, so the MCU cannot drive it high whatever the FPGA's I/O
+//!   voltage. Released, a pull-up raises it (nCONFIG is a plain input of the
+//!   FPGA, and the internal pull-up is on).
+//! * DCLK / DATA0 become outputs only after nSTATUS has followed nCONFIG down
+//!   and back up, CONF_DONE reads low, and both read high in every sample
+//!   with their pull-ups on; afterwards, or on any failure, they
+//!   go back to input + pull-up (the reset state), before nCONFIG is touched.
+//!   With a `ball:PIN_G1` clock PA24 stays an output after a good load.
+//! * Final state of nCONFIG on failure: held low once PB2 has followed PA25
+//!   or a clock may have gone out (user I/O off, nothing half-configured can
+//!   drive). Left an input if the handshake never proved PA25 is nCONFIG: no
+//!   clock was sent, and an unproven line is not sunk until power-off.
+//! * A failed load is not retried; a SysTick hook ends the load or the run at
+//!   its time limit; panic, HardFault and the default handler release the
+//!   lines the same way.
 //! * One run per power-up: a flag in GPBR3 (kept across resets, cleared when
-//!   the backup domain loses power) makes a second boot refuse to load the
-//!   FPGA. Clear it by removing power, or over SWD:
+//!   the backup domain loses power), set before the first drive, makes a
+//!   second boot refuse. Clear it by removing power, or over SWD:
 //!   `probe-rs write --chip ATSAM3U2E b32 0x400E129C 0`.
-//! * Not covered: a debugger halting the core (nothing runs, nCONFIG stays
-//!   as it is; with a `ball:` clock the FPGA stops mid-frame) -- do not halt
-//!   while the FPGA is configured.
+//! * Not covered: a debugger halting the core; and an MCU reset while the
+//!   FPGA is configured. The refused boot may not drive PA25, so the FPGA
+//!   stays configured: the log says so when CONF_DONE reads high. Power off.
 
 use crate::cyclone;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -48,6 +56,7 @@ use defmt::{error, info, warn};
 use embassy_atsam3::pac;
 use embassy_time::Instant;
 use pinfind::{Decoder, Frame, Tally};
+use psload::guarded::{self, GuardedError, GuardedPsPins, PrecheckError};
 use psload::{PsPins, PsSource};
 
 mod params {
@@ -64,9 +73,10 @@ const NPINS: usize = 96;
 const NCONFIG_BIT: u32 = 1 << 25; // PA25
 const DATA0_BIT: u32 = 1 << 23; // PA23
 const DCLK_BIT: u32 = 1 << 24; // PA24
+const CONF_DONE_BIT: u32 = 1 << 1; // PB1
+const NSTATUS_BIT: u32 = 1 << 2; // PB2
 
-/// Wait this long after boot, FPGA unconfigured (nCONFIG low, its user I/O
-/// off), before loading: time to attach the logic analyser and the external
+/// Wait this long after boot, every PS line an input, before loading: time to attach the logic analyser and the external
 /// pull-ups to a powered board (README_ja.md section 5).
 const PRE_LOAD_WAIT_S: u64 = 10;
 /// The configuration of the FPGA may take this long (estimated 1-3 s,
@@ -103,15 +113,155 @@ fn pio(port: usize) -> &'static pac::pioa::RegisterBlock {
     }
 }
 
-/// nCONFIG (PA25) low, by register, from any context: the FPGA goes back
-/// into configuration with its user I/O off. Idempotent.
+/// May the fault paths sink nCONFIG? False until the handshake first drives
+/// it, and again once a failed handshake has left it unproven.
+static NCONFIG_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// The five PS lines by register, from any context. A zero-sized handle, so
+/// the panic and fault handlers can use it too.
+pub struct RegPins;
+
+impl PsPins for RegPins {
+    #[inline(always)]
+    fn set_nconfig(&mut self, high: bool) {
+        if high {
+            self.release_nconfig()
+        } else {
+            self.assert_nconfig()
+        }
+    }
+    /// The output latch only: with the line released this drives nothing.
+    #[inline(always)]
+    fn set_dclk(&mut self, high: bool) {
+        let a = pio(0);
+        unsafe {
+            if high {
+                a.sodr.write_with_zero(|w| w.bits(DCLK_BIT));
+            } else {
+                a.codr.write_with_zero(|w| w.bits(DCLK_BIT));
+            }
+        }
+    }
+    #[inline(always)]
+    fn set_data(&mut self, high: bool) {
+        let a = pio(0);
+        unsafe {
+            if high {
+                a.sodr.write_with_zero(|w| w.bits(DATA0_BIT));
+            } else {
+                a.codr.write_with_zero(|w| w.bits(DATA0_BIT));
+            }
+        }
+    }
+    /// Reads low once the deadline has tripped, which ends the stream at the
+    /// next byte.
+    #[inline(always)]
+    fn nstatus_high(&mut self) -> bool {
+        !TRIPPED.load(Ordering::Relaxed) && pio(1).pdsr.read().bits() & NSTATUS_BIT != 0
+    }
+    #[inline(always)]
+    fn conf_done_high(&mut self) -> bool {
+        pio(1).pdsr.read().bits() & CONF_DONE_BIT != 0
+    }
+}
+
+impl GuardedPsPins for RegPins {
+    #[inline(always)]
+    fn tripped(&mut self) -> bool {
+        TRIPPED.load(Ordering::Relaxed)
+    }
+    fn mark_run_started(&mut self) {
+        unsafe { core::ptr::write_volatile(GPBR3, RAN_MAGIC) };
+        cortex_m::asm::dsb();
+    }
+    #[inline(always)]
+    fn assert_nconfig(&mut self) {
+        NCONFIG_ARMED.store(true, Ordering::Relaxed);
+        let a = pio(0);
+        unsafe {
+            a.codr.write_with_zero(|w| w.bits(NCONFIG_BIT));
+            a.oer.write_with_zero(|w| w.bits(NCONFIG_BIT));
+        }
+    }
+    /// Masked so the deadline hook cannot sink it between the check and the
+    /// release; after a trip nCONFIG stays low.
+    fn release_nconfig(&mut self) {
+        cortex_m::interrupt::free(|_| {
+            if !TRIPPED.load(Ordering::Relaxed) {
+                unsafe { pio(0).odr.write_with_zero(|w| w.bits(NCONFIG_BIT)) };
+            }
+        });
+    }
+    fn disarm_nconfig(&mut self) {
+        NCONFIG_ARMED.store(false, Ordering::Relaxed);
+        unsafe { pio(0).odr.write_with_zero(|w| w.bits(NCONFIG_BIT)) };
+    }
+    #[inline(always)]
+    fn data0_high(&mut self) -> bool {
+        pio(0).pdsr.read().bits() & DATA0_BIT != 0
+    }
+    #[inline(always)]
+    fn dclk_high(&mut self) -> bool {
+        pio(0).pdsr.read().bits() & DCLK_BIT != 0
+    }
+    fn data_lines_passed(&mut self, l: guarded::DataLineLevels) {
+        info!(
+            "PF data lines before enable: PA23 high={} PA24 high={} ({} samples, pull-ups on)",
+            l.data0_high,
+            l.dclk_high,
+            guarded::DATA_LINE_SAMPLES
+        );
+    }
+    /// Masked for the same reason: a trip either comes first (refused) or
+    /// finds the lines enabled and releases them.
+    fn enable_data_outputs(&mut self) -> bool {
+        cortex_m::interrupt::free(|_| {
+            if TRIPPED.load(Ordering::Relaxed) {
+                return false;
+            }
+            let a = pio(0);
+            unsafe {
+                a.codr.write_with_zero(|w| w.bits(DCLK_BIT | DATA0_BIT));
+                a.oer.write_with_zero(|w| w.bits(DCLK_BIT | DATA0_BIT));
+            }
+            true
+        })
+    }
+    #[inline(always)]
+    fn release_data_outputs(&mut self, keep_dclk: bool) {
+        let bits = if keep_dclk { DATA0_BIT } else { DATA0_BIT | DCLK_BIT };
+        let a = pio(0);
+        unsafe {
+            a.odr.write_with_zero(|w| w.bits(bits));
+            a.puer.write_with_zero(|w| w.bits(bits));
+        }
+    }
+}
+
+/// Every exit: DCLK / DATA0 to inputs first, then nCONFIG low if it is armed.
+/// From any context; idempotent.
 #[inline(always)]
 pub fn fpga_off() {
-    let a = pio(0);
-    unsafe {
-        a.codr.write_with_zero(|w| w.bits(NCONFIG_BIT));
-        a.oer.write_with_zero(|w| w.bits(NCONFIG_BIT));
-        a.per.write_with_zero(|w| w.bits(NCONFIG_BIT));
+    guarded::fault_release(&mut RegPins, NCONFIG_ARMED.load(Ordering::Relaxed));
+}
+
+/// The five PS lines to PIO inputs with pull-up, nothing driven, the output
+/// latches 0. First thing in the run: also covers what a boot ROM or an
+/// earlier firmware left behind across a warm reset.
+fn ps_lines_to_input() {
+    const A: u32 = NCONFIG_BIT | DCLK_BIT | DATA0_BIT;
+    const B: u32 = NSTATUS_BIT | CONF_DONE_BIT;
+    for (port, m) in [(0, A), (1, B)] {
+        let p = pio(port);
+        unsafe {
+            p.odr.write_with_zero(|w| w.bits(m));
+            p.codr.write_with_zero(|w| w.bits(m));
+            p.idr.write_with_zero(|w| w.bits(m));
+            p.mddr.write_with_zero(|w| w.bits(m));
+            p.ifdr.write_with_zero(|w| w.bits(m));
+            p.puer.write_with_zero(|w| w.bits(m));
+            p.per.write_with_zero(|w| w.bits(m));
+        }
     }
 }
 
@@ -120,6 +270,7 @@ pub fn fpga_off() {
 /// `no-board-io` nothing has set them up; this also covers whatever the
 /// boot ROM or a resident left behind.)
 pub fn prepare_pins() {
+    ps_lines_to_input();
     for (port, &m) in MASK.iter().enumerate() {
         let p = pio(port);
         unsafe {
@@ -130,18 +281,6 @@ pub fn prepare_pins() {
             p.puer.write_with_zero(|w| w.bits(m));
             p.per.write_with_zero(|w| w.bits(m));
         }
-    }
-}
-
-/// PA23 (and PA24 unless it clocks the design) back to input + pull-up,
-/// right after configuration: they are user I/O of the FPGA from now on
-/// (ag16k-config.md C9).
-fn release_ps_data_lines() {
-    let bits = if params::TOGGLE_DCLK { DATA0_BIT } else { DATA0_BIT | DCLK_BIT };
-    let a = pio(0);
-    unsafe {
-        a.odr.write_with_zero(|w| w.bits(bits));
-        a.puer.write_with_zero(|w| w.bits(bits));
     }
 }
 
@@ -172,8 +311,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     fpga_off();
     cortex_m::interrupt::disable();
     match info.location() {
-        Some(l) => error!("PF panic at {=str}:{=u32}; FPGA held in reset", l.file(), l.line()),
-        None => error!("PF panic; FPGA held in reset"),
+        Some(l) => error!("PF panic at {=str}:{=u32}; PS lines released", l.file(), l.line()),
+        None => error!("PF panic; PS lines released"),
     }
     loop {
         fpga_off();
@@ -189,13 +328,101 @@ unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
     }
 }
 
-/// nCONFIG low and stop for good (RTT stays readable).
+/// Release the lines and stop for good (RTT stays readable).
 fn halt(why: &str) -> ! {
     fpga_off();
-    error!("PF stop: {=str}. FPGA held in reset (nCONFIG low). Power off.", why);
+    if NCONFIG_ARMED.load(Ordering::Relaxed) {
+        error!("PF stop: {=str}. DCLK/DATA0 inputs, FPGA held in reset (nCONFIG low). Power off.", why);
+    } else {
+        error!("PF stop: {=str}. PA23/PA24/PA25 all inputs, nothing driven. Power off.", why);
+    }
     loop {
         fpga_off();
         cortex_m::asm::wfi();
+    }
+}
+
+fn report_precheck(e: PrecheckError) -> ! {
+    match e {
+        PrecheckError::AlreadyRan => {
+            if RegPins.conf_done_high() {
+                error!("PF precheck: CONF_DONE (PB1) reads high: the FPGA may still be configured from the earlier run. Remove power now.");
+            }
+            halt("precheck: a pin-finder run already started since power-up (GPBR3); remove power, or clear it with `probe-rs write --chip ATSAM3U2E b32 0x400E129C 0`")
+        }
+        PrecheckError::NoBitstream => {
+            halt("precheck: no bitstream in this firmware (fpga/pinfind/output/pinfind_ag16k.rbf was missing at build time)")
+        }
+        PrecheckError::Decode { produced } => {
+            error!("PF precheck: bitstream does not decode (stopped after {} bytes)", produced);
+            halt("precheck: corrupt bitstream")
+        }
+        PrecheckError::Length { got, want } => {
+            error!("PF precheck: bitstream decodes to {} bytes, expected {}", got, want);
+            halt("precheck: bitstream length")
+        }
+        PrecheckError::Cksum { got, want } => {
+            error!("PF precheck: bitstream cksum {=u32} != {=u32}", got, want);
+            halt("precheck: bitstream checksum")
+        }
+    }
+}
+
+fn report_load(e: GuardedError) -> ! {
+    if TRIPPED.load(Ordering::Relaxed) {
+        error!("PF load: time limit ({} ms) passed", LOAD_LIMIT_MS);
+    }
+    match e {
+        GuardedError::NstatusLowBeforeReset => {
+            error!("PF handshake FAILED: nSTATUS (PB2) already low before nCONFIG moved; PA25 not driven");
+            halt("handshake: nSTATUS low at start")
+        }
+        GuardedError::NstatusStuckHigh => {
+            error!("PF handshake FAILED: nSTATUS (PB2) did not fall with PA25 low; PA25 released, PA23/PA24 never enabled");
+            halt("handshake: nSTATUS stuck high")
+        }
+        GuardedError::NstatusRoseWhileLow => {
+            error!("PF handshake FAILED: nSTATUS (PB2) read high again while PA25 was still low; PA25 released, PA23/PA24 never enabled; PA25 is not shown to control PB2");
+            halt("handshake: nSTATUS rose while nCONFIG low")
+        }
+        GuardedError::DeadlineBeforeReset => {
+            error!("PF handshake FAILED: time limit passed before PA25 moved; nothing driven");
+            halt("handshake: deadline before reset")
+        }
+        GuardedError::DeadlineTripped => {
+            error!("PF handshake FAILED: time limit passed during the handshake; PB2 not shown to move; PA23/PA24 never enabled, PA25 held low");
+            halt("handshake: deadline")
+        }
+        GuardedError::NstatusStuckLow => {
+            error!("PF handshake FAILED: nSTATUS (PB2) did not rise after PA25 release; PA23/PA24 never enabled");
+            halt("handshake: nSTATUS stuck low")
+        }
+        GuardedError::ConfDoneHighAfterReset => {
+            error!("PF handshake FAILED: CONF_DONE (PB1) high after reset; PA23/PA24 never enabled");
+            halt("handshake: CONF_DONE high")
+        }
+        GuardedError::DataLinesNotHigh(l) => {
+            error!(
+                "PF data-line check FAILED: PA23 high={} PA24 high={} ({} samples, pull-ups on); PA23/PA24 never enabled",
+                l.data0_high,
+                l.dclk_high,
+                guarded::DATA_LINE_SAMPLES
+            );
+            halt("data lines not high before enable")
+        }
+        GuardedError::OutputsRefused => halt("load: deadline passed before DCLK/DATA0 were enabled"),
+        GuardedError::Load(f) => {
+            error!("PF stream FAILED: {}", f);
+            halt("load failed")
+        }
+        GuardedError::EarlyDone { sent, want } => {
+            error!("PF stream: CONF_DONE early, {} of {} bytes", sent, want);
+            halt("configuration did not take the whole bitstream")
+        }
+        GuardedError::ShortTransfer { sent, want } => {
+            error!("PF stream: short transfer, {} of {} bytes", sent, want);
+            halt("configuration did not take the whole bitstream")
+        }
     }
 }
 
@@ -226,16 +453,14 @@ fn report_diff(what: &str, a: &[u32; 3], b: &[u32; 3]) -> u32 {
     n
 }
 
-/// The whole pin-finder run. Called by `main_task` right after the PS pins
-/// are set up; never returns. `make_source` starts the bitstream (as for
+/// The whole pin-finder run. Called by `main_task` before anything has made a
+/// PS line an output; never returns. `make_source` starts the bitstream (as for
 /// `cyclone::load`).
 pub fn main<S: PsSource>(
-    fpga: &mut cyclone::McuPins,
     present: bool,
     raw_len: usize,
-    make_source: impl FnMut() -> S,
+    mut make_source: impl FnMut() -> S,
 ) -> ! {
-    fpga.set_nconfig(false);
     if params::STAGE0 {
         info!("PF STAGE 0 (no outputs driven) bitstream sha256={} ({} bytes raw)", params::RBF_SHA256, raw_len);
     } else {
@@ -252,24 +477,18 @@ pub fn main<S: PsSource>(
         params::N_DRIVE
     );
 
-    // One run per power-up.
-    unsafe {
-        if core::ptr::read_volatile(GPBR3) == RAN_MAGIC {
-            halt("a pin-finder run already started since power-up (GPBR3); remove power, or clear it with `probe-rs write --chip ATSAM3U2E b32 0x400E129C 0`");
-        }
+    // One run per power-up, and a bitstream that decodes to what was built.
+    // Every PS line is still an input.
+    let already_ran = unsafe { core::ptr::read_volatile(GPBR3) } == RAN_MAGIC;
+    if let Err(e) = guarded::precheck(already_ran, present, raw_len, params::RBF_CKSUM, &mut make_source) {
+        report_precheck(e);
     }
-    if !present {
-        halt("no bitstream in this firmware (fpga/pinfind/output/pinfind_ag16k.rbf was missing at build time)");
-    }
+    info!("PF precheck passed ({} bytes, cksum {=u32})", raw_len, params::RBF_CKSUM);
 
-    info!("PF waiting {} s with the FPGA in reset before loading (attach probes now)", PRE_LOAD_WAIT_S);
+    info!("PF waiting {} s, PS lines all inputs, before loading (attach probes now)", PRE_LOAD_WAIT_S);
     let w0 = Instant::now();
-    while (Instant::now() - w0).as_secs() < PRE_LOAD_WAIT_S {
-        fpga.set_nconfig(false);
-    }
+    while (Instant::now() - w0).as_secs() < PRE_LOAD_WAIT_S {}
 
-    // From here on a reset must not lead to a second run.
-    unsafe { core::ptr::write_volatile(GPBR3, RAN_MAGIC) };
     embassy_atsam3::systick::set_tick_hook(on_tick);
     set_deadline_ms(LOAD_LIMIT_MS);
 
@@ -277,24 +496,22 @@ pub fn main<S: PsSource>(
     cortex_m::asm::delay(bootcore::part::MCK_HZ / 500); // 2 ms: inputs settle
     let before = pdsr_all();
 
-    let stats = match cyclone::load_once_no_retry(fpga, make_source) {
+    info!("PF handshake: PA25 low, expecting PB2 to follow");
+    let mut clk = cyclone::McuClock;
+    let stats = match guarded::guarded_load(
+        &cyclone::PROFILE,
+        &mut RegPins,
+        &mut clk,
+        raw_len,
+        params::TOGGLE_DCLK,
+        make_source,
+    ) {
         Ok(s) => s,
-        Err(f) => {
-            error!("PF FPGA load failed: {} (after {} attempt)", f.error, f.attempts);
-            halt("load failed")
-        }
+        Err(e) => report_load(e),
     };
     if TRIPPED.load(Ordering::Relaxed) {
         halt("load took longer than the limit");
     }
-    if stats.early_done || stats.bytes as usize != raw_len {
-        error!(
-            "PF CONF_DONE early or short transfer: {} of {} bytes, early_done={}",
-            stats.bytes, raw_len, stats.early_done
-        );
-        halt("configuration did not take the whole bitstream");
-    }
-    release_ps_data_lines();
     info!(
         "PF FPGA configured ({} ms, {} bytes, padding {}); PA23{} back to input",
         (Instant::now() - t0).as_millis(),
@@ -316,7 +533,7 @@ pub fn main<S: PsSource>(
     if params::STAGE0 {
         stage0(&after);
     }
-    run(fpga)
+    run(&mut RegPins)
 }
 
 /// Stage 0: the design has no outputs. Hold it configured for the current
@@ -401,7 +618,7 @@ fn report(pins: &[Pin; NPINS], clock: &Option<Frame>) {
 }
 
 /// Listen until the run ends, then hold the FPGA in reset. Never returns.
-fn run(fpga: &mut cyclone::McuPins) -> ! {
+fn run(fpga: &mut RegPins) -> ! {
     // CPU cycle counter as the time base (96 MHz, wraps every ~44 s; only
     // differences are used).
     let mut cp = unsafe { cortex_m::Peripherals::steal() };
@@ -517,7 +734,6 @@ fn run(fpga: &mut cyclone::McuPins) -> ! {
 
     // FPGA back into configuration: user I/O off. Then the summary.
     fpga_off();
-    fpga.set_nconfig(false);
     report(pins, &clock);
     info!(
         "PF end ({=str}, {} s): FPGA held in reset (nCONFIG low). Power off, then flash the normal firmware.",
