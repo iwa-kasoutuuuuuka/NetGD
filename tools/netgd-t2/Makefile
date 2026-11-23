@@ -1,7 +1,9 @@
 # netgd-t2 - the standalone T2 receiver (NGTP over KOS TCP -> NetGD SD card), KallistiOS build.  NOT run on hardware.
 # Build in the DreamSDK shell (KOS_BASE set), or with build.ps1 from PowerShell:
 #     make                 netgd-t2.elf          stock KOS TCP: WANT 16 KiB x 1
-#     make tcpfix          netgd-t2-tcpfix.elf   KOS's net_tcp.c replaced by a patched copy (../kos-patches): 64 KiB x 2
+#     make tcpfix          netgd-t2-tcpfix.elf   KOS's net_tcp.c replaced by a patched copy (../kos-patches): 16 KiB x 1 for now
+#                          (64 KiB x 2 is the shape that hung the real Dreamcast in g2netbench p4, cause unknown;
+#                          make tcpfix T2_WANT=65536 T2_DEPTH=2 asks for it)
 #     make T2_NO_DRIVE=1   never sends a packet to the drive (network-only smoke test; every write is refused)
 #     make T2_WANT=32768 T2_DEPTH=2 T2_RCVBUF=20480 T2_CODE=1234 T2_IP=0xC0A80A02   (numbers only: no quoted -D strings)
 #     make clean

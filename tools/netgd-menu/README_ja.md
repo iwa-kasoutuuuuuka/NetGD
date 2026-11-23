@@ -28,14 +28,15 @@ DreamSDK のシェル（`KOS_BASE` 設定済み、KOS は 2.3.0 のユーザー�
 ```
 cd tools/netgd-menu
 make                 # netgd-menu.elf（KOS の TCP のまま：NGTP の窓 16 KiB × 1）
-make tcpfix          # netgd-menu-tcpfix.elf（直した net_tcp.c を一緒にリンク：64 KiB × 2）
+make tcpfix          # netgd-menu-tcpfix.elf（直した net_tcp.c を一緒にリンク：当面 16 KiB × 1）
 make cdi             # netgd-menu.cdi（SD のフォルダ 01 用。CI では作らない）
 ```
 
 PowerShell からは `.\build.ps1 [-Debug] [-TcpFix] [-Cdi] [-Make 'NM_IP=0x...'] -BbaTools <Dreamcast-Dev-Tools-for-BBA のフォルダ>`。
 
+- **B ボタン**：B は「離された」のを見てから数える（`../netgd-recv/src/ng_btnguard.h`。実機で B が押されっぱなしに見えるパッドがあった）。B が固まっている間は、情報画面・BIOS 確認・取り込み画面（待機中）・Drive not ready のダイアログは START で戻れ、画面にそう出る。転送中は PC 側から止める。正常なパッドの操作は変わらない。
 - オブジェクトは `build/kos/`（tcpfix は `build/kos-fix/`）に出る（`tools/netgd-recv/src/*.c` と FatFs のオブジェクトもここ。netgd-recv 側のビルドには触らない）。
-- **NGTP の窓**（WANT の大きさ × 同時数）：既定は **16 KiB × 1**。KOS 2.3 の TCP は窓より大きいフレームでほぼ止まる（R178：32〜64 KiB で 4〜6 KB/s）ため。`make tcpfix` だけ **64 KiB × 2**（`tools/netgd-t2` と同じ仕組み：`$(KOS_BASE)/kernel/net/net_tcp.c` を写して `../kos-patches/net_tcp-rx-fix.patch` を当て、ここでコンパイルしてリンク。リンクマップで直した版が入り KOS の `net_tcp.o` が入っていないことを確かめる。DreamSDK は変更しない）。受信バッファ（= TCP の窓）は両方とも listen の前に 20480 B（`make NM_RCVBUF=…` で変更）。取り込み画面の 4 行目に `window 16 KiB x 1 (stock tcp)` のように出る。
+- **NGTP の窓**（WANT の大きさ × 同時数）：既定は **16 KiB × 1**。KOS 2.3 の TCP は窓より大きいフレームでほぼ止まる（R178：32〜64 KiB で 4〜6 KB/s）ため。`make tcpfix` も当面 **16 KiB × 1**（64 KiB × 2 は g2netbench p4 と同じ形で実機の Dreamcast が 2 回止まった。原因は未解明で、この既定は止まる形を避けるだけ。`make tcpfix NM_WANT=65536 NM_DEPTH=2` で明示できる。`tools/netgd-t2` と同じ仕組み：`$(KOS_BASE)/kernel/net/net_tcp.c` を写して `../kos-patches/net_tcp-rx-fix.patch` を当て、ここでコンパイルしてリンク。リンクマップで直した版が入り KOS の `net_tcp.o` が入っていないことを確かめる。DreamSDK は変更しない）。受信バッファ（= TCP の窓）は両方とも listen の前に 20480 B（`make NM_RCVBUF=…` で変更）。取り込み画面の 4 行目に `window 16 KiB x 1 (stock tcp)` のように出る。
 - `make NM_IP=0xC0A80A02`：固定 IP（既定 192.168.10.2）。数値だけ（引用符つきの `-D` は kos-cc を通らない）。
 - `make cdi` が使うツール（`sh-elf-objcopy`、`scramble`、`makeip`、`mkisofs`、`cdi4dc`）は変数で差し替えられる（`MKISOFS=... make cdi`）。**`mkisofs`・`cdi4dc` が DreamSDK に入っているかは未確認**（無ければ `mkdcdisc` に替える）。`ip.txt` の書式も実機の DreamSDK の `makeip` で確かめること。
 - `make NM_HANDOFF_DEFAULT=1`：既定の渡し方を再起動にする（0 = BIOS メニュー）。`make NM_SHOW_SLOT1=1`：フォルダ `01` も一覧に出す。
@@ -115,7 +116,7 @@ python tools/netgd-recv/test/run_tests.py            # 受信コアの試験（�
 7. 同じ番号のフォルダが 2 つあるときにファームがどちらを選ぶか（H8）。
 8. `reset_goto`・`open_time`・`detect_time` の表示が `GDEMU.INI` と合っているか。
 
-9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありでケーブルを抜いたまま Y：約 10 秒で「No link: check the cable and restart the console」が出て、もう一度 Y を押しても落ちない（net_init を再び呼ばない）か。挿して再起動すれば通るか。取り込み画面を何度も出入りしても空きメモリが減らないか（リッスンソケットは閉じずに使い回す）。直結ケーブル（PC 192.168.10.1/24）で 192.168.10.2 が出て、ARP の行が「PC 192.168.10.1 answered ARP」になるか。`netgd-send push` が最後まで通り、実効速度はどれくらいか（既定 16 KiB × 1 で約 2 MB/s の見込み（R178）、tcpfix 版 64 KiB × 2 と比べる）。純正 GDEMU で起動したとき `52 00` だけで止まるか（ファームのログ、または gdprobe の記録と比べる）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
+9. 取り込み（H6、H7、H9）：BBA なしで Y を押して「BBA not found」がすぐ出るか。BBA ありでケーブルを抜いたまま Y：約 10 秒で「No link: check the cable and restart the console」が出て、もう一度 Y を押しても落ちない（net_init を再び呼ばない）か。挿して再起動すれば通るか。取り込み画面を何度も出入りしても空きメモリが減らないか（リッスンソケットは閉じずに使い回す）。直結ケーブル（PC 192.168.10.1/24）で 192.168.10.2 が出て、ARP の行が「PC 192.168.10.1 answered ARP」になるか。`netgd-send push` が最後まで通り、実効速度はどれくらいか（既定 16 KiB × 1 で約 2 MB/s の見込み（R178）、tcpfix 版（既定は同じ 16 KiB × 1）と比べる）。純正 GDEMU で起動したとき `52 00` だけで止まるか（ファームのログ、または gdprobe の記録と比べる）。セッションを閉じた後に `52 82` がすぐ通るか。`tools/netgd-recv/README_ja.md` の初回確認リスト（DMA・FLUSH・FNV 照合・マウント時間）も同じ経路。
 
 KOS 2.3.0 のヘッダで確かめること（CI で通れば確認済み）：`arch_menu()`／`arch_reboot()`（K1）、`bfont` の色設定（netgd-fwupd が使用）、`maple`（netgd-recv が使用）、ネットワーク：`net_init`・`net_default_dev->ip_addr`・TCP の `listen`／`accept`・`O_NONBLOCK`（K2〜K4、`net_kos.c`）。
 

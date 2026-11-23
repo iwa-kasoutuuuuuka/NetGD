@@ -44,6 +44,27 @@ void nm_ui_set_tcpfix(nm_ui_t *ui, int tcpfix)
     ui->tcpfix = tcpfix ? 1 : 0;
     ui->want_bytes = tcpfix ? NGTP_WANT_TCPFIX : NGTP_WANT_STOCK;
     ui->depth = tcpfix ? NGTP_DEPTH_TCPFIX : NGTP_DEPTH_STOCK;
+#ifdef NM_WANT
+    ui->want_bytes = NM_WANT;           /* make NM_WANT=...: an explicit window */
+#endif
+#ifdef NM_DEPTH
+    ui->depth = NM_DEPTH;
+#endif
+}
+
+/* The buttons of this frame.  B is an event only from a pad that has been seen with B released (ng_btnguard.h). */
+static uint32_t read_events(nm_ui_t *ui, uint32_t now)
+{
+    uint32_t btn, pad = nm_plat_pad(&btn);
+    uint32_t ev = nm_input_update(&ui->in, btn, now);
+    if (!ng_btnguard_update(&ui->bguard, pad, (btn & NM_BTN_B) != 0, now)) ev &= ~(uint32_t)NM_BTN_B;
+    return ev;
+}
+
+/* With B stuck, START does what B would do on the screens that have no other way back.  Never with a healthy pad. */
+static int stuck_back(const nm_ui_t *ui)
+{
+    return ng_btnguard_stuck(&ui->bguard) && (ui->events & NM_BTN_START);
 }
 
 /* ---- drawing helpers ---- */
@@ -141,7 +162,7 @@ static void draw_info(nm_ui_t *ui)
     char reset[64], buf[96];
     const char *def = ui->scan.default_image[0] ? ui->scan.default_image : "(none)";
     nm_screen_clear(&ui->scr);
-    draw_frame(ui, "A:Switch hand-off  B:Back", "");
+    draw_frame(ui, ng_btnguard_stuck(&ui->bguard) ? "A:Switch hand-off  START:Back (B is stuck)" : "A:Switch hand-off  B:Back", "");
     nm_screen_printf(&ui->scr, 2, 1, NM_ATTR_NORMAL, "Firmware      %.24s", ui->fw.fwstr);
     nm_screen_printf(&ui->scr, 3, 1, NM_ATTR_NORMAL, "Protocol      OGDM %u  features 0x%02X%s%s%s", ui->fw.proto, ui->fw.caps,
                      (ui->fw.caps & FW_CAP_SESSION) ? " session" : "", (ui->fw.caps & FW_CAP_CHECKSUM) ? " checksum" : "",
@@ -336,7 +357,9 @@ static void draw_net(nm_ui_t *ui)
     const ng_ui_t *u = &ui->prog;
     int busy = ui->state == NM_S_NET_BUSY;
     nm_screen_clear(&ui->scr);
-    draw_frame(ui, busy ? "B:Stop safely (a later push resumes)" : "B:Leave this screen", "Send with: netgd-send push <image> --host <IP> --code <code>");
+    draw_frame(ui, ng_btnguard_stuck(&ui->bguard) ? (busy ? "B is stuck: stop from the PC" : "START:Leave this screen (B is stuck)")
+                   : busy ? "B:Stop safely (a later push resumes)" : "B:Leave this screen",
+               "Send with: netgd-send push <image> --host <IP> --code <code>");
     nm_screen_printf(&ui->scr, 2, 1, NM_ATTR_NORMAL, "IP %s  port %u  code %04u", ui->ip, (unsigned)NGTP_PORT, (unsigned)ui->code);
     if (!ui->srv.connected) snprintf(line, sizeof line, "waiting for the PC%s", ui->srv.session ? " (session open)" : "");
     else if (!ui->srv.hello) snprintf(line, sizeof line, "client connected");
@@ -365,7 +388,7 @@ static void draw_net_confirm(nm_ui_t *ui)
 {
     uint32_t held = nm_input_held_ms(&ui->in, NM_BTN_A, ui->now);
     nm_screen_clear(&ui->scr);
-    draw_frame(ui, "Hold A for 1 second: allow", "B (or 30 seconds): refuse");
+    draw_frame(ui, "Hold A for 1 second: allow", ng_btnguard_stuck(&ui->bguard) ? "B is stuck: 30 seconds refuses" : "B (or 30 seconds): refuse");
     nm_screen_printf(&ui->scr, 3, 2, NM_ATTR_WARN, "The PC asks to %s a protected folder:", ui->confirm_what);
     nm_screen_printf(&ui->scr, 5, 2, NM_ATTR_NORMAL, "%.48s", ui->confirm_folder);
     nm_screen_put(&ui->scr, 7, 2, "The folder is the card's default image or 01.", NM_ATTR_NORMAL);
@@ -402,7 +425,8 @@ static void draw_state(nm_ui_t *ui)
         char label[NM_FOLDER_MAX + 1];
         folder_label(ui, label, sizeof label);
         nm_screen_clear(&ui->scr);
-        draw_frame(ui, ui->dialog == NM_DLG_NOTREADY ? "A:Wait again  B:Back to the list" : "A:Back to the list", "");
+        draw_frame(ui, ui->dialog != NM_DLG_NOTREADY ? "A:Back to the list"
+                       : ng_btnguard_stuck(&ui->bguard) ? "A:Wait again  START:Back (B is stuck)" : "A:Wait again  B:Back to the list", "");
         switch (ui->dialog) {
         case NM_DLG_NOIMAGE:
             nm_screen_printf(&ui->scr, 4, 2, NM_ATTR_WARN, "No image in folder %s", label);
@@ -426,7 +450,7 @@ static void draw_state(nm_ui_t *ui)
     }
     case NM_S_CONFIRM_BIOS:
         nm_screen_clear(&ui->scr);
-        draw_frame(ui, "A:Yes, go to the BIOS menu", "B:No, stay in the menu");
+        draw_frame(ui, "A:Yes, go to the BIOS menu", ng_btnguard_stuck(&ui->bguard) ? "START:No, stay in the menu (B is stuck)" : "B:No, stay in the menu");
         nm_screen_put(&ui->scr, 4, 2, "Go back to the BIOS menu?", NM_ATTR_WARN);
         break;
     case NM_S_HANDOFF:
@@ -486,7 +510,9 @@ static void hk_progress(void *ctx, const ng_ui_t *u)
 static int hk_stop(void *ctx)
 {
     nm_ui_t *ui = (nm_ui_t *)ctx;
-    int stop = ng_plat_user_stop();
+    uint32_t pad = 0;
+    int down = ng_plat_user_stop(&pad);
+    int stop = ng_btnguard_update(&ui->bguard, pad, down, nm_plat_millis());
     if (stop) ui->b_wait_release = 1;       /* the same press must not also leave the screen when the operation has stopped */
     return stop;
 }
@@ -525,8 +551,9 @@ static int hk_confirm(void *ctx, const char *what, const char *folder)
     ui->state = NM_S_NET_CONFIRM;
     ui->confirm_since = t0;
     for (;;) {
-        uint32_t ev = nm_input_update(&ui->in, nm_plat_buttons(), nm_plat_millis());
+        uint32_t ev;
         ui->now = nm_plat_millis();
+        ev = read_events(ui, ui->now);
         if (ev & NM_BTN_B) break;
         if (nm_input_held_ms(&ui->in, NM_BTN_A, ui->now) >= 1000) { allow = 1; break; }
         if (ui->now - t0 >= 30000) break;
@@ -600,7 +627,7 @@ static void net_start(nm_ui_t *ui)
     hk.ctx = ui; hk.line = hk_line; hk.progress = hk_progress; hk.stop = hk_stop; hk.confirm = hk_confirm;
     hk.busy = hk_busy; hk.idle = hk_idle; hk.millis = hk_millis; hk.before_session = hk_before_session;
     ngtp_srv_init(&ui->srv, &hk, &ui->fw, ui->code);
-    ngtp_srv_set_window(&ui->srv, ui->want_bytes, ui->depth);      /* 16 KiB x 1 on stock KOS TCP (R178), 64 KiB x 2 tcpfix */
+    ngtp_srv_set_window(&ui->srv, ui->want_bytes, ui->depth);      /* 16 KiB x 1 by default (ngtp_srv.h) */
     ui->nlog = 0;
     ui->prog_valid = 0;
     ui->msg[0] = 0;
@@ -637,7 +664,7 @@ static void net_close(nm_ui_t *ui)
 static void net_frame(nm_ui_t *ui)
 {
     int ev;
-    if (ui->events & NM_BTN_B) { net_close(ui); return; }
+    if ((ui->events & NM_BTN_B) || stuck_back(ui)) { net_close(ui); return; }
     nm_disc_service(ui->srv.connected);
     ev = ngtp_srv_service(&ui->srv);
     if (ui->srv.code_expired) {
@@ -677,9 +704,9 @@ void nm_ui_step(nm_ui_t *ui)
 {
     ui->now = nm_plat_millis();
     ui->controller = nm_plat_controller();
-    ui->events = nm_input_update(&ui->in, nm_plat_buttons(), ui->now);
+    ui->events = read_events(ui, ui->now);
     if (ui->b_wait_release) {           /* B stopped an operation: the press that did it must not count as a new B (R104 D) */
-        if (nm_plat_buttons() & NM_BTN_B) ui->events &= ~(uint32_t)NM_BTN_B;
+        if (ui->in.held & NM_BTN_B) ui->events &= ~(uint32_t)NM_BTN_B;
         else ui->b_wait_release = 0;
     }
 
@@ -719,7 +746,7 @@ void nm_ui_step(nm_ui_t *ui)
         break;
 
     case NM_S_INFO:
-        if (ui->events & NM_BTN_B) ui->state = NM_S_LIST;
+        if ((ui->events & NM_BTN_B) || stuck_back(ui)) ui->state = NM_S_LIST;
         else if (ui->events & NM_BTN_A) ui->handoff_mode = ui->handoff_mode == NM_HANDOFF_REBOOT ? NM_HANDOFF_BIOS : NM_HANDOFF_REBOOT;
         scan_frame(ui);
         break;
@@ -732,7 +759,7 @@ void nm_ui_step(nm_ui_t *ui)
         if (ui->dialog == NM_DLG_NOTREADY && (ui->events & NM_BTN_A)) {
             nm_launch_wait_again(&ui->launch);
             ui->state = NM_S_LAUNCH;
-        } else if (ui->events & (NM_BTN_A | NM_BTN_B)) {
+        } else if ((ui->events & (NM_BTN_A | NM_BTN_B)) || stuck_back(ui)) {
             back_to_list(ui);
         }
         break;
@@ -742,7 +769,7 @@ void nm_ui_step(nm_ui_t *ui)
             nm_art_cancel(&ui->art);
             if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
             enter_handoff(ui, "Returning to the BIOS menu ...", NM_HANDOFF_BIOS);
-        } else if (ui->events & NM_BTN_B) {
+        } else if ((ui->events & NM_BTN_B) || stuck_back(ui)) {
             ui->state = NM_S_LIST;
         }
         if (ui->state == NM_S_CONFIRM_BIOS) scan_frame(ui);

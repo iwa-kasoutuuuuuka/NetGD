@@ -300,7 +300,17 @@ static int confirm(void)
     draw_wrap(ROWS - 1, COL_GREY, fw_msg_euc(FWM_UI_CONFIRM_CANCEL));
 
     /* the buttons must be let go first, so a press from the previous screen cannot count */
-    while (pad_buttons() & (COMBO | CONT_B)) thd_sleep(30);
+    /* A pad can report a button all the time: this then waits for ever, on purpose (never a way into the flash path), and says why */
+    {
+        uint32_t waited = 0;
+        int shown = 0;
+        while (pad_buttons() & (COMBO | CONT_B)) {
+            if (!shown && waited >= 1000) { draw_wrap(ROWS - 2, COL_YELLOW, fw_msg_euc(FWM_UI_BTN_HELD)); shown = 1; }
+            thd_sleep(30);
+            waited += 30;
+        }
+        if (shown) clear_rows(ROWS - 2, ROWS - 2);
+    }
     for (;;) {
         b = pad_buttons();
         if ((b & COMBO) == COMBO) {

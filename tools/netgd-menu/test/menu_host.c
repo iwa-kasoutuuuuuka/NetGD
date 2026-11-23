@@ -4,7 +4,7 @@
                   [--rflip K] [--rflip-all] [--nocontroller] [--names A|B] [--stock] [--gdemu-version V] [--nolink N]
      menu_host serve <img> <sectors> --port P --code C [--tcpfix] ...   (the transfer screen on a localhost socket)
         events: U D L R A B X Y S LT RT (press and release), hold:A:1200, t:500, scan, step, dump, rflipall, ua,
-                nocontroller, controller
+                nocontroller, controller, stuck, unstuck (--b-stuck: B reads down until "unstuck")
    Nothing here runs on a Dreamcast. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -330,6 +330,9 @@ static void dump_screen(void)
     }
 }
 
+static int pad_stuck;           /* B reads down whatever the script presses (a pad that reports it all the time) */
+static uint32_t ui_buttons(void) { return nm_host_buttons | (pad_stuck ? NM_BTN_B : 0); }
+
 static uint32_t button_by_name(const char *n)
 {
     static const struct { const char *name; uint32_t bit; } tab[] = {
@@ -358,6 +361,8 @@ static void run_event(char *ev)
     if (!strcmp(ev, "ua")) { sim_ua_mode = 1; sim_ua_pending = 1; return; }
     if (!strcmp(ev, "nocontroller")) { nm_host_controller = 0; return; }
     if (!strcmp(ev, "controller")) { nm_host_controller = 1; return; }
+    if (!strcmp(ev, "stuck")) { pad_stuck = 1; return; }
+    if (!strcmp(ev, "unstuck")) { pad_stuck = 0; return; }
     if (!strncmp(ev, "t:", 2)) { run_ms((uint32_t)atol(ev + 2)); return; }
     if (!strncmp(ev, "hold:", 5)) {
         char *colon = strchr(ev + 5, ':');
@@ -409,6 +414,7 @@ static int ui_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--rflip") && i + 1 < argc) sim_rflip_cmd = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
         else if (!strcmp(argv[i], "--nocontroller")) nm_host_controller = 0;
+        else if (!strcmp(argv[i], "--b-stuck")) pad_stuck = 1;
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(argv[i], "--noaddr") && i + 1 < argc) nm_host_net_noaddr = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nolink") && i + 1 < argc) nm_host_net_nolink = atoi(argv[++i]);
@@ -420,6 +426,8 @@ static int ui_cmd(int argc, char **argv)
     sim_trace = 1;
     atexit(sim_summary);
     nm_ui_init(&ui);
+    nm_host_buttons_hook = ui_buttons;
+    if (!pad_stuck) ng_btnguard_prearm(&ui.bguard, 1);  /* the scripted presses come from a healthy pad */
     copy = malloc(strlen(script) + 1);
     strcpy(copy, script);
     for (tok = strtok(copy, " ,"); tok; tok = strtok(NULL, " ,")) {
@@ -429,6 +437,54 @@ static int ui_cmd(int argc, char **argv)
     }
     free(copy);
     return 0;
+}
+
+/* U12: a button counts only after a stable release from a present pad (ng_btnguard.h) */
+static uint32_t g_feed(ng_btnguard_t *g, uint32_t pad, int down, int n, uint32_t t, uint32_t step, int *any)
+{
+    for (int i = 0; i < n; i++, t += step) if (ng_btnguard_update(g, pad, down, t)) *any = 1;
+    return t;
+}
+
+static void u12_btnguard(void)
+{
+    ng_btnguard_t g;
+    uint32_t t;
+    int any;
+    /* stuck from the first sample: never counts, and is reported */
+    memset(&g, 0, sizeof g); any = 0;
+    t = g_feed(&g, 1, 1, 1000, 0, 16, &any);
+    CHECK(!any && ng_btnguard_stuck(&g));
+    /* one up sample, and three up samples in one Maple frame, are not a release */
+    g_feed(&g, 1, 0, 1, t, 16, &any); t += 16;
+    t = g_feed(&g, 1, 1, 10, t, 16, &any);
+    g_feed(&g, 1, 0, 50, t, 0, &any);           /* many polls of one status: no time has passed */
+    t = g_feed(&g, 1, 1, 10, t, 16, &any);
+    CHECK(!any && ng_btnguard_stuck(&g));
+    /* a stable release arms it: the next press counts */
+    t = g_feed(&g, 1, 0, 10, t, 16, &any);
+    CHECK(!any && !ng_btnguard_stuck(&g));
+    CHECK(ng_btnguard_update(&g, 1, 1, t));
+    /* unplugged and back with B down: ignored again */
+    t = g_feed(&g, 0, 0, 20, t, 16, &any); any = 0;
+    t = g_feed(&g, 1, 1, 20, t, 16, &any);
+    CHECK(!any && ng_btnguard_stuck(&g));
+    /* no pad for a long time is not a release */
+    memset(&g, 0, sizeof g); any = 0;
+    t = g_feed(&g, 0, 0, 100, 0, 16, &any);
+    t = g_feed(&g, 2, 1, 5, t, 16, &any);
+    CHECK(!any && ng_btnguard_stuck(&g));
+    /* a different pad starts over */
+    memset(&g, 0, sizeof g); any = 0;
+    t = g_feed(&g, 1, 0, 20, 0, 16, &any);
+    CHECK(!ng_btnguard_update(&g, 7, 1, t));
+    CHECK(ng_btnguard_stuck(&g));
+    /* a healthy pad: not "stuck" before it arms, and the clock may wrap */
+    memset(&g, 0, sizeof g); any = 0;
+    t = g_feed(&g, 1, 0, 2, 0xFFFFFFF0u, 16, &any);
+    CHECK(!ng_btnguard_stuck(&g));
+    t = g_feed(&g, 1, 0, 10, t, 16, &any);
+    CHECK(ng_btnguard_update(&g, 1, 1, t));
 }
 
 /* U8: the NGTP frame layer */
@@ -559,8 +615,9 @@ static uint32_t serve_btn;
 
 static uint32_t serve_buttons(void)
 {
-    if (ui.state == NM_S_NET_CONFIRM) return serve_confirm == 1 ? NM_BTN_A : serve_confirm == 2 ? NM_BTN_B : 0;
-    return serve_btn;
+    uint32_t stuck = pad_stuck ? NM_BTN_B : 0;
+    if (ui.state == NM_S_NET_CONFIRM) return stuck | (serve_confirm == 1 ? NM_BTN_A : serve_confirm == 2 ? NM_BTN_B : 0);
+    return stuck | serve_btn;
 }
 
 /* menu_host serve <img> <sectors> --port P --code C [--cut N] [--idle-ms N] [--stopafter N] [--confirm allow|deny]
@@ -570,7 +627,7 @@ static int serve_cmd(int argc, char **argv)
     const char *img = argv[2];
     uint32_t sectors = (uint32_t)strtoul(argv[3], NULL, 10), seed = 0, timeout_ms = 120000;
     unsigned code = 4821;
-    int dump = 0, entered = 0, k = 0, tcpfix = 0;
+    int dump = 0, entered = 0, k = 0, tcpfix = 0, want = 0, depth = 0;
     uint64_t t0;
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) nm_host_net_port = (uint16_t)atoi(argv[++i]);
@@ -587,6 +644,9 @@ static int serve_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(argv[i], "--no-udp")) nm_host_no_udp = 1;
         else if (!strcmp(argv[i], "--tcpfix")) tcpfix = 1;
+        else if (!strcmp(argv[i], "--want") && i + 1 < argc) want = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--depth") && i + 1 < argc) depth = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--b-stuck")) pad_stuck = 1;
         else if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) timeout_ms = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--dump")) dump = 1;
         else if (!strcmp(argv[i], "--trace")) sim_trace = 1;
@@ -607,6 +667,9 @@ static int serve_cmd(int argc, char **argv)
         nm_ui_init(&ui);
         if (keep_idle) ui.idle_ms = keep_idle;
         if (tcpfix) nm_ui_set_tcpfix(&ui, 1);
+        if (want) ui.want_bytes = (uint32_t)want;
+        if (depth) ui.depth = depth;
+        if (!pad_stuck) ng_btnguard_prearm(&ui.bguard, 1);
     }
     for (int i = 0; i < 2000 && ui.state != NM_S_LIST; i++) {
         frame();
@@ -846,6 +909,7 @@ static int selftest(void)
     u9_disc();
     u10_art();
     u11_netup();
+    u12_btnguard();
     printf(bad ? "SELFTEST FAIL (%d)\n" : "SELFTEST OK\n", bad);
     return bad ? 1 : 0;
 }

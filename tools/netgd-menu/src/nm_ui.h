@@ -11,6 +11,7 @@
 #include "nm_art.h"
 #include "ngtp_srv.h"
 #include "fwctl.h"
+#include "ng_btnguard.h"
 
 #ifndef NM_HANDOFF_DEFAULT
 #define NM_HANDOFF_DEFAULT 0            /* NM_HANDOFF_BIOS */
@@ -18,8 +19,8 @@
 #ifndef NM_SHOW_SLOT1
 #define NM_SHOW_SLOT1 0
 #endif
-/* 1: the patched net_tcp.c (tools/kos-patches) is linked in (make tcpfix): the NGTP window is 64 KiB x 2, else 16 KiB x 1
-   (stock KOS 2.3 TCP: a frame bigger than the receive window nearly stalls, R178).  As netgd-t2's T2_TCPFIX. */
+/* 1: the patched net_tcp.c (tools/kos-patches) is linked in (make tcpfix).  The NGTP window is 16 KiB x 1 in both builds for
+   now (see NGTP_WANT_TCPFIX in ngtp_srv.h); make NM_WANT=... NM_DEPTH=... overrides it.  As netgd-t2's T2_TCPFIX. */
 #ifndef NM_TCPFIX
 #define NM_TCPFIX 0
 #endif
@@ -85,6 +86,7 @@ typedef struct {
     uint32_t confirm_since;
     char fatal[NM_COLS + 1];
     int b_wait_release;                 /* B stopped an operation ("Stop safely"): ignore B until it is released (R104 D) */
+    ng_btnguard_t bguard;               /* B counts only after it was seen released (a pad can report it all the time) */
 
     int sd_mounted;                     /* the light mount is active */
     nm_art_t art;                       /* the box art of the game under the cursor (step 11) */

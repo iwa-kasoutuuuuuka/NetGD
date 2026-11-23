@@ -270,8 +270,15 @@ class TestWindow(Base):
         expect = sum((len(d) + 16383) // 16384 for d in datas)
         self.assertEqual((src.wants, srv.end["wants"], srv.end["data"]), (expect, expect, expect), srv.text)
 
-    def test_tcpfix_default_is_64k_x2(self):
+    def test_tcpfix_default_is_16k_x1(self):
+        # interim: 64 KiB x 2 is the shape of g2netbench p4, which hung the real Dreamcast (cause unknown)
         srv, src, datas = self.put_with("--tcpfix")
+        self.assertIn("want 16384 depth 1", srv.text)
+        self.assertEqual(max(src.sizes), 16384)
+        self.assertEqual(src.wants, sum((len(d) + 16383) // 16384 for d in datas))
+
+    def test_tcpfix_explicit_64k_x2_still_works(self):
+        srv, src, datas = self.put_with("--tcpfix", "--want", "65536", "--depth", "2")
         self.assertIn("want 65536 depth 2", srv.text)
         self.assertEqual(src.wants, sum((len(d) + 65535) // 65536 for d in datas))
 
@@ -768,6 +775,62 @@ class TestBoundedWaits(Base):
         self.assertTrue(c.put(text, Src(datas)).ok)
         sim = srv.finish(timeout=30)
         self.assertEqual((sim["end"], srv.end["result"]), (1, R_USER), srv.text)
+
+    # A pad can report B all the time (real hardware: 400 of 400 samples).  B counts only after a stable release.
+
+    def pad_run(self, script, *opts):
+        srv = Serve(self, self.card(), "--pad", script, *opts)
+        srv.finish(timeout=30)
+        return srv, int(re.search(r"^T2-MS (\d+)$", srv.text, re.M).group(1))
+
+    def test_b_held_from_the_start_neither_leaves_nor_stops(self):
+        img = self.card()
+        text, datas = self.gdi_set()
+        srv = Serve(self, img, "--pad", "B:0")
+        c = srv.client()
+        c.hello(CODE)
+        res = c.put(text, Src(datas))
+        self.assertTrue(res.ok, res.lines)
+        c.finish()
+        srv.finish()
+        self.assertEqual(srv.end["result"], R_FINISH, srv.text)
+        self.check_folder(img, "03", datas)
+
+    def test_b_held_then_released_then_pressed_leaves(self):
+        # the hold (1200 ms) must really be ignored: the old code left on the first step
+        srv, ms = self.pad_run("B:1200,-:500,B:0")
+        self.assertEqual(srv.end["result"], R_USER, srv.text)
+        self.assertGreaterEqual(ms, 1500, srv.text)
+
+    def test_one_up_sample_is_not_a_release(self):
+        srv, ms = self.pad_run("B:400,-:5,B:0", "--idle-exit-ms", "1500")
+        self.assertEqual(srv.end["result"], R_IDLE, srv.text)
+
+    def test_stuck_pad_replugged_is_still_ignored(self):
+        # healthy first (armed), then unplugged, then a pad with B down comes back
+        srv, ms = self.pad_run("-:500,x:300,B:0", "--idle-exit-ms", "2000")
+        self.assertEqual(srv.end["result"], R_IDLE, srv.text)
+
+    def test_pad_first_seen_with_b_down_is_ignored(self):
+        srv, ms = self.pad_run("x:500,B:0", "--idle-exit-ms", "1500")
+        self.assertEqual(srv.end["result"], R_IDLE, srv.text)
+
+    def test_no_pad_is_not_a_release(self):
+        srv, ms = self.pad_run("B:300,x:600,B:0", "--idle-exit-ms", "1800")
+        self.assertEqual(srv.end["result"], R_IDLE, srv.text)
+
+    def test_force_confirm_works_with_b_held(self):
+        # with the level of B, hk_confirm refused at once and a stuck pad could never allow anything
+        img = self.card({"/01/MENU.CDI": b"menu"})
+        text, datas = self.gdi_set("01")
+        srv = Serve(self, img, "--pad", "B:0", "--confirm", "allow")
+        c = srv.client()
+        c.hello(CODE)
+        res = c.put(text, Src(datas), mode=ngtp.PUT_OVERWRITE, force=True)
+        self.assertTrue(res.ok, res.lines)
+        c.finish()
+        srv.finish()
+        self.check_folder(img, "01", datas)
 
     def test_no_bba_fails_cleanly(self):
         srv = Serve(self, self.card(), "--nobba", "--dump")

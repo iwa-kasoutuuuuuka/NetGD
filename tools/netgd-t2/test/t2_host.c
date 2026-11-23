@@ -1,7 +1,9 @@
 /* t2_host: the netgd-t2 core on the host, for test/run_tests.py.
      t2_host serve <img> <sectors> --port P --code C [--want N] [--depth N] [--nofw] [--caps N] [--no-drive] [--cut N]
              [--idle-close-ms N] [--idle-exit-ms N] [--stopafter N] [--hold-b-ms N] [--confirm allow|deny]
-             [--leave-after-ms N] [--nobba] [--timeout-ms N] [--trace] [--dump]
+             [--leave-after-ms N] [--pad SCRIPT] [--nobba] [--timeout-ms N] [--trace] [--dump]
+        --pad "B:800,-:300,x:200,B:0": the pad over time from the first read: B = present with B down, - = present with B up,
+        x = no pad; each for that many ms, the last one for ever.  Without --pad the pad is healthy from the start.
    The card is a disk image (netgd-recv test/dev_file.c), the firmware the packet-level model (test/fwctl_sim.c), the
    network a real 127.0.0.1 socket (netgd-menu test/net_host.c), the clock the real one.  Prints LISTENING when the port is
    open, T2-END at the end, and a SIM line (what the model saw) at exit. */
@@ -18,6 +20,29 @@ static t2_app_t app;
 static int confirm_mode;            /* 1 = A while the question is on the screen, 2 = B */
 static uint32_t leave_after_ms;     /* B (not busy) this long after LISTENING; 0 = never */
 static uint64_t t_listen;
+static struct { char st; uint32_t ms; } pad_s[16];
+static int pad_n;
+static uint64_t pad_t0;
+
+static char pad_state(void)
+{
+    uint64_t now = nm_host_real_ms(), at = 0;
+    if (!pad_t0) pad_t0 = now;
+    for (int i = 0; i < pad_n - 1; i++) {
+        at += pad_s[i].ms;
+        if (now - pad_t0 < at) return pad_s[i].st;
+    }
+    return pad_s[pad_n - 1].st;
+}
+
+static void pad_parse(char *s)
+{
+    for (char *p = strtok(s, ","); p && pad_n < 16; p = strtok(NULL, ",")) {
+        pad_s[pad_n].st = p[0];
+        pad_s[pad_n].ms = p[1] == ':' ? (uint32_t)atol(p + 2) : 0;
+        pad_n++;
+    }
+}
 
 static void sim_summary(void)
 {
@@ -32,10 +57,16 @@ static void sim_summary(void)
 static uint32_t host_buttons(void)
 {
     char row[NM_COLS + 1];
+    uint32_t pad = 0;
+    if (pad_n) {
+        char c = pad_state();
+        nm_host_controller = c != 'x';
+        if (c == 'B') pad = NM_BTN_B;
+    }
     nm_screen_row_text(&nm_host_screen, 10, row);
-    if (strstr(row, "Hold A")) return confirm_mode == 1 ? NM_BTN_A : confirm_mode == 2 ? NM_BTN_B : 0;
-    if (leave_after_ms && t_listen && !app.busy && nm_host_real_ms() - t_listen >= leave_after_ms) return NM_BTN_B;
-    return 0;
+    if (strstr(row, "Hold A")) return pad | (confirm_mode == 1 ? NM_BTN_A : confirm_mode == 2 ? NM_BTN_B : 0);
+    if (leave_after_ms && t_listen && !app.busy && nm_host_real_ms() - t_listen >= leave_after_ms) return pad | NM_BTN_B;
+    return pad;
 }
 
 static void dump(void)
@@ -86,6 +117,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--hold-b-ms") && v) { nm_host_b_hold_ms = (uint32_t)atol(v); i++; }
         else if (!strcmp(a, "--confirm") && v) { confirm_mode = !strcmp(v, "allow") ? 1 : 2; i++; }
         else if (!strcmp(a, "--leave-after-ms") && v) { leave_after_ms = (uint32_t)atol(v); i++; }
+        else if (!strcmp(a, "--pad") && v) { pad_parse(argv[++i]); }
         else if (!strcmp(a, "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(a, "--timeout-ms") && v) { timeout_ms = (uint32_t)atol(v); i++; }
         else if (!strcmp(a, "--trace")) sim_trace = 1;
@@ -98,6 +130,7 @@ int main(int argc, char **argv)
     nm_host_buttons_hook = host_buttons;
     atexit(sim_summary);
     t2_init(&app, &cfg);
+    if (!pad_n) ng_btnguard_prearm(&app.bguard, 1);    /* the scripted presses below come from a healthy pad */
     if (ckp) ng_cfg.ckp_bytes = ckp;            /* checkpoints inside a file: resume reopens it at off > 0 */
     t0 = nm_host_real_ms();
     for (;;) {
@@ -113,6 +146,7 @@ int main(int argc, char **argv)
         if (nm_host_real_ms() - t0 > timeout_ms) { printf("T2-TIMEOUT\n"); break; }
         nm_host_real_sleep(1);
     }
+    printf("T2-MS %u\n", t_listen ? (unsigned)(nm_host_real_ms() - t_listen) : 0u);
     printf("T2-END state=%d result=%d wants=%u data=%u fw_checked=%d fw_ok=%d\n", app.state, app.result,
            (unsigned)app.srv.wants, (unsigned)app.srv.data_frames, app.fw_checked, app.fw_ok);
     if (do_dump) dump();

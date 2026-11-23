@@ -48,6 +48,12 @@ uint32_t nm_plat_buttons(void)
     if (b_down_until && (int32_t)(b_down_until - nm_plat_millis()) > 0) b |= NM_BTN_B;
     return b;
 }
+uint32_t nm_plat_pad(uint32_t *buttons)
+{
+    uint32_t b = nm_plat_buttons();     /* first: a scripted hook may plug or unplug the pad */
+    *buttons = nm_host_controller ? b : 0;
+    return (uint32_t)nm_host_controller;
+}
 int nm_plat_controller(void) { return nm_host_controller; }
 int nm_plat_dcload(void) { return nm_host_dcload; }
 uint32_t nm_plat_entropy(void) { return nm_host_entropy; }
@@ -80,14 +86,17 @@ void nm_plat_handoff(int mode)
 uint32_t ng_plat_millis(void) { return nm_plat_millis(); }
 const char *ng_plat_pcpath(const char *pc, char *buf, size_t n) { (void)buf; (void)n; return pc; }
 void ng_plat_console(const char *line) { (void)line; }
-int ng_plat_user_stop(void)
+int ng_plat_user_stop(uint32_t *pad)
 {
+    uint32_t b = nm_host_buttons_hook ? nm_host_buttons_hook() : nm_host_buttons;   /* a scripted pad (not the --hold-b-ms tail) */
+    *pad = (uint32_t)nm_host_controller;
     nm_host_polls++;
+    if (!nm_host_controller) return 0;
     if (nm_host_stop_after_polls >= 0 && nm_host_polls > nm_host_stop_after_polls) {
         nm_host_stop_after_polls = -1;          /* one B press: the next run is not stopped */
         if (nm_host_b_hold_ms) b_down_until = nm_plat_millis() + nm_host_b_hold_ms;
         return 1;
     }
-    return nm_host_user_stop;
+    return nm_host_user_stop || (b & NM_BTN_B);
 }
 DWORD get_fattime(void) { return ((DWORD)(2025 - 1980) << 25) | (6u << 21) | (1u << 16); }

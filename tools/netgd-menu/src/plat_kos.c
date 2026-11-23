@@ -31,19 +31,15 @@ uint32_t nm_plat_millis(void) { return (uint32_t)timer_ms_gettime64(); }
 
 void nm_plat_sleep(uint32_t ms) { thd_sleep((int)ms); }
 
-/* The first controller found (ports A to D).  The analog stick counts as the D-pad past +-64, the triggers as buttons past 128. */
-static cont_state_t *first_pad(void)
-{
-    maple_device_t *c = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-    return c ? (cont_state_t *)maple_dev_status(c) : NULL;
-}
-
 int nm_plat_controller(void) { return maple_enum_type(0, MAPLE_FUNC_CONTROLLER) != NULL; }
 
-uint32_t nm_plat_buttons(void)
+/* The first controller found (ports A to D).  The analog stick counts as the D-pad past +-64, the triggers as buttons past 128. */
+uint32_t nm_plat_pad(uint32_t *buttons)
 {
-    cont_state_t *st = first_pad();
+    maple_device_t *c = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    cont_state_t *st = c ? (cont_state_t *)maple_dev_status(c) : NULL;
     uint32_t b = 0;
+    *buttons = 0;
     if (!st) return 0;
     if (st->buttons & CONT_DPAD_UP) b |= NM_BTN_UP;
     if (st->buttons & CONT_DPAD_DOWN) b |= NM_BTN_DOWN;
@@ -60,6 +56,14 @@ uint32_t nm_plat_buttons(void)
     if (st->joyx > 64) b |= NM_BTN_RIGHT;
     if (st->ltrig > 128) b |= NM_BTN_LT;
     if (st->rtrig > 128) b |= NM_BTN_RT;
+    *buttons = b;
+    return (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u;
+}
+
+uint32_t nm_plat_buttons(void)
+{
+    uint32_t b;
+    nm_plat_pad(&b);
     return b;
 }
 
@@ -157,8 +161,13 @@ void ng_plat_console(const char *line)
     fflush(stdout);
 }
 
-/* B held on the controller: stop at the next safe point */
-int ng_plat_user_stop(void) { return (nm_plat_buttons() & NM_BTN_B) ? 1 : 0; }
+/* the level of B and the pad it was read from (ng_plat.h) */
+int ng_plat_user_stop(uint32_t *pad)
+{
+    uint32_t b;
+    *pad = nm_plat_pad(&b);
+    return (b & NM_BTN_B) ? 1 : 0;
+}
 
 /* FatFs clock (FF_FS_NORTC = 0) */
 DWORD get_fattime(void)

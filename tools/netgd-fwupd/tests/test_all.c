@@ -922,6 +922,7 @@ static void test_text(void)
     n = fw_text_wrap(fw_msg_euc(FWM_UI_WARN_SWD), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n <= 2);
     n = fw_text_wrap(fw_msg_euc(FWM_UI_WARN_UNTESTED), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n == 1);
     n = fw_text_wrap(fw_msg_euc(FWM_UI_CONFIRM_TITLE), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n == 1);
+    n = fw_text_wrap(fw_msg_euc(FWM_UI_BTN_HELD), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n == 1);     /* one row: ROWS - 2 */
     n = fw_text_wrap(fw_msg_euc(FWM_UI_WARN_NO_BITSTREAM), 50, &lines[0][0], sizeof lines[0], 12); CHECK(n <= 2);
     for (id = FWM_OUT_OK; id <= FWM_OUT_IO_DIRTY; id++) {          /* result screen: a handful of rows */
         n = fw_text_wrap(fw_msg_euc(id), 50, &lines[0][0], sizeof lines[0], 12);

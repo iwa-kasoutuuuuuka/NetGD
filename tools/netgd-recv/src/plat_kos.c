@@ -22,13 +22,14 @@ void ng_plat_console(const char *line)
     fflush(stdout);
 }
 
-int ng_plat_user_stop(void)
+int ng_plat_user_stop(uint32_t *pad)
 {
     maple_device_t *cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-    cont_state_t *st;
-    if (!cont) return 0;
-    st = (cont_state_t *)maple_dev_status(cont);
-    return st && (st->buttons & CONT_B) ? 1 : 0;
+    cont_state_t *st = cont ? (cont_state_t *)maple_dev_status(cont) : NULL;
+    *pad = 0;
+    if (!st) return 0;
+    *pad = (uint32_t)cont->port * MAPLE_UNIT_COUNT + (uint32_t)cont->unit + 1u;
+    return (st->buttons & CONT_B) ? 1 : 0;
 }
 
 /* FatFs clock (FF_FS_NORTC = 0) */
