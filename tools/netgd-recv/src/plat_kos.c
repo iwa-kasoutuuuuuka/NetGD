@@ -6,6 +6,7 @@
 #include <dc/maple.h>
 #include <dc/maple/controller.h>
 #include "ng_plat.h"
+#include "ng_btnguard.h"
 #include "ff.h"
 
 uint32_t ng_plat_millis(void) { return (uint32_t)timer_ms_gettime64(); }
@@ -22,13 +23,17 @@ void ng_plat_console(const char *line)
     fflush(stdout);
 }
 
-int ng_plat_user_stop(void)
+int ng_plat_user_stop(uint32_t *pad, int *odd)
 {
     maple_device_t *cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-    cont_state_t *st;
-    if (!cont) return 0;
-    st = (cont_state_t *)maple_dev_status(cont);
-    return st && (st->buttons & CONT_B) ? 1 : 0;
+    cont_state_t *st = cont ? (cont_state_t *)maple_dev_status(cont) : NULL;
+    *pad = 0;
+    *odd = 0;
+    if (!st) return 0;
+    *odd = ng_pad_implausible(st->buttons, CONT_DPAD_UP, CONT_DPAD_DOWN, CONT_DPAD_LEFT, CONT_DPAD_RIGHT,
+                              CONT_A | CONT_B | CONT_X | CONT_Y | CONT_START);          /* e.g. an all-zero raw reply */
+    *pad = (uint32_t)cont->port * MAPLE_UNIT_COUNT + (uint32_t)cont->unit + 1u;
+    return (st->buttons & CONT_B) ? 1 : 0;
 }
 
 /* FatFs clock (FF_FS_NORTC = 0) */

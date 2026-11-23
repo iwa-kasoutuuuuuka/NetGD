@@ -13,6 +13,7 @@ test failure, never a stuck run.  Nothing here has run on a Dreamcast.
 import atexit
 import hashlib
 import os
+import random
 import re
 import shutil
 import socket
@@ -714,14 +715,31 @@ class NgtClient(object):
                 raise AssertionError("unexpected frame %#x" % t)
 
 
+def free_tcp_udp_port():
+    """A port number free for TCP and UDP: menu_host binds both to it.  An ephemeral TCP port is not enough on Windows, where
+    excluded port ranges can apply to UDP only (bind then fails with WSAEACCES).  Random numbers below the ephemeral range: bind(0)
+    hands out neighbouring ports, so it can walk through a whole excluded block, and outgoing connections never take these."""
+    for _ in range(200):
+        port = random.randrange(21000, 49000)
+        t = socket.socket()
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            t.bind(("127.0.0.1", port))
+            u.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            continue
+        finally:
+            t.close()
+            u.close()
+    raise AssertionError("no port free for both TCP and UDP")
+
+
 class NgtServe(object):
     """menu_host serve on a card image: the transfer screen on a real localhost socket"""
 
     def __init__(self, test, img, *opts, code=CODE, sectors=None):
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        self.port = s.getsockname()[1]
-        s.close()
+        self.port = free_tcp_udp_port()
         self.test = test
         cmd = [EXE, "serve", img, str(sectors or UiBase.SECTORS), "--port", str(self.port), "--code", str(code)] + list(opts)
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
@@ -1588,7 +1606,7 @@ def solid_png(w, h, rgb):
 
 
 class TestWindow(NetBase):
-    """The NGTP receive window: 16 KiB x 1 on stock KOS TCP (R178), 64 KiB x 2 in a tcpfix build (as netgd-t2)"""
+    """The NGTP receive window: 16 KiB x 1 by default in both builds; a tcpfix build can ask for more (as netgd-t2)"""
 
     def push_counting(self, c, text, src):
         """a PUT; WANTs are answered only when no more frames come for 0.3 s: the largest WANT and most outstanding at once"""
@@ -1639,10 +1657,143 @@ class TestWindow(NetBase):
         self.assertIn("WINDOW want=16384 depth=1 tcpfix=0 rcvbuf=20480", srv.text)
         self.assertEqual((biggest, most), (16384, 1))
 
-    def test_tcpfix_is_64k_x_2(self):
+    def test_tcpfix_default_is_16k_x_1(self):
+        # interim: 64 KiB x 2 is the shape of g2netbench p4, which hung the real Dreamcast (cause unknown)
         srv, biggest, most = self.run_push("--tcpfix")
+        self.assertIn("WINDOW want=16384 depth=1 tcpfix=1 rcvbuf=20480", srv.text)
+        self.assertEqual((biggest, most), (16384, 1))
+
+    def test_tcpfix_explicit_64k_x_2_still_works(self):
+        srv, biggest, most = self.run_push("--tcpfix", "--want", "65536", "--depth", "2")
         self.assertIn("WINDOW want=65536 depth=2 tcpfix=1 rcvbuf=20480", srv.text)
         self.assertEqual((biggest, most), (65536, 2))
+
+    def test_b_stuck_does_not_stop_a_transfer(self):
+        srv, biggest, most = self.run_push("--b-stuck")
+        self.assertNotIn("NGD:STOP", srv.text)
+
+
+class TestStuckB(NetBase):
+    """A pad that reports B all the time (real hardware: 400 of 400 samples): B counts only after a stable release, and the
+    screens that are left with B offer START instead, only while B is stuck."""
+    S_LIST, S_INFO, S_CONFIRM_BIOS, S_NET_IDLE = 3, 4, 7, 9
+
+    def lib(self):
+        return self.card({"/02/DISC.GDI": GDI3})
+
+    def run_ui(self, script, *opts):
+        return self.ui(self.lib(), script, "--slots", "2", *opts)
+
+    def state(self, r, i=-1):
+        return int(r.screens[i][0]["state"])
+
+    def test_info_screen_has_a_way_out(self):
+        r = self.run_ui("scan X dump B dump S dump", "--b-stuck")
+        self.assertEqual([self.state(r, i) for i in range(3)], [self.S_INFO, self.S_INFO, self.S_LIST], r.text)
+        self.assertIn("START:Back (B is stuck)", NL.join(r.screens[0][1]))
+
+    def test_bios_confirm_has_a_way_out(self):
+        r = self.run_ui("scan S dump B dump S dump", "--b-stuck")
+        self.assertEqual([self.state(r, i) for i in range(3)], [self.S_CONFIRM_BIOS, self.S_CONFIRM_BIOS, self.S_LIST], r.text)
+        self.assertIn("START:No, stay in the menu (B is stuck)", NL.join(r.screens[0][1]))
+        self.assertEqual(r.handoff, [])
+
+    def test_transfer_screen_has_a_way_out(self):
+        r = self.run_ui("scan Y dump B dump S t:100 dump", "--b-stuck")
+        self.assertEqual([self.state(r, i) for i in range(3)], [self.S_NET_IDLE, self.S_NET_IDLE, self.S_LIST], r.text)
+        self.assertIn("START:Leave this screen (B is stuck)", NL.join(r.screens[0][1]))
+
+    def test_healthy_pad_start_does_not_leave(self):
+        for script, want in (("scan X S dump", self.S_INFO), ("scan S S dump", self.S_CONFIRM_BIOS), ("scan Y S dump", self.S_NET_IDLE)):
+            r = self.run_ui(script)
+            self.assertEqual(self.state(r), want, script)
+            self.assertNotIn("B is stuck", NL.join(r.rows))
+
+    def test_released_then_pressed_works(self):
+        r = self.run_ui("scan X unstuck t:200 dump B dump", "--b-stuck")
+        self.assertEqual((self.state(r, 0), self.state(r, 1)), (self.S_INFO, self.S_LIST), r.text)
+        self.assertIn("B:Back", NL.join(r.screens[0][1]))
+
+    def test_one_up_sample_is_not_a_press(self):
+        r = self.run_ui("scan X unstuck step stuck step step dump", "--b-stuck")
+        self.assertEqual(self.state(r), self.S_INFO, r.text)
+
+    def test_replugged_stuck_pad_is_ignored(self):
+        r = self.run_ui("scan unstuck t:200 X nocontroller step stuck controller t:100 dump", "--b-stuck")
+        self.assertEqual(self.state(r), self.S_INFO, r.text)
+        self.assertIn("B is stuck", NL.join(r.rows))
+
+    def force_refused(self, stuck):
+        img = self.card({"/01/MENU.CDI": b"menu"})
+        text, src, files = self.gdi_set("01")
+        srv = NgtServe(self, img, "--pad-stuck", stuck, "--confirm-max-ms", "1800")
+        c = srv.client()
+        c.hello()
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=2, flags=1), source=src)
+        self.assertFalse(ok, lines)
+        self.assertEqual(name, "EPROTECTED")
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertIn("/01/MENU.CDI", fc.files)
+        self.assertNotIn("/01/DISC.GDI", fc.files)
+
+    def test_stuck_a_and_b_never_approve(self):
+        self.force_refused("AB")
+
+    def test_a_held_before_the_question_never_approves(self):
+        self.force_refused("A")
+
+    def test_all_zero_raw_status_never_approves(self):
+        self.force_refused("ZERO")
+
+    def test_all_zero_after_a_release_never_approves(self):
+        # B stuck (so it cannot refuse), A seen released in the question, then every button "down": A must not count
+        img = self.card({"/01/MENU.CDI": b"menu"})
+        text, src, files = self.gdi_set("01")
+        srv = NgtServe(self, img, "--b-stuck", "--confirm", "zero", "--confirm-max-ms", "2500")
+        c = srv.client()
+        c.hello()
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=2, flags=1), source=src)
+        self.assertFalse(ok, lines)
+        self.assertEqual(name, "EPROTECTED")
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertIn("/01/MENU.CDI", fc.files)
+        self.assertNotIn("/01/DISC.GDI", fc.files)
+
+    def test_a_needs_a_release_first(self):
+        # a pad that comes back with A down must not launch the game under the cursor
+        r = self.run_ui("scan t:200 nocontroller step stuckA controller t:200 dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_LIST, r.text)
+        r = self.run_ui("scan t:200 nocontroller step stuckA controller t:200 unstuck t:200 A t:16 dump", "--no-prearm")
+        self.assertNotEqual(self.state(r), self.S_LIST, r.text)         # released: the same press now counts
+
+    def test_start_needs_a_release_first(self):
+        r = self.run_ui("scan t:200 nocontroller step stuckS controller t:200 dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_LIST, r.text)
+        r = self.run_ui("scan t:200 nocontroller step stuckS controller t:200 unstuck t:200 S dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_CONFIRM_BIOS, r.text)
+
+    def test_soft_reset_combo_still_counts_as_b(self):
+        r = self.run_ui("scan t:200 X stuckR step step dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_LIST, r.text)
+
+    def test_force_confirm_works_with_b_stuck(self):
+        img = self.card({"/01/MENU.CDI": b"menu"})
+        text, src, files = self.gdi_set("01")
+        srv = NgtServe(self, img, "--b-stuck", "--confirm", "allow")
+        c = srv.client()
+        c.hello()
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=2, flags=1), source=src)
+        self.assertTrue(ok, (lines, name))
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
+        self.assertIn("/01/DISC.GDI", self.clean_fs(img).files)
 
 
 class TestR104LowItems(NetBase):

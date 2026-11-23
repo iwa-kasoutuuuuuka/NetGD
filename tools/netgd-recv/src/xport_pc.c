@@ -5,10 +5,12 @@
 #include "xport_pc.h"
 #include "ng_plat.h"
 #include "ngdev.h"
+#include "ng_btnguard.h"
 
 #define MAX_OPS 64
 
 uint32_t ng_pc_poll_ms = 1000;          /* tests set 0 */
+int ng_pc_pad_healthy;                  /* tests: the scripted pad counts from its first press */
 void (*ng_pc_cfg_hook)(void);          /* tests: change ng_cfg after the defaults and the *.req flags */
 
 typedef struct {
@@ -16,6 +18,7 @@ typedef struct {
     FILE *res;
     uint32_t last_poll;
     int stop;
+    ng_btnguard_t b;                    /* B counts only after it was seen released */
 } pc_t;
 
 static int pc_exists(const char *path)
@@ -72,8 +75,11 @@ static int sink_poll(void *ctx)
     pc_t *pc = (pc_t *)ctx;
     uint32_t t = ng_plat_millis();
     char p[200];
+    uint32_t pad = 0;
+    int down, odd = 0;
     if (pc->stop) return 1;
-    if (ng_plat_user_stop()) { pc->stop = 1; return 1; }
+    down = ng_plat_user_stop(&pad, &odd);
+    if (ng_btnguard_sample(&pc->b, pad, down, odd, t)) { pc->stop = 1; return 1; }
     if (t - pc->last_poll < ng_pc_poll_ms) return 0;     /* /pc/ is a dcload call: once a second */
     pc->last_poll = t;
     snprintf(p, sizeof p, "%s/reload.req", pc->jobdir);
@@ -258,6 +264,7 @@ int ng_pc_run(const char *jobdir, void (*ui)(const ng_ui_t *))
     memset(&pc, 0, sizeof pc);
     snprintf(pc.jobdir, sizeof pc.jobdir, "%s", jobdir);
     pc.last_poll = ng_plat_millis();
+    if (ng_pc_pad_healthy) ng_btnguard_prearm(&pc.b, 1);
     sk.ctx = &pc; sk.line = sink_line; sk.poll = sink_poll; sk.millis = sink_millis;
     g_ui = ui;
     sk.ui = sink_ui;

@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "nm_screen.h"
 #include "ngtp_srv.h"
+#include "ng_btnguard.h"
 
 #define T2_VERSION "0.1.0"
 
@@ -22,6 +23,7 @@ typedef struct {
     uint32_t idle_exit_ms;          /* no frame for this long: close everything and exit (bounded wait) */
     int drive;                      /* 0: never send anything to the drive (build T2_NO_DRIVE=1) */
     int tcpfix;                     /* the patched net_tcp.c is linked (shown on the screen only) */
+    uint32_t confirm_max_ms;        /* a force question with no answer is refused after this long */
 } t2_cfg_t;
 
 void t2_cfg_defaults(t2_cfg_t *c, int tcpfix);
@@ -47,6 +49,7 @@ typedef struct {
     int nlog;
     char op[NM_COLS + 1];
     int busy, b_was_down;
+    ng_btnguard_t bguard;           /* B counts only after it was seen released (a pad can report it all the time) */
     uint32_t last_ui_ms;
     ng_err_t close_err;
 } t2_app_t;

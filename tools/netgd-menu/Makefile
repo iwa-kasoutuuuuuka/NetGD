@@ -2,7 +2,8 @@
 # there is no KOS toolchain on the development PC.  Build inside the DreamSDK shell or any KOS environment:
 #     make             (release)         make DEBUG=1   (-g -O0)
 #     make tcpfix      netgd-menu-tcpfix.elf: KOS's net_tcp.c replaced by a patched copy (../kos-patches), NGTP window
-#                      64 KiB x 2 (the default build, stock KOS TCP: 16 KiB x 1, R178).  As tools/netgd-t2.
+#                      16 KiB x 1 for now, like the default build (64 KiB x 2 is the shape that hung the real Dreamcast in
+#                      g2netbench p4, cause unknown).  make NM_WANT=65536 NM_DEPTH=2 asks for it.  As tools/netgd-t2.
 #     make NM_IP=0xC0A80A02 NM_RCVBUF=20480   the static IP (no DHCP) and the TCP receive window (numbers only)
 #     make clean
 #     make cdi         netgd-menu.cdi for the SD card folder 01 (needs makeip, scramble, mkisofs, cdi4dc; see README_ja.md)
@@ -57,6 +58,19 @@ ifneq ($(NM_IP),)
 endif
 ifneq ($(NM_RCVBUF),)
   KOS_CFLAGS += -DNM_RCVBUF=$(NM_RCVBUF)
+endif
+# the window override is for tcpfix builds only: on stock KOS TCP a larger window stalls (R178)
+ifneq ($(NM_WANT)$(NM_DEPTH),)
+ifeq ($(TCPFIX),1)
+ifneq ($(NM_WANT),)
+  KOS_CFLAGS += -DNM_WANT=$(NM_WANT)
+endif
+ifneq ($(NM_DEPTH),)
+  KOS_CFLAGS += -DNM_DEPTH=$(NM_DEPTH)
+endif
+else
+$(info NM_WANT / NM_DEPTH ignored: this is the stock TCP build, which stays at 16 KiB x 1)
+endif
 endif
 ifeq ($(DEBUG),1)
   KOS_CFLAGS += -g -O0

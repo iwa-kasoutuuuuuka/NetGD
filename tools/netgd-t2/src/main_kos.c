@@ -44,10 +44,10 @@ int main(int argc, char **argv)
     vid_empty();
     bfont_set_background_color(0x0000);
     t2_cfg_defaults(&cfg, T2_TCPFIX);
-#ifdef T2_WANT
+#if defined(T2_WANT) && T2_TCPFIX      /* an explicit window, never on stock TCP (R178) */
     cfg.want_bytes = T2_WANT;
 #endif
-#ifdef T2_DEPTH
+#if defined(T2_DEPTH) && T2_TCPFIX
     cfg.depth = T2_DEPTH;
 #endif
 #ifdef T2_RCVBUF

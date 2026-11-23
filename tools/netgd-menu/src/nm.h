@@ -11,6 +11,8 @@
 #define NM_MAX_GAMES    1024
 #define NM_FOLDER_MAX   96      /* longest folder name kept (buffers hold one more) */
 #define NM_TITLE_MAX    64
+#include "ng_btnguard.h"
+
 #define NM_COLS         53
 #define NM_ROWS         20
 
@@ -26,6 +28,9 @@
 #define NM_BTN_START  0x0100u
 #define NM_BTN_LT     0x0200u
 #define NM_BTN_RT     0x0400u
+#define NM_BTN_ODD    0x8000u   /* nm_plat_pad only: the status is implausible; of the buttons only B is reported with it */
+#define NM_PAD_IMPLAUSIBLE(b) ng_pad_implausible((b), NM_BTN_UP, NM_BTN_DOWN, NM_BTN_LEFT, NM_BTN_RIGHT, \
+                                                 NM_BTN_A | NM_BTN_B | NM_BTN_X | NM_BTN_Y | NM_BTN_START)
 
 typedef enum { NM_KIND_UNKNOWN = 0, NM_KIND_GDI, NM_KIND_CDI } nm_kind_t;
 typedef enum { NM_ST_UNSCANNED = 0, NM_ST_COMPLETE, NM_ST_PARTIAL, NM_ST_EMPTY, NM_ST_ERROR } nm_state_t;

@@ -2,7 +2,7 @@
 .SYNOPSIS  Builds netgd-menu.elf (and optionally netgd-menu-tcpfix.elf, netgd-menu.cdi) with the DreamSDK toolchain (KallistiOS), in the style of tools\netgd-recv\build.ps1.
 .EXAMPLE   .\build.ps1                       # release build -> netgd-menu.elf (stock KOS TCP: NGTP window 16 KiB x 1)
            .\build.ps1 -Debug                # -g -O0
-           .\build.ps1 -TcpFix               # also netgd-menu-tcpfix.elf (patched net_tcp.c from ..\kos-patches linked in: 64 KiB x 2)
+           .\build.ps1 -TcpFix               # also netgd-menu-tcpfix.elf (patched net_tcp.c from ..\kos-patches linked in; window 16 KiB x 1 unless -Make 'NM_WANT=.. NM_DEPTH=..')
            .\build.ps1 -Make 'NM_IP=0xC0A80A02'   # make variables (the static IP, NM_RCVBUF; numbers only)
            .\build.ps1 -Cdi                  # also make netgd-menu.cdi (needs makeip, scramble, mkisofs, cdi4dc in the DreamSDK shell)
            .\build.ps1 -BbaTools E:\Dreamcast-Dev-Tools-for-BBA
