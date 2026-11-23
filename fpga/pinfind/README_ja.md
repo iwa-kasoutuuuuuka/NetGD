@@ -274,6 +274,7 @@ probe-rs attach --chip ATSAM3U2E target/thumbv7m-none-eabi/release/netgd | tee r
 3. **10 秒待つ**（PS の線はすべて入力のまま。ロジアナやプルアップを付けるのはこの間。§5）。
 4. 印を付け、SysTick の割り込みで動く**独立の期限**を構える（構成 30 秒、走査 120 秒 + 3 秒、段階 0 は 20 秒 + 3 秒。過ぎたら割り込みの中で PA23・PA24 を入力に戻し、nCONFIG を Low）。
 5. 構成前の全 PIO の値を記録 → **ハンドシェイク**：PA25 を Low に引き（オープンドレイン。High は駆動しない）、PB2 が Low になるのを確認、PA25 を離して PB2 が High に戻るのを確認。どちらも時間制限つき。失敗すると PA23・PA24 は一度も出力にならない。
+   次に PA23・PA24 を入力のまま複数回読み、どちらかが一度でも Low なら出力にせず止まる（`PF data-line check FAILED`。PA25 は Low のまま）。
    通ったら PA23・PA24 を出力にして **1 回だけ**ビットストリームを流す。失敗・CONF_DONE が早い（`early_done`）・流した量が足りない → PA23・PA24 を入力に戻し、nCONFIG を Low にして止まる（やり直さない）。
    PB2 が PA25 に反応しなかったとき（PA25 が nCONFIG だと示せていない）だけは、PA25 も入力に戻す。
 6. 成功したら PA23 と（`ball:PIN_G1` でなければ）PA24 を入力 + プルアップに戻し、構成後の全 PIO の値と比べて違いを `PF diff` で出す。

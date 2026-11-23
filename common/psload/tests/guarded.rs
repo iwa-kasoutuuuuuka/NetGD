@@ -12,6 +12,8 @@ enum E {
     Assert,
     Release,
     Disarm,
+    ReadData,
+    Passed(DataLineLevels),
     Enable,
     Refused,
     ReleaseData { keep_dclk: bool },
@@ -34,6 +36,11 @@ struct M {
     done_after: Option<u32>,
     done_at_start: bool,
     refuse: bool,
+    /// Bit n set: the n-th read of that line returns low.
+    data0_low: u32,
+    dclk_low: u32,
+    data0_reads: u32,
+    dclk_reads: u32,
     t_us: u64,
     ncfg_low: bool,
     seen_reset: bool,
@@ -50,6 +57,10 @@ impl M {
             done_after,
             done_at_start: false,
             refuse: false,
+            data0_low: 0,
+            dclk_low: 0,
+            data0_reads: 0,
+            dclk_reads: 0,
             t_us: 0,
             ncfg_low: false,
             seen_reset: false,
@@ -127,6 +138,25 @@ impl GuardedPsPins for H {
         let mut m = self.0.borrow_mut();
         m.ncfg_low = false;
         m.ev.push(E::Disarm);
+    }
+    fn data0_high(&mut self) -> bool {
+        let mut m = self.0.borrow_mut();
+        assert!(!m.outputs, "sampled while an output");
+        let n = m.data0_reads;
+        m.data0_reads += 1;
+        m.ev.push(E::ReadData);
+        m.data0_low >> n & 1 == 0
+    }
+    fn dclk_high(&mut self) -> bool {
+        let mut m = self.0.borrow_mut();
+        assert!(!m.outputs, "sampled while an output");
+        let n = m.dclk_reads;
+        m.dclk_reads += 1;
+        m.ev.push(E::ReadData);
+        m.dclk_low >> n & 1 == 0
+    }
+    fn data_lines_passed(&mut self, levels: DataLineLevels) {
+        self.0.borrow_mut().ev.push(E::Passed(levels));
     }
     fn enable_data_outputs(&mut self) -> bool {
         let mut m = self.0.borrow_mut();
@@ -289,6 +319,48 @@ fn refused_outputs_hold_reset() {
 }
 
 #[test]
+fn data_line_levels_each_combination() {
+    for (d, c) in [(true, true), (true, false), (false, true), (false, false)] {
+        let mut m = M::new(Fpga::Good, Some(ALL_BITS));
+        m.data0_low = if d { 0 } else { u32::MAX };
+        m.dclk_low = if c { 0 } else { u32::MAX };
+        let (r, m) = load(m);
+        assert_eq!((m.data0_reads, m.dclk_reads), (DATA_LINE_SAMPLES, DATA_LINE_SAMPLES));
+        let levels = DataLineLevels { data0_high: d, dclk_high: c };
+        assert_eq!(levels.safe_to_enable(), d && c);
+        if d && c {
+            r.unwrap();
+            let last_read = m.ev.iter().rposition(|e| *e == E::ReadData).unwrap();
+            assert!(last_read < m.pos(E::Passed(levels)) && m.pos(E::Passed(levels)) < m.pos(E::Enable));
+        } else {
+            assert_eq!(r, Err(GuardedError::DataLinesNotHigh(levels)));
+            assert_no_data_activity(&m);
+            assert!(m.ncfg_low, "the handshake passed: nCONFIG stays sunk");
+            assert_eq!(m.ending(), [REL, E::Assert]);
+            assert!(!m.ev.iter().any(|e| matches!(e, E::Passed(_))));
+        }
+    }
+}
+
+#[test]
+fn one_low_sample_on_either_line_refuses() {
+    for n in 0..DATA_LINE_SAMPLES {
+        for dclk in [false, true] {
+            let mut m = M::new(Fpga::Good, Some(ALL_BITS));
+            if dclk {
+                m.dclk_low = 1 << n;
+            } else {
+                m.data0_low = 1 << n;
+            }
+            let (r, m) = load(m);
+            let levels = DataLineLevels { data0_high: dclk, dclk_high: !dclk };
+            assert_eq!(r, Err(GuardedError::DataLinesNotHigh(levels)), "sample {n}");
+            assert_no_data_activity(&m);
+        }
+    }
+}
+
+#[test]
 fn conf_done_timeout_releases_data_then_holds_reset() {
     let (r, m) = load(M::new(Fpga::Good, None));
     assert_eq!(r, Err(GuardedError::Load(PsError::ConfDoneTimeout { padding: AG16K.pad_cap_clocks })));
@@ -357,6 +429,7 @@ fn final_nconfig_table() {
     for e in [
         NstatusStuckLow,
         ConfDoneHighAfterReset,
+        DataLinesNotHigh(DataLineLevels { data0_high: false, dclk_high: true }),
         OutputsRefused,
         Load(PsError::ConfDoneTimeout { padding: 0 }),
         EarlyDone { sent: 0, want: 1 },

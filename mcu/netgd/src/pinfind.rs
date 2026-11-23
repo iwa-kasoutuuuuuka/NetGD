@@ -30,7 +30,8 @@
 //!   voltage. Released, a pull-up raises it (nCONFIG is a plain input of the
 //!   FPGA, and the internal pull-up is on).
 //! * DCLK / DATA0 become outputs only after nSTATUS has followed nCONFIG down
-//!   and back up and CONF_DONE reads low; afterwards, or on any failure, they
+//!   and back up, CONF_DONE reads low, and both read high in every sample
+//!   with their pull-ups on; afterwards, or on any failure, they
 //!   go back to input + pull-up (the reset state), before nCONFIG is touched.
 //!   With a `ball:PIN_G1` clock PA24 stays an output after a good load.
 //! * Final state of nCONFIG on failure: held low once PB2 has followed PA25
@@ -190,6 +191,22 @@ impl GuardedPsPins for RegPins {
     fn disarm_nconfig(&mut self) {
         NCONFIG_ARMED.store(false, Ordering::Relaxed);
         unsafe { pio(0).odr.write_with_zero(|w| w.bits(NCONFIG_BIT)) };
+    }
+    #[inline(always)]
+    fn data0_high(&mut self) -> bool {
+        pio(0).pdsr.read().bits() & DATA0_BIT != 0
+    }
+    #[inline(always)]
+    fn dclk_high(&mut self) -> bool {
+        pio(0).pdsr.read().bits() & DCLK_BIT != 0
+    }
+    fn data_lines_passed(&mut self, l: guarded::DataLineLevels) {
+        info!(
+            "PF data lines before enable: PA23 high={} PA24 high={} ({} samples, pull-ups on)",
+            l.data0_high,
+            l.dclk_high,
+            guarded::DATA_LINE_SAMPLES
+        );
     }
     /// Masked for the same reason: a trip either comes first (refused) or
     /// finds the lines enabled and releases them.
@@ -367,6 +384,15 @@ fn report_load(e: GuardedError) -> ! {
         GuardedError::ConfDoneHighAfterReset => {
             error!("PF handshake FAILED: CONF_DONE (PB1) high after reset; PA23/PA24 never enabled");
             halt("handshake: CONF_DONE high")
+        }
+        GuardedError::DataLinesNotHigh(l) => {
+            error!(
+                "PF data-line check FAILED: PA23 high={} PA24 high={} ({} samples, pull-ups on); PA23/PA24 never enabled",
+                l.data0_high,
+                l.dclk_high,
+                guarded::DATA_LINE_SAMPLES
+            );
+            halt("data lines not high before enable")
         }
         GuardedError::OutputsRefused => halt("load: deadline passed before DCLK/DATA0 were enabled"),
         GuardedError::Load(f) => {

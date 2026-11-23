@@ -9,7 +9,8 @@
 //! 2. [`guarded_load`] records the run (so a reset cannot start a second one),
 //!    then does the nCONFIG/nSTATUS handshake. Only nCONFIG moves, and only
 //!    by sinking it low: released, the line is an input held up by a pull-up.
-//! 3. Only after the handshake do DCLK and DATA0 become outputs.
+//! 3. Only after the handshake, and only if both read high in every sample
+//!    with their pull-ups on, do DCLK and DATA0 become outputs.
 //! 4. Every exit releases DCLK and DATA0 *first*, then settles nCONFIG
 //!    ([`GuardedError::final_nconfig`]).
 
@@ -18,6 +19,25 @@ use crate::{stream, LoadStats, PsClock, PsError, PsPins, PsProfile, PsSource};
 /// Polling step of the handshake. The bounds are counted in delays, not read
 /// from the system tick, so they hold even if the tick has stopped.
 const POLL_STEP_US: u32 = 10;
+
+/// Reads of DATA0 / DCLK before they may become outputs, `POLL_STEP_US` apart.
+pub const DATA_LINE_SAMPLES: u32 = 8;
+
+/// DATA0 and DCLK as inputs with their pull-ups on. A field is true only if
+/// that line read high in every sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct DataLineLevels {
+    pub data0_high: bool,
+    pub dclk_high: bool,
+}
+
+impl DataLineLevels {
+    /// A line that something holds low must not be driven against it.
+    pub const fn safe_to_enable(&self) -> bool {
+        self.data0_high && self.dclk_high
+    }
+}
 
 /// The line control a guarded load needs on top of [`PsPins`].
 pub trait GuardedPsPins: PsPins {
@@ -29,6 +49,12 @@ pub trait GuardedPsPins: PsPins {
     fn release_nconfig(&mut self);
     /// As `release_nconfig`, and no later fault path may sink it again.
     fn disarm_nconfig(&mut self);
+    /// DATA0 as an input, right now.
+    fn data0_high(&mut self) -> bool;
+    /// DCLK as an input, right now.
+    fn dclk_high(&mut self) -> bool;
+    /// The check before enabling passed, with these levels (for the log).
+    fn data_lines_passed(&mut self, levels: DataLineLevels);
     /// Make DCLK and DATA0 outputs, both low. `false` = refused (the deadline
     /// has passed) and neither became an output.
     fn enable_data_outputs(&mut self) -> bool;
@@ -70,6 +96,9 @@ pub enum GuardedError {
     NstatusStuckLow,
     /// CONF_DONE read high after the reset: clocking would be meaningless.
     ConfDoneHighAfterReset,
+    /// DATA0 or DCLK did not read high in every sample with its pull-up on:
+    /// something may be holding it. Neither was enabled.
+    DataLinesNotHigh(DataLineLevels),
     /// The deadline passed before DCLK / DATA0 were enabled.
     OutputsRefused,
     /// The stream itself failed.
@@ -208,6 +237,19 @@ pub fn handshake<P: GuardedPsPins, C: PsClock>(p: &PsProfile, pins: &mut P, clk:
     Ok(())
 }
 
+/// Sample DATA0 and DCLK [`DATA_LINE_SAMPLES`] times. Reads only.
+pub fn sample_data_lines<P: GuardedPsPins, C: PsClock>(pins: &mut P, clk: &mut C) -> DataLineLevels {
+    let mut levels = DataLineLevels { data0_high: true, dclk_high: true };
+    for i in 0..DATA_LINE_SAMPLES {
+        if i != 0 {
+            clk.delay_us(POLL_STEP_US);
+        }
+        levels.data0_high &= pins.data0_high();
+        levels.dclk_high &= pins.dclk_high();
+    }
+    levels
+}
+
 fn attempt<P, C, S, F>(
     p: &PsProfile,
     pins: &mut P,
@@ -225,6 +267,11 @@ where
     if pins.conf_done_high() {
         return Err(GuardedError::ConfDoneHighAfterReset);
     }
+    let levels = sample_data_lines(pins, clk);
+    if !levels.safe_to_enable() {
+        return Err(GuardedError::DataLinesNotHigh(levels));
+    }
+    pins.data_lines_passed(levels);
     if !pins.enable_data_outputs() {
         return Err(GuardedError::OutputsRefused);
     }
