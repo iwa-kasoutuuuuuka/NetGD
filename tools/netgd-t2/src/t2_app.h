@@ -23,6 +23,7 @@ typedef struct {
     uint32_t idle_exit_ms;          /* no frame for this long: close everything and exit (bounded wait) */
     int drive;                      /* 0: never send anything to the drive (build T2_NO_DRIVE=1) */
     int tcpfix;                     /* the patched net_tcp.c is linked (shown on the screen only) */
+    uint32_t confirm_max_ms;        /* a force question with no answer is refused after this long */
 } t2_cfg_t;
 
 void t2_cfg_defaults(t2_cfg_t *c, int tcpfix);

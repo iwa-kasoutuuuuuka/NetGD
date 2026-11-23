@@ -31,6 +31,7 @@ void nm_ui_init(nm_ui_t *ui)
     ui->state = NM_S_BOOT;
     ui->handoff_mode = NM_HANDOFF_DEFAULT;
     ui->idle_ms = 300000;
+    ui->confirm_max_ms = 30000;
     nm_ui_set_tcpfix(ui, NM_TCPFIX);
     ui->controller = 1;
     nm_input_init(&ui->in);
@@ -44,20 +45,25 @@ void nm_ui_set_tcpfix(nm_ui_t *ui, int tcpfix)
     ui->tcpfix = tcpfix ? 1 : 0;
     ui->want_bytes = tcpfix ? NGTP_WANT_TCPFIX : NGTP_WANT_STOCK;
     ui->depth = tcpfix ? NGTP_DEPTH_TCPFIX : NGTP_DEPTH_STOCK;
+    if (tcpfix) {                       /* make tcpfix NM_WANT=...: an explicit window, never on stock TCP (R178) */
 #ifdef NM_WANT
-    ui->want_bytes = NM_WANT;           /* make NM_WANT=...: an explicit window */
+        ui->want_bytes = NM_WANT;
 #endif
 #ifdef NM_DEPTH
-    ui->depth = NM_DEPTH;
+        ui->depth = NM_DEPTH;
 #endif
+    }
 }
 
-/* The buttons of this frame.  B is an event only from a pad that has been seen with B released (ng_btnguard.h). */
+/* The buttons of this frame.  A, B and START are events only from a pad that has been seen with them released (ng_btnguard.h). */
 static uint32_t read_events(nm_ui_t *ui, uint32_t now)
 {
     uint32_t btn, pad = nm_plat_pad(&btn);
     uint32_t ev = nm_input_update(&ui->in, btn, now);
+    ui->pad_id = pad;
     if (!ng_btnguard_update(&ui->bguard, pad, (btn & NM_BTN_B) != 0, now)) ev &= ~(uint32_t)NM_BTN_B;
+    if (!ng_btnguard_update(&ui->aguard, pad, (btn & NM_BTN_A) != 0, now)) ev &= ~(uint32_t)NM_BTN_A;
+    if (!ng_btnguard_update(&ui->sguard, pad, (btn & NM_BTN_START) != 0, now)) ev &= ~(uint32_t)NM_BTN_START;
     return ev;
 }
 
@@ -386,9 +392,10 @@ static void draw_net(nm_ui_t *ui)
 
 static void draw_net_confirm(nm_ui_t *ui)
 {
-    uint32_t held = nm_input_held_ms(&ui->in, NM_BTN_A, ui->now);
+    uint32_t held = ng_holdconfirm_ms(&ui->confirm_a, ui->now);
     nm_screen_clear(&ui->scr);
-    draw_frame(ui, "Hold A for 1 second: allow", ng_btnguard_stuck(&ui->bguard) ? "B is stuck: 30 seconds refuses" : "B (or 30 seconds): refuse");
+    draw_frame(ui, ng_btnguard_stuck(&ui->confirm_a.g) ? "Release A, then hold it for 1 second" : "Hold A for 1 second: allow",
+               ng_btnguard_stuck(&ui->bguard) ? "B is stuck: 30 seconds refuses" : "B (or 30 seconds): refuse");
     nm_screen_printf(&ui->scr, 3, 2, NM_ATTR_WARN, "The PC asks to %s a protected folder:", ui->confirm_what);
     nm_screen_printf(&ui->scr, 5, 2, NM_ATTR_NORMAL, "%.48s", ui->confirm_folder);
     nm_screen_put(&ui->scr, 7, 2, "The folder is the card's default image or 01.", NM_ATTR_NORMAL);
@@ -540,7 +547,8 @@ static void hk_before_session(void *ctx)
     if (ui->sd_mounted) { ngfs_unmount(); ui->sd_mounted = 0; }
 }
 
-/* The PC asked for force on a protected folder: A held for a second allows it, B or 30 s refuses (design 8.3). */
+/* The PC asked for force on a protected folder: A released and then held for a second allows it, B or 30 s refuses (design 8.3).
+   An A that was down before the question, or a pad that reports it all the time, never approves (ng_holdconfirm_t). */
 static int hk_confirm(void *ctx, const char *what, const char *folder)
 {
     nm_ui_t *ui = (nm_ui_t *)ctx;
@@ -550,13 +558,14 @@ static int hk_confirm(void *ctx, const char *what, const char *folder)
     snprintf(ui->confirm_folder, sizeof ui->confirm_folder, "%s", folder);
     ui->state = NM_S_NET_CONFIRM;
     ui->confirm_since = t0;
+    memset(&ui->confirm_a, 0, sizeof ui->confirm_a);
     for (;;) {
         uint32_t ev;
         ui->now = nm_plat_millis();
         ev = read_events(ui, ui->now);
         if (ev & NM_BTN_B) break;
-        if (nm_input_held_ms(&ui->in, NM_BTN_A, ui->now) >= 1000) { allow = 1; break; }
-        if (ui->now - t0 >= 30000) break;
+        if (ng_holdconfirm_update(&ui->confirm_a, ui->pad_id, (ui->in.held & NM_BTN_A) != 0, ui->now, 1000)) { allow = 1; break; }
+        if (ui->now - t0 >= ui->confirm_max_ms) break;
         net_redraw(ui);
         nm_plat_sleep(16);
     }

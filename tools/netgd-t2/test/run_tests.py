@@ -832,6 +832,27 @@ class TestBoundedWaits(Base):
         srv.finish()
         self.check_folder(img, "01", datas)
 
+    def force_refused(self, script):
+        img = self.card({"/01/MENU.CDI": b"menu"})
+        text, datas = self.gdi_set("01")
+        srv = Serve(self, img, "--pad", script, "--confirm-max-ms", "1800")
+        c = srv.client()
+        c.hello(CODE)
+        res = c.put(text, Src(datas), mode=ngtp.PUT_OVERWRITE, force=True)
+        self.assertEqual(res.error, "EPROTECTED", res.lines)
+        c.finish()
+        srv.finish()
+        self.assertIn("/01/MENU.CDI", fatcheck.Fat32(img).files)        # the protected image is untouched
+
+    def test_stuck_a_and_b_never_approve(self):
+        self.force_refused("C:0")
+
+    def test_a_held_before_the_question_never_approves(self):
+        self.force_refused("A:0")
+
+    def test_all_zero_raw_status_never_approves(self):
+        self.force_refused("Z:0")
+
     def test_no_bba_fails_cleanly(self):
         srv = Serve(self, self.card(), "--nobba", "--dump")
         sim = srv.finish(timeout=30)

@@ -51,7 +51,9 @@ uint32_t nm_plat_buttons(void)
 uint32_t nm_plat_pad(uint32_t *buttons)
 {
     uint32_t b = nm_plat_buttons();     /* first: a scripted hook may plug or unplug the pad */
-    *buttons = nm_host_controller ? b : 0;
+    *buttons = 0;
+    if (!nm_host_controller || NM_PAD_IMPLAUSIBLE(b)) return 0;
+    *buttons = b;
     return (uint32_t)nm_host_controller;
 }
 int nm_plat_controller(void) { return nm_host_controller; }
@@ -92,6 +94,7 @@ int ng_plat_user_stop(uint32_t *pad)
     *pad = (uint32_t)nm_host_controller;
     nm_host_polls++;
     if (!nm_host_controller) return 0;
+    if (NM_PAD_IMPLAUSIBLE(b)) { *pad = 0; return 0; }
     if (nm_host_stop_after_polls >= 0 && nm_host_polls > nm_host_stop_after_polls) {
         nm_host_stop_after_polls = -1;          /* one B press: the next run is not stopped */
         if (nm_host_b_hold_ms) b_down_until = nm_plat_millis() + nm_host_b_hold_ms;

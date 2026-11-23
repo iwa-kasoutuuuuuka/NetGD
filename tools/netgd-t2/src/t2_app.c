@@ -11,7 +11,6 @@
 
 
 #define CONFIRM_HOLD_MS 1000
-#define CONFIRM_MAX_MS  30000
 #define UI_EVERY_MS     200
 
 void t2_cfg_defaults(t2_cfg_t *c, int tcpfix)
@@ -25,6 +24,7 @@ void t2_cfg_defaults(t2_cfg_t *c, int tcpfix)
     c->idle_exit_ms = 15u * 60u * 1000u;
     c->drive = 1;
     c->tcpfix = tcpfix;
+    c->confirm_max_ms = 30000;
 }
 
 /* ---- the screen ---- */
@@ -136,27 +136,28 @@ static int hk_stop(void *ctx)
     return ng_btnguard_update(&a->bguard, pad, down, nm_plat_millis());
 }
 
-/* force on a protected folder: A held for a second allows it, B or 30 s refuses */
+/* force on a protected folder: A released and then held for a second allows it, B or 30 s refuses.  A pad that reports A all the
+   time never approves (ng_holdconfirm_t). */
 static int hk_confirm(void *ctx, const char *what, const char *folder)
 {
     t2_app_t *a = (t2_app_t *)ctx;
-    uint32_t t0 = nm_plat_millis(), down = 0;
+    uint32_t t0 = nm_plat_millis();
+    ng_holdconfirm_t hold;
     char l[NM_COLS + 1];
+    memset(&hold, 0, sizeof hold);
     for (;;) {
         uint32_t b, pad = nm_plat_pad(&b), now = nm_plat_millis();
         int refuse = ng_btnguard_update(&a->bguard, pad, (b & NM_BTN_B) != 0, now);
         draw(a);
         snprintf(l, sizeof l, "PC asks to %s the protected %.24s", what, folder);
         nm_screen_row(&a->scr, 9, l, NM_ATTR_WARN);
-        nm_screen_row(&a->scr, 10, ng_btnguard_stuck(&a->bguard) ? "Hold A for 1 s to allow (B stuck: 30 s refuses)"
-                                                                 : "Hold A for 1 s to allow, B to refuse", NM_ATTR_WARN);
+        nm_screen_row(&a->scr, 10, ng_btnguard_stuck(&hold.g) ? "Release A, then hold it 1 s to allow"
+                                   : ng_btnguard_stuck(&a->bguard) ? "Hold A for 1 s to allow (B stuck: wait to refuse)"
+                                   : "Hold A for 1 s to allow, B to refuse", NM_ATTR_WARN);
         nm_plat_present(&a->scr);
         if (refuse) return 0;
-        if (b & NM_BTN_A) {
-            if (!down) down = now ? now : 1;
-            if (now - down >= CONFIRM_HOLD_MS) return 1;
-        } else down = 0;
-        if (now - t0 >= CONFIRM_MAX_MS) return 0;
+        if (ng_holdconfirm_update(&hold, pad, (b & NM_BTN_A) != 0, now, CONFIRM_HOLD_MS)) return 1;
+        if (now - t0 >= a->cfg.confirm_max_ms) return 0;
         nm_plat_sleep(20);
     }
 }

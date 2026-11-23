@@ -56,6 +56,7 @@ uint32_t nm_plat_pad(uint32_t *buttons)
     if (st->joyx > 64) b |= NM_BTN_RIGHT;
     if (st->ltrig > 128) b |= NM_BTN_LT;
     if (st->rtrig > 128) b |= NM_BTN_RT;
+    if (NM_PAD_IMPLAUSIBLE(b)) return 0;        /* e.g. an all-zero raw reply: every button "down" */
     *buttons = b;
     return (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u;
 }

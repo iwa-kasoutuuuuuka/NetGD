@@ -10,8 +10,8 @@
 uint32_t nm_plat_millis(void);                  /* ms since start */
 void nm_plat_sleep(uint32_t ms);                /* host: advances the virtual clock */
 uint32_t nm_plat_buttons(void);                 /* NM_BTN_* bits that are down now */
-/* The same bits and, as the result, which pad they came from: 0 = no pad (*buttons is 0), otherwise a number that stays the same
-   for one port and unit.  One read, so the bits always belong to that pad (ng_btnguard.h). */
+/* The same bits and, as the result, which pad they came from: 0 = no pad or a status no real pad produces (*buttons is 0), otherwise
+   a number that stays the same for one port and unit.  One read, so the bits always belong to that pad (ng_btnguard.h). */
 uint32_t nm_plat_pad(uint32_t *buttons);
 void nm_plat_present(const nm_screen_t *s);     /* draw the grid (only the cells that changed) */
 void nm_plat_handoff(int mode);                 /* does not return on the Dreamcast; the host prints HANDOFF and exits */

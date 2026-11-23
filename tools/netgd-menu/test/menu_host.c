@@ -333,6 +333,14 @@ static void dump_screen(void)
 static int pad_stuck;           /* B reads down whatever the script presses (a pad that reports it all the time) */
 static uint32_t ui_buttons(void) { return nm_host_buttons | (pad_stuck ? NM_BTN_B : 0); }
 
+/* the scripted presses come from a healthy pad, except the buttons that are stuck */
+static void prearm_pad(uint32_t stuck)
+{
+    if (!(stuck & NM_BTN_B)) ng_btnguard_prearm(&ui.bguard, 1);
+    if (!(stuck & NM_BTN_A)) ng_btnguard_prearm(&ui.aguard, 1);
+    ng_btnguard_prearm(&ui.sguard, 1);
+}
+
 static uint32_t button_by_name(const char *n)
 {
     static const struct { const char *name; uint32_t bit; } tab[] = {
@@ -427,7 +435,7 @@ static int ui_cmd(int argc, char **argv)
     atexit(sim_summary);
     nm_ui_init(&ui);
     nm_host_buttons_hook = ui_buttons;
-    if (!pad_stuck) ng_btnguard_prearm(&ui.bguard, 1);  /* the scripted presses come from a healthy pad */
+    prearm_pad(pad_stuck ? NM_BTN_B : 0);
     copy = malloc(strlen(script) + 1);
     strcpy(copy, script);
     for (tok = strtok(copy, " ,"); tok; tok = strtok(NULL, " ,")) {
@@ -446,11 +454,58 @@ static uint32_t g_feed(ng_btnguard_t *g, uint32_t pad, int down, int n, uint32_t
     return t;
 }
 
+static void u12_holdconfirm(void)
+{
+    ng_holdconfirm_t c;
+    uint32_t t = 0;
+    int ok = 0;
+    /* down since before the question: never, however long */
+    memset(&c, 0, sizeof c);
+    for (int i = 0; i < 1000; i++, t += 16) ok |= ng_holdconfirm_update(&c, 1, 1, t, 1000);
+    CHECK(!ok);
+    /* released, then held: only after the full hold */
+    for (int i = 0; i < 10; i++, t += 16) ok |= ng_holdconfirm_update(&c, 1, 0, t, 1000);
+    CHECK(!ok);
+    for (int i = 0; i < 62; i++, t += 16) ok |= ng_holdconfirm_update(&c, 1, 1, t, 1000);
+    CHECK(!ok);
+    t += 16;
+    CHECK(ng_holdconfirm_update(&c, 1, 1, t, 1000));
+    /* a pad change in the middle of a hold starts over, and the new pad must release first */
+    t += 16;
+    CHECK(!ng_holdconfirm_update(&c, 2, 1, t, 1000));
+    CHECK(ng_holdconfirm_ms(&c, t) == 0);
+    for (int i = 0; i < 100; i++, t += 16) ok |= ng_holdconfirm_update(&c, 2, 1, t, 1000);
+    CHECK(!ok);
+    /* no pad resets the hold */
+    memset(&c, 0, sizeof c); t = 0;
+    for (int i = 0; i < 10; i++, t += 16) ng_holdconfirm_update(&c, 1, 0, t, 1000);
+    for (int i = 0; i < 40; i++, t += 16) ok |= ng_holdconfirm_update(&c, 1, 1, t, 1000);
+    ok |= ng_holdconfirm_update(&c, 0, 0, t, 1000); t += 16;
+    for (int i = 0; i < 40; i++, t += 16) ok |= ng_holdconfirm_update(&c, 1, 1, t, 1000);
+    CHECK(!ok);
+    /* a status no pad produces */
+    CHECK(NM_PAD_IMPLAUSIBLE(0xFFFFu));
+    CHECK(NM_PAD_IMPLAUSIBLE(NM_BTN_UP | NM_BTN_DOWN));
+    CHECK(NM_PAD_IMPLAUSIBLE(NM_BTN_LEFT | NM_BTN_RIGHT));
+    CHECK(NM_PAD_IMPLAUSIBLE(NM_BTN_A | NM_BTN_B | NM_BTN_X | NM_BTN_Y | NM_BTN_START));
+    CHECK(!NM_PAD_IMPLAUSIBLE(NM_BTN_A | NM_BTN_B));
+    CHECK(!NM_PAD_IMPLAUSIBLE(NM_BTN_UP | NM_BTN_RIGHT | NM_BTN_A));
+    CHECK(!NM_PAD_IMPLAUSIBLE(0));
+}
+
 static void u12_btnguard(void)
 {
     ng_btnguard_t g;
     uint32_t t;
     int any;
+    /* polls inside one Maple frame are one sample: 4 quick ones and a late one are 2, not 5 */
+    memset(&g, 0, sizeof g);
+    for (t = 0; t < 4; t++) ng_btnguard_update(&g, 1, 0, t);
+    ng_btnguard_update(&g, 1, 0, 130);
+    CHECK(!g.armed);
+    ng_btnguard_update(&g, 1, 0, 146);
+    ng_btnguard_update(&g, 1, 0, 162);
+    CHECK(g.armed);
     /* stuck from the first sample: never counts, and is reported */
     memset(&g, 0, sizeof g); any = 0;
     t = g_feed(&g, 1, 1, 1000, 0, 16, &any);
@@ -612,11 +667,20 @@ static void u9_disc(void)
 
 static int serve_confirm;       /* 1 = A is held while the confirm screen shows, 2 = B */
 static uint32_t serve_btn;
+static uint32_t serve_stuck;    /* --pad-stuck A|AB: down all the time */
+static int serve_zero;          /* --pad-stuck ZERO: an all-zero raw status (every button down) while the question is up */
+static uint64_t confirm_t0;     /* when the question appeared: "allow" releases A first, then holds it */
 
 static uint32_t serve_buttons(void)
 {
-    uint32_t stuck = pad_stuck ? NM_BTN_B : 0;
-    if (ui.state == NM_S_NET_CONFIRM) return stuck | (serve_confirm == 1 ? NM_BTN_A : serve_confirm == 2 ? NM_BTN_B : 0);
+    uint32_t stuck = serve_stuck | (pad_stuck ? NM_BTN_B : 0);
+    if (ui.state == NM_S_NET_CONFIRM) {
+        if (serve_zero) return 0xFFFFu;
+        if (!confirm_t0) confirm_t0 = nm_host_real_ms();
+        if (serve_confirm == 1 && nm_host_real_ms() - confirm_t0 >= 300) return stuck | NM_BTN_A;
+        return stuck | (serve_confirm == 2 ? NM_BTN_B : 0);
+    }
+    confirm_t0 = 0;
     return stuck | serve_btn;
 }
 
@@ -628,6 +692,7 @@ static int serve_cmd(int argc, char **argv)
     uint32_t sectors = (uint32_t)strtoul(argv[3], NULL, 10), seed = 0, timeout_ms = 120000;
     unsigned code = 4821;
     int dump = 0, entered = 0, k = 0, tcpfix = 0, want = 0, depth = 0;
+    uint32_t confirm_max = 0;
     uint64_t t0;
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) nm_host_net_port = (uint16_t)atoi(argv[++i]);
@@ -644,6 +709,12 @@ static int serve_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(argv[i], "--no-udp")) nm_host_no_udp = 1;
         else if (!strcmp(argv[i], "--tcpfix")) tcpfix = 1;
+        else if (!strcmp(argv[i], "--pad-stuck") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "ZERO")) serve_zero = 1;
+            else serve_stuck = NM_BTN_A | (!strcmp(v, "AB") ? NM_BTN_B : 0);
+        }
+        else if (!strcmp(argv[i], "--confirm-max-ms") && i + 1 < argc) confirm_max = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--want") && i + 1 < argc) want = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--depth") && i + 1 < argc) depth = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--b-stuck")) pad_stuck = 1;
@@ -669,7 +740,8 @@ static int serve_cmd(int argc, char **argv)
         if (tcpfix) nm_ui_set_tcpfix(&ui, 1);
         if (want) ui.want_bytes = (uint32_t)want;
         if (depth) ui.depth = depth;
-        if (!pad_stuck) ng_btnguard_prearm(&ui.bguard, 1);
+        if (confirm_max) ui.confirm_max_ms = confirm_max;
+        prearm_pad(serve_stuck | (pad_stuck ? NM_BTN_B : 0));
     }
     for (int i = 0; i < 2000 && ui.state != NM_S_LIST; i++) {
         frame();
@@ -910,6 +982,7 @@ static int selftest(void)
     u10_art();
     u11_netup();
     u12_btnguard();
+    u12_holdconfirm();
     printf(bad ? "SELFTEST FAIL (%d)\n" : "SELFTEST OK\n", bad);
     return bad ? 1 : 0;
 }

@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "fwcore.h"
+#include "fwconfirm.h"
 #include "g1dev.h"
 #include "resout.h"
 
@@ -132,6 +133,27 @@ static uint32_t pad_buttons(void)
         if (st) b |= st->buttons;
     }
     return b;
+}
+
+/* For the confirmation: the buttons of all pads and a number for that set of pads.  0 = no pad, a pad without a status, or a
+   status no real pad produces (KOS cooks buttons = ~raw: an all-zero reply reads as every button down). */
+static uint32_t pad_sample(uint32_t *buttons)
+{
+    uint32_t b = 0, id = 0;
+    int i;
+    *buttons = 0;
+    for (i = 0; i < 4; i++) {
+        maple_device_t *c = maple_enum_type(i, MAPLE_FUNC_CONTROLLER);
+        cont_state_t *st;
+        if (!c) break;
+        st = (cont_state_t *)maple_dev_status(c);
+        if (!st || ng_pad_implausible(st->buttons, CONT_DPAD_UP, CONT_DPAD_DOWN, CONT_DPAD_LEFT, CONT_DPAD_RIGHT,
+                                      CONT_A | CONT_B | CONT_X | CONT_Y | CONT_START)) return 0;
+        b |= st->buttons;
+        id = id * 37u + (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u;
+    }
+    *buttons = b;
+    return id;
 }
 
 static void wait_start_and_exit(int code)
@@ -271,8 +293,9 @@ static void show_image_error(const fw_vres *res)
 static int confirm(void)
 {
     int row, i;
-    uint32_t held = 0;
-    uint32_t b;
+    uint32_t held, b, pad, now;
+    int bar_shown = 0;
+    ng_holdconfirm_t hold;
     ui_title();
     row = 2;
     row = drawf(row, COL_WHITE, "%s: %s", fw_msg_euc(FWM_UI_DEVICE), g_model);
@@ -311,10 +334,14 @@ static int confirm(void)
         }
         if (shown) clear_rows(ROWS - 2, ROWS - 2);
     }
+    memset(&hold, 0, sizeof hold);
     for (;;) {
-        b = pad_buttons();
-        if ((b & COMBO) == COMBO) {
-            held += 30;
+        pad = pad_sample(&b);
+        now = (uint32_t)timer_ms_gettime64();
+        if (fw_confirm_step(&hold, pad, b, COMBO, CONT_B, now, HOLD_MS)) return 1;
+        held = ng_holdconfirm_ms(&hold, now);
+        if (hold.holding) {
+            bar_shown = 1;
             clear_rows(ROWS - 2, ROWS - 2);
             {
                 char bar[34];
@@ -325,10 +352,9 @@ static int confirm(void)
                 bar[30] = 0;
                 drawf(ROWS - 2, COL_YELLOW, "[%s] %s", bar, fw_msg_euc(FWM_UI_HOLDING));
             }
-            if (held >= HOLD_MS) return 1;
         } else {
-            if (held) clear_rows(ROWS - 2, ROWS - 2);
-            held = 0;
+            if (bar_shown) clear_rows(ROWS - 2, ROWS - 2);
+            bar_shown = 0;
             if (b & CONT_B) return 0;
         }
         thd_sleep(30);

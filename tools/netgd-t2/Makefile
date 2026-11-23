@@ -5,7 +5,8 @@
 #                          (64 KiB x 2 is the shape that hung the real Dreamcast in g2netbench p4, cause unknown;
 #                          make tcpfix T2_WANT=65536 T2_DEPTH=2 asks for it)
 #     make T2_NO_DRIVE=1   never sends a packet to the drive (network-only smoke test; every write is refused)
-#     make T2_WANT=32768 T2_DEPTH=2 T2_RCVBUF=20480 T2_CODE=1234 T2_IP=0xC0A80A02   (numbers only: no quoted -D strings)
+#     make T2_RCVBUF=20480 T2_CODE=1234 T2_IP=0xC0A80A02   (numbers only: no quoted -D strings)
+#     T2_WANT / T2_DEPTH apply to tcpfix builds only: on stock KOS TCP a larger window stalls (R178)
 #     make clean
 # Objects go to build/kos (build/kos-fix for tcpfix), never next to the sources (netgd-menu, netgd-recv are shared:
 #   src/X.c -> X.o, ../netgd-menu/src/X.c -> menu_X.o, ../netgd-recv/src/X.c -> recv_X.o, FatFs -> ff_X.o).
@@ -39,11 +40,17 @@ FATFS_OBJS = $(addprefix $(OBJDIR)/ff_, ff.o ffunicode.o ffsystem.o)
 OBJS = $(T2_OBJS) $(MENU_OBJS) $(RECV_OBJS) $(FATFS_OBJS) $(FIX_OBJS)
 
 KOS_CFLAGS += -I src -I $(MENU)/src -I $(RECV)/src -I $(FATFS) -std=gnu11 -Wall -Wno-unused-function -Wno-format-truncation
+ifneq ($(T2_WANT)$(T2_DEPTH),)
+ifeq ($(TCPFIX),1)
 ifneq ($(T2_WANT),)
   KOS_CFLAGS += -DT2_WANT=$(T2_WANT)
 endif
 ifneq ($(T2_DEPTH),)
   KOS_CFLAGS += -DT2_DEPTH=$(T2_DEPTH)
+endif
+else
+$(info T2_WANT / T2_DEPTH ignored: this is the stock TCP build, which stays at 16 KiB x 1)
+endif
 endif
 ifneq ($(T2_RCVBUF),)
   KOS_CFLAGS += -DT2_RCVBUF=$(T2_RCVBUF)

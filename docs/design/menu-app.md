@@ -153,6 +153,7 @@ Y を押すと「BBA not found」と出て一覧に戻る。それ以外は 3.1 
 | `uint32_t nm_plat_millis(void)` | 起動からの ms |
 | `void nm_plat_sleep(uint32_t ms)` | 待つ（ホストは仮想時計を進めるだけ） |
 | `uint32_t nm_plat_buttons(void)` | いま押されているボタンのビット（`NM_BTN_UP/DOWN/LEFT/RIGHT/A/B/X/Y/START/LT/RT`）。アナログは ±64 を超えたら十字キー扱い、トリガーは 128 を超えたら押下 |
+| `uint32_t nm_plat_pad(uint32_t *buttons)` | 同じビットと、読んだパッドの番号（ポートとユニットで決まる）。0 はパッドなし、または実機のパッドが出さない状態（上下同時など。生データが全 0 だと全ボタン押下に見える）で、`*buttons` も 0 |
 | `void nm_plat_present(const nm_screen_t *s)` | マス目を画面に出す（前回と違うマスだけ描く） |
 | `void nm_plat_handoff(int mode)` | `NM_HANDOFF_BIOS`：BIOS メニューへ／`NM_HANDOFF_REBOOT`：再起動。KOS では戻らない。ホストは `HANDOFF bios` を出力して終了 |
 | `int nm_plat_dcload(void)` | dcload-ip から起動したなら 1 |
@@ -169,7 +170,7 @@ Y を押すと「BBA not found」と出て一覧に戻る。それ以外は 3.1 
 | `int nm_net_send_all(const void *buf, uint32_t n)` | 0／-1 |
 | `void nm_net_close_client(void)`・`void nm_net_stop(void)` | 接続を閉じる／待ち受けをやめる（BBA は初期化したまま） |
 
-受信コアが要る `ng_plat_*`（`ng_plat.h`）と `get_fattime` は、メニュー側の `plat_kos.c`／`plat_host.c` が定義する。`ng_plat_user_stop` は「取り込み中に B が押された」フラグを返す。
+受信コアが要る `ng_plat_*`（`ng_plat.h`）と `get_fattime` は、メニュー側の `plat_kos.c`／`plat_host.c` が定義する。`ng_plat_user_stop(&pad)` は B の状態と読んだパッドの番号を返す。判断はせず、呼び出し側が `ng_btnguard.h` を通す（B は離されたのを見てから数える）。
 
 ---
 
@@ -401,7 +402,7 @@ Dreamcast → PC：
 
 `ng_src_t` の実装（`ngtp_srv.c`、2026-11-23 改訂。`tools/netgd-t2` と共用）：
 
-- **窓**：`ngtp_srv_set_window(want, depth)`。`WANT` は `open(idx, off)` の位置から `want` バイトずつの決まった区切り（マニフェストのファイル長を越えない）で、未回答の `WANT` は最大 `depth` 本（1〜4）。`read` は未回答が `depth` 本になるまで `WANT` を足してから先頭の `DATA` を待つので、`depth` 2 では受信コアが SD に書く間に PC が次の塊を送れる。メニューの既定は 65536 × 1（従来どおり）、`netgd-t2` は素の KOS の TCP で 16384 × 1、直した `net_tcp.c`（`tools/kos-patches`）で 65536 × 2（R178、`docs/research/g2-transport.md` §3）。
+- **窓**：`ngtp_srv_set_window(want, depth)`。`WANT` は `open(idx, off)` の位置から `want` バイトずつの決まった区切り（マニフェストのファイル長を越えない）で、未回答の `WANT` は最大 `depth` 本（1〜4）。`read` は未回答が `depth` 本になるまで `WANT` を足してから先頭の `DATA` を待つので、`depth` 2 では受信コアが SD に書く間に PC が次の塊を送れる。メニューと `netgd-t2` の既定は、素の KOS の TCP（R178）でも直した `net_tcp.c`（`tools/kos-patches`、`docs/research/g2-transport.md` §3）でも当面 16384 × 1。65536 × 2 は g2netbench p4 と同じ形で実機が 2 回止まり、原因が未解明のため。tcpfix ビルドに限り `NM_WANT`/`NM_DEPTH`、`T2_WANT`/`T2_DEPTH` で明示できる。
 - `read(buf, n)` に入りきらない `DATA` の残りは取っておき、次の `read` で渡す（`want` と受信コアの読み出しの大きさが合わなくてよい）。
 - **読み捨て**：`open`（ファイルが変わる・再開）、`close`、`PUT` の `DONE` の前に、未回答の `WANT` の `DATA` を受けて捨てる。`DONE` の後に `DATA` が流れてこない。
 - 短い `DATA` = そのファイルの終わり（以後 `WANT` を出さない。`read` は 0 を返し、受信コアが `ESRC` にする）。

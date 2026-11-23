@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../fwcore.h"
+#include "../fwconfirm.h"
 #include "../resout.h"
 #include "fakedev.h"
 
@@ -980,6 +981,40 @@ static size_t w_write(const void *p, size_t n, void *f) { (void)p; (void)f; g_w.
 static int w_flush(void *f) { (void)f; g_w.flushes++; return 0; }
 static int w_close(void *f) { (void)f; g_w.closes++; return 0; }
 
+/* the update confirmation: no stuck state of a pad may ever start a flash */
+static void test_confirm_gate(void)
+{
+    enum { COMBO = 0x0F, CANCEL = 0x10, HOLD = 3000 };
+    ng_holdconfirm_t c;
+    uint32_t t = 0;
+    int i, go = 0;
+    /* the combination stuck since before the screen */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* no pad / an implausible status (pad 0), whatever the bits */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 0, 0xFFFF, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* released, then the combination with the cancel button also down */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 10; i++, t += 30) go |= fw_confirm_step(&c, 1, 0, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO | CANCEL, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* a pad change during the hold: the new pad must release first */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 10; i++, t += 30) go |= fw_confirm_step(&c, 1, 0, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 50; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 2, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* a real release and a full hold still works, and not before the hold is over */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 10; i++, t += 30) go |= fw_confirm_step(&c, 1, 0, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 100; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    CHECK(fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD));
+}
+
 static void test_resout(void)
 {
     static resout o;
@@ -1042,6 +1077,7 @@ int main(void)
     test_resume();
     test_text();
     test_result_text();
+    test_confirm_gate();
     test_resout();
     test_golden();
     printf("netgd-fwupd host tests: %d checks passed\n", g_checks);

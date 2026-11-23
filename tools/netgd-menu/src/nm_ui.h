@@ -87,6 +87,10 @@ typedef struct {
     char fatal[NM_COLS + 1];
     int b_wait_release;                 /* B stopped an operation ("Stop safely"): ignore B until it is released (R104 D) */
     ng_btnguard_t bguard;               /* B counts only after it was seen released (a pad can report it all the time) */
+    ng_btnguard_t aguard, sguard;       /* the same for A and START */
+    uint32_t pad_id;                    /* the pad of the last frame (0 = none, or a status no real pad produces) */
+    ng_holdconfirm_t confirm_a;         /* the force question: A released, then held */
+    uint32_t confirm_max_ms;            /* no answer: refused after this long */
 
     int sd_mounted;                     /* the light mount is active */
     nm_art_t art;                       /* the box art of the game under the cursor (step 11) */

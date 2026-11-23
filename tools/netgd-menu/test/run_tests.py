@@ -13,6 +13,7 @@ test failure, never a stuck run.  Nothing here has run on a Dreamcast.
 import atexit
 import hashlib
 import os
+import random
 import re
 import shutil
 import socket
@@ -716,13 +717,14 @@ class NgtClient(object):
 
 def free_tcp_udp_port():
     """A port number free for TCP and UDP: menu_host binds both to it.  An ephemeral TCP port is not enough on Windows, where
-    excluded port ranges can apply to UDP only (bind then fails with WSAEACCES)."""
+    excluded port ranges can apply to UDP only (bind then fails with WSAEACCES).  Random numbers below the ephemeral range: bind(0)
+    hands out neighbouring ports, so it can walk through a whole excluded block, and outgoing connections never take these."""
     for _ in range(200):
+        port = random.randrange(21000, 49000)
         t = socket.socket()
         u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            t.bind(("127.0.0.1", 0))
-            port = t.getsockname()[1]
+            t.bind(("127.0.0.1", port))
             u.bind(("127.0.0.1", port))
             return port
         except OSError:
@@ -1604,7 +1606,7 @@ def solid_png(w, h, rgb):
 
 
 class TestWindow(NetBase):
-    """The NGTP receive window: 16 KiB x 1 on stock KOS TCP (R178), 64 KiB x 2 in a tcpfix build (as netgd-t2)"""
+    """The NGTP receive window: 16 KiB x 1 by default in both builds; a tcpfix build can ask for more (as netgd-t2)"""
 
     def push_counting(self, c, text, src):
         """a PUT; WANTs are answered only when no more frames come for 0.3 s: the largest WANT and most outstanding at once"""
@@ -1720,6 +1722,31 @@ class TestStuckB(NetBase):
         r = self.run_ui("scan unstuck t:200 X nocontroller step stuck controller t:100 dump", "--b-stuck")
         self.assertEqual(self.state(r), self.S_INFO, r.text)
         self.assertIn("B is stuck", NL.join(r.rows))
+
+    def force_refused(self, stuck):
+        img = self.card({"/01/MENU.CDI": b"menu"})
+        text, src, files = self.gdi_set("01")
+        srv = NgtServe(self, img, "--pad-stuck", stuck, "--confirm-max-ms", "1800")
+        c = srv.client()
+        c.hello()
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=2, flags=1), source=src)
+        self.assertFalse(ok, lines)
+        self.assertEqual(name, "EPROTECTED")
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertIn("/01/MENU.CDI", fc.files)
+        self.assertNotIn("/01/DISC.GDI", fc.files)
+
+    def test_stuck_a_and_b_never_approve(self):
+        self.force_refused("AB")
+
+    def test_a_held_before_the_question_never_approves(self):
+        self.force_refused("A")
+
+    def test_all_zero_raw_status_never_approves(self):
+        self.force_refused("ZERO")
 
     def test_force_confirm_works_with_b_stuck(self):
         img = self.card({"/01/MENU.CDI": b"menu"})

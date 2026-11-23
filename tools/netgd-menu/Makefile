@@ -59,11 +59,18 @@ endif
 ifneq ($(NM_RCVBUF),)
   KOS_CFLAGS += -DNM_RCVBUF=$(NM_RCVBUF)
 endif
+# the window override is for tcpfix builds only: on stock KOS TCP a larger window stalls (R178)
+ifneq ($(NM_WANT)$(NM_DEPTH),)
+ifeq ($(TCPFIX),1)
 ifneq ($(NM_WANT),)
   KOS_CFLAGS += -DNM_WANT=$(NM_WANT)
 endif
 ifneq ($(NM_DEPTH),)
   KOS_CFLAGS += -DNM_DEPTH=$(NM_DEPTH)
+endif
+else
+$(info NM_WANT / NM_DEPTH ignored: this is the stock TCP build, which stays at 16 KiB x 1)
+endif
 endif
 ifeq ($(DEBUG),1)
   KOS_CFLAGS += -g -O0
