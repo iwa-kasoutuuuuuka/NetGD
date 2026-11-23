@@ -3,7 +3,7 @@
              [--idle-close-ms N] [--idle-exit-ms N] [--stopafter N] [--hold-b-ms N] [--confirm allow|deny]
              [--leave-after-ms N] [--pad SCRIPT] [--nobba] [--timeout-ms N] [--trace] [--dump]
         --pad "B:800,-:300,x:200,B:0": the pad over time from the first read: B = present with B down, - = present with B up,
-        A = A down, C = A and B down, Z = an all-zero raw reply (every button down), x = no pad; each for that many ms, the last one for ever.  Without --pad the pad is healthy from the start.
+        A = A down, C = A and B down, Z = an all-zero raw reply (every button down), R = A+B+X+Y+START, x = no pad; each for that many ms, the last one for ever.  Without --pad the pad is healthy from the start.
    The card is a disk image (netgd-recv test/dev_file.c), the firmware the packet-level model (test/fwctl_sim.c), the
    network a real 127.0.0.1 socket (netgd-menu test/net_host.c), the clock the real one.  Prints LISTENING when the port is
    open, T2-END at the end, and a SIM line (what the model saw) at exit. */
@@ -17,7 +17,7 @@
 #include "ng.h"
 
 static t2_app_t app;
-static int confirm_mode;            /* 1 = A while the question is on the screen, 2 = B */
+static int confirm_mode;            /* 1 = A released, then held while the question is up, 2 = B, 3 = 300 ms as the pad, then all-zero */
 static uint32_t leave_after_ms;     /* B (not busy) this long after LISTENING; 0 = never */
 static uint64_t t_listen;
 static struct { char st; uint32_t ms; } pad_s[16];
@@ -65,11 +65,13 @@ static uint32_t host_buttons(void)
         if (c == 'B') pad = NM_BTN_B;
         else if (c == 'A') pad = NM_BTN_A;
         else if (c == 'C') pad = NM_BTN_A | NM_BTN_B;
-        else if (c == 'Z') pad = 0xFFFFu;
+        else if (c == 'Z') pad = 0x07FFu;
+        else if (c == 'R') pad = NM_BTN_A | NM_BTN_B | NM_BTN_X | NM_BTN_Y | NM_BTN_START;
     }
     nm_screen_row_text(&nm_host_screen, 9, row);
     if (strstr(row, "PC asks to")) {
         if (!confirm_t0) confirm_t0 = nm_host_real_ms();
+        if (confirm_mode == 3) return nm_host_real_ms() - confirm_t0 >= 300 ? 0x07FFu : pad;
         if (confirm_mode == 1 && nm_host_real_ms() - confirm_t0 >= 300) return pad | NM_BTN_A;
         return pad | (confirm_mode == 2 ? NM_BTN_B : 0);
     }
@@ -124,7 +126,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--idle-exit-ms") && v) { cfg.idle_exit_ms = (uint32_t)atol(v); i++; }
         else if (!strcmp(a, "--stopafter") && v) { nm_host_stop_after_polls = atoi(v); i++; }
         else if (!strcmp(a, "--hold-b-ms") && v) { nm_host_b_hold_ms = (uint32_t)atol(v); i++; }
-        else if (!strcmp(a, "--confirm") && v) { confirm_mode = !strcmp(v, "allow") ? 1 : 2; i++; }
+        else if (!strcmp(a, "--confirm") && v) { confirm_mode = !strcmp(v, "allow") ? 1 : !strcmp(v, "zero") ? 3 : 2; i++; }
         else if (!strcmp(a, "--leave-after-ms") && v) { leave_after_ms = (uint32_t)atol(v); i++; }
         else if (!strcmp(a, "--pad") && v) { pad_parse(argv[++i]); }
         else if (!strcmp(a, "--confirm-max-ms") && v) { cfg.confirm_max_ms = (uint32_t)atol(v); i++; }

@@ -59,6 +59,24 @@ static inline int ng_btnguard_update(ng_btnguard_t *g, uint32_t pad, int down, u
     return 0;
 }
 
+/* The same for a sample whose whole status is implausible (odd, see ng_pad_implausible).  It is never a release.  A guard that is
+   already armed still counts the button as down: A+B+X+Y+START is a real soft-reset habit, and for B that means "stop", the safe
+   direction.  Never use this for a button that approves something: pass pad 0 to those guards instead. */
+static inline int ng_btnguard_sample(ng_btnguard_t *g, uint32_t pad, int down, int odd, uint32_t now_ms)
+{
+    if (!odd) return ng_btnguard_update(g, pad, down, now_ms);
+    if (pad != g->pad) {
+        g->pad = pad;
+        g->armed = 0;
+        g->seen_down = 0;
+    }
+    g->up_n = 0;
+    if (!pad) return 0;
+    if (g->armed) return down != 0;
+    if (down) g->seen_down = 1;
+    return 0;
+}
+
 /* 1 while a present pad holds the button without ever having released it: the screens offer another way out */
 static inline int ng_btnguard_stuck(const ng_btnguard_t *g)
 {
@@ -75,7 +93,8 @@ static inline void ng_btnguard_prearm(ng_btnguard_t *g, uint32_t pad)
 }
 
 /* A status no real pad produces: opposite directions, or all five face buttons.  KOS cooks buttons = ~raw, so an all-zero raw
-   reply reads as every button pressed.  The platform layers report such a status as "no pad". */
+   reply reads as every button pressed.  Test the raw digital bits, before an analog stick is merged into the D-pad.  Such a status
+   never approves anything and is never a release (ng_btnguard_sample). */
 static inline int ng_pad_implausible(uint32_t b, uint32_t up, uint32_t down, uint32_t left, uint32_t right, uint32_t face)
 {
     return ((b & up) && (b & down)) || ((b & left) && (b & right)) || (b & face) == face;

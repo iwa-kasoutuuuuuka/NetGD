@@ -1748,6 +1748,40 @@ class TestStuckB(NetBase):
     def test_all_zero_raw_status_never_approves(self):
         self.force_refused("ZERO")
 
+    def test_all_zero_after_a_release_never_approves(self):
+        # B stuck (so it cannot refuse), A seen released in the question, then every button "down": A must not count
+        img = self.card({"/01/MENU.CDI": b"menu"})
+        text, src, files = self.gdi_set("01")
+        srv = NgtServe(self, img, "--b-stuck", "--confirm", "zero", "--confirm-max-ms", "2500")
+        c = srv.client()
+        c.hello()
+        lines, ok, name = c.request(NGT_PUT, self.put_payload(text, mode=2, flags=1), source=src)
+        self.assertFalse(ok, lines)
+        self.assertEqual(name, "EPROTECTED")
+        c.send(NGT_FINISH, bytes([1]))
+        c.recv(), c.recv()
+        srv.finish()
+        fc = self.clean_fs(img)
+        self.assertIn("/01/MENU.CDI", fc.files)
+        self.assertNotIn("/01/DISC.GDI", fc.files)
+
+    def test_a_needs_a_release_first(self):
+        # a pad that comes back with A down must not launch the game under the cursor
+        r = self.run_ui("scan t:200 nocontroller step stuckA controller t:200 dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_LIST, r.text)
+        r = self.run_ui("scan t:200 nocontroller step stuckA controller t:200 unstuck t:200 A t:16 dump", "--no-prearm")
+        self.assertNotEqual(self.state(r), self.S_LIST, r.text)         # released: the same press now counts
+
+    def test_start_needs_a_release_first(self):
+        r = self.run_ui("scan t:200 nocontroller step stuckS controller t:200 dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_LIST, r.text)
+        r = self.run_ui("scan t:200 nocontroller step stuckS controller t:200 unstuck t:200 S dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_CONFIRM_BIOS, r.text)
+
+    def test_soft_reset_combo_still_counts_as_b(self):
+        r = self.run_ui("scan t:200 X stuckR step step dump", "--no-prearm")
+        self.assertEqual(self.state(r), self.S_LIST, r.text)
+
     def test_force_confirm_works_with_b_stuck(self):
         img = self.card({"/01/MENU.CDI": b"menu"})
         text, src, files = self.gdi_set("01")

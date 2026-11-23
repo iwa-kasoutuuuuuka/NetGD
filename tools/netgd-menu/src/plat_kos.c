@@ -38,9 +38,16 @@ uint32_t nm_plat_pad(uint32_t *buttons)
 {
     maple_device_t *c = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
     cont_state_t *st = c ? (cont_state_t *)maple_dev_status(c) : NULL;
-    uint32_t b = 0;
+    uint32_t b = 0, id;
     *buttons = 0;
     if (!st) return 0;
+    id = (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u;
+    /* the digital bits alone: D-pad one way and the stick the other is a real state */
+    if (ng_pad_implausible(st->buttons, CONT_DPAD_UP, CONT_DPAD_DOWN, CONT_DPAD_LEFT, CONT_DPAD_RIGHT,
+                           CONT_A | CONT_B | CONT_X | CONT_Y | CONT_START)) {
+        *buttons = NM_BTN_ODD | ((st->buttons & CONT_B) ? NM_BTN_B : 0);
+        return id;
+    }
     if (st->buttons & CONT_DPAD_UP) b |= NM_BTN_UP;
     if (st->buttons & CONT_DPAD_DOWN) b |= NM_BTN_DOWN;
     if (st->buttons & CONT_DPAD_LEFT) b |= NM_BTN_LEFT;
@@ -56,16 +63,15 @@ uint32_t nm_plat_pad(uint32_t *buttons)
     if (st->joyx > 64) b |= NM_BTN_RIGHT;
     if (st->ltrig > 128) b |= NM_BTN_LT;
     if (st->rtrig > 128) b |= NM_BTN_RT;
-    if (NM_PAD_IMPLAUSIBLE(b)) return 0;        /* e.g. an all-zero raw reply: every button "down" */
     *buttons = b;
-    return (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u;
+    return id;
 }
 
 uint32_t nm_plat_buttons(void)
 {
     uint32_t b;
     nm_plat_pad(&b);
-    return b;
+    return b & ~(uint32_t)NM_BTN_ODD;
 }
 
 /* ---- screen: only the cells that changed since the last call ---- */
@@ -163,10 +169,11 @@ void ng_plat_console(const char *line)
 }
 
 /* the level of B and the pad it was read from (ng_plat.h) */
-int ng_plat_user_stop(uint32_t *pad)
+int ng_plat_user_stop(uint32_t *pad, int *odd)
 {
     uint32_t b;
     *pad = nm_plat_pad(&b);
+    *odd = (b & NM_BTN_ODD) != 0;
     return (b & NM_BTN_B) ? 1 : 0;
 }
 

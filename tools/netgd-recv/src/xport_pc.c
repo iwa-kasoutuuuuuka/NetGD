@@ -76,10 +76,10 @@ static int sink_poll(void *ctx)
     uint32_t t = ng_plat_millis();
     char p[200];
     uint32_t pad = 0;
-    int down;
+    int down, odd = 0;
     if (pc->stop) return 1;
-    down = ng_plat_user_stop(&pad);
-    if (ng_btnguard_update(&pc->b, pad, down, t)) { pc->stop = 1; return 1; }
+    down = ng_plat_user_stop(&pad, &odd);
+    if (ng_btnguard_sample(&pc->b, pad, down, odd, t)) { pc->stop = 1; return 1; }
     if (t - pc->last_poll < ng_pc_poll_ms) return 0;     /* /pc/ is a dcload call: once a second */
     pc->last_poll = t;
     snprintf(p, sizeof p, "%s/reload.req", pc->jobdir);

@@ -58,12 +58,14 @@ void nm_ui_set_tcpfix(nm_ui_t *ui, int tcpfix)
 /* The buttons of this frame.  A, B and START are events only from a pad that has been seen with them released (ng_btnguard.h). */
 static uint32_t read_events(nm_ui_t *ui, uint32_t now)
 {
-    uint32_t btn, pad = nm_plat_pad(&btn);
-    uint32_t ev = nm_input_update(&ui->in, btn, now);
-    ui->pad_id = pad;
-    if (!ng_btnguard_update(&ui->bguard, pad, (btn & NM_BTN_B) != 0, now)) ev &= ~(uint32_t)NM_BTN_B;
-    if (!ng_btnguard_update(&ui->aguard, pad, (btn & NM_BTN_A) != 0, now)) ev &= ~(uint32_t)NM_BTN_A;
-    if (!ng_btnguard_update(&ui->sguard, pad, (btn & NM_BTN_START) != 0, now)) ev &= ~(uint32_t)NM_BTN_START;
+    uint32_t btn, pad = nm_plat_pad(&btn), ev;
+    int odd = (btn & NM_BTN_ODD) != 0;
+    btn &= ~(uint32_t)NM_BTN_ODD;
+    ev = nm_input_update(&ui->in, btn, now);
+    ui->pad_id = odd ? 0 : pad;         /* what approves something sees an implausible status as no pad */
+    if (!ng_btnguard_sample(&ui->bguard, pad, (btn & NM_BTN_B) != 0, odd, now)) ev &= ~(uint32_t)NM_BTN_B;
+    if (!ng_btnguard_update(&ui->aguard, ui->pad_id, (btn & NM_BTN_A) != 0, now)) ev &= ~(uint32_t)NM_BTN_A;
+    if (!ng_btnguard_update(&ui->sguard, ui->pad_id, (btn & NM_BTN_START) != 0, now)) ev &= ~(uint32_t)NM_BTN_START;
     return ev;
 }
 
@@ -518,8 +520,8 @@ static int hk_stop(void *ctx)
 {
     nm_ui_t *ui = (nm_ui_t *)ctx;
     uint32_t pad = 0;
-    int down = ng_plat_user_stop(&pad);
-    int stop = ng_btnguard_update(&ui->bguard, pad, down, nm_plat_millis());
+    int odd = 0, down = ng_plat_user_stop(&pad, &odd);
+    int stop = ng_btnguard_sample(&ui->bguard, pad, down, odd, nm_plat_millis());
     if (stop) ui->b_wait_release = 1;       /* the same press must not also leave the screen when the operation has stopped */
     return stop;
 }

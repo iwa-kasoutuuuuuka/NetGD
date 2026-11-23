@@ -135,25 +135,19 @@ static uint32_t pad_buttons(void)
     return b;
 }
 
-/* For the confirmation: the buttons of all pads and a number for that set of pads.  0 = no pad, a pad without a status, or a
-   status no real pad produces (KOS cooks buttons = ~raw: an all-zero reply reads as every button down). */
-static uint32_t pad_sample(uint32_t *buttons)
+/* For the confirmation: every pad, see fw_pads_t (KOS cooks buttons = ~raw: an all-zero reply reads as every button down). */
+static void pad_sample(fw_pads_t *p)
 {
-    uint32_t b = 0, id = 0;
     int i;
-    *buttons = 0;
+    memset(p, 0, sizeof *p);
     for (i = 0; i < 4; i++) {
         maple_device_t *c = maple_enum_type(i, MAPLE_FUNC_CONTROLLER);
         cont_state_t *st;
         if (!c) break;
         st = (cont_state_t *)maple_dev_status(c);
-        if (!st || ng_pad_implausible(st->buttons, CONT_DPAD_UP, CONT_DPAD_DOWN, CONT_DPAD_LEFT, CONT_DPAD_RIGHT,
-                                      CONT_A | CONT_B | CONT_X | CONT_Y | CONT_START)) return 0;
-        b |= st->buttons;
-        id = id * 37u + (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u;
+        fw_pads_add(p, (uint32_t)c->port * MAPLE_UNIT_COUNT + (uint32_t)c->unit + 1u, st != NULL, st ? st->buttons : 0,
+                    CONT_DPAD_UP, CONT_DPAD_DOWN, CONT_DPAD_LEFT, CONT_DPAD_RIGHT, CONT_A | CONT_B | CONT_X | CONT_Y | CONT_START);
     }
-    *buttons = b;
-    return id;
 }
 
 static void wait_start_and_exit(int code)
@@ -296,6 +290,7 @@ static int confirm(void)
     uint32_t held, b, pad, now;
     int bar_shown = 0;
     ng_holdconfirm_t hold;
+    fw_pads_t pads;
     ui_title();
     row = 2;
     row = drawf(row, COL_WHITE, "%s: %s", fw_msg_euc(FWM_UI_DEVICE), g_model);
@@ -328,6 +323,8 @@ static int confirm(void)
         uint32_t waited = 0;
         int shown = 0;
         while (pad_buttons() & (COMBO | CONT_B)) {
+            pad_sample(&pads);                  /* an implausible pad never lets this end: B on a healthy pad still cancels */
+            if (pads.bad && (pads.b & CONT_B)) return 0;
             if (!shown && waited >= 1000) { draw_wrap(ROWS - 2, COL_YELLOW, fw_msg_euc(FWM_UI_BTN_HELD)); shown = 1; }
             thd_sleep(30);
             waited += 30;
@@ -336,7 +333,9 @@ static int confirm(void)
     }
     memset(&hold, 0, sizeof hold);
     for (;;) {
-        pad = pad_sample(&b);
+        pad_sample(&pads);
+        pad = fw_pads_id(&pads);
+        b = pads.b;
         now = (uint32_t)timer_ms_gettime64();
         if (fw_confirm_step(&hold, pad, b, COMBO, CONT_B, now, HOLD_MS)) return 1;
         held = ng_holdconfirm_ms(&hold, now);

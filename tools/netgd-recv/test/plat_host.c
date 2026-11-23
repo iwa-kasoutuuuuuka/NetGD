@@ -27,9 +27,10 @@ void ng_plat_console(const char *line)
     if (!sim_quiet) printf("%s\n", line);
 }
 
-int ng_plat_user_stop(uint32_t *pad)
+int ng_plat_user_stop(uint32_t *pad, int *odd)
 {
     *pad = 1;
+    *odd = 0;
     sim_polls++;
     return sim_b_stuck || (sim_stop_after_polls >= 0 && sim_polls > sim_stop_after_polls);
 }

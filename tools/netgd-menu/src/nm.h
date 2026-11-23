@@ -28,6 +28,7 @@
 #define NM_BTN_START  0x0100u
 #define NM_BTN_LT     0x0200u
 #define NM_BTN_RT     0x0400u
+#define NM_BTN_ODD    0x8000u   /* nm_plat_pad only: the status is implausible; of the buttons only B is reported with it */
 #define NM_PAD_IMPLAUSIBLE(b) ng_pad_implausible((b), NM_BTN_UP, NM_BTN_DOWN, NM_BTN_LEFT, NM_BTN_RIGHT, \
                                                  NM_BTN_A | NM_BTN_B | NM_BTN_X | NM_BTN_Y | NM_BTN_START)
 

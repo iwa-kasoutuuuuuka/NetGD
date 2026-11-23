@@ -1007,6 +1007,34 @@ static void test_confirm_gate(void)
     for (i = 0; i < 50; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
     for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 2, COMBO, COMBO, CANCEL, t, HOLD);
     CHECK(!go);
+    /* three combination buttons stuck: pressing the fourth for the hold must not start anything */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 100; i++, t += 30) go |= fw_confirm_step(&c, 1, 0x07, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* the cancel button stuck is not a release either */
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < 100; i++, t += 30) go |= fw_confirm_step(&c, 1, CANCEL, COMBO, CANCEL, t, HOLD);
+    for (i = 0; i < 2000; i++, t += 30) go |= fw_confirm_step(&c, 1, COMBO, COMBO, CANCEL, t, HOLD);
+    CHECK(!go);
+    /* an implausible pad next to a healthy one: nothing approves, the healthy pad's B is still seen */
+    {
+        fw_pads_t p;
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 1, 1, 0xFFFF, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        fw_pads_add(&p, 7, 1, CANCEL, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 0 && (p.b & CANCEL));
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 1, 1, 0xFFFF, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        fw_pads_add(&p, 7, 1, 0, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 0 && p.b == 0);
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 7, 0, 0, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 0);
+        memset(&p, 0, sizeof p);
+        fw_pads_add(&p, 7, 1, COMBO & 0x1F, 0x100, 0x200, 0x400, 0x800, 0x1F);
+        CHECK(fw_pads_id(&p) == 7);
+    }
     /* a real release and a full hold still works, and not before the hold is over */
     memset(&c, 0, sizeof c);
     for (i = 0; i < 10; i++, t += 30) go |= fw_confirm_step(&c, 1, 0, COMBO, CANCEL, t, HOLD);

@@ -132,8 +132,8 @@ static int hk_stop(void *ctx)
 {
     t2_app_t *a = (t2_app_t *)ctx;
     uint32_t pad = 0;
-    int down = ng_plat_user_stop(&pad);
-    return ng_btnguard_update(&a->bguard, pad, down, nm_plat_millis());
+    int odd = 0, down = ng_plat_user_stop(&pad, &odd);
+    return ng_btnguard_sample(&a->bguard, pad, down, odd, nm_plat_millis());
 }
 
 /* force on a protected folder: A released and then held for a second allows it, B or 30 s refuses.  A pad that reports A all the
@@ -147,7 +147,8 @@ static int hk_confirm(void *ctx, const char *what, const char *folder)
     memset(&hold, 0, sizeof hold);
     for (;;) {
         uint32_t b, pad = nm_plat_pad(&b), now = nm_plat_millis();
-        int refuse = ng_btnguard_update(&a->bguard, pad, (b & NM_BTN_B) != 0, now);
+        int odd = (b & NM_BTN_ODD) != 0;    /* implausible: B can still refuse, nothing can approve */
+        int refuse = ng_btnguard_sample(&a->bguard, pad, (b & NM_BTN_B) != 0, odd, now);
         draw(a);
         snprintf(l, sizeof l, "PC asks to %s the protected %.24s", what, folder);
         nm_screen_row(&a->scr, 9, l, NM_ATTR_WARN);
@@ -156,7 +157,7 @@ static int hk_confirm(void *ctx, const char *what, const char *folder)
                                    : "Hold A for 1 s to allow, B to refuse", NM_ATTR_WARN);
         nm_plat_present(&a->scr);
         if (refuse) return 0;
-        if (ng_holdconfirm_update(&hold, pad, (b & NM_BTN_A) != 0, now, CONFIRM_HOLD_MS)) return 1;
+        if (ng_holdconfirm_update(&hold, odd ? 0 : pad, (b & NM_BTN_A) != 0, now, CONFIRM_HOLD_MS)) return 1;
         if (now - t0 >= a->cfg.confirm_max_ms) return 0;
         nm_plat_sleep(20);
     }
@@ -253,7 +254,7 @@ int t2_step(t2_app_t *a)
         ev = ngtp_srv_service(&a->srv);
         now = nm_plat_millis();
         pad = nm_plat_pad(&btn);
-        b = ng_btnguard_update(&a->bguard, pad, (btn & NM_BTN_B) != 0, now);
+        b = ng_btnguard_sample(&a->bguard, pad, (btn & NM_BTN_B) != 0, (btn & NM_BTN_ODD) != 0, now);
         if (ev & NGTP_EV_FINISH) { leave(a, T2_R_FINISH); present(a); return 1; }
         if (ev & NGTP_EV_REQUEST) a->b_was_down = b;        /* a B that stopped an operation does not also leave */
         if (b && !a->b_was_down && !a->busy) { leave(a, T2_R_USER); present(a); return 1; }

@@ -832,10 +832,10 @@ class TestBoundedWaits(Base):
         srv.finish()
         self.check_folder(img, "01", datas)
 
-    def force_refused(self, script):
+    def force_refused(self, script, *opts):
         img = self.card({"/01/MENU.CDI": b"menu"})
         text, datas = self.gdi_set("01")
-        srv = Serve(self, img, "--pad", script, "--confirm-max-ms", "1800")
+        srv = Serve(self, img, "--pad", script, "--confirm-max-ms", "2500", *opts)
         c = srv.client()
         c.hello(CODE)
         res = c.put(text, Src(datas), mode=ngtp.PUT_OVERWRITE, force=True)
@@ -852,6 +852,14 @@ class TestBoundedWaits(Base):
 
     def test_all_zero_raw_status_never_approves(self):
         self.force_refused("Z:0")
+
+    def test_all_zero_after_a_release_never_approves(self):
+        # B stuck (so it cannot refuse), A seen released in the question, then every button "down": A must not count
+        self.force_refused("B:0", "--confirm", "zero")
+
+    def test_soft_reset_combo_still_leaves_with_b(self):
+        srv, ms = self.pad_run("-:500,R:0", "--idle-exit-ms", "4000")
+        self.assertEqual(srv.end["result"], R_USER, srv.text)
 
     def test_no_bba_fails_cleanly(self):
         srv = Serve(self, self.card(), "--nobba", "--dump")

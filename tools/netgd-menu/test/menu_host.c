@@ -4,7 +4,9 @@
                   [--rflip K] [--rflip-all] [--nocontroller] [--names A|B] [--stock] [--gdemu-version V] [--nolink N]
      menu_host serve <img> <sectors> --port P --code C [--tcpfix] ...   (the transfer screen on a localhost socket)
         events: U D L R A B X Y S LT RT (press and release), hold:A:1200, t:500, scan, step, dump, rflipall, ua,
-                nocontroller, controller, stuck, unstuck (--b-stuck: B reads down until "unstuck")
+                nocontroller, controller, stuck, unstuck (--b-stuck: B reads down until "unstuck"),
+                stuckA, stuckS, stuckR (A, START, A+B+X+Y+START read down until "unstuck")
+        --no-prearm: the guards of A, B and START start as on the console (a release is needed first)
    Nothing here runs on a Dreamcast. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -331,7 +333,8 @@ static void dump_screen(void)
 }
 
 static int pad_stuck;           /* B reads down whatever the script presses (a pad that reports it all the time) */
-static uint32_t ui_buttons(void) { return nm_host_buttons | (pad_stuck ? NM_BTN_B : 0); }
+static uint32_t ui_stuck_bits;   /* stuckA, stuckS, stuckR */
+static uint32_t ui_buttons(void) { return nm_host_buttons | ui_stuck_bits | (pad_stuck ? NM_BTN_B : 0); }
 
 /* the scripted presses come from a healthy pad, except the buttons that are stuck */
 static void prearm_pad(uint32_t stuck)
@@ -370,7 +373,10 @@ static void run_event(char *ev)
     if (!strcmp(ev, "nocontroller")) { nm_host_controller = 0; return; }
     if (!strcmp(ev, "controller")) { nm_host_controller = 1; return; }
     if (!strcmp(ev, "stuck")) { pad_stuck = 1; return; }
-    if (!strcmp(ev, "unstuck")) { pad_stuck = 0; return; }
+    if (!strcmp(ev, "unstuck")) { pad_stuck = 0; ui_stuck_bits = 0; return; }
+    if (!strcmp(ev, "stuckA")) { ui_stuck_bits = NM_BTN_A; return; }
+    if (!strcmp(ev, "stuckS")) { ui_stuck_bits = NM_BTN_START; return; }
+    if (!strcmp(ev, "stuckR")) { ui_stuck_bits = NM_BTN_A | NM_BTN_B | NM_BTN_X | NM_BTN_Y | NM_BTN_START; return; }
     if (!strncmp(ev, "t:", 2)) { run_ms((uint32_t)atol(ev + 2)); return; }
     if (!strncmp(ev, "hold:", 5)) {
         char *colon = strchr(ev + 5, ':');
@@ -406,7 +412,7 @@ static int ui_cmd(int argc, char **argv)
     const char *script = "";
     const char *img = argv[2];
     uint32_t sectors = (uint32_t)strtoul(argv[3], NULL, 10);
-    int noimg = 0, k = 0;
+    int noimg = 0, k = 0, no_prearm = 0;
     char *copy, *tok;
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--script") && i + 1 < argc) script = argv[++i];
@@ -422,6 +428,7 @@ static int ui_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--rflip") && i + 1 < argc) sim_rflip_cmd = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--rflip-all")) sim_rflip_every = 1;
         else if (!strcmp(argv[i], "--nocontroller")) nm_host_controller = 0;
+        else if (!strcmp(argv[i], "--no-prearm")) no_prearm = 1;
         else if (!strcmp(argv[i], "--b-stuck")) pad_stuck = 1;
         else if (!strcmp(argv[i], "--nobba")) nm_host_net_nodev = 1;
         else if (!strcmp(argv[i], "--noaddr") && i + 1 < argc) nm_host_net_noaddr = atoi(argv[++i]);
@@ -435,7 +442,7 @@ static int ui_cmd(int argc, char **argv)
     atexit(sim_summary);
     nm_ui_init(&ui);
     nm_host_buttons_hook = ui_buttons;
-    prearm_pad(pad_stuck ? NM_BTN_B : 0);
+    if (!no_prearm) prearm_pad(pad_stuck ? NM_BTN_B : 0);
     copy = malloc(strlen(script) + 1);
     strcpy(copy, script);
     for (tok = strtok(copy, " ,"); tok; tok = strtok(NULL, " ,")) {
@@ -498,6 +505,14 @@ static void u12_btnguard(void)
     ng_btnguard_t g;
     uint32_t t;
     int any;
+    /* an implausible status: never a release; an armed guard still sees B (a stop), an unarmed one does not */
+    memset(&g, 0, sizeof g);
+    for (t = 0; t < 400; t += 16) CHECK(!ng_btnguard_sample(&g, 1, 0, 1, t));
+    CHECK(!g.armed);
+    CHECK(!ng_btnguard_sample(&g, 1, 1, 1, t));
+    CHECK(ng_btnguard_stuck(&g));
+    ng_btnguard_prearm(&g, 1);
+    CHECK(ng_btnguard_sample(&g, 1, 1, 1, t));
     /* polls inside one Maple frame are one sample: 4 quick ones and a late one are 2, not 5 */
     memset(&g, 0, sizeof g);
     for (t = 0; t < 4; t++) ng_btnguard_update(&g, 1, 0, t);
@@ -675,8 +690,9 @@ static uint32_t serve_buttons(void)
 {
     uint32_t stuck = serve_stuck | (pad_stuck ? NM_BTN_B : 0);
     if (ui.state == NM_S_NET_CONFIRM) {
-        if (serve_zero) return 0xFFFFu;
+        if (serve_zero) return 0x07FFu;
         if (!confirm_t0) confirm_t0 = nm_host_real_ms();
+        if (serve_confirm == 3) return nm_host_real_ms() - confirm_t0 >= 300 ? 0x07FFu : stuck;
         if (serve_confirm == 1 && nm_host_real_ms() - confirm_t0 >= 300) return stuck | NM_BTN_A;
         return stuck | (serve_confirm == 2 ? NM_BTN_B : 0);
     }
@@ -700,7 +716,7 @@ static int serve_cmd(int argc, char **argv)
         else if (!strcmp(argv[i], "--cut") && i + 1 < argc) sim_cut_after = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--idle-ms") && i + 1 < argc) ui.idle_ms = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--stopafter") && i + 1 < argc) nm_host_stop_after_polls = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--confirm") && i + 1 < argc) serve_confirm = !strcmp(argv[++i], "allow") ? 1 : 2;
+        else if (!strcmp(argv[i], "--confirm") && i + 1 < argc) { i++; serve_confirm = !strcmp(argv[i], "allow") ? 1 : !strcmp(argv[i], "zero") ? 3 : 2; }
         else if (!strcmp(argv[i], "--ua")) { sim_ua_mode = 1; sim_ua_pending = 1; }
         else if (!strcmp(argv[i], "--failend2")) sim_fail_end2 = 1;
         else if (!strcmp(argv[i], "--failend") && i + 1 < argc) sim_fail_end = !strcmp(argv[++i], "stuck") ? 2 : 1;
