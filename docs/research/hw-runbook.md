@@ -1,10 +1,49 @@
 # 実機ランブック（純正 GDEMU 6.0 + Dreamcast + BBA）
 
-作成：2026-11-23（`main` a59cbd00 から切った `docs/hw-runbook`）。**ここに書いた 5 本の実行は、まだ 1 回も実機で行っていない。** 期待する値・画面は、ソースと既存の記録から読んだ「見込み」であって結果ではない。確認できなかったことは **要確認** と付けた。
+作成：2026-11-23（`main` a59cbd00 から切った `docs/hw-runbook`）。2026-11-23 の実機の結果を反映した（下の「今の状況」）。**結果と書いていないところの期待する値・画面は、ソースと既存の記録から読んだ「見込み」である。** 確認できなかったことは **要確認** と付けた。
 
 前提：ユーザーの GDEMU 6.0 の MCU はロックされた扱いなので、NetGD 自体はまだ動かせない。ここの実行はすべて **純正 GDEMU のまま**、Dreamcast + BBA（PC 192.168.10.1、dcload-ip 192.168.10.2）で行う。SWD 端子と ERASE パッドには触らない。
 
+## 今の状況（2026-11-23）
+
+| セクション | 状況 | 実機で分かったこと |
+|---|---|---|
+| §1 gdprobe seq 25c | 未実行 | — |
+| §2 g2netbench_tcpfix | **保留**（`diag/hw-exit` で調査中） | p1・p2 は完了。p3 で結果が来なくなった |
+| §3 g2netbench（g2x） | **実行済み・全パス完了** | 最高 2,602 KB/s（`g2net_002.txt`） |
+| §4 netgd-t2（`T2_NO_DRIVE=1`） | **保留**（`diag/hw-exit` で調査中） | 起動の約 10〜20 秒後に終了し、ポート 20039 が開かない |
+| §5 netgd-menu | 未実行 | — |
+
+§2 と §4 は、`diag/hw-exit` の調査が終わるまで回さない。原因はまだ分かっていない。
+
 ## 0. 先に読む：順番と注意
+
+### TV が見えなくても、PC だけで状態を見る
+
+ユーザーが TV を見られないことがある。どの実行でも、まず PC 側で次の 1 行を実行する（Dreamcast には ping を 2 個送るだけ）。
+
+```powershell
+Get-Content H:\DC\tools\dc-bba-tools\logs\dc_auto_status.txt | Select-String '^(state|reason|detail|since|elf|last_result)='; Get-Process dc-tool-ip -ErrorAction SilentlyContinue | Select-Object Id,StartTime; Get-NetTCPConnection -RemotePort 20039 -ErrorAction SilentlyContinue | Select-Object RemoteAddress,State; ping -n 2 192.168.10.2
+```
+
+**ping の TTL で、誰が答えているかが分かる。** TTL=128 が dcload-ip、TTL=255 が動いている KOS のアプリというのは、2026-11-23 の実機での観察である。ソースとも合う。
+
+- dcload-ip は受け取った ping の IP ヘッダをそのまま返す（`dcload/net.c` の `process_icmp`）。だから 128 は **Windows が送った TTL の折り返し**で、`ping -i 64` なら 64 に変わるはず（未確認）。判定には既定の `ping` を使う。
+- KOS は ping の返事を TTL 255 で送る（`kernel/net/net_icmp.c:114`）。ただし KOS のネットが動いているアプリに限る。
+
+| `state` | `dc-tool-ip` | ping | 読み方 |
+|---|---|---|---|
+| `running` | いる | TTL=255 | KOS のアプリがネットを使って動いている |
+| `running` | いる | **TTL=128** | **アプリは終わるか落ちるかして dcload に戻ったのに、PC に終了が届いていない。** tcpfix の 1 回目がこの状態で 40 分以上残った。`-Stop` で片付ける（下の「共通の約束」） |
+| `running` | いる | 応答なし | 起動の直後か、ネットを使わないアプリの実行中か、固まっている。1 回では判断しない（下） |
+| `waiting` | — | — | `reason` と `detail` が、何を待っているかを示す |
+| `idle` | いない | TTL=128 | 実行は終わり、dcload が次を受けられる |
+
+- **`dc_auto` を始めた直後は、Dreamcast が少しの間 ping に答えないことがある（2026-11-23 に観察）。これを固まったと判断しない。** ELF の転送と KOS の起動の間は dcload も KOS のネットも答えない。30 秒ほどあけて見直し、結果のファイルやログが増えているかも合わせて見る。
+- `state=running` だけでは動いている証拠にならない。上のとおり、アプリが落ちたあとも `running` のまま残る。
+- 計測の最中に ping を続けて打たない（結果に影響しうる）。進み具合は結果のファイルの更新時刻で見る。
+- ポート 20039 に試しに接続しない（`Test-NetConnection` など）。アプリは最初の接続を送り手として受け取るので、本物の送り手の接続を邪魔する。上の 1 行は既にある接続を読むだけ。
+- PC からは **GDEMU が固まったかどうかは直接見えない**。ping はネット側の応答でしかない。§1 では記録の `ABORT` で判断する。
 
 ### 共通の約束
 
@@ -12,6 +51,7 @@
   - 別の `dc_auto` の窓が動いている場合、新しい実行はその窓と `dc-tool-ip` を止めて置き換える（`Stop-OtherRuns`、`[replace]` と表示）。そのあと `Waiting for the reset` で、Dreamcast の電源の入れ直しを待つ。`-Wait` を付けると、置き換えずに終わるのを待つ。
   - 持ち主の `dc_auto` がいない `dc-tool-ip` が残っている（stale）場合は、置き換えられない。`Another dc-tool-ip is running (PID …). Waiting for it to end...` と出て止まる。
   - 前の実行が止まらずに置き換わると、その記録は途中で終わる。だから、前の実行が終わったのを確かめてから次を始める。
+  - **`-Stop` が止めるのは `dc_auto` が起動した `dc-tool-ip` だけ**。持ち主のいないものは `left alone` と表示して残す。
   - 残ったら次のとおり。
   1. `Set-Location H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\dc_auto.ps1 -Stop -Ip 192.168.10.2`（この Dreamcast 向けの `dc_auto` と `dc-tool-ip` を止める。`-Stop` は `dc_auto.ps1` にある）
   2. Dreamcast の電源を切って 5 秒待ち、入れ直し、GDmenu で SD の `02`（dcload-ip）を選ぶ。
@@ -25,9 +65,9 @@
 
 | 順 | セクション | 純正 GDEMU が固まる可能性 | 固まったら |
 |---|---|---|---|
-| 1 | §2 g2netbench_tcpfix | 無い（GD-ROM に触れない：`INIT_CDROM` 無し、G1・ATA 呼び出し無し） | — |
-| 2 | §3 g2netbench（g2x） | 無い（同上） | — |
-| 3 | §4 netgd-t2（`T2_NO_DRIVE=1`） | 無い（ドライブに 1 パケットも送らない） | — |
+| 1 | §2 g2netbench_tcpfix（**保留**） | 無い（GD-ROM に触れない：`INIT_CDROM` 無し、G1・ATA 呼び出し無し） | — |
+| 2 | §3 g2netbench（g2x）（**実行済み**） | 無い（同上） | — |
+| 3 | §4 netgd-t2（`T2_NO_DRIVE=1`）（**保留**） | 無い（ドライブに 1 パケットも送らない） | — |
 | 4 | §5 netgd-menu 初回確認（純正） | 低い（ドライブに送るのは `52 00` 1 個、UNIT ATTENTION のときだけもう 1 個。`52 00` は gdprobe が純正に送って記録済みの CDB） | 電源 OFF |
 | 5 | §1 gdprobe seq 25c | **ある**（DMA の CD_READ。純正は seq 25b で 2 回目に固まった） | **電源 OFF** → 5 秒 → ON |
 
@@ -98,6 +138,10 @@ gdprobe は画面に描かない（`main.c` に bfont・video の呼び出しが
 - `dc_auto` のログ：`H:\DC\tools\dc-bba-tools\logs\auto_<日付>_<時刻>.txt`
 - 実行後に `dc_auto` が `[gdprobe] newest record: <パス>` を出す。
 
+### PC だけで見る
+
+gdprobe は BBA を KOS に渡さないので、実行中の ping は応答なしが正常と見込む（**要確認**）。進み具合は `host\gdprobe_stock_seq00027.txt` の更新と `dc_auto` のログで見る。終わると `state=idle`、ping は TTL=128。記録の `ABORT reason=drive-not-answering` が出たら、ping に関係なく電源 OFF が要る。TV がなくても判定できる。
+
 ### 合否
 
 - 正常終了：記録の最後が `img=2 probe=END abort=0`（return_to=2 の戻り先）、`# done abort=0`。ヘッダに `# config ... dma_modes=exact`。
@@ -121,6 +165,13 @@ gdprobe は画面に描かない（`main.c` に bfont・video の呼び出しが
 ---
 
 ## 2. g2netbench_tcpfix（直した KOS の TCP、p1〜p6）
+
+> **保留（2026-11-23）：`diag/hw-exit` の調査が終わるまで回さない。原因はまだ分かっていない。**
+>
+> 1 回目（`tools/g2bench/host/g2net_001.txt`、08:53 開始）で観察したこと：
+> - p1（16 KiB・検査あり）：20 秒の制限で打ち切り、1,550 KB/s。p2（16 KiB・検査なし）：完了、2,099 KB/s。どちらも `tcp_ooo_dropped=0`、`tcp_trimmed=0`。
+> - p2 のあと `next_pass=p3`（64 KiB）まで届き、p3 の結果は 1 行も来なかった。08:55:16 に PC の受信が `WinError 10054` で失敗した。
+> - そのあと `dc_auto` と `dc-tool-ip` は終わらず、`state=running` のまま 40 分以上残った。TV は dcload-ip の画面で、`192.168.10.2` は ping に答えた。
 
 ### 何を確かめるか
 
@@ -160,6 +211,10 @@ Set-Location H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy By
 
 所要は約 2 分（README の見積もり）。
 
+### PC だけで見る
+
+実行中は ping が TTL=255、`Get-NetTCPConnection` に 20039 の `Established` が 1 本、`host\g2net_NNN.txt` が増える。**TTL=128 に変わったら、アプリは dcload に戻っている。** 正常に終わると結果のファイルに `pc_partial=0` と `pc_all_ok=1` が入り、`state=idle` になる。
+
 ### 合否（見込み）
 
 - 合格：パス p1〜p6（16 KiB × 1、64 KiB × 1、64 KiB × 2、32 KiB × 2 など）が `status=ok`、検査ありのパスで `pN_pc_crc_ok=1`、全体で `pc_all_ok=1`、接続が切れない。パスごとに `pN_tcp_ooo_dropped`・`pN_tcp_trimmed`・`pN_tcp_wnd_updates` が出る（直した版が動いた印）。64 KiB のパスが R178 の 4〜6 KB/s より大幅に速い。
@@ -174,6 +229,23 @@ Set-Location H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy By
 
 ## 3. g2netbench と g2x（UDP の独自転送）
 
+### 結果（2026-11-23、`tools/g2bench/host/g2net_002.txt`）
+
+`pc_all_ok=1`、`pc_partial=0`、`passes_failed=0`。g2x の 6 パスとも `bad=0`、ACK の不足（`no_ack`）なし。
+
+| パス | 毎秒の個数（開始） | `ck` | 終わり方 | 速さ | 欠け（`gaps`） |
+|---|---|---|---|---|---|
+| x1 | 1,200 | 1 | 20 秒の制限で打ち切り | 1,617 KB/s | 0 |
+| x2 | 2,000 | 1 | 完了 | 2,306 KB/s | 71 |
+| x3 | 1,500 | 1 | 完了 | 2,302 KB/s | 31 |
+| x4 | 1,500 | **0** | 完了 | **2,602 KB/s** | 20 |
+| x5 | 1,500 | 2 | 完了（PC が全体の CRC を照合：`x5_pc_crc_ok=1`） | 1,848 KB/s | 16 |
+| x6 | 2,500 | 1 | 完了 | 2,297 KB/s | 384 |
+
+- 最高の 2,602 KB/s は **データグラムの CRC を調べない `ck=0`** の値。CRC を調べるパス（`ck=1`）の最高は 2,306 KB/s。
+- 同じ実行の TCP の基準：p1（検査あり）は 20 秒の制限で打ち切り 1,570 KB/s、p2（検査なし）は完了 2,139 KB/s。
+- **ファイアウォール：** この PC では、NIC（192.168.10.1）が「パブリック」で Python の許可規則がなくても、g2x は通った。Dreamcast の ACK は PC の送信元ポートへの返事として届いたと見られる。他の PC では同じとは限らない。
+
 ### 何を確かめるか
 
 `g2netbench.elf`（通常の KOS の TCP）は、TCP の p1・p2（16 KiB の基準）、UDP の連続 u1〜u3（R178 と同じ）、**g2x の x1〜x6**（UDP 20040、1,400 B のデータグラム、データグラムごとの CRC、窓 64、選択 ACK、ペース配分）を実行する。g2x が UDP の取りこぼし（R178：毎秒 2,500 個で 17 % 落ちた）を再送で埋めて、壊れずにどれだけ出るか。
@@ -181,7 +253,7 @@ Set-Location H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy By
 ### 準備
 
 - ビルドはプリセットが行う（`-Net`）。先に作るなら：`Set-Location H:\OpenGDEmu\tools\g2bench; .\build.ps1 -BbaTools H:\DC\tools\dc-bba-tools -Net`。
-- **PC のファイアウォール**：g2x は Dreamcast → PC の UDP（ACK）が要る。結果に `xN_pc_reason=no_ack` が出たら、Python（`python.exe` / `py.exe`）の受信を許可して再実行（README）。**要確認**：PC の NIC が 192.168.10.1/24 のプロファイル（プライベート／公開）で許可されているか。
+- **PC のファイアウォール**：g2x は Dreamcast → PC の UDP（ACK）が要る。**この PC では設定の変更なしで通った（上の結果）。** 別の PC で `xN_pc_reason=no_ack` が出たら、Python（`python.exe` / `py.exe`）の受信の許可を検討する（README）。
 - SD・PC・Dreamcast の状態は §2 と同じ。
 
 ### コマンド
@@ -213,6 +285,12 @@ Set-Location H:\DC\tools\dc-bba-tools; powershell -NoProfile -ExecutionPolicy By
 ---
 
 ## 4. netgd-t2（`T2_NO_DRIVE=1`、ネットだけ）
+
+> **保留（2026-11-23）：`diag/hw-exit` の調査が終わるまで回さない。原因はまだ分かっていない。**
+>
+> 観察したこと：起動の約 10〜20 秒後にアプリが終了し、ポート 20039 は開かなかった。
+>
+> PC だけで見るとき：待ち受けに入れば ping は TTL=255 のはず。TTL=128 に戻ったらアプリは終わっている。ポートの確認に `Test-NetConnection` は使わず、`netgd-send` の接続の結果で見る。
 
 ### 何を確かめるか
 
@@ -302,6 +380,21 @@ TV の写真（待ち受けの画面）、窓 B の出力、`auto_*.txt`、`FAIL
 
 **要確認**：純正のまま Y の経路を通す手段（デバッグ用のビルドなど）はソースに見つからなかった。必要なら、`nm_ui.c` に純正用の迂回を足す別の作業になる（この依頼の範囲外）。「空きメモリ」を画面で確かめる表示も、`plat_kos.c`・`main_kos.c` に見つからなかった（**要確認**：どう測る計画か）。
 
+### TV が見えないとき：PC だけで分かること・分からないこと
+
+このメニューは起動しただけではネットを使わない（`main_kos.c` に `INIT_NET` が無く、純正では Y にも入れない）。だから動いている間、**ping の応答なしが正常**と見込む（**要確認**）。TTL=255 にはならない。
+
+| 確かめること | PC だけで | 見るもの |
+|---|---|---|
+| ELF の転送と起動 | 分かる | `dc_auto` のログの転送の行と KOS の起動の行 |
+| 起動後に落ちて dcload に戻った | 分かる | ping が TTL=128 に変わる（`state=running` のまま残ることがある） |
+| 動き続けている | **言い切れない** | 応答なしは、動作中・固まった・BIOS に戻った、のどれでも同じに見える |
+| `52 00` に純正が固まらなかった | **分からない** | PC に届く印が無い |
+| NOFW の文言、53 桁の収まり、PAL・VGA | **分からない** | TV が要る |
+| START で BIOS に戻る | **分からない** | ボタン操作と TV が要る。戻っても ping は応答なしのまま |
+
+NOFW の画面はコンソールに何も出さない（`nm_ui.c` に、この画面の内容を PC へ送る処理が無い）。**§5 の合格は TV を見ないと出せない。** TV が見えないときは「起動して、観察した間は dcload に戻らなかった」までを結果とし、合格とは書かない。
+
 ### 準備
 
 ビルド（DreamSDK）：
@@ -311,7 +404,7 @@ Set-Location H:\OpenGDEmu\tools\netgd-menu; .\build.ps1 -BbaTools H:\DC\tools\dc
 ```
 
 - `netgd-menu.elf` ができる（通常の KOS の TCP。`-TcpFix` で `netgd-menu-tcpfix.elf`）。
-- **dcload-ip から ELF を送って動かす**（SD の `01` を書き換えない）。`.cdi` を `01` に入れる方法は純正の GDmenu を置き換えてしまうので、捨てても困らない SD でだけ（`make cdi` は `mkisofs`・`cdi4dc` が DreamSDK にあるか **要確認**、README 記載）。
+- **dcload-ip から ELF を送って動かす**（SD の `01` を書き換えない）。`.cdi` を `01` に入れる方法は純正の GDmenu を置き換えてしまうので、捨てても困らない SD でだけ（`make cdi` が使う `mkisofs`・`cdi4dc` は `C:\DreamSDK\usr\bin` にある）。
 - SD：`01`・`02`。Dreamcast：GDmenu → `02`。
 
 ### コマンド
@@ -351,8 +444,9 @@ TV の写真（NOFW の画面、PAL・VGA を試したならその両方）、�
 ## 付録：要確認の一覧
 
 1. gdprobe：TV の表示（描画しない見込みで、dcload-ip の画面のまま）。25c の所要時間。7 セクタ exact が 1 セクタと同じく終わるか（推測）。
-2. g2netbench_tcpfix：合格の速度の線（`docs/research/g2-transport.md` に数値の線があるか）。
-3. g2netbench（g2x）：PC のファイアウォールのプロファイル。
-4. netgd-t2：`remote finish --none` の実機での終了の形、PC 側のファイル出力の有無。
-5. netgd-menu：純正で Y に入る手段、空きメモリの測り方、dcload から BIOS への引き渡し、dcload のコンソールの出力、`make cdi` のツール（`mkisofs`・`cdi4dc`）。
+2. g2netbench_tcpfix：p3 で結果が来ない原因（`diag/hw-exit` で調査中）。`docs/research/g2-transport.md` の基準は「p1・p2 が R178 より遅くならない」「p3〜p6 が MB/s 台」で、それ以上の数値の線は無い。
+3. g2netbench（g2x）：**解決**。この PC はパブリックのまま通った（§3）。
+4. netgd-t2：起動後に終了してポートが開かない原因（`diag/hw-exit` で調査中）。`remote finish --none` の実機での終了の形、PC 側のファイル出力の有無。
+5. netgd-menu：純正で Y に入る手段、空きメモリの測り方、dcload から BIOS への引き渡し、動作中に ping が応答なしになること。
 6. 共通：`dc_auto` を別の窓から 2 つ起動したときの動き。コードでは、既定は前の実行を止めて置き換え、`-Wait` なら待つ。持ち主のいない `dc-tool-ip` は止めずに待つ（§0）。この動きは実機では確かめていない。
+7. 共通：ping の TTL の見分け（128 / 255）は 2026-11-23 の観察とソースから。`ping -i` で TTL を変えたときの折り返しは未確認。gdprobe の実行中に ping が応答なしになることも未確認。
