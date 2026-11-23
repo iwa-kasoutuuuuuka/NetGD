@@ -778,12 +778,17 @@ pub const DMA_PAD_SETTLE_READS: u8 = 3;
 /// Decides that a padded DMA read is over although pad words remain in the
 /// FIFO, for a host that stops at the programmed length.
 ///
-/// With the whole request and its pad staged, a level of at most the pad
-/// means every data word has left. A host that does read the whole last
-/// block passes through those levels only inside that one burst, 16 words
-/// or about 2 us, so a level that holds for a millisecond is a host that has
-/// stopped. Equal reads also rule out a level torn by the asynchronous SMC
-/// read, which only happens while it is changing.
+/// With the whole request and its pad staged, a level of exactly the pad
+/// means every data word has left and no pad word has. A host that stops at
+/// its programmed length rests there. One that reads the whole last block
+/// passes that level once, inside a burst of 16 words or about 2 us, so a
+/// level that holds there for a millisecond is taken as a host that stopped.
+/// Equal reads also rule out a level torn by the asynchronous SMC read, which
+/// only happens while it is changing.
+///
+/// Known limit: a full-burst host that pauses for over 1-2 ms at exactly that
+/// level is cut off. Its data has all arrived, but DMA goes off under the
+/// rest of its burst. A pause at any other level is not affected.
 #[derive(Clone, Copy)]
 pub struct DmaPadDrain {
     last: u16,
@@ -798,7 +803,7 @@ impl DmaPadDrain {
     /// Feed one level read; true once only pad is left and it has settled.
     /// Never true with `pad_bytes` 0 or an empty FIFO.
     pub fn poll(&mut self, level: u16, pad_bytes: usize) -> bool {
-        if level == 0 || level as usize * 2 > pad_bytes {
+        if level == 0 || level as usize * 2 != pad_bytes {
             self.same = 0;
             return false;
         }

@@ -1777,6 +1777,9 @@ fn dma_pad_drain_needs_a_settled_level_of_only_pad() {
     // Still moving through the pad (a host reading the last block).
     assert_eq!(settled(&[8, 7, 6, 5, 4, 3, 2, 1, 0], 16), None);
     assert_eq!(settled(&[8, 8, 7, 7, 0], 16), None);
+    // Part of the pad taken: a full-burst host paused inside its last burst.
+    assert_eq!(settled(&[4; 20], 16), None);
+    assert_eq!(settled(&[7; 20], 16), None);
     // Data still queued, however long it sits: a slow host is left alone.
     assert_eq!(settled(&[9; 20], 16), None);
     assert_eq!(settled(&[16; 20], 16), None);

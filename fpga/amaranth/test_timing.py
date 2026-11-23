@@ -448,7 +448,7 @@ class PadDrain:
         self.last, self.same = 0, 0
 
     def poll(self, level, pad_bytes):
-        if level == 0 or level * 2 > pad_bytes:
+        if level == 0 or level * 2 != pad_bytes:
             self.same = 0
             return False
         self.same = self.same + 1 if self.same and level == self.last else 1
@@ -462,17 +462,22 @@ def exact_words(nbytes):
 
 def dma_read_exact(chunks, model, pad=True, host_bytes=None, fast=True,
                    sd_latency_ns=20_000, late_pad_ns=0, host_start_ns=0,
-                   pause_last_ns=0, abort=False, next_cmd=False, expect="done"):
+                   pause_last_ns=0, pause_in_last=None, abort=False, next_cmd=False,
+                   cap=FW_CAP_POLLS, floor=FW_MIN_WAIT_POLLS, expect="done"):
     """A DMA read of sum(chunks) bytes against one host model.
 
     `chunks` are the firmware's staging rounds, `host_bytes` the length the
     host programmed (default: the transfer), `fast` the `fast-complete` feature.
     `late_pad_ns` delays the pad, `host_start_ns` the host's first burst,
-    `pause_last_ns` its last. `abort` writes a new command while the pad is in
-    the FIFO; `next_cmd` runs a second read after the completion. `expect`:
+    `pause_last_ns` its last. `pause_in_last` = (words, ns) pauses a full host
+    that many words into its last burst. `abort` writes a new command while the
+    pad is in the FIFO; `next_cmd` runs a second read after the completion.
+    `cap` and `floor` are the drain loop's limits in polls. `expect`:
       "done"  all data delivered, clean completion;
       "stall" no pad: the tail is never granted, the poll cap ends the command;
-      "short" the host stops early and the device still completes.
+      "short" the host stops early and the device still completes;
+      "cut"   the known limit of DmaPadDrain: a full host paused at exactly the
+              pad level has DMA turned off under it, with all its data in.
     """
     assert model in ("full", "exact")
     total = sum(chunks)
@@ -515,7 +520,16 @@ def dma_read_exact(chunks, model, pad=True, host_bytes=None, fast=True,
                 paused = True
                 await host.delay(pause_last_ns)
             await host.delay(host.t["tLR"])
-            burst = await host.dma_read_burst(min(HOLLY_BURST_WORDS, host_words - len(got)))
+            if pause_in_last and host_words - len(got) == HOLLY_BURST_WORDS:
+                k, ns = pause_in_last
+                got += [v & 0xFFFF for v in await host.dma_read_burst(k)]
+                await host.delay(ns)
+                if not ctx.get(core.io_IDE_DMARQ):
+                    res["cut_off"] = True
+                    break
+                burst = await host.dma_read_burst(HOLLY_BURST_WORDS - k)
+            else:
+                burst = await host.dma_read_burst(min(HOLLY_BURST_WORDS, host_words - len(got)))
             if burst is None:
                 stalled = True
                 break
@@ -605,12 +619,12 @@ def dma_read_exact(chunks, model, pad=True, host_bytes=None, fast=True,
 
         level = await mcu.read(MCU_RFIFO_LEVEL)
         took_all = pushed_all and primed > 0 and level == 0
-        min_wait = 0 if took_all else FW_MIN_WAIT_POLLS
+        min_wait = 0 if took_all else floor
         peak, pulled, zeros = level_after_prime, False, 0
         drain = PadDrain()
-        polls = FW_CAP_POLLS
+        polls = cap
         first_gone = None
-        for i in range(FW_CAP_POLLS):
+        for i in range(cap):
             if await is_aborted():
                 polls = i
                 break
@@ -623,7 +637,9 @@ def dma_read_exact(chunks, model, pad=True, host_bytes=None, fast=True,
                 pulled = True
             zeros = zeros + 1 if level == 0 else 0
             waived = fast and pulled and zeros >= 2
-            if (i >= min_wait and level == 0) or waived or drain.poll(level, pad_pushed):
+            # The higher of two reads, as the firmware.
+            pad_level = max(level, await mcu.read(MCU_RFIFO_LEVEL)) if pad_pushed else level
+            if (i >= min_wait and level == 0) or waived or drain.poll(pad_level, pad_pushed):
                 polls = i
                 break
             await mcu.delay(FW_POLL_NS)
@@ -667,25 +683,31 @@ def dma_read_exact(chunks, model, pad=True, host_bytes=None, fast=True,
               f"delivered {res['delivered']}, polls {res['polls']} "
               f"({res['polls_after_data']} after the data), status {res['status']:#04x}")
         assert res["intrq"] and res["status"] == 0x50, "no clean completion"
-        if expect == "done":
+        assert bool(res.get("cut_off")) == (expect == "cut"), "cut-off not as expected"
+        if expect == "cut":
+            assert len(got) == total // 2, "the host must have all its data"
+            assert res["delivered"] == total
+            assert res["left_words"] == pad_bytes // 2
+            assert res["polls"] < cap, "ran to the drain cap"
+        elif expect == "done":
             assert not res["stalled"], "host never got its data"
             assert len(got) == host_words
             assert res["delivered"] == total
             assert res["left_words"] == (0 if model == "full" else pad_bytes // 2)
             assert all(w == 0 for w in got[len(want):]), "pad is not zero"
-            assert res["polls"] < FW_CAP_POLLS, "ran to the drain cap"
+            assert res["polls"] < cap, "ran to the drain cap"
             if model == "exact" and pad_bytes:
-                assert res["polls_after_data"] <= DMA_PAD_SETTLE_READS, "pad did not settle promptly"
+                assert res["polls_after_data"] == DMA_PAD_SETTLE_READS - 1, "pad settle count"
         elif expect == "stall":
             assert res["stalled"], "expected the tail to starve"
             assert len(got) == total // DMA_BLOCK_BYTES * HOLLY_BURST_WORDS
             assert res["left_words"] == (total % DMA_BLOCK_BYTES) // 2
-            assert res["polls"] == FW_CAP_POLLS
+            assert res["polls"] == cap
         else:
             assert not res["stalled"] and len(got) == host_words
             assert res["left_words"] == (total + pad_bytes - host_len) // 2
             assert res["delivered"] == host_len
-            assert res["polls"] == FW_CAP_POLLS, "must not end early with data queued"
+            assert res["polls"] == cap, "must not end early with data queued"
         if next_cmd:
             assert not res["dmarq_idle"], "DMARQ up between commands"
             assert res["level_at_next"] == 0, "pad survived the next Command write"
@@ -696,23 +718,38 @@ def dma_read_exact(chunks, model, pad=True, host_bytes=None, fast=True,
 
 
 def oi04_cases():
-    cases = []
-    for model in ("full", "exact"):
-        m = model
+    # 304 B: 9.5 blocks, pad 16, as the 2,352 B sector ends, at an eighth of
+    # the simulation time. Where the host model cannot matter a case runs once.
+    small = dict(chunks=[304], cap=100, floor=50)
+    cases = [
+        # The tail is never granted, so neither host gets past the last whole block.
+        ("dma_exact_full_unpadded_stalls",
+         dma_read_exact(model="full", pad=False, expect="stall", **small)),
+        # The 100 ms floor; DmaPadDrain does not depend on fast-complete.
+        ("dma_exact_full_no_fast", dma_read_exact(model="full", fast=False, **small)),
+        # Both hosts stop at the programmed length here.
+        ("dma_exact_exact_floor",
+         dma_read_exact(model="exact", host_bytes=288, expect="short", **small)),
+        ("dma_exact_exact_16464_two_chunks", dma_read_exact([5 * 2352, 2 * 2352], "exact")),
+        ("dma_exact_exact_mixed_2324_2048", dma_read_exact([2324 + 2048], "exact")),
+        ("dma_exact_exact_4704_no_pad", dma_read_exact([4704], "exact")),
+        # Paused 12 words into the last burst (level 4): must not be cut off.
+        ("dma_exact_full_pause_inside_last_block",
+         dma_read_exact(model="full", pause_in_last=(12, 60_000), **small)),
+        # Paused 8 words in (level 8 = the pad): the known limit, recorded.
+        ("dma_exact_full_pause_at_pad_level_is_cut",
+         dma_read_exact(model="full", pause_in_last=(8, 60_000), expect="cut", **small)),
+    ]
+    for m in ("full", "exact"):
         cases += [
-            (f"dma_exact_{m}_2352_unpadded_stalls", dma_read_exact([2352], m, pad=False, expect="stall")),
             (f"dma_exact_{m}_2352", dma_read_exact([2352], m)),
-            (f"dma_exact_{m}_2352_no_fast", dma_read_exact([2352], m, fast=False)),
             (f"dma_exact_{m}_2324", dma_read_exact([2324], m)),
-            (f"dma_exact_{m}_16464_two_chunks", dma_read_exact([5 * 2352, 2 * 2352], m)),
-            (f"dma_exact_{m}_mixed_2324_2048", dma_read_exact([2324 + 2048], m)),
-            (f"dma_exact_{m}_4704_no_pad", dma_read_exact([4704], m)),
-            (f"dma_exact_{m}_floor_2336", dma_read_exact([2352], m, host_bytes=2336, expect="short")),
-            (f"dma_exact_{m}_late_pad", dma_read_exact([2352], m, late_pad_ns=40_000)),
-            (f"dma_exact_{m}_slow_host", dma_read_exact([2352], m, host_start_ns=60_000)),
-            (f"dma_exact_{m}_pause_before_last", dma_read_exact([2352], m, pause_last_ns=60_000)),
-            (f"dma_exact_{m}_abort_in_pad", dma_read_exact([2352], m, abort=True)),
-            (f"dma_exact_{m}_next_command", dma_read_exact([2352], m, next_cmd=True)),
+            (f"dma_exact_{m}_late_pad", dma_read_exact(model=m, late_pad_ns=40_000, **small)),
+            (f"dma_exact_{m}_slow_host", dma_read_exact(model=m, host_start_ns=60_000, **small)),
+            (f"dma_exact_{m}_pause_before_last",
+             dma_read_exact(model=m, pause_last_ns=60_000, **small)),
+            (f"dma_exact_{m}_abort_in_pad", dma_read_exact(model=m, abort=True, **small)),
+            (f"dma_exact_{m}_next_command", dma_read_exact(model=m, next_cmd=True, **small)),
         ]
     return cases
 

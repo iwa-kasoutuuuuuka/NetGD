@@ -3770,7 +3770,9 @@ async fn stream_from_sd(
         let waived_done = pulled && zeros >= 2;
         #[cfg(not(feature = "fast-complete"))]
         let waived_done = false;
-        if (i >= min_wait_ms && lvl == 0) || waived_done || pad_drain.poll(lvl, pad_bytes) { break; }
+        // The higher of two reads, so a level torn low cannot count as the pad.
+        let pad_lvl = if pad_bytes != 0 { lvl.max(dev.read_fifo_level()) } else { lvl };
+        if (i >= min_wait_ms && lvl == 0) || waived_done || pad_drain.poll(pad_lvl, pad_bytes) { break; }
         if lvl != last_lvl {
             if stalled_ms >= 20 {
                 info!("  drain: resumed after {} ms stall (lvl={})", stalled_ms, lvl);
