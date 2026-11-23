@@ -188,22 +188,6 @@ pub fn load<S: PsSource>(
     })
 }
 
-/// `pinfind`: one attempt only, no retries (LOG R143 item 4): a failed load
-/// is not tried again with the FPGA in an unknown state; the caller drives
-/// nCONFIG low and stops.
-#[cfg(feature = "pinfind")]
-#[inline(always)]
-pub fn load_once_no_retry<S: PsSource>(
-    pins: &mut McuPins,
-    make_source: impl FnMut() -> S,
-) -> Result<LoadStats, LoadFailure> {
-    const ONE_SHOT: PsProfile = PsProfile { retries: 0, ..PROFILE };
-    let mut clk = McuClock;
-    psload::load_with_retries(&ONE_SHOT, pins, &mut clk, make_source, |n, e| {
-        defmt::warn!("FPGA load attempt {} failed: {}", n, e);
-    })
-}
-
 /// What the LED says when the FPGA could not be configured: `code` short
 /// blinks (`PsError::code`), then a pause, three times over.
 pub async fn blink_code(led: &mut Output<'static, peripherals::PB18>, error: &PsError) {

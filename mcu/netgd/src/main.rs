@@ -120,6 +120,11 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
     #[cfg(feature = "pinfind")]
     pinfind::prepare_pins();
 
+    // Pin-finder build: the whole run, then halt. Before `McuPins::new`, which
+    // would make the three PS lines outputs. Never returns: no LED, no IDE.
+    #[cfg(feature = "pinfind")]
+    pinfind_main();
+
     // Load the FPGA first. When the GDEMU board is powered by the DC
     // every millisecond between MCU power-on and an alive FPGA is one
     // more millisecond the DC sees a dead GD-ROM bus and CDCLK silent.
@@ -133,10 +138,6 @@ async fn main_task(spawner: Spawner, p: UserPeripherals) {
         p.nstatus,
         p.done,
     );
-    // Pin-finder build: the whole run, then halt. Never returns, so nothing
-    // below runs: no LED output (PB18), no retries, no IDE side.
-    #[cfg(feature = "pinfind")]
-    pinfind_main(&mut fpga);
 
     // Only set up on the failure path below; `main_task` needs it later in
     // any case.
@@ -434,8 +435,8 @@ fn log_entry(parent: &str, entry: &embedded_sdmmc::DirEntry) {
 /// `pinfind`: hand the PS pins and the embedded bitstream to the pin-finder
 /// (src/pinfind.rs). Never returns. LOG R143 items 3 and 4.
 #[cfg(feature = "pinfind")]
-fn pinfind_main(fpga: &mut cyclone::McuPins) -> ! {
-    pinfind::main(fpga, BITSTREAM_PRESENT, BITSTREAM_RAW_LEN, || {
+fn pinfind_main() -> ! {
+    pinfind::main(BITSTREAM_PRESENT, BITSTREAM_RAW_LEN, || {
         let scratch = lzma::Scratch::from_buf(ide::loader_scratch())
             .expect("CD_READ_BUF too small for the LZMA scratch");
         cyclone::LzSource(lzma::Decoder::new(&BITSTREAM_LZMA, BITSTREAM_RAW_LEN, scratch))

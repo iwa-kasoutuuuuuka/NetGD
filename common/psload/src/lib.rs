@@ -15,6 +15,8 @@
 
 #![no_std]
 
+pub mod guarded;
+
 /// The five lines the loader drives or watches. Levels are logical: `true` is
 /// electrically high. Reads take `&mut self` so a simulator can advance with
 /// them.
@@ -284,6 +286,18 @@ where
         clk.delay_us(p.post_nstatus_us);
     }
 
+    stream(p, pins, clk, src)
+}
+
+/// The data phase: bytes, zero padding until CONF_DONE, trailing clocks.
+/// nSTATUS is already high and DCLK / DATA0 are outputs.
+#[inline(always)]
+pub(crate) fn stream<P, C, I>(p: &PsProfile, pins: &mut P, clk: &mut C, src: I) -> Result<LoadStats, PsError>
+where
+    P: PsPins,
+    C: PsClock,
+    I: Iterator<Item = u8>,
+{
     let mut stats = LoadStats { attempts: 1, ..LoadStats::default() };
     for byte in src {
         if pins.conf_done_high() {

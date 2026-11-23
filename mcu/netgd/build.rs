@@ -156,6 +156,7 @@ fn main() {
 fn pinfind_params(out_dir: &Path, present: bool) {
     println!("cargo:rerun-if-changed={PARAMS_PINFIND}");
     let mut kv = std::collections::HashMap::new();
+    let mut rbf_cksum = 0u32;
     if present {
         let text = std::fs::read_to_string(PARAMS_PINFIND).unwrap_or_else(|e| {
             panic!("pinfind: {RBF_PINFIND} is there but {PARAMS_PINFIND} is not ({e}); build the bitstream with fpga/pinfind/build.sh")
@@ -166,7 +167,8 @@ fn pinfind_params(out_dir: &Path, present: bool) {
             }
         }
         let raw = std::fs::read(RBF_PINFIND).expect("read the pin-finder bitstream");
-        let want = format!("{} {}", posix_cksum(&raw), raw.len());
+        rbf_cksum = posix_cksum(&raw);
+        let want = format!("{} {}", rbf_cksum, raw.len());
         let got = format!(
             "{} {}",
             kv.get("rbf_cksum").map(String::as_str).unwrap_or("?"),
@@ -211,8 +213,10 @@ fn pinfind_params(out_dir: &Path, present: bool) {
 ",
                 "pub const RBF_SHA256: &str = {:?};
 ",
+                "pub const RBF_CKSUM: u32 = {};
+",
             ),
-            PARAMS_PINFIND, stage0, toggle, ball_clock, loops, num("frames"), num("prescale"), num("n_drive"), get("rbf_sha256")
+            PARAMS_PINFIND, stage0, toggle, ball_clock, loops, num("frames"), num("prescale"), num("n_drive"), get("rbf_sha256"), rbf_cksum
         ),
     )
     .expect("write pinfind_params.rs");
