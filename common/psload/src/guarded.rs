@@ -43,6 +43,10 @@ impl DataLineLevels {
 pub trait GuardedPsPins: PsPins {
     /// Record that a run started. Called before the first drive of any line.
     fn mark_run_started(&mut self);
+    /// Has the deadline passed? Unlike `nstatus_high()`, which reads low after
+    /// a trip, this tells a trip apart from a real low. Read it *after* a
+    /// sample of nSTATUS: a trip that lands between the two is then seen.
+    fn tripped(&mut self) -> bool;
     /// Sink nCONFIG low. Never drives it high.
     fn assert_nconfig(&mut self);
     /// Stop sinking nCONFIG: input, raised by the pull-up.
@@ -92,6 +96,15 @@ pub enum GuardedError {
     NstatusLowBeforeReset,
     /// nCONFIG low did not bring nSTATUS low.
     NstatusStuckHigh,
+    /// nSTATUS fell, then read high again while nCONFIG was still sunk. A
+    /// real FPGA holds it low for the whole reset, so nothing shows PA25
+    /// controls PB2 (a coupled line would do this).
+    NstatusRoseWhileLow,
+    /// The deadline had passed before nCONFIG was touched. Nothing was driven.
+    DeadlineBeforeReset,
+    /// The deadline passed after nCONFIG was sunk, during the handshake. PB2
+    /// is not shown to have moved; the deadline hook has left nCONFIG low.
+    DeadlineTripped,
     /// nSTATUS followed nCONFIG down but did not rise after the release.
     NstatusStuckLow,
     /// CONF_DONE read high after the reset: clocking would be meaningless.
@@ -120,7 +133,10 @@ impl GuardedError {
     /// a line of unproven function until power-off.
     pub const fn final_nconfig(&self) -> NconfigFinal {
         match self {
-            GuardedError::NstatusLowBeforeReset | GuardedError::NstatusStuckHigh => NconfigFinal::Released,
+            GuardedError::NstatusLowBeforeReset
+            | GuardedError::NstatusStuckHigh
+            | GuardedError::NstatusRoseWhileLow
+            | GuardedError::DeadlineBeforeReset => NconfigFinal::Released,
             _ => NconfigFinal::HeldLow,
         }
     }
@@ -209,32 +225,75 @@ where
     Ok(())
 }
 
-fn wait_nstatus<P: PsPins, C: PsClock>(pins: &mut P, clk: &mut C, want_high: bool, timeout_us: u32) -> bool {
+enum Wait {
+    Seen,
+    Timeout,
+    Tripped,
+}
+
+/// Samples nSTATUS first and the deadline after, so a trip that makes
+/// `nstatus_high()` read low is never taken for a real low.
+fn wait_nstatus<P: GuardedPsPins, C: PsClock>(pins: &mut P, clk: &mut C, want_high: bool, timeout_us: u32) -> Wait {
     for _ in 0..=timeout_us / POLL_STEP_US {
-        if pins.nstatus_high() == want_high {
-            return true;
+        let high = pins.nstatus_high();
+        if pins.tripped() {
+            return Wait::Tripped;
+        }
+        if high == want_high {
+            return Wait::Seen;
         }
         clk.delay_us(POLL_STEP_US);
     }
-    pins.nstatus_high() == want_high
+    let high = pins.nstatus_high();
+    if pins.tripped() {
+        Wait::Tripped
+    } else if high == want_high {
+        Wait::Seen
+    } else {
+        Wait::Timeout
+    }
 }
 
-/// nCONFIG low, nSTATUS must follow; nCONFIG released, nSTATUS must rise.
-/// Both waits are bounded by the profile. Touches nCONFIG only.
+/// nSTATUS samples spread over the nCONFIG-low period.
+const LOW_SAMPLES: u32 = 4;
+
+/// nCONFIG low, nSTATUS must follow and stay low for the whole low period;
+/// nCONFIG released, nSTATUS must rise. Every wait is bounded by the profile.
+/// A deadline trip is never taken for nSTATUS moving. Touches nCONFIG only.
 pub fn handshake<P: GuardedPsPins, C: PsClock>(p: &PsProfile, pins: &mut P, clk: &mut C) -> Result<(), GuardedError> {
-    if !pins.nstatus_high() {
+    let high = pins.nstatus_high();
+    if pins.tripped() {
+        return Err(GuardedError::DeadlineBeforeReset);
+    }
+    if !high {
         return Err(GuardedError::NstatusLowBeforeReset);
     }
     pins.assert_nconfig();
-    if !wait_nstatus(pins, clk, false, p.nstatus_low_wait_us) {
-        return Err(GuardedError::NstatusStuckHigh);
+    match wait_nstatus(pins, clk, false, p.nstatus_low_wait_us) {
+        Wait::Seen => {}
+        Wait::Timeout => return Err(GuardedError::NstatusStuckHigh),
+        Wait::Tripped => return Err(GuardedError::DeadlineTripped),
     }
-    clk.delay_us(p.ncfg_low_us);
+    // The low period, in slices; nSTATUS is sampled after each, the last one
+    // after the whole `ncfg_low_us`.
+    let slice = p.ncfg_low_us / LOW_SAMPLES;
+    for i in 0..LOW_SAMPLES {
+        let us = if i + 1 == LOW_SAMPLES { p.ncfg_low_us - slice * (LOW_SAMPLES - 1) } else { slice };
+        clk.delay_us(us);
+        let high = pins.nstatus_high();
+        if pins.tripped() {
+            return Err(GuardedError::DeadlineTripped);
+        }
+        if high {
+            return Err(GuardedError::NstatusRoseWhileLow);
+        }
+    }
     pins.release_nconfig();
-    if !wait_nstatus(pins, clk, true, p.nstatus_high_timeout_us) {
-        return Err(GuardedError::NstatusStuckLow);
+    match wait_nstatus(pins, clk, true, p.nstatus_high_timeout_us) {
+        Wait::Seen => Ok(()),
+        Wait::Timeout => Err(GuardedError::NstatusStuckLow),
+        Wait::Tripped => Err(GuardedError::DeadlineTripped),
     }
-    Ok(())
 }
 
 /// Sample DATA0 and DCLK [`DATA_LINE_SAMPLES`] times. Reads only.

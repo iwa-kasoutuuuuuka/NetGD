@@ -166,6 +166,10 @@ impl PsPins for RegPins {
 }
 
 impl GuardedPsPins for RegPins {
+    #[inline(always)]
+    fn tripped(&mut self) -> bool {
+        TRIPPED.load(Ordering::Relaxed)
+    }
     fn mark_run_started(&mut self) {
         unsafe { core::ptr::write_volatile(GPBR3, RAN_MAGIC) };
         cortex_m::asm::dsb();
@@ -376,6 +380,18 @@ fn report_load(e: GuardedError) -> ! {
         GuardedError::NstatusStuckHigh => {
             error!("PF handshake FAILED: nSTATUS (PB2) did not fall with PA25 low; PA25 released, PA23/PA24 never enabled");
             halt("handshake: nSTATUS stuck high")
+        }
+        GuardedError::NstatusRoseWhileLow => {
+            error!("PF handshake FAILED: nSTATUS (PB2) read high again while PA25 was still low; PA25 released, PA23/PA24 never enabled; PA25 is not shown to control PB2");
+            halt("handshake: nSTATUS rose while nCONFIG low")
+        }
+        GuardedError::DeadlineBeforeReset => {
+            error!("PF handshake FAILED: time limit passed before PA25 moved; nothing driven");
+            halt("handshake: deadline before reset")
+        }
+        GuardedError::DeadlineTripped => {
+            error!("PF handshake FAILED: time limit passed during the handshake; PB2 not shown to move; PA23/PA24 never enabled, PA25 held low");
+            halt("handshake: deadline")
         }
         GuardedError::NstatusStuckLow => {
             error!("PF handshake FAILED: nSTATUS (PB2) did not rise after PA25 release; PA23/PA24 never enabled");

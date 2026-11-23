@@ -28,6 +28,9 @@ enum Fpga {
     StuckLow,
     /// nSTATUS drops once this many clocks went in.
     DropAfterBits(u32),
+    /// Follows nCONFIG down, then reads high again at the n-th (0-based)
+    /// read after the assert.
+    RisesAt(u32),
 }
 
 struct M {
@@ -42,6 +45,12 @@ struct M {
     data0_reads: u32,
     dclk_reads: u32,
     t_us: u64,
+    /// The deadline hook has fired (set at once, or after this many delays).
+    tripped: bool,
+    trip_after_delays: Option<u32>,
+    delays: u32,
+    /// nSTATUS reads while nCONFIG was sunk.
+    low_reads: u32,
     ncfg_low: bool,
     seen_reset: bool,
     outputs: bool,
@@ -62,6 +71,10 @@ impl M {
             data0_reads: 0,
             dclk_reads: 0,
             t_us: 0,
+            tripped: false,
+            trip_after_delays: None,
+            delays: 0,
+            low_reads: 0,
             ncfg_low: false,
             seen_reset: false,
             outputs: false,
@@ -105,13 +118,20 @@ impl PsPins for H {
     fn nstatus_high(&mut self) -> bool {
         let mut m = self.0.borrow_mut();
         m.t_us += 1;
-        match m.fpga {
+        let idx = m.low_reads;
+        if m.ncfg_low {
+            m.low_reads += 1;
+        }
+        let v = match m.fpga {
             Fpga::LowFromStart => false,
             Fpga::StuckHigh => true,
             Fpga::StuckLow => !m.seen_reset,
             Fpga::Good => !m.ncfg_low,
             Fpga::DropAfterBits(n) => !m.ncfg_low && m.clocks < n,
-        }
+            Fpga::RisesAt(k) => !m.ncfg_low || idx >= k,
+        };
+        // As the firmware's RegPins: reads low once the deadline has tripped.
+        v && !m.tripped
     }
     fn conf_done_high(&mut self) -> bool {
         let m = self.0.borrow();
@@ -123,6 +143,9 @@ impl GuardedPsPins for H {
     fn mark_run_started(&mut self) {
         self.0.borrow_mut().ev.push(E::Mark);
     }
+    fn tripped(&mut self) -> bool {
+        self.0.borrow().tripped
+    }
     fn assert_nconfig(&mut self) {
         let mut m = self.0.borrow_mut();
         m.ncfg_low = true;
@@ -131,7 +154,10 @@ impl GuardedPsPins for H {
     }
     fn release_nconfig(&mut self) {
         let mut m = self.0.borrow_mut();
-        m.ncfg_low = false;
+        // As the firmware: after a trip nCONFIG stays low.
+        if !m.tripped {
+            m.ncfg_low = false;
+        }
         m.ev.push(E::Release);
     }
     fn disarm_nconfig(&mut self) {
@@ -160,7 +186,7 @@ impl GuardedPsPins for H {
     }
     fn enable_data_outputs(&mut self) -> bool {
         let mut m = self.0.borrow_mut();
-        if m.refuse {
+        if m.refuse || m.tripped {
             m.ev.push(E::Refused);
             return false;
         }
@@ -178,7 +204,12 @@ impl GuardedPsPins for H {
 impl PsClock for H {
     fn nops(&mut self, _: u32) {}
     fn delay_us(&mut self, us: u32) {
-        self.0.borrow_mut().t_us += us as u64;
+        let mut m = self.0.borrow_mut();
+        m.t_us += us as u64;
+        m.delays += 1;
+        if m.trip_after_delays == Some(m.delays) {
+            m.tripped = true;
+        }
     }
     fn now_us(&mut self) -> u64 {
         panic!("the guarded path must not depend on the system tick")
@@ -296,6 +327,80 @@ fn nstatus_stuck_low_holds_reset_and_never_clocks() {
     assert_eq!(m.ending(), [REL, E::Assert]);
     assert!(m.t_us <= handshake_bound(), "{} us", m.t_us);
     assert!(m.t_us >= AG16K.nstatus_high_timeout_us as u64);
+}
+
+#[test]
+fn nstatus_rising_during_the_low_period_is_refused() {
+    // Read 0 is the fall wait; reads 1..=4 are the samples across the low
+    // period. A rise at any of them must stop the run before the release.
+    for k in 1..=4 {
+        let (r, m) = load(M::new(Fpga::RisesAt(k), Some(ALL_BITS)));
+        assert_eq!(r, Err(GuardedError::NstatusRoseWhileLow), "rise at read {k}");
+        assert_no_data_activity(&m);
+        assert_eq!(m.count(E::Release), 0, "nCONFIG released only after a clean low period");
+        assert_eq!(m.count(E::ReadData), 0, "PA23/PA24 never sampled either");
+        assert!(!m.ncfg_low, "PA25 is not proven: released");
+        assert_eq!(m.ending(), [REL, E::Disarm]);
+        assert!(m.t_us <= handshake_bound(), "{} us", m.t_us);
+    }
+    // The last sample comes after the whole low period.
+    let (_, m) = load(M::new(Fpga::RisesAt(4), Some(ALL_BITS)));
+    assert!(m.t_us >= AG16K.ncfg_low_us as u64);
+}
+
+#[test]
+fn deadline_before_the_assert_never_sinks_nconfig() {
+    let mut m = M::new(Fpga::Good, Some(ALL_BITS));
+    m.tripped = true;
+    let (r, m) = load(m);
+    assert_eq!(r, Err(GuardedError::DeadlineBeforeReset));
+    assert_eq!(m.count(E::Assert), 0, "PA25 never sunk");
+    assert_no_data_activity(&m);
+    assert_eq!(m.count(E::ReadData), 0);
+    assert!(!m.ncfg_low);
+    assert_eq!(m.ending(), [REL, E::Disarm]);
+}
+
+#[test]
+fn deadline_in_the_fall_wait_is_not_a_fall() {
+    // PB2 stays high, but a tripped nstatus_high() reads low.
+    let mut m = M::new(Fpga::StuckHigh, Some(ALL_BITS));
+    m.trip_after_delays = Some(3);
+    let (r, m) = load(m);
+    assert_eq!(r, Err(GuardedError::DeadlineTripped));
+    assert_no_data_activity(&m);
+    assert_eq!(m.count(E::ReadData), 0);
+    assert_eq!(m.count(E::Release), 0);
+    assert!(m.ncfg_low, "armed and tripped: stays low");
+    assert_eq!(m.ending(), [REL, E::Assert]);
+}
+
+#[test]
+fn deadline_in_the_low_period_is_not_a_low_sample() {
+    // Each delay in the low period is one slice; trip after the second.
+    let mut m = M::new(Fpga::Good, Some(ALL_BITS));
+    m.trip_after_delays = Some(2);
+    let (r, m) = load(m);
+    assert_eq!(r, Err(GuardedError::DeadlineTripped));
+    assert_no_data_activity(&m);
+    assert_eq!(m.count(E::ReadData), 0);
+    assert_eq!(m.count(E::Release), 0);
+    assert!(m.ncfg_low);
+    assert_eq!(m.ending(), [REL, E::Assert]);
+}
+
+#[test]
+fn deadline_in_the_rise_wait_holds_reset() {
+    // Four slices, then the rise-wait polls; the release is skipped by the
+    // trip and PB2 never rises.
+    let mut m = M::new(Fpga::StuckLow, Some(ALL_BITS));
+    m.trip_after_delays = Some(6);
+    let (r, m) = load(m);
+    assert_eq!(r, Err(GuardedError::DeadlineTripped));
+    assert_no_data_activity(&m);
+    assert_eq!(m.count(E::ReadData), 0);
+    assert!(m.ncfg_low);
+    assert_eq!(m.ending(), [REL, E::Assert]);
 }
 
 #[test]
@@ -423,11 +528,12 @@ fn fault_release_order() {
 #[test]
 fn final_nconfig_table() {
     use GuardedError::*;
-    for e in [NstatusLowBeforeReset, NstatusStuckHigh] {
+    for e in [NstatusLowBeforeReset, NstatusStuckHigh, NstatusRoseWhileLow, DeadlineBeforeReset] {
         assert_eq!(e.final_nconfig(), NconfigFinal::Released);
     }
     for e in [
         NstatusStuckLow,
+        DeadlineTripped,
         ConfDoneHighAfterReset,
         DataLinesNotHigh(DataLineLevels { data0_high: false, dclk_high: true }),
         OutputsRefused,
