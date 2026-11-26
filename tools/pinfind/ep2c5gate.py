@@ -209,8 +209,10 @@ REQUIRED_OPTIONS = [
     (r"^enable device-wide reset \(dev_clrn\)$", r"^off$"),
     (r"^enable device-wide output enable \(dev_oe\)$", r"^off$"),
     (r"^(error detection crc|enable error detection crc.*|crc error checking)$", r"^off$"),
-    # 13.0 labels this row just "nCEO" for Cyclone II.
-    (r"^(nceo|reserve nceo pin after configuration\.?)$", r"^use as regular io$"),
+    # 13.0 labels this row just "nCEO" for Cyclone II; "USE AS REGULAR IO"
+    # shows as "Unreserved" (the pin is then an unused pin, reserved as
+    # input tri-stated, which the .pin check confirms).
+    (r"^(nceo|reserve nceo pin after configuration\.?)$", r"^(unreserved|use as regular io)$"),
 ]
 # Optional rows: checked only if present.
 OPTIONAL_OPTIONS = [
