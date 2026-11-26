@@ -3,6 +3,7 @@
 
 usage: ep2c5gate.py OUTPUT_DIR_OR_PIN_FILE [--fit FIT_RPT] [--device EP2C5F256C8]
                     [--user stage0_in ...] [--pins 256]
+                    [--pullcode K --code ep2c5_pullcode.csv] [--rbf FILE.rbf]
 
 Reads the Quartus II fitter's <rev>.pin file and <rev>.fit.rpt and exits
 non-zero unless the bitstream cannot drive any pin after configuration:
@@ -27,9 +28,21 @@ non-zero unless the bitstream cannot drive any pin after configuration:
            DEV_CLRn, DEV_OE, CLKUSR and CRC error detection off,
            configuration scheme Passive Serial, Input Pins table present, nCEO as regular IO
 
+--pullcode K (weak pull-up code variant K of fpga/pullcode-ep2c5): every
+ball listed in --code must be the user input p_<BALL> (no RESERVED_INPUT
+I/O left), and the Weak Pull Up column of both the Input Pins and the All
+Package Pins table must be On exactly where the ball's codeword has bit K
+set (Off on balls with no codeword). Bus hold must be off everywhere, and
+all the stage-0 checks above still apply (no Output/Bidir rows, dual-purpose
+pins not kept, device options).
+
+--rbf prints the bitstream's size and SHA-256 (a missing file fails).
+
 Standard library only. Prints every pin it looked at, then PASS or FAIL.
 """
 import argparse
+import csv
+import hashlib
 import glob
 import os
 import re
@@ -45,6 +58,9 @@ BALL_TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 DEDICATED_INPUT = {"TDI", "TMS", "TCK", "nCONFIG", "nCE", "DCLK", "DATA0",
                    "MSEL0", "MSEL1", "MSEL2", "MSEL3"}
 POWER_DIRS = {"gnd", "power"}
+# Ball-table roles that are user I/O or dedicated clock inputs (pull-up code
+# ports). USER is the stage-0 input ball (H1, itself a clock input).
+PORT_ROLES = {"RESERVED_INPUT", "USER", "GND+"}
 OK_INPUT_DIRS = {"input", ""}
 
 BAD_USAGE = re.compile(r"(GND\*|VCC\*|PULL|BUS_HOLD|BUS-HOLD|OUTPUT|BIDIR)",
@@ -110,7 +126,34 @@ def load_balls(path=None):
     return table
 
 
-def check_pin(g, text, device, users, npins, balls=None):
+def load_code(path, k):
+    """Return {ball: pull-up expected in variant k} from the code csv.
+
+    A row with an empty codeword is a port with pull-up off in every variant.
+    """
+    out = {}
+    words = []
+    with open(path, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            ball = r["ball"].strip()
+            code = (r.get("code") or "").strip()
+            if code:
+                if len(code) != 10 or set(code) - {"0", "1"} or code.count("1") != 5:
+                    raise SystemExit(f"ep2c5gate: bad codeword {code!r} for {ball}")
+                words.append(code)
+            if ball in out:
+                raise SystemExit(f"ep2c5gate: ball {ball} twice in {path}")
+            out[ball] = bool(code) and code[k] == "1"
+    if len(words) != len(set(words)):
+        raise SystemExit("ep2c5gate: codewords not distinct")
+    return out
+
+
+def code_port(ball):
+    return "p_" + ball
+
+
+def check_pin(g, text, device, users, npins, balls=None, code=None):
     chip, dev, rows = parse_pin(text)
     if dev is None:
         g.fail(".pin: no 'CHIP ... ASSIGNED TO AN:' line")
@@ -132,12 +175,27 @@ def check_pin(g, text, device, users, npins, balls=None):
     for b in sorted(set(balls) - listed):
         g.fail(f".pin: expected ball {b} ({balls[b]}) missing")
     seen_users = set()
+    if code is not None:
+        for b in sorted(code):
+            if balls.get(b) not in PORT_ROLES:
+                g.fail(f".pin: code ball {b} is not an I/O or clock ball "
+                       f"(table: {balls.get(b)})")
+        for b, role in sorted(balls.items()):
+            if role in PORT_ROLES and b not in code:
+                g.fail(f".pin: I/O / clock ball {b} has no entry in the code table")
     for r in rows:
         name, d = r["name"], r["dir"]
         where = f"{r['loc']} {name!r} dir={d or '-'}"
         role = balls.get(r["loc"])
         if role is None:
             g.fail(f".pin: ball not in the expected EP2C5F256C8 table: {where}")
+            continue
+        if code is not None and r["loc"] in code:
+            if name != code_port(r["loc"]):
+                g.fail(f".pin: code ball is not its input port {code_port(r['loc'])}: {where}")
+            elif d != "input":
+                g.fail(f".pin: code port not an input: {where}")
+            seen_users.add(name)
             continue
         m = DUAL.match(name)
         if m:
@@ -258,7 +316,55 @@ OPTIONAL_OPTIONS = [
 ]
 
 
-def check_fit(g, text, users):
+def check_package(g, tables, code, required):
+    """All Package Pins: Bus Hold off everywhere; Weak Pull Up as expected.
+
+    code: {ball: pull-up expected} for the balls that must be input ports
+    (pull-up code mode), or None (stage-0: no pull-up anywhere).
+    """
+    t, rows = find_table(tables, "All Package Pins")
+    if not t or not rows:
+        if required:
+            g.fail("fit.rpt: All Package Pins table missing")
+        return
+    hdr = rows[0]
+    iloc, iname, idir = col(hdr, "Location"), col(hdr, "Pin Name/Usage"), col(hdr, "Dir.")
+    ibh, ipu = col(hdr, "Bus Hold"), col(hdr, "Weak Pull Up")
+    if None in (iloc, iname, idir, ibh, ipu):
+        g.fail("fit.rpt: All Package Pins table lacks Location/Pin Name/Dir./Bus Hold/Weak Pull Up")
+        return
+    seen = set()
+    npu = 0
+    for r in rows[1:]:
+        if len(r) <= max(iloc, iname, idir, ibh, ipu):
+            g.fail(f"fit.rpt: short All Package Pins row: {r}")
+            continue
+        loc, name, d = r[iloc], r[iname], r[idir].lower()
+        bh, pu = r[ibh].lower(), r[ipu].lower()
+        if bh not in ("no", "off", "--", ""):
+            g.fail(f"fit.rpt: package pin {loc} {name} bus hold {r[ibh]}")
+        if pu == "on":
+            npu += 1
+        if code is not None and loc in code:
+            seen.add(loc)
+            want = "on" if code[loc] else "off"
+            if name != code_port(loc) or d != "input":
+                g.fail(f"fit.rpt: package pin {loc} is {name!r} dir={d}, "
+                       f"expected input {code_port(loc)}")
+            if pu != want:
+                g.fail(f"fit.rpt: package pin {loc} weak pull-up {r[ipu]}, expected {want}")
+        elif pu not in ("off", "--", ""):
+            g.fail(f"fit.rpt: package pin {loc} {name} weak pull-up {r[ipu]}, expected off")
+        if d in ("output", "bidir") and name not in ("#TDO", "^nSTATUS", "^CONF_DONE"):
+            g.fail(f"fit.rpt: package pin {loc} {name} dir={d}")
+    if code is not None:
+        for b in sorted(set(code) - seen):
+            g.fail(f"fit.rpt: code ball {b} missing from All Package Pins")
+        g.note(f"fit.rpt: All Package Pins weak pull-up On on {npu} balls "
+               f"(expected {sum(code.values())})")
+
+
+def check_fit(g, text, users, code=None):
     tables = rpt_tables(text)
     for kind in ("Output Pins", "Bidir Pins"):
         t, rows = find_table(tables, kind)
@@ -270,13 +376,29 @@ def check_fit(g, text, users):
         hdr = rows[0]
         ipu = col(hdr, "Weak Pull Up")
         ibh = col(hdr, "Bus Hold")
+        iloc = col(hdr, "Pin #")
+        seen = set()
         for r in rows[1:]:
-            if ipu is not None and r[ipu].lower() not in ("off", ""):
+            if code is not None:
+                loc = r[iloc] if iloc is not None and iloc < len(r) else ""
+                seen.add(loc)
+                if loc not in code or r[0] != code_port(loc):
+                    g.fail(f"fit.rpt: input {r[0]} at {loc or '?'} is not a code port")
+                elif ipu is None or r[ipu].lower() != ("on" if code[loc] else "off"):
+                    g.fail(f"fit.rpt: input {r[0]} weak pull-up "
+                           f"{r[ipu] if ipu is not None else '?'}, expected "
+                           f"{'On' if code[loc] else 'Off'}")
+            elif ipu is not None and r[ipu].lower() not in ("off", ""):
                 g.fail(f"fit.rpt: input {r[0]} weak pull-up {r[ipu]}")
             if ibh is not None and r[ibh].lower() not in ("no", "off", ""):
                 g.fail(f"fit.rpt: input {r[0]} bus hold {r[ibh]}")
             if r[0] not in users:
                 g.fail(f"fit.rpt: unexpected input pin {r[0]}")
+        if code is not None:
+            for b in sorted(set(code) - seen):
+                g.fail(f"fit.rpt: code ball {b} not in the Input Pins table")
+            if ipu is None or ibh is None or iloc is None:
+                g.fail("fit.rpt: Input Pins table lacks Pin #/Weak Pull Up/Bus Hold column")
         if ipu is None or ibh is None:
             g.note("fit.rpt: Input Pins table lacks Weak Pull Up/Bus Hold column")
     else:
@@ -298,6 +420,7 @@ def check_fit(g, text, users):
                     g.fail(f"fit.rpt: dual-purpose pin {nm} reserved as {res!r}")
     else:
         g.note("fit.rpt: no Dual Purpose and Dedicated Pins table")
+    check_package(g, tables, code, required=code is not None)
     opts = {}
     for t, rows in tables.items():
         if "device options" in t.lower() or t.lower().startswith("fitter settings"):
@@ -354,16 +477,38 @@ def main(argv=None):
                     help="allowed user input pin name (repeatable; default stage0_in)")
     ap.add_argument("--pins", type=int, default=256,
                     help="expected .pin row count (0 = do not check)")
+    ap.add_argument("--pullcode", type=int, default=None, metavar="K",
+                    help="pull-up code variant K (0..9); needs --code")
+    ap.add_argument("--code", help="code table csv (tools/pinfind/ep2c5_pullcode.csv)")
+    ap.add_argument("--rbf", help="bitstream: print its size and SHA-256")
     ap.add_argument("-q", "--quiet", action="store_true")
     a = ap.parse_args(argv)
-    users = set(a.user or ["stage0_in"])
+    code = None
+    if a.pullcode is not None:
+        if not a.code or not 0 <= a.pullcode <= 9:
+            ap.error("--pullcode K needs 0 <= K <= 9 and --code")
+        code = load_code(a.code, a.pullcode)
+        users = {code_port(b) for b in code}
+    else:
+        users = set(a.user or ["stage0_in"])
     pin, fit = locate(a.path, a.fit)
     g = Gate()
-    rows = check_pin(g, read(pin), a.device, users, a.pins)
+    if code is not None:
+        g.note(f"pull-up code variant k={a.pullcode}: {len(code)} ports, "
+               f"{sum(code.values())} with weak pull-up On")
+    rows = check_pin(g, read(pin), a.device, users, a.pins, code=code)
     if os.path.exists(fit):
-        check_fit(g, read(fit), users)
+        check_fit(g, read(fit), users, code=code)
     else:
         g.fail(f"fit.rpt not found: {fit}")
+    if a.rbf:
+        if os.path.exists(a.rbf):
+            with open(a.rbf, "rb") as f:
+                data = f.read()
+            print(f"rbf: {a.rbf} size {len(data)} bytes sha256 "
+                  f"{hashlib.sha256(data).hexdigest()}")
+        else:
+            g.fail(f"rbf not found: {a.rbf}")
     if not a.quiet:
         print(f"== {pin}: {len(rows)} pins")
         for r in rows:
