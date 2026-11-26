@@ -39,10 +39,14 @@ import sys
 
 NBITS = 10
 WEIGHT = 5
-# Cyclone II dedicated clock inputs (CLK0..CLK7; listed as GND+ when unused).
-# True: they are coded like any I/O ball. False: they stay input ports with
-# pull-up OFF and carry no codeword (use if Quartus cannot pull them up).
-CLOCK_PULLUP = True
+# Cyclone II dedicated clock inputs (CLK0..CLK7 = F256 H1 H2 J1 J2 H15 H16
+# J15 J16; listed as GND+ when unused) have no weak pull-up. With them coded
+# (CI run 45824026037) Quartus II 13.0 SP1 stopped every variant with
+# "Error (169057): Can't place I/O pin p_<ball> ... I/O pin uses weak
+# pullup, which is not supported by this pin location" on exactly the
+# clock balls whose bit was 1. So they stay input ports with pull-up OFF
+# and carry no codeword (docs/research/ep2c5-pullcode.md).
+CLOCK_PULLUP = False
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))

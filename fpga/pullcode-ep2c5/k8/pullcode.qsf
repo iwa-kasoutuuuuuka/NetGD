@@ -3,7 +3,7 @@
 #
 # Every user I/O and clock-input ball is an input port; no outputs,
 # no bidirs, no logic. WEAK_PULL_UP_RESISTOR is ON exactly on the
-# balls whose codeword bit 8 is 1 (79 balls), OFF on the rest.
+# balls whose codeword bit 8 is 1 (75 balls), OFF on the rest.
 # Bus hold OFF everywhere. All other settings are the stage-0 ones
 # (fpga/stage0-ep2c5/stage0.qsf). tools/pinfind/ep2c5gate.py --pullcode
 # 8 checks the fitter's result. Bitstreams are CI artifacts only.
@@ -84,7 +84,7 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_E2
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_E2
 set_location_assignment PIN_H2 -to p_H2
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_H2
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_H2
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_H2
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_H2
 set_location_assignment PIN_H1 -to p_H1
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_H1
@@ -92,7 +92,7 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_H1
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_H1
 set_location_assignment PIN_J2 -to p_J2
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_J2
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_J2
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_J2
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_J2
 set_location_assignment PIN_J1 -to p_J1
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_J1
@@ -104,11 +104,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_K2
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_K2
 set_location_assignment PIN_K1 -to p_K1
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_K1
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_K1
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_K1
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_K1
 set_location_assignment PIN_K4 -to p_K4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_K4
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_K4
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_K4
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_K4
 set_location_assignment PIN_K5 -to p_K5
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_K5
@@ -120,11 +120,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_M1
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_M1
 set_location_assignment PIN_L1 -to p_L1
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_L1
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_L1
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L1
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L1
 set_location_assignment PIN_L2 -to p_L2
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_L2
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L2
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_L2
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L2
 set_location_assignment PIN_J4 -to p_J4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_J4
@@ -136,11 +136,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_M2
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_M2
 set_location_assignment PIN_M3 -to p_M3
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_M3
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_M3
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_M3
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_M3
 set_location_assignment PIN_N1 -to p_N1
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N1
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_N1
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_N1
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_N1
 set_location_assignment PIN_N2 -to p_N2
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N2
@@ -152,19 +152,19 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L3
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L3
 set_location_assignment PIN_P1 -to p_P1
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_P1
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_P1
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_P1
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_P1
 set_location_assignment PIN_P2 -to p_P2
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_P2
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_P2
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_P2
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_P2
 set_location_assignment PIN_P3 -to p_P3
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_P3
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_P3
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_P3
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_P3
 set_location_assignment PIN_L4 -to p_L4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_L4
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_L4
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L4
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L4
 set_location_assignment PIN_M4 -to p_M4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_M4
@@ -208,11 +208,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_T6
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_T6
 set_location_assignment PIN_N8 -to p_N8
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N8
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_N8
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_N8
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_N8
 set_location_assignment PIN_T7 -to p_T7
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_T7
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_T7
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_T7
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_T7
 set_location_assignment PIN_R7 -to p_R7
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_R7
@@ -224,11 +224,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L7
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L7
 set_location_assignment PIN_L8 -to p_L8
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_L8
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L8
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_L8
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L8
 set_location_assignment PIN_T8 -to p_T8
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_T8
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_T8
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_T8
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_T8
 set_location_assignment PIN_R8 -to p_R8
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_R8
@@ -240,11 +240,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_T9
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_T9
 set_location_assignment PIN_R9 -to p_R9
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_R9
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_R9
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_R9
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_R9
 set_location_assignment PIN_N9 -to p_N9
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N9
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_N9
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_N9
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_N9
 set_location_assignment PIN_N10 -to p_N10
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N10
@@ -256,11 +256,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_T11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_T11
 set_location_assignment PIN_R11 -to p_R11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_R11
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_R11
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_R11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_R11
 set_location_assignment PIN_P11 -to p_P11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_P11
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_P11
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_P11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_P11
 set_location_assignment PIN_L9 -to p_L9
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_L9
@@ -272,19 +272,19 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L10
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L10
 set_location_assignment PIN_R10 -to p_R10
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_R10
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_R10
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_R10
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_R10
 set_location_assignment PIN_T10 -to p_T10
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_T10
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_T10
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_T10
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_T10
 set_location_assignment PIN_K11 -to p_K11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_K11
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_K11
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_K11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_K11
 set_location_assignment PIN_K10 -to p_K10
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_K10
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_K10
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_K10
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_K10
 set_location_assignment PIN_N11 -to p_N11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N11
@@ -328,19 +328,19 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_R14
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_R14
 set_location_assignment PIN_M11 -to p_M11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_M11
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_M11
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_M11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_M11
 set_location_assignment PIN_L11 -to p_L11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_L11
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_L11
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_L11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_L11
 set_location_assignment PIN_N12 -to p_N12
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N12
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_N12
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_N12
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_N12
 set_location_assignment PIN_M12 -to p_M12
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_M12
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_M12
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_M12
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_M12
 set_location_assignment PIN_N13 -to p_N13
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N13
@@ -352,19 +352,19 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_N14
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_N14
 set_location_assignment PIN_P14 -to p_P14
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_P14
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_P14
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_P14
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_P14
 set_location_assignment PIN_P15 -to p_P15
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_P15
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_P15
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_P15
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_P15
 set_location_assignment PIN_P16 -to p_P16
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_P16
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_P16
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_P16
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_P16
 set_location_assignment PIN_N15 -to p_N15
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N15
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_N15
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_N15
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_N15
 set_location_assignment PIN_N16 -to p_N16
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_N16
@@ -404,11 +404,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_K15
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_K15
 set_location_assignment PIN_J16 -to p_J16
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_J16
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_J16
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_J16
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_J16
 set_location_assignment PIN_J15 -to p_J15
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_J15
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_J15
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_J15
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_J15
 set_location_assignment PIN_H15 -to p_H15
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_H15
@@ -448,27 +448,27 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_J11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_J11
 set_location_assignment PIN_H11 -to p_H11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_H11
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_H11
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_H11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_H11
 set_location_assignment PIN_G12 -to p_G12
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_G12
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_G12
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_G12
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_G12
 set_location_assignment PIN_G13 -to p_G13
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_G13
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_G13
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_G13
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_G13
 set_location_assignment PIN_H13 -to p_H13
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_H13
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_H13
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_H13
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_H13
 set_location_assignment PIN_D15 -to p_D15
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_D15
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_D15
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_D15
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_D15
 set_location_assignment PIN_D16 -to p_D16
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_D16
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_D16
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_D16
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_D16
 set_location_assignment PIN_E16 -to p_E16
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_E16
@@ -480,11 +480,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_C14
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_C14
 set_location_assignment PIN_D13 -to p_D13
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_D13
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_D13
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_D13
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_D13
 set_location_assignment PIN_E14 -to p_E14
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_E14
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_E14
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_E14
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_E14
 set_location_assignment PIN_D14 -to p_D14
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_D14
@@ -496,11 +496,11 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_B14
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_B14
 set_location_assignment PIN_A14 -to p_A14
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_A14
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_A14
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A14
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A14
 set_location_assignment PIN_C13 -to p_C13
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_C13
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_C13
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_C13
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_C13
 set_location_assignment PIN_C12 -to p_C12
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_C12
@@ -560,27 +560,27 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_F9
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_F9
 set_location_assignment PIN_D11 -to p_D11
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_D11
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_D11
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_D11
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_D11
 set_location_assignment PIN_D10 -to p_D10
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_D10
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_D10
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_D10
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_D10
 set_location_assignment PIN_A9 -to p_A9
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_A9
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_A9
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A9
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A9
 set_location_assignment PIN_B9 -to p_B9
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_B9
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_B9
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_B9
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_B9
 set_location_assignment PIN_A8 -to p_A8
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_A8
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A8
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_A8
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A8
 set_location_assignment PIN_A7 -to p_A7
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_A7
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_A7
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A7
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A7
 set_location_assignment PIN_B7 -to p_B7
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_B7
@@ -608,27 +608,27 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A6
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A6
 set_location_assignment PIN_G6 -to p_G6
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_G6
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_G6
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_G6
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_G6
 set_location_assignment PIN_G7 -to p_G7
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_G7
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_G7
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_G7
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_G7
 set_location_assignment PIN_D6 -to p_D6
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_D6
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_D6
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_D6
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_D6
 set_location_assignment PIN_C6 -to p_C6
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_C6
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_C6
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_C6
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_C6
 set_location_assignment PIN_C5 -to p_C5
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_C5
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_C5
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_C5
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_C5
 set_location_assignment PIN_C4 -to p_C4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_C4
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_C4
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_C4
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_C4
 set_location_assignment PIN_B5 -to p_B5
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_B5
@@ -640,25 +640,25 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A5
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A5
 set_location_assignment PIN_B4 -to p_B4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_B4
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_B4
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_B4
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_B4
 set_location_assignment PIN_A4 -to p_A4
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_A4
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_A4
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A4
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A4
 set_location_assignment PIN_A3 -to p_A3
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_A3
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_A3
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_A3
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_A3
 set_location_assignment PIN_B3 -to p_B3
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_B3
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_B3
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_B3
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_B3
 set_location_assignment PIN_E6 -to p_E6
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_E6
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_E6
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_E6
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_E6
 set_location_assignment PIN_F6 -to p_F6
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to p_F6
-set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to p_F6
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to p_F6
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to p_F6
