@@ -30,6 +30,10 @@ set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
 set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"
 
 # --- dual-purpose pins: release to regular I/O (then reserved as above) ----
+# Cyclone II reads the CYCLONEII_ name. The plain name is silently ignored
+# for this family (first CI run: fit.rpt said nCEO "As output driving
+# ground" and the .pin listed ~LVDS41p/nCEO~ as an output). Keep both.
+set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
 set_global_assignment -name RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
 set_global_assignment -name RESERVE_ASDO_AFTER_CONFIGURATION "USE AS REGULAR IO"
 set_global_assignment -name RESERVE_FLASH_NCE_AFTER_CONFIGURATION "USE AS REGULAR IO"
@@ -45,5 +49,8 @@ set_global_assignment -name USE_CONFIGURATION_DEVICE OFF
 set_global_assignment -name CYCLONEII_CONFIGURATION_SCHEME "PASSIVE SERIAL"
 
 # --- the single input: plain LVTTL input, no pull-up, no bus hold ----------
+# H1 is a dedicated clock input pad (listed as GND+ when unused), i.e. it is
+# input-only in silicon, so even the one pin the design keeps cannot drive.
+set_location_assignment PIN_H1 -to stage0_in
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to stage0_in
 set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to stage0_in

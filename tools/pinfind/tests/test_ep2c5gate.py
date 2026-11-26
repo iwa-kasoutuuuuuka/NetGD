@@ -72,8 +72,8 @@ FIT = """+------------------------------------------------+
 ; Enable device-wide output enable (DEV_OE)     ; Off       ;
 ; Enable INIT_DONE output                       ; Off       ;
 ; Error detection CRC                           ; Off       ;
-; Reserve ASDO pin after configuration.         ; As input tri-stated ;
-; Reserve nCEO pin after configuration.         ; Use as regular IO ;
+; nCEO                                          ; Use as regular IO ;
+; ASDO,nCSO                                     ; Unreserved ;
 ; Reserve all unused pins                       ; As input tri-stated ;
 +-----------------------------------------------+-----------+
 """
@@ -160,6 +160,13 @@ class GateTest(unittest.TestCase):
 
     def test_fit_input_pullup_fails(self):
         fit = FIT.replace("; no           ; Off       ;", "; no           ; On        ;")
+        self.assertNotEqual(fit, FIT)
+        self.assertEqual(self.run_gate(GOOD_ROWS, fit=fit)[0], 1)
+
+    def test_fit_nceo_driving_ground_fails(self):
+        # What the first CI run produced with the non-CYCLONEII_ assignment.
+        fit = FIT.replace("; nCEO                                          ; Use as regular IO ;",
+                          "; nCEO                                          ; As output driving ground ;")
         self.assertNotEqual(fit, FIT)
         self.assertEqual(self.run_gate(GOOD_ROWS, fit=fit)[0], 1)
 
