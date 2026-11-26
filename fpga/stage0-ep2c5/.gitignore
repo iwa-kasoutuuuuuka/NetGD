@@ -1,0 +1,12 @@
+# Bitstreams and Quartus work files are never committed (CI artifacts only).
+output_files/
+db/
+incremental_db/
+greybox_tmp/
+simulation/
+*.rbf
+*.sof
+*.pof
+*.jic
+*.ttf
+*.qws

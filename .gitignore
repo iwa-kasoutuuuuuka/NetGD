@@ -74,3 +74,4 @@ gdemu60_flash_*
 # fpga/pinfind/build/ (covered by `build/` above); bitstreams are never committed.
 fpga/pinfind/output/
 tools/pinfind/out/
+out-ci/

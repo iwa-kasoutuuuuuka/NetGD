@@ -1,0 +1,49 @@
+# Stage-0 "do nothing" bitstream for EP2C5F256C8 (Quartus II 13.0 SP1).
+#
+# Goal: a bitstream that, once loaded, drives NO pin. Every user and unused
+# pin is an input with no weak pull-up and no bus hold, every dual-purpose
+# pin is released to regular I/O (and therefore reserved as input
+# tri-stated), and no optional configuration output is enabled.
+# tools/pinfind/ep2c5gate.py fails the CI run unless the fitter agrees.
+#
+# Note: before and during configuration the device's own weak pull-ups are
+# active on user I/O (hardware behaviour, not controllable from here).
+
+set_global_assignment -name FAMILY "Cyclone II"
+set_global_assignment -name DEVICE EP2C5F256C8
+set_global_assignment -name TOP_LEVEL_ENTITY stage0
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION "13.0 SP1"
+set_global_assignment -name LAST_QUARTUS_VERSION "13.0 SP1"
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
+set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
+set_global_assignment -name VERILOG_FILE stage0.v
+set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
+
+# --- outputs ---------------------------------------------------------------
+set_global_assignment -name GENERATE_RBF_FILE ON
+# Same as the v5.5 project's OpenGDEMU.rbf (which is compressed).
+set_global_assignment -name ON_CHIP_BITSTREAM_DECOMPRESSION ON
+
+# --- unused pins: input tri-stated, never "output driving ground" ----------
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"
+
+# --- dual-purpose pins: release to regular I/O (then reserved as above) ----
+set_global_assignment -name RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
+set_global_assignment -name RESERVE_ASDO_AFTER_CONFIGURATION "USE AS REGULAR IO"
+set_global_assignment -name RESERVE_FLASH_NCE_AFTER_CONFIGURATION "USE AS REGULAR IO"
+set_global_assignment -name RESERVE_DATA0_AFTER_CONFIGURATION "USE AS REGULAR IO"
+set_global_assignment -name RESERVE_DCLK_AFTER_CONFIGURATION "USE AS REGULAR IO"
+
+# --- optional configuration pins / features: all off -----------------------
+set_global_assignment -name ENABLE_INIT_DONE_OUTPUT OFF
+set_global_assignment -name ENABLE_DEVICE_WIDE_RESET OFF
+set_global_assignment -name ENABLE_DEVICE_WIDE_OE OFF
+set_global_assignment -name CRC_ERROR_CHECKING OFF
+set_global_assignment -name USE_CONFIGURATION_DEVICE OFF
+set_global_assignment -name CYCLONEII_CONFIGURATION_SCHEME "PASSIVE SERIAL"
+
+# --- the single input: plain LVTTL input, no pull-up, no bus hold ----------
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR OFF -to stage0_in
+set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to stage0_in

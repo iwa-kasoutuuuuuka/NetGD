@@ -1,0 +1,149 @@
+name: Build FPGA stage-0 (EP2C5F256, do-nothing)
+
+# Builds fpga/stage0-ep2c5 (a design with one unused input and no outputs)
+# for EP2C5F256C8 with Quartus II 13.0 SP1, then runs tools/pinfind/ep2c5gate.py
+# on the fitter's .pin file and fit.rpt. The run fails unless every pin is
+# input tri-stated (no output/bidir, no GND*, no weak pull-up, no bus hold,
+# dual-purpose pins released, INIT_DONE/DEV_OE/DEV_CLRn/CRC off).
+#
+# ARTIFACTS ONLY: the .rbf is never committed. Not hardware-verified.
+# Image resolution and fallback are the same as fpga.yaml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: >-
+          Quartus image to use. Default is this repository's own
+          ghcr.io/<owner>/<repo>/quartus2:latest (lower-cased).
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'fpga/stage0-ep2c5/**'
+      - 'tools/pinfind/ep2c5gate.py'
+      - '.github/workflows/fpga-stage0-ep2c5.yaml'
+  pull_request:
+    paths:
+      - 'fpga/stage0-ep2c5/**'
+      - 'tools/pinfind/ep2c5gate.py'
+      - '.github/workflows/fpga-stage0-ep2c5.yaml'
+
+jobs:
+  quartus-compile:
+    name: Quartus II 13.0 SP1 compile + pin gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Gate unit tests
+        run: python3 -m unittest tools/pinfind/tests/test_ep2c5gate.py -v
+
+      - name: Reclaim Runner Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/lib/android \
+            /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve and pull image
+        id: img
+        env:
+          INPUT_IMAGE: ${{ github.event.inputs.image }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -n "$INPUT_IMAGE" ]; then
+            image="$INPUT_IMAGE"
+          else
+            image="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')/quartus2:latest"
+          fi
+          echo "Using $image"
+          if ! docker pull "$image"; then
+            image="ghcr.io/cepawiel/opengdemu/quartus2:latest"
+            echo "Falling back to $image"
+            docker pull "$image"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Stage sources
+        run: |
+          mkdir -p "$RUNNER_TEMP/work/project"
+          cp fpga/stage0-ep2c5/stage0.qpf fpga/stage0-ep2c5/stage0.qsf \
+             fpga/stage0-ep2c5/stage0.v "$RUNNER_TEMP/work/project/"
+
+      - name: Compile (quartus_sh --flow compile)
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+        run: |
+          # --user 0: the image ends on USER ubuntu (uid 1000), which cannot
+          # write the runner's bind mount. Also log the Cyclone II defaults of
+          # the assignments this project relies on, for the record.
+          docker run --rm --user 0 \
+            -v "$RUNNER_TEMP/work:/build" \
+            --entrypoint /bin/bash \
+            "$IMAGE" \
+            -c 'q=$(dirname "$(command -v quartus_sh)"); \
+                f=$(ls "$q"/assignment_defaults.qdf "$q"/../bin/assignment_defaults.qdf 2>/dev/null | head -1); \
+                echo "== defaults from ${f:-<none>}"; \
+                [ -n "$f" ] && grep -iE "RESERVE_|INIT_DONE|DEVICE_WIDE|CRC_ERROR|DECOMPRESS|COMPRESS|WEAK_PULL|BUS_HOLD|CONFIGURATION_SCHEME|USER_START_UP" "$f"; \
+                cd /build/project && quartus_sh --flow compile stage0'
+
+      - name: Collect outputs, size, SHA-256, header
+        if: always()
+        run: |
+          mkdir -p dist
+          o="$RUNNER_TEMP/work/project/output_files"
+          ls -la "$o" || true
+          cp "$o"/stage0.* dist/ 2>/dev/null || true
+          rm -f dist/stage0.sof dist/stage0.pof
+          test -f dist/stage0.rbf || { echo "::error::no stage0.rbf produced"; exit 1; }
+          size=$(stat -c %s dist/stage0.rbf)
+          sha=$(sha256sum dist/stage0.rbf | cut -d' ' -f1)
+          {
+            echo "### stage0.rbf (EP2C5F256C8)"
+            echo "- size: $size bytes"
+            echo "- sha256: \`$sha\`"
+            echo '```'; od -A x -t x1 -N 64 dist/stage0.rbf; echo '```'
+            echo "### fit.summary"; echo '```'; cat dist/stage0.fit.summary 2>/dev/null; echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "== warnings"
+          grep -h "^Warning" dist/*.rpt || true
+
+      - name: Pin safety gate
+        run: |
+          python3 tools/pinfind/ep2c5gate.py dist/stage0.pin --fit dist/stage0.fit.rpt | tee gate.txt
+          { echo "### ep2c5gate"; echo '```'; tail -n 40 gate.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bitstream
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-ep2c5-rbf
+          path: dist/stage0.rbf
+          if-no-files-found: ignore
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-ep2c5-reports
+          path: |
+            dist/*.summary
+            dist/*.rpt
+            dist/*.pin
+            dist/*.smsg
+            dist/*.done
+            gate.txt
+          if-no-files-found: ignore
