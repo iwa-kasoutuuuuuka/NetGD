@@ -8,9 +8,11 @@ Reads the Quartus II fitter's <rev>.pin file and <rev>.fit.rpt and exits
 non-zero unless the bitstream cannot drive any pin after configuration:
 
   .pin   * the chip line names the expected device
-         * no row is an output or bidir, except the dedicated JTAG and
-           configuration pins (TDO, nSTATUS, CONF_DONE), which the
-           bitstream does not control
+         * every one of the 256 balls is listed and has the role given by
+           ep2c5f256_balls.txt (expected ball table); nothing else is
+           accepted at a ball (an I/O ball shown as GND/GND*/TDO fails)
+         * no row is an output or bidir, except TDO, nSTATUS and CONF_DONE
+           at their own balls, which the bitstream does not control
          * every unused I/O is plain RESERVED_INPUT: no GND* / VCC*
            (unused pin driving ground/VCC), no weak pull-up, no bus hold,
            no RESERVED_OUTPUT / RESERVED_BIDIR
@@ -22,7 +24,8 @@ non-zero unless the bitstream cannot drive any pin after configuration:
          * Dual Purpose and Dedicated Pins: dual-purpose pins not kept for
            configuration and not driven
          * device options: unused pins as input tri-stated, INIT_DONE,
-           DEV_CLRn, DEV_OE and CRC error detection off, nCEO as regular IO
+           DEV_CLRn, DEV_OE, CLKUSR and CRC error detection off,
+           configuration scheme Passive Serial, Input Pins table present, nCEO as regular IO
 
 Standard library only. Prints every pin it looked at, then PASS or FAIL.
 """
@@ -36,6 +39,9 @@ import sys
 # file is fixed by the device (TDO is a JTAG output, nSTATUS/CONF_DONE are
 # open-drain configuration bidirs), so they are allowed any direction.
 DEDICATED_ANY_DIR = {"TDO", "nSTATUS", "CONF_DONE"}
+# Expected ball -> role table (256 balls); exemptions apply only there.
+BALL_TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "ep2c5f256_balls.txt")
 DEDICATED_INPUT = {"TDI", "TMS", "TCK", "nCONFIG", "nCE", "DCLK", "DATA0",
                    "MSEL0", "MSEL1", "MSEL2", "MSEL3"}
 POWER_DIRS = {"gnd", "power"}
@@ -90,7 +96,21 @@ def parse_pin(text):
     return chip, device, rows
 
 
-def check_pin(g, text, device, users, npins):
+def load_balls(path=None):
+    """Return {ball: role} from the expected-ball table (BALL ROLE per line)."""
+    path = path or BALL_TABLE
+    table = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            ball, role = line.split(None, 1)
+            table[ball] = role.strip()
+    return table
+
+
+def check_pin(g, text, device, users, npins, balls=None):
     chip, dev, rows = parse_pin(text)
     if dev is None:
         g.fail(".pin: no 'CHIP ... ASSIGNED TO AN:' line")
@@ -106,46 +126,60 @@ def check_pin(g, text, device, users, npins):
         g.fail(".pin: duplicate locations")
     if npins and len(rows) != npins:
         g.fail(f".pin: {len(rows)} rows, expected {npins}")
+    if balls is None:
+        balls = load_balls()
+    listed = set(locs)
+    for b in sorted(set(balls) - listed):
+        g.fail(f".pin: expected ball {b} ({balls[b]}) missing")
     seen_users = set()
     for r in rows:
         name, d = r["name"], r["dir"]
         where = f"{r['loc']} {name!r} dir={d or '-'}"
+        role = balls.get(r["loc"])
+        if role is None:
+            g.fail(f".pin: ball not in the expected EP2C5F256C8 table: {where}")
+            continue
         m = DUAL.match(name)
         if m:
             usage = (m.group(2) or "").strip()
-            if usage != "RESERVED_INPUT" or d not in OK_INPUT_DIRS:
+            if role != "RESERVED_INPUT":
+                g.fail(f".pin: dual-purpose name on non-I/O ball (expected {role}): {where}")
+            elif usage != "RESERVED_INPUT" or d not in OK_INPUT_DIRS:
                 g.fail(f".pin: dual-purpose pin not input tri-stated: {where}")
             continue
-        if d in POWER_DIRS:
-            # Power/ground balls. "GND*"/"VCC*" are I/Os driven to a rail and
-            # are caught below even if a tool version labels them gnd/power.
-            if "*" in name:
-                g.fail(f".pin: unused I/O driven to a rail: {where}")
+        if role == "USER":
+            if name not in users:
+                g.fail(f".pin: unexpected user pin (ball expects USER): {where}")
+            elif d != "input":
+                g.fail(f".pin: user pin not an input: {where}")
+            seen_users.add(name)
             continue
-        if name in DEDICATED_ANY_DIR:
+        if role == "RESERVED_INPUT":
+            # Unused/released I/O ball: must be plain RESERVED_INPUT, or a
+            # user input. Anything else (GND, GND*, TDO, output, ...) fails.
+            if name in users:
+                if d != "input":
+                    g.fail(f".pin: user pin not an input: {where}")
+                seen_users.add(name)
+            elif name != "RESERVED_INPUT" or d not in OK_INPUT_DIRS:
+                g.fail(f".pin: I/O ball not RESERVED_INPUT (expected RESERVED_INPUT): {where}")
             continue
-        if name in DEDICATED_INPUT:
-            if d not in OK_INPUT_DIRS:
-                g.fail(f".pin: dedicated input pin not an input: {where}")
+        # Fixed ball: the .pin name must be exactly the expected role.
+        if name != role:
+            g.fail(f".pin: ball {r['loc']} is {name!r}, expected {role!r}")
             continue
-        if d in ("output", "bidir") or BAD_USAGE.search(name):
+        if "*" in name or BAD_USAGE.search(name):
             g.fail(f".pin: driving/pulled pin: {where}")
-            continue
-        if name == "RESERVED_INPUT" or name in ("NC", "GND+"):
+        elif role in DEDICATED_ANY_DIR:
+            pass  # direction fixed by the device, exempt at this ball only
+        elif role in DEDICATED_INPUT or role in ("NC", "GND+"):
             if d not in OK_INPUT_DIRS:
-                g.fail(f".pin: reserved pin not an input: {where}")
-            continue
-        if name.startswith(("VCC", "GND")):
-            # Supply ball listed without gnd/power direction.
-            if d not in OK_INPUT_DIRS:
-                g.fail(f".pin: supply-named pin with direction: {where}")
-            continue
-        # Anything else is a user signal.
-        if name not in users:
-            g.fail(f".pin: unexpected user pin: {where}")
-        elif d != "input":
-            g.fail(f".pin: user pin not an input: {where}")
-        seen_users.add(name)
+                g.fail(f".pin: pin not an input: {where}")
+        elif role.startswith(("VCC", "GND")):
+            if d not in POWER_DIRS | OK_INPUT_DIRS:
+                g.fail(f".pin: supply pin with direction: {where}")
+        else:
+            g.fail(f".pin: unknown role {role!r}: {where}")
     for u in users:
         if u not in seen_users:
             g.note(f".pin: user pin {u} not listed (optimised away?)")
@@ -209,6 +243,8 @@ REQUIRED_OPTIONS = [
     (r"^enable device-wide reset \(dev_clrn\)$", r"^off$"),
     (r"^enable device-wide output enable \(dev_oe\)$", r"^off$"),
     (r"^(error detection crc|enable error detection crc.*|crc error checking)$", r"^off$"),
+    (r"^enable user-supplied start-up clock \(clkusr\)$", r"^off$"),
+    (r"^configuration scheme$", r"^passive serial$"),
     # 13.0 labels this row just "nCEO" for Cyclone II; "USE AS REGULAR IO"
     # shows as "Unreserved" (the pin is then an unused pin, reserved as
     # input tri-stated, which the .pin check confirms).
@@ -243,8 +279,8 @@ def check_fit(g, text, users):
                 g.fail(f"fit.rpt: unexpected input pin {r[0]}")
         if ipu is None or ibh is None:
             g.note("fit.rpt: Input Pins table lacks Weak Pull Up/Bus Hold column")
-    elif users:
-        g.note("fit.rpt: no Input Pins table")
+    else:
+        g.fail("fit.rpt: Input Pins table missing (cannot check weak pull-up / bus hold)")
     t, rows = find_table(tables, "Dual Purpose and Dedicated Pins")
     if t and rows:
         hdr = rows[0]

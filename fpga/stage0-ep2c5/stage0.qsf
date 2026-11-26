@@ -30,15 +30,14 @@ set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
 set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"
 
 # --- dual-purpose pins: release to regular I/O (then reserved as above) ----
-# Cyclone II reads the CYCLONEII_ name. The plain name is silently ignored
-# for this family (first CI run: fit.rpt said nCEO "As output driving
-# ground" and the .pin listed ~LVDS41p/nCEO~ as an output). Keep both.
+# Only the CYCLONEII_ form is applied for this family (first CI run: with
+# just the plain RESERVE_NCEO_AFTER_CONFIGURATION name, fit.rpt said nCEO
+# "As output driving ground"). The plain RESERVE_{NCEO,ASDO,FLASH_NCE,DATA0,
+# DCLK}_AFTER_CONFIGURATION lines were removed: only nCEO was shown to be
+# ignored in the plain form, and none changed the reported result
+# (ASDO,nCSO stays "Unreserved", DATA0/DCLK are dedicated
+# pins here). tools/pinfind/ep2c5gate.py checks the outcome in fit.rpt/.pin.
 set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
-set_global_assignment -name RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
-set_global_assignment -name RESERVE_ASDO_AFTER_CONFIGURATION "USE AS REGULAR IO"
-set_global_assignment -name RESERVE_FLASH_NCE_AFTER_CONFIGURATION "USE AS REGULAR IO"
-set_global_assignment -name RESERVE_DATA0_AFTER_CONFIGURATION "USE AS REGULAR IO"
-set_global_assignment -name RESERVE_DCLK_AFTER_CONFIGURATION "USE AS REGULAR IO"
 
 # --- optional configuration pins / features: all off -----------------------
 set_global_assignment -name ENABLE_INIT_DONE_OUTPUT OFF

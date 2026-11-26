@@ -22,11 +22,15 @@ on:
     paths:
       - 'fpga/stage0-ep2c5/**'
       - 'tools/pinfind/ep2c5gate.py'
+      - 'tools/pinfind/ep2c5f256_balls.txt'
+      - 'tools/pinfind/tests/test_ep2c5gate.py'
       - '.github/workflows/fpga-stage0-ep2c5.yaml'
   pull_request:
     paths:
       - 'fpga/stage0-ep2c5/**'
       - 'tools/pinfind/ep2c5gate.py'
+      - 'tools/pinfind/ep2c5f256_balls.txt'
+      - 'tools/pinfind/tests/test_ep2c5gate.py'
       - '.github/workflows/fpga-stage0-ep2c5.yaml'
 
 jobs:
@@ -75,7 +79,15 @@ jobs:
             echo "Falling back to $image"
             docker pull "$image"
           fi
+          # :latest is a moving tag: record what it resolved to.
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image")
           echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Quartus image"
+            echo "- image: \`$image\`"
+            echo "- resolved digest: \`$digest\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Stage sources
         run: |
@@ -124,12 +136,23 @@ jobs:
       - name: Pin safety gate
         # `shell: bash` adds -o pipefail, so the gate's exit status survives tee.
         shell: bash
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+          DIGEST: ${{ steps.img.outputs.digest }}
         run: |
-          python3 tools/pinfind/ep2c5gate.py dist/stage0.pin --fit dist/stage0.fit.rpt | tee gate.txt
-          { echo "### ep2c5gate"; echo '```'; tail -n 40 gate.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "image: $IMAGE"
+            echo "image digest: $DIGEST"
+            echo "stage0.rbf size: $(stat -c %s dist/stage0.rbf) bytes"
+            echo "stage0.rbf sha256: $(sha256sum dist/stage0.rbf | cut -d' ' -f1)"
+          } > gate.txt
+          python3 tools/pinfind/ep2c5gate.py dist/stage0.pin --fit dist/stage0.fit.rpt | tee -a gate.txt
+          { echo "### ep2c5gate"; echo '```'; head -n 4 gate.txt; tail -n 40 gate.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bitstream
-        if: always()
+        # Only a bitstream that passed the pin gate is published. If the gate
+        # fails, no rbf artifact exists (reports are still uploaded below).
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: stage0-ep2c5-rbf

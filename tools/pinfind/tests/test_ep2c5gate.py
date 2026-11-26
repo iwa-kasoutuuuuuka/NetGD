@@ -29,22 +29,46 @@ def pin_row(name, loc, d="", std="", bank="", user=""):
     return f"{name:<29}: {loc:<10}: {d:<7}: {std:<18}:         : {bank:<10}: {user}\n"
 
 
-GOOD_ROWS = [
-    ("GND", "A1", "gnd"),
-    ("VCCIO8", "A2", "power"),
-    ("RESERVED_INPUT", "A3", "", "", "3"),
-    ("~ASDO~ / RESERVED_INPUT", "C1", "input", "3.3-V LVTTL", "1"),
-    ("~nCSO~ / RESERVED_INPUT", "D2", "input", "3.3-V LVTTL", "1"),
-    ("~LVDS41p/nCEO~ / RESERVED_INPUT", "N12", "input", "3.3-V LVTTL", "4"),
-    ("TDO", "J5", "output"),
-    ("nSTATUS", "M12", "bidir"),
-    ("CONF_DONE", "L12", ""),
-    ("nCONFIG", "H5", ""),
-    ("DCLK", "H1", ""),
-    ("DATA0", "H2", ""),
-    ("GND+", "E8", ""),
-    ("stage0_in", "B5", "input", "3.3-V LVTTL", "3", "N"),
-]
+BALLS = ep2c5gate.load_balls()
+DIRS = {"TDO": "output", "TDI": "input", "TMS": "input", "TCK": "input",
+        "DATA0": "input", "USER": "input"}
+
+
+def good_rows():
+    """One row per expected ball, taken from the repository's ball table."""
+    rows = []
+    for ball, role in BALLS.items():
+        if role == "USER":
+            rows.append(["stage0_in", ball, "input", "3.3-V LVTTL", "1", "Y"])
+        elif role in ("GND",) or role.startswith("GND_PLL") or role.startswith("GNDA_PLL"):
+            rows.append([role, ball, "gnd"])
+        elif role.startswith(("VCC",)):
+            rows.append([role, ball, "power"])
+        else:
+            rows.append([role, ball, DIRS.get(role, "")])
+    return rows
+
+
+GOOD_ROWS = good_rows()
+
+
+def ball_of(role, n=0):
+    return [b for b, r in BALLS.items() if r == role][n]
+
+
+def mutate(ball, **kw):
+    """GOOD_ROWS with the row at `ball` replaced (name=..., d=...)."""
+    out = []
+    for r in GOOD_ROWS:
+        r = list(r)
+        if r[1] == ball:
+            if "name" in kw:
+                r[0] = kw["name"]
+            if "d" in kw:
+                r[2] = kw["d"]
+        out.append(r)
+    return out
+
 
 FIT = """+------------------------------------------------+
 ; Input Pins                                     ;
@@ -71,6 +95,8 @@ FIT = """+------------------------------------------------+
 ; Enable device-wide reset (DEV_CLRn)           ; Off       ;
 ; Enable device-wide output enable (DEV_OE)     ; Off       ;
 ; Enable INIT_DONE output                       ; Off       ;
+; Enable user-supplied start-up clock (CLKUSR)  ; Off       ;
+; Configuration scheme                          ; Passive Serial ;
 ; Error detection CRC                           ; Off       ;
 ; nCEO                                          ; Use as regular IO ;
 ; ASDO,nCSO                                     ; Unreserved ;
@@ -100,35 +126,82 @@ class GateTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("PASS", out)
 
+    def io(self, n=0):
+        return ball_of("RESERVED_INPUT", n)
+
     def test_unused_driving_ground_fails(self):
-        rows = GOOD_ROWS + [("GND*", "A4", "", "", "3")]
-        rc, out = self.run_gate(rows)
+        rc, out = self.run_gate(mutate(self.io(), name="GND*"))
         self.assertEqual(rc, 1, out)
         self.assertIn("GND*", out)
 
     def test_weak_pullup_reserved_fails(self):
-        rows = GOOD_ROWS + [("RESERVED_INPUT_WITH_WEAK_PULLUP", "A5", "", "", "3")]
-        self.assertEqual(self.run_gate(rows)[0], 1)
+        self.assertEqual(self.run_gate(mutate(self.io(), name="RESERVED_INPUT_WITH_WEAK_PULLUP"))[0], 1)
 
     def test_bus_hold_reserved_fails(self):
-        rows = GOOD_ROWS + [("RESERVED_INPUT_WITH_BUS_HOLD", "A5", "", "", "3")]
-        self.assertEqual(self.run_gate(rows)[0], 1)
+        self.assertEqual(self.run_gate(mutate(self.io(), name="RESERVED_INPUT_WITH_BUS_HOLD"))[0], 1)
 
     def test_user_output_fails(self):
-        rows = GOOD_ROWS + [("led", "A6", "output", "3.3-V LVTTL", "3", "N")]
+        rows = mutate(self.io(), name="led", d="output")
         self.assertEqual(self.run_gate(rows, extra=["--user", "stage0_in", "--user", "led"])[0], 1)
 
     def test_unexpected_user_input_fails(self):
-        rows = GOOD_ROWS + [("other", "A6", "input", "3.3-V LVTTL", "3", "N")]
-        self.assertEqual(self.run_gate(rows)[0], 1)
+        self.assertEqual(self.run_gate(mutate(self.io(), name="other", d="input"))[0], 1)
 
     def test_nceo_as_output_fails(self):
-        rows = [r for r in GOOD_ROWS if "nCEO" not in r[0]] + [("nCEO", "N12", "output")]
-        self.assertEqual(self.run_gate(rows)[0], 1)
+        self.assertEqual(self.run_gate(mutate(self.io(), name="nCEO", d="output"))[0], 1)
 
     def test_dual_purpose_kept_fails(self):
-        rows = [r for r in GOOD_ROWS if "ASDO" not in r[0]] + [("~ASDO~", "C1", "output")]
+        self.assertEqual(self.run_gate(mutate(self.io(), name="~ASDO~", d="output"))[0], 1)
+
+    # --- D3: expected-ball table (the false-pass mutations) ---------------
+
+    def test_io_ball_renamed_tdo_output_fails(self):
+        rc, out = self.run_gate(mutate(self.io(), name="TDO", d="output"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("I/O ball not RESERVED_INPUT", out)
+
+    def test_io_ball_renamed_conf_done_output_fails(self):
+        rc, out = self.run_gate(mutate(self.io(), name="CONF_DONE", d="output"))
+        self.assertEqual(rc, 1, out)
+
+    def test_io_ball_renamed_nstatus_bidir_fails(self):
+        self.assertEqual(self.run_gate(mutate(self.io(), name="nSTATUS", d="bidir"))[0], 1)
+
+    def test_io_ball_changed_to_gnd_fails(self):
+        rc, out = self.run_gate(mutate(self.io(), name="GND", d="gnd"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not RESERVED_INPUT", out)
+
+    def test_io_ball_changed_to_gnd_star_fails(self):
+        self.assertEqual(self.run_gate(mutate(self.io(), name="GND*", d="gnd"))[0], 1)
+
+    def test_tdo_on_wrong_ball_fails_both_ends(self):
+        # TDO moved: the real TDO ball is now a plain I/O (wrong role), and
+        # the other ball is not the TDO ball.
+        rows = mutate(ball_of("TDO"), name="RESERVED_INPUT", d="")
+        rc, out = self.run_gate(rows)
+        self.assertEqual(rc, 1, out)
+
+    def test_tdo_still_allowed_as_output_at_its_ball(self):
+        self.assertEqual(self.run_gate(GOOD_ROWS)[0], 0)
+
+    def test_supply_ball_renamed_fails(self):
+        self.assertEqual(self.run_gate(mutate(ball_of("GND"), name="RESERVED_INPUT"))[0], 1)
+
+    def test_ball_missing_fails(self):
+        rows = [r for r in GOOD_ROWS if r[1] != self.io()]
+        rc, out = self.run_gate(rows, extra=[])
+        self.assertEqual(rc, 1, out)
+
+    def test_unknown_ball_fails(self):
+        rows = mutate(self.io())
+        rows[0][1] = "ZZ99"
         self.assertEqual(self.run_gate(rows)[0], 1)
+
+    def test_table_has_256_balls_one_each_special(self):
+        self.assertEqual(len(BALLS), 256)
+        for role in ("TDO", "CONF_DONE", "nSTATUS", "USER"):
+            self.assertEqual(list(BALLS.values()).count(role), 1, role)
 
     def test_wrong_device_fails(self):
         rc, out = self.run_gate(GOOD_ROWS, extra=["--device", "EP2C5T144C8"])
@@ -167,6 +240,33 @@ class GateTest(unittest.TestCase):
         # What the first CI run produced with the non-CYCLONEII_ assignment.
         fit = FIT.replace("; nCEO                                          ; Use as regular IO ;",
                           "; nCEO                                          ; As output driving ground ;")
+        self.assertNotEqual(fit, FIT)
+        self.assertEqual(self.run_gate(GOOD_ROWS, fit=fit)[0], 1)
+
+    # --- D4 / D5 -----------------------------------------------------------
+
+    def test_fit_input_pins_table_missing_fails(self):
+        blocks = FIT.split(chr(10) * 2)
+        fit = (chr(10) * 2).join(x for x in blocks if "; Input Pins" not in x)
+        self.assertNotIn("Input Pins", fit)
+        rc, out = self.run_gate(GOOD_ROWS, fit=fit)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Input Pins table missing", out)
+
+    def test_fit_clkusr_on_fails(self):
+        fit = FIT.replace("(CLKUSR)  ; Off       ;", "(CLKUSR)  ; On        ;")
+        self.assertNotEqual(fit, FIT)
+        rc, out = self.run_gate(GOOD_ROWS, fit=fit)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("clkusr", out)
+
+    def test_fit_clkusr_missing_fails(self):
+        fit = FIT.replace("; Enable user-supplied start-up clock (CLKUSR)  ; Off       ;" + chr(10), "")
+        self.assertNotEqual(fit, FIT)
+        self.assertEqual(self.run_gate(GOOD_ROWS, fit=fit)[0], 1)
+
+    def test_fit_scheme_not_passive_serial_fails(self):
+        fit = FIT.replace("; Passive Serial ;", "; Active Serial ;")
         self.assertNotEqual(fit, FIT)
         self.assertEqual(self.run_gate(GOOD_ROWS, fit=fit)[0], 1)
 
