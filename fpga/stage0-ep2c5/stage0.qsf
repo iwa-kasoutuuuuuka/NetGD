@@ -1,0 +1,32 @@
+# stage-0 for the GDEMU 6.0: Cyclone II EP2C5F256C8, no outputs.
+# Every setting below exists to keep the configured FPGA from driving any
+# pin; check_pins.py checks the fitter's .pin report for that.
+set_global_assignment -name FAMILY "Cyclone II"
+set_global_assignment -name DEVICE EP2C5F256C8
+set_global_assignment -name TOP_LEVEL_ENTITY stage0
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION "13.0 SP1"
+set_global_assignment -name LAST_QUARTUS_VERSION "13.0 SP1"
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name VERILOG_FILE stage0.v
+set_global_assignment -name GENERATE_RBF_FILE ON
+
+# Passive serial from the MCU, no configuration device.
+set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
+set_global_assignment -name CYCLONEII_CONFIGURATION_SCHEME "PASSIVE SERIAL"
+set_global_assignment -name USE_CONFIGURATION_DEVICE OFF
+
+# Unused pins: inputs, output buffer off (the old default drives them to GND).
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"
+
+# Dual-purpose pins: not kept as programming pins after configuration, so
+# they fall under the rule above. nCEO would otherwise drive low.
+set_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION "USE AS REGULAR IO"
+set_global_assignment -name RESERVE_ASDO_AFTER_CONFIGURATION "AS INPUT TRI-STATED"
+set_global_assignment -name RESERVE_NCSO_AFTER_CONFIGURATION "AS INPUT TRI-STATED"
+
+# No optional pins that drive or listen.
+set_global_assignment -name ENABLE_INIT_DONE_OUTPUT OFF
+set_global_assignment -name ENABLE_DEVICE_WIDE_RESET OFF
+set_global_assignment -name ENABLE_DEVICE_WIDE_OE OFF
+set_global_assignment -name CRC_ERROR_CHECKING OFF
