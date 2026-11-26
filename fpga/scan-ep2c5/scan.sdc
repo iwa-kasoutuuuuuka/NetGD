@@ -1,0 +1,16 @@
+# EP2C5F256C8 scan core timing (Quartus II 13.0 SP1 TimeQuest).
+# Hand-written. Every clock is asynchronous to every other one: the
+# cross-domain signals (clr, arm, the window enable, the raw levels) go
+# through 2-flop synchronisers or are read only when frozen.
+create_clock -name clk_h16 -period 20.833 [get_ports p_H16]
+create_clock -name clk_j2  -period 88.577 [get_ports p_J2]
+create_clock -name clk_h1  -period 10.000 [get_ports p_H1]
+create_clock -name clk_h2  -period 10.000 [get_ports p_H2]
+create_clock -name clk_j1  -period 10.000 [get_ports p_J1]
+create_clock -name clk_h15 -period 10.000 [get_ports p_H15]
+create_clock -name clk_j15 -period 10.000 [get_ports p_J15]
+create_clock -name clk_j16 -period 10.000 [get_ports p_J16]
+create_clock -name clk_nrd -period 1000.000 [get_ports p_M12]
+set_clock_groups -asynchronous -group {clk_h16} -group {clk_j2} -group {clk_h1} \
+    -group {clk_h2} -group {clk_j1} -group {clk_h15} -group {clk_j15} \
+    -group {clk_j16} -group {clk_nrd}

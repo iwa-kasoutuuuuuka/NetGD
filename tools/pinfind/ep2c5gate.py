@@ -36,6 +36,16 @@ set (Off on balls with no codeword). Bus hold must be off everywhere, and
 all the stage-0 checks above still apply (no Output/Bidir rows, dual-purpose
 pins not kept, device options).
 
+--scan (the scan core of fpga/scan-ep2c5, table --table ep2c5_scan.csv):
+every ball listed in the table must be its port p_<BALL>; the balls whose
+dir is "output" (the 16 MCU_DATA balls) must be output or bidir, every other
+one an input. The Output Pins + Bidir Pins tables must list exactly those
+output ports (nothing else may drive), the Input Pins table exactly the
+input ports. Weak Pull Up must be On exactly where the table says "on"
+(Input Pins, Output/Bidir Pins and All Package Pins), bus hold off
+everywhere, the Fitter Summary must show 0 PLLs, and the dual-purpose and
+device-option checks of stage-0 still apply.
+
 --rbf prints the bitstream's size and SHA-256 (a missing file fails).
 
 Standard library only. Prints every pin it looked at, then PASS or FAIL.
@@ -149,11 +159,28 @@ def load_code(path, k):
     return out
 
 
+def load_scan(path):
+    """Return ({ball: pull-up expected}, {output balls}) from ep2c5_scan.csv."""
+    code, outs = {}, set()
+    with open(path, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            ball = r["ball"].strip()
+            if ball in code:
+                raise SystemExit(f"ep2c5gate: ball {ball} twice in {path}")
+            d, pu = r["dir"].strip(), r["pullup"].strip()
+            if d not in ("input", "output") or pu not in ("on", "off"):
+                raise SystemExit(f"ep2c5gate: bad dir/pullup {d!r}/{pu!r} for {ball}")
+            code[ball] = pu == "on"
+            if d == "output":
+                outs.add(ball)
+    return code, outs
+
+
 def code_port(ball):
     return "p_" + ball
 
 
-def check_pin(g, text, device, users, npins, balls=None, code=None):
+def check_pin(g, text, device, users, npins, balls=None, code=None, outs=frozenset()):
     chip, dev, rows = parse_pin(text)
     if dev is None:
         g.fail(".pin: no 'CHIP ... ASSIGNED TO AN:' line")
@@ -193,6 +220,9 @@ def check_pin(g, text, device, users, npins, balls=None, code=None):
         if code is not None and r["loc"] in code:
             if name != code_port(r["loc"]):
                 g.fail(f".pin: code ball is not its input port {code_port(r['loc'])}: {where}")
+            elif r["loc"] in outs:
+                if d not in ("output", "bidir"):
+                    g.fail(f".pin: scan output port not an output: {where}")
             elif d != "input":
                 g.fail(f".pin: code port not an input: {where}")
             seen_users.add(name)
@@ -316,7 +346,7 @@ OPTIONAL_OPTIONS = [
 ]
 
 
-def check_package(g, tables, code, required):
+def check_package(g, tables, code, required, outs=frozenset()):
     """All Package Pins: Bus Hold off everywhere; Weak Pull Up as expected.
 
     code: {ball: pull-up expected} for the balls that must be input ports
@@ -348,14 +378,16 @@ def check_package(g, tables, code, required):
         if code is not None and loc in code:
             seen.add(loc)
             want = "on" if code[loc] else "off"
-            if name != code_port(loc) or d != "input":
+            want_dir = ("output", "bidir") if loc in outs else ("input",)
+            if name != code_port(loc) or d not in want_dir:
                 g.fail(f"fit.rpt: package pin {loc} is {name!r} dir={d}, "
-                       f"expected input {code_port(loc)}")
+                       f"expected {'/'.join(want_dir)} {code_port(loc)}")
             if pu != want:
                 g.fail(f"fit.rpt: package pin {loc} weak pull-up {r[ipu]}, expected {want}")
         elif pu not in ("off", "--", ""):
             g.fail(f"fit.rpt: package pin {loc} {name} weak pull-up {r[ipu]}, expected off")
-        if d in ("output", "bidir") and name not in ("#TDO", "^nSTATUS", "^CONF_DONE"):
+        if d in ("output", "bidir") and loc not in outs \
+                and name not in ("#TDO", "^nSTATUS", "^CONF_DONE"):
             g.fail(f"fit.rpt: package pin {loc} {name} dir={d}")
     if code is not None:
         for b in sorted(set(code) - seen):
@@ -364,13 +396,73 @@ def check_package(g, tables, code, required):
                f"(expected {sum(code.values())})")
 
 
-def check_fit(g, text, users, code=None):
-    tables = rpt_tables(text)
+def check_drivers(g, tables, code, outs):
+    """Scan mode: Output Pins + Bidir Pins list exactly the output ports."""
+    want = {code_port(b): b for b in outs}
+    seen = set()
     for kind in ("Output Pins", "Bidir Pins"):
         t, rows = find_table(tables, kind)
-        if t and len(rows) > 1:
-            g.fail(f"fit.rpt: {kind} table has {len(rows) - 1} row(s): "
-                   + ", ".join(r[0] for r in rows[1:]))
+        if not t or len(rows) < 2:
+            continue
+        hdr = rows[0]
+        ipu, ibh, iloc = col(hdr, "Weak Pull Up"), col(hdr, "Bus Hold"), col(hdr, "Pin #")
+        if None in (ipu, ibh, iloc):
+            g.fail(f"fit.rpt: {kind} table lacks Pin #/Weak Pull Up/Bus Hold column")
+            continue
+        for r in rows[1:]:
+            name = r[0]
+            loc = r[iloc] if iloc < len(r) else "?"
+            if name not in want or loc != want[name]:
+                g.fail(f"fit.rpt: {kind} row {name} at {loc} is not a scan output port")
+                continue
+            if name in seen:
+                g.fail(f"fit.rpt: scan output {name} listed twice")
+            seen.add(name)
+            exp = "on" if code[want[name]] else "off"
+            if ipu >= len(r) or r[ipu].lower() != exp:
+                g.fail(f"fit.rpt: output {name} weak pull-up "
+                       f"{r[ipu] if ipu < len(r) else '?'}, expected {exp}")
+            if ibh >= len(r) or r[ibh].lower() not in ("no", "off", ""):
+                g.fail(f"fit.rpt: output {name} bus hold {r[ibh] if ibh < len(r) else '?'}")
+    for name in sorted(set(want) - seen):
+        g.fail(f"fit.rpt: scan output {name} not in the Output Pins / Bidir Pins tables")
+    g.note(f"fit.rpt: {len(seen)} output/bidir ports (expected {len(want)})")
+
+
+def check_pll(g, tables, required):
+    """Fitter Summary 'Total PLLs' must be 0 / N."""
+    val = None
+    for t, rows in tables.items():
+        if not t.lower().startswith("fitter summary"):
+            continue
+        for r in rows:
+            if len(r) >= 2 and r[0].strip().lower() == "total plls":
+                val = r[1].strip()
+    if val is None:
+        if required:
+            g.fail("fit.rpt: PLL count (Fitter Summary 'Total PLLs') not found")
+        return
+    if not re.match(r"^0\s*/", val):
+        g.fail(f"fit.rpt: PLLs used: {val!r}, expected 0")
+    else:
+        g.note(f"fit.rpt: Total PLLs {val}")
+
+
+def check_fit(g, text, users, code=None, outs=frozenset(), scan=False):
+    tables = rpt_tables(text)
+    if scan:
+        check_drivers(g, tables, code, outs)
+    else:
+        for kind in ("Output Pins", "Bidir Pins"):
+            t, rows = find_table(tables, kind)
+            if t and len(rows) > 1:
+                g.fail(f"fit.rpt: {kind} table has {len(rows) - 1} row(s): "
+                       + ", ".join(r[0] for r in rows[1:]))
+    check_pll(g, tables, required=scan)
+    pkg_code = code
+    if code is not None and outs:
+        users = users - {code_port(b) for b in outs}
+        code = {b: v for b, v in code.items() if b not in outs}
     t, rows = find_table(tables, "Input Pins")
     if t and rows:
         hdr = rows[0]
@@ -420,7 +512,7 @@ def check_fit(g, text, users, code=None):
                     g.fail(f"fit.rpt: dual-purpose pin {nm} reserved as {res!r}")
     else:
         g.note("fit.rpt: no Dual Purpose and Dedicated Pins table")
-    check_package(g, tables, code, required=code is not None)
+    check_package(g, tables, pkg_code, required=pkg_code is not None, outs=outs)
     opts = {}
     for t, rows in tables.items():
         if "device options" in t.lower() or t.lower().startswith("fitter settings"):
@@ -480,11 +572,23 @@ def main(argv=None):
     ap.add_argument("--pullcode", type=int, default=None, metavar="K",
                     help="pull-up code variant K (0..9); needs --code")
     ap.add_argument("--code", help="code table csv (tools/pinfind/ep2c5_pullcode.csv)")
+    ap.add_argument("--scan", action="store_true",
+                    help="scan core mode (fpga/scan-ep2c5); table from --table")
+    ap.add_argument("--table", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                    "ep2c5_scan.csv"),
+                    help="scan table csv (default tools/pinfind/ep2c5_scan.csv)")
     ap.add_argument("--rbf", help="bitstream: print its size and SHA-256")
     ap.add_argument("-q", "--quiet", action="store_true")
     a = ap.parse_args(argv)
     code = None
-    if a.pullcode is not None:
+    outs = frozenset()
+    if a.scan and a.pullcode is not None:
+        ap.error("--scan and --pullcode are exclusive")
+    if a.scan:
+        code, outs = load_scan(a.table)
+        outs = frozenset(outs)
+        users = {code_port(b) for b in code}
+    elif a.pullcode is not None:
         if not a.code or not 0 <= a.pullcode <= 9:
             ap.error("--pullcode K needs 0 <= K <= 9 and --code")
         code = load_code(a.code, a.pullcode)
@@ -493,12 +597,15 @@ def main(argv=None):
         users = set(a.user or ["stage0_in"])
     pin, fit = locate(a.path, a.fit)
     g = Gate()
-    if code is not None:
+    if a.scan:
+        g.note(f"scan core: {len(code)} ports, {len(outs)} outputs "
+               f"({' '.join(sorted(outs))}), {sum(code.values())} with weak pull-up On")
+    elif code is not None:
         g.note(f"pull-up code variant k={a.pullcode}: {len(code)} ports, "
                f"{sum(code.values())} with weak pull-up On")
-    rows = check_pin(g, read(pin), a.device, users, a.pins, code=code)
+    rows = check_pin(g, read(pin), a.device, users, a.pins, code=code, outs=outs)
     if os.path.exists(fit):
-        check_fit(g, read(fit), users, code=code)
+        check_fit(g, read(fit), users, code=code, outs=outs, scan=a.scan)
     else:
         g.fail(f"fit.rpt not found: {fit}")
     if a.rbf:
