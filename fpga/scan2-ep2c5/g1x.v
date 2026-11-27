@@ -250,56 +250,55 @@ module g1x #(
     end
 
     // -------------------------------- (h) RDn timing, both H16 edges --
-    // Half-tick sample stream: per rising edge the pair [c2[21], rn2] =
-    // samples at t-2 and t-1.5 ticks; hp = the previous pair's last sample.
+    // Half-tick sample stream: per rising edge the pair (a, b) = (c2[21],
+    // rn2) = samples at t-2 and t-1.5 ticks; p = the previous pair's b.
+    // A pair holds at most one fall and at most one rise, so one min / max
+    // update per tick suffices. hpc = samples from the last fall to p,
+    // hlw = low samples of the current low run up to p (0 if p is high).
     reg rn1, rn2;
     always @(negedge h16) begin rn1 <= dc[21]; rn2 <= rn1; end
-    reg hp;
-    reg hlv, hpv;
+    reg hp, hlv, hpv;
     reg [15:0] hlw, hpc, minw, maxw, minp, maxp;
-    reg        t_lv, t_pv;
-    reg [15:0] t_lw, t_pc, t_minw, t_maxw, t_minp, t_maxp;
-    task hstep;
-        input p, x, en;
+    wire ha = c2[21], hb2 = rn2;
+    wire fa = hp & ~ha, fb = ha & ~hb2;          // fall at a / at b
+    wire ra_ = ~hp & ha, rb = ~ha & hb2;         // rise at a / at b
+    wire hfall = fa | fb, hrise = ra_ | rb;
+    function [15:0] sadd;                        // saturating add
+        input [15:0] x;
+        input [1:0] y;
+        reg [16:0] s;
         begin
-            if (p && !x) begin                         // fall
-                if (t_pv && en) begin
-                    if (t_pc < t_minp) t_minp = t_pc;
-                    if (t_pc > t_maxp) t_maxp = t_pc;
-                end
-                t_pc = 16'd1; t_pv = en;
-                t_lw = 16'd1; t_lv = en;
-            end else begin
-                if (!(&t_pc)) t_pc = t_pc + 16'd1;
-                if (!p && x) begin                     // rise
-                    if (t_lv && en) begin
-                        if (t_lw < t_minw) t_minw = t_lw;
-                        if (t_lw > t_maxw) t_maxw = t_lw;
-                    end
-                    t_lv = 1'b0;
-                end else if (!x && !(&t_lw)) begin
-                    t_lw = t_lw + 16'd1;
-                end
-            end
+            s = {1'b0, x} + {15'd0, y};
+            sadd = s[16] ? 16'hFFFF : s[15:0];
         end
-    endtask
-    always @* begin
-        t_lv = hlv; t_pv = hpv; t_lw = hlw; t_pc = hpc;
-        t_minw = minw; t_maxw = maxw; t_minp = minp; t_maxp = maxp;
-        hstep(hp, c2[21], g_on);
-        hstep(c2[21], rn2, g_on);
-    end
+    endfunction
+    wire [15:0] per = sadd(hpc, fb ? 2'd2 : 2'd1);           // period at the fall
+    wire [15:0] wid = sadd(hlw, rb ? 2'd1 : 2'd0);           // low width at the rise
+    wire wid_ok = (fa & rb) ? g_on : hlv;                    // run started in window
+    wire [15:0] lw_n = hb2 ? 16'd0 : (ha ? 16'd1 : sadd(hp ? 16'd0 : hlw, 2'd2));
+    wire [15:0] pc_n = fa ? 16'd1 : fb ? 16'd0 : sadd(hpc, 2'd2);
     always @(posedge h16 or posedge rst) begin
         if (rst) begin
             hp <= 1'b1; hlv <= 1'b0; hpv <= 1'b0; hlw <= 16'd0; hpc <= 16'd0;
             minw <= 16'hFFFF; maxw <= 16'd0; minp <= 16'hFFFF; maxp <= 16'd0;
         end else begin
-            hp <= rn2;
-            hlv <= t_lv; hpv <= t_pv; hlw <= t_lw; hpc <= t_pc;
-            minw <= t_minw; maxw <= t_maxw; minp <= t_minp; maxp <= t_maxp;
+            hp <= hb2;
+            hlw <= lw_n;
+            hpc <= pc_n;
+            if (hfall && hpv && g_on) begin
+                if (per < minp) minp <= per;
+                if (per > maxp) maxp <= per;
+            end
+            if (hrise && wid_ok && g_on) begin
+                if (wid < minw) minw <= wid;
+                if (wid > maxw) maxw <= wid;
+            end
+            if (hfall) hpv <= g_on;
+            if (fb) hlv <= g_on;
+            else if (fa) hlv <= rb ? 1'b0 : g_on;
+            else if (hrise) hlv <= 1'b0;
         end
     end
-
     // ----------------------------------------------- (b) async counters --
     wire [23:0] ab4, ard;
     g1x_acnt cb4 (.aclk(dc[25]),  .arst(clr_g), .en_h(run), .h16(h16), .hrst(rst),
@@ -430,7 +429,8 @@ module g1x #(
     end
 endmodule
 
-// 32 x 32 simple dual-port RAM, registered read address (M4K).
+// 32 x 32 simple dual-port RAM, registered read data (M4K, old-data /
+// don't-care read-during-write: no pass-through logic).
 // No read-during-write check: the g1x schedules never read the word that
 // is written in the same tick.
 module g1x_ram (
@@ -441,15 +441,15 @@ module g1x_ram (
     input  wire [4:0]  ra,
     output wire [31:0] q
 );
-    (* ramstyle = "M4K, no_rw_check" *) reg [31:0] mem [0:31];
-    reg [4:0] ra_r = 5'd0;
+    reg [31:0] mem [0:31] /* synthesis ramstyle = "no_rw_check" */;
+    reg [31:0] q_r = 32'd0;
     integer i;
     initial for (i = 0; i < 32; i = i + 1) mem[i] = 32'd0;
     always @(posedge clk) begin
         if (we) mem[wa] <= wd;
-        ra_r <= ra;
+        q_r <= mem[ra];
     end
-    assign q = mem[ra_r];
+    assign q = q_r;
 endmodule
 
 // Async edge counter (24 bit) clocked by a G1 ball, with a Gray-coded
