@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Generate the v55g pin table and Quartus project (fpga/v55g-ep2c5, Run B / C
+of docs/research/ag16k-ps-plan-run4.md) from tools/pinfind/ep2c5_padmap.csv.
+
+usage: mk_v55g.py [--padmap tools/pinfind/ep2c5_padmap.csv]
+                  [--table tools/pinfind/ep2c5_v55g.csv] [--out fpga/v55g-ep2c5]
+
+The 66 v5.5 signals are placed at the F256 ball the pad map gives for their
+T144 pin (no hand edits), plus the two g1gate control inputs:
+
+  G_MASTERn  R14 (MCU PA28)  weak pull-up ON  low = G1 outputs allowed
+  G_WRAPn    N8  (MCU PA26)  weak pull-up ON  low = wrapper mode
+
+Directions follow fpga/v55g-ep2c5/v55g.v: the 24 DC outputs are bidir
+(the pad input buffer is g1gate's readback), DC inputs are inputs,
+MCU_DATA bidir, MCU_IRQn output (tri-state), everything else an input.
+I/O settings: 3.3-V LVTTL everywhere; CURRENT_STRENGTH_NEW 4MA (the
+minimum for Cyclone II LVTTL) on the 24 DC outputs; weak pull-up ON only
+on G_MASTERn / G_WRAPn and the MCU strobes NCS, NRE, NWE, NBS0/1 (OFF on
+every DC_* ball, B4 / DC_INTRQ included per the Run A verdict H1, and on
+the clocks, MCU_ADDR, MCU_DATA, MCU_RSTn, MCU_IRQn); bus hold OFF everywhere. Unused pins: stage-0 options
+(reserved as input tri-stated, no pull-up).
+
+Writes:
+  <table>                        ball,pad,bank,signal,dir,group,pullup,strength
+  <out>/v55g.qsf, <out>/v55g.qpf
+tools/pinfind/ep2c5gate.py --v55g checks the fitter's result against the
+table. Standard library only; deterministic output.
+"""
+import argparse
+import csv
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+sys.path.insert(0, HERE)
+
+import mk_scan  # noqa: E402
+
+# g1gate ball index order (pad_in / pin_oe bit) and group
+DC_OUT = (["DC_INTRQ", "DC_DMARQ", "DC_IORDY"]
+          + [f"DC_DATA[{i}]" for i in range(16)]
+          + ["DC_CDCLK", "DC_SCK", "DC_SDAT", "DC_LRCK", "DC_EMPH"])
+
+
+def group_of(sig):
+    if sig == "DC_INTRQ":
+        return 1
+    if sig == "DC_DMARQ":
+        return 2
+    if sig == "DC_IORDY":
+        return 3
+    if sig.startswith("DC_DATA["):
+        return 4 if int(sig[8:-1]) < 8 else 5
+    return 6
+
+
+GATE_IN = {"G_MASTERn": "R14", "G_WRAPn": "N8"}
+# MCU strobes: weak pull-up ON (as in the scan cores, where the bus was
+# proven), so an MCU pin that is not yet driven reads "idle" and the FPGA
+# never drives MCU_DATA because of a floating NCS / NRD.
+MCU_PULLUP = ("MCU_NCS", "MCU_NRE", "MCU_NWE", "MCU_NBS[0]", "MCU_NBS[1]")
+CLOCK_SIGS = ("CLK_48_MHz", "CLK_11_2896_MHz")
+COLS = ["ball", "pad", "bank", "signal", "dir", "group", "gidx", "pullup", "strength"]
+VERILOG_FILES = ("v55g.v", "g1gate.v", "OpenGDEMUCore.v", "Audio_PLL.v")
+N_V55 = 66
+
+
+def build(padmap):
+    rows = []
+    seen = set()
+    with open(padmap, encoding="utf-8") as f:
+        pm = list(csv.DictReader(f))
+    by_ball = {r["f256_ball"]: r for r in pm if r["f256_ball"]}
+    for r in pm:
+        s = r["v55_signal"].strip()
+        if not s:
+            continue
+        ball = r["f256_ball"]
+        if not ball or s in seen:
+            raise SystemExit(f"mk_v55g: bad pad map row for {s}")
+        seen.add(s)
+        d55 = r["v55_dir"].strip()
+        if s in DC_OUT:
+            if d55 not in ("output", "bidir"):
+                raise SystemExit(f"mk_v55g: {s} is {d55} in the pad map")
+            d, g, gi, st = "bidir", str(group_of(s)), str(DC_OUT.index(s)), "4mA"
+        elif s.startswith("MCU_DATA["):
+            d, g, gi, st = "bidir", "", "", ""
+        elif s == "MCU_IRQn":
+            d, g, gi, st = "output", "", "", ""
+        else:
+            if d55 != "input":
+                raise SystemExit(f"mk_v55g: unexpected v5.5 {d55} {s}")
+            d, g, gi, st = "input", "", "", ""
+        pu = "on" if s in MCU_PULLUP else "off"
+        if s in CLOCK_SIGS and "clock input" not in r["special"]:
+            raise SystemExit(f"mk_v55g: {s} is not on a dedicated clock ball")
+        rows.append({"ball": ball, "pad": r["pad"], "bank": r["bank"], "signal": s,
+                     "dir": d, "group": g, "gidx": gi, "pullup": pu, "strength": st})
+    if len(rows) != N_V55:
+        raise SystemExit(f"mk_v55g: {len(rows)} v5.5 signals, expected {N_V55}")
+    for s in DC_OUT:
+        if s not in seen:
+            raise SystemExit(f"mk_v55g: {s} missing from the pad map")
+    for s, ball in GATE_IN.items():
+        r = by_ball.get(ball)
+        if r is None or r["v55_signal"].strip() or r["io_type"] not in ("Row I/O", "Column I/O") \
+                or r["special"].strip():
+            raise SystemExit(f"mk_v55g: {ball} is not a free plain I/O ball")
+        rows.append({"ball": ball, "pad": r["pad"], "bank": r["bank"], "signal": s,
+                     "dir": "input", "group": "", "gidx": "", "pullup": "on", "strength": ""})
+    rows.sort(key=lambda x: int(x["pad"]))
+    return rows
+
+
+def qsf_text(rows):
+    n_out = sum(r["dir"] != "input" for r in rows)
+    L = [
+        "# GENERATED by tools/pinfind/mk_v55g.py -- do not edit.",
+        "# v55g: the v5.5 core + g1gate on EP2C5F256C8 (Quartus II 13.0 SP1).",
+        "# Pins from tools/pinfind/ep2c5_padmap.csv (v5.5 T144 pin -> F256 ball).",
+        f"# {len(rows)} ports, {n_out} output / bidir. CURRENT_STRENGTH 4mA on the 24 DC",
+        "# outputs; weak pull-up only on G_MASTERn (R14), G_WRAPn (N8) and the MCU",
+        "# strobes NCS / NRE / NWE / NBS; bus hold off; unused pins as input",
+        "# tri-stated (stage-0 options).",
+        "# tools/pinfind/ep2c5gate.py --v55g checks the fitter's result.",
+        "# Bitstreams are CI artifacts only.",
+        "",
+        "set_global_assignment -name TOP_LEVEL_ENTITY v55g",
+    ]
+    L += [f"set_global_assignment -name VERILOG_FILE {f}" for f in VERILOG_FILES]
+    L.append("set_global_assignment -name SDC_FILE v55g.sdc")
+    L += mk_scan.stage0_globals()
+    L.append("")
+    for r in rows:
+        p = r["signal"]
+        L.append(f"set_location_assignment PIN_{r['ball']} -to {p}")
+        L.append(f"set_instance_assignment -name IO_STANDARD \"3.3-V LVTTL\" -to {p}")
+        L.append(f"set_instance_assignment -name WEAK_PULL_UP_RESISTOR "
+                 f"{'ON' if r['pullup'] == 'on' else 'OFF'} -to {p}")
+        L.append(f"set_instance_assignment -name ENABLE_BUS_HOLD_CIRCUITRY OFF -to {p}")
+        if r["strength"]:
+            L.append(f"set_instance_assignment -name CURRENT_STRENGTH_NEW \"4MA\" -to {p}")
+    L.append("")
+    return "\n".join(L)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--padmap", default=os.path.join(HERE, "ep2c5_padmap.csv"))
+    ap.add_argument("--table", default=os.path.join(HERE, "ep2c5_v55g.csv"))
+    ap.add_argument("--out", default=os.path.join(ROOT, "fpga", "v55g-ep2c5"))
+    a = ap.parse_args(argv)
+    rows = build(a.padmap)
+    os.makedirs(os.path.dirname(os.path.abspath(a.table)), exist_ok=True)
+    with open(a.table, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=COLS, lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+    mk_scan.write(os.path.join(a.out, "v55g.qsf"), qsf_text(rows))
+    mk_scan.write(os.path.join(a.out, "v55g.qpf"),
+                  'QUARTUS_VERSION = "13.0"\nPROJECT_REVISION = "v55g"\n')
+    print(f"v55g: {len(rows)} ports, {sum(r['dir'] != 'input' for r in rows)} output/bidir, "
+          f"{sum(r['strength'] == '4mA' for r in rows)} at 4mA, "
+          f"{sum(r['pullup'] == 'on' for r in rows)} with pull-up")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

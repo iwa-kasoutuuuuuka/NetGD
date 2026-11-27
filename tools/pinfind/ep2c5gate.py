@@ -57,6 +57,17 @@ base are exactly the variant's set: v0 none; v1 the 33 DC_* balls plus
 C4 and C5 with pull-up Off; v2 the 33 DC_* balls with pull-up Off and bus
 hold On.
 
+--v55g (the v5.5 core + g1gate image of fpga/v55g-ep2c5, table --table
+ep2c5_v55g.csv from mk_v55g.py, --sta sta.rpt): the table follows
+--padmap (v5.5 signal -> F256 ball) plus G_MASTERn R14 / G_WRAPn N8; .pin:
+every port at its ball with its direction, nothing else used; fit.rpt:
+the Output + Bidir Pins tables list exactly the 41 table outputs, Current
+Strength 4mA on each of the 24 G1 pins, weak pull-up exactly per table,
+bus hold off, inputs exactly per table, unused pins without pull-up and
+not driven, PLL policy (exactly one PLL = Audio_PLL, inclk0
+CLK_11_2896_MHz on a dedicated pin), stage-0 device options; sta.rpt:
+every slack summary >= 0 and no "Timing requirements not met".
+
 --rbf prints the bitstream's size and SHA-256 (a missing file fails).
 
 Standard library only. Prints every pin it looked at, then PASS or FAIL.
@@ -572,6 +583,12 @@ def check_fit(g, text, users, code=None, outs=frozenset(), scan=False, hold=None
             g.note("fit.rpt: Input Pins table lacks Weak Pull Up/Bus Hold column")
     else:
         g.fail("fit.rpt: Input Pins table missing (cannot check weak pull-up / bus hold)")
+    check_dual_options(g, tables)
+    check_package(g, tables, pkg_code, required=pkg_code is not None, outs=outs, hold=hold)
+
+
+def check_dual_options(g, tables):
+    """Dual-purpose pins not kept / driven; the stage-0 device options."""
     t, rows = find_table(tables, "Dual Purpose and Dedicated Pins")
     if t and rows:
         hdr = rows[0]
@@ -589,7 +606,6 @@ def check_fit(g, text, users, code=None, outs=frozenset(), scan=False, hold=None
                     g.fail(f"fit.rpt: dual-purpose pin {nm} reserved as {res!r}")
     else:
         g.note("fit.rpt: no Dual Purpose and Dedicated Pins table")
-    check_package(g, tables, pkg_code, required=pkg_code is not None, outs=outs, hold=hold)
     opts = {}
     for t, rows in tables.items():
         if "device options" in t.lower() or t.lower().startswith("fitter settings"):
@@ -616,6 +632,297 @@ def check_fit(g, text, users, code=None, outs=frozenset(), scan=False, hold=None
                     g.note(f"fit.rpt option: {k} = {v}")
 
 
+# ---------------------------------------------------------------- v55g ----
+
+V55G_DC_PREFIX = "DC_"
+# The 24 G1 outputs / bidirs that g1gate drives (ep2c5_v55g.csv "strength").
+V55G_STRENGTH = "4ma"
+
+
+def load_v55g(path):
+    """Return {signal: row} from ep2c5_v55g.csv (mk_v55g.py)."""
+    out = {}
+    with open(path, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            s = r["signal"].strip()
+            if s in out:
+                raise SystemExit(f"ep2c5gate: signal {s} twice in {path}")
+            if r["dir"] not in ("input", "output", "bidir") or r["pullup"] not in ("on", "off"):
+                raise SystemExit(f"ep2c5gate: bad dir / pullup for {s} in {path}")
+            out[s] = r
+    balls = [r["ball"] for r in out.values()]
+    if len(set(balls)) != len(balls):
+        raise SystemExit(f"ep2c5gate: a ball twice in {path}")
+    return out
+
+
+def check_v55g_table(g, tab, padmap):
+    """The table is the v5.5 pin list carried by the pad map, plus R14 / N8."""
+    with open(padmap, encoding="utf-8") as f:
+        pm = {r["v55_signal"].strip(): r for r in csv.DictReader(f) if r["v55_signal"].strip()}
+    want = set(pm) | {"G_MASTERn", "G_WRAPn"}
+    if set(tab) != want:
+        g.fail(f"v55g table: signals differ from the pad map: {sorted(set(tab) ^ want)}")
+    for s, r in sorted(tab.items()):
+        if s in pm and pm[s]["f256_ball"] != r["ball"]:
+            g.fail(f"v55g table: {s} at {r['ball']}, pad map says {pm[s]['f256_ball']}")
+        dc_out = s.startswith(V55G_DC_PREFIX) and pm.get(s, {}).get("v55_dir") in ("output", "bidir")
+        if dc_out != (r["strength"].lower() == V55G_STRENGTH):
+            g.fail(f"v55g table: {s} strength {r['strength']!r}")
+        if dc_out and r["dir"] != "bidir":
+            g.fail(f"v55g table: DC output {s} is not bidir (no readback)")
+        if s.startswith(V55G_DC_PREFIX) and r["pullup"] != "off":
+            g.fail(f"v55g table: weak pull-up on {s}")
+    if tab.get("G_MASTERn", {}).get("ball") != "R14" or tab.get("G_WRAPn", {}).get("ball") != "N8":
+        g.fail("v55g table: G_MASTERn / G_WRAPn not at R14 / N8")
+    for s in ("G_MASTERn", "G_WRAPn"):
+        if tab.get(s, {}).get("pullup") != "on" or tab.get(s, {}).get("dir") != "input":
+            g.fail(f"v55g table: {s} must be an input with weak pull-up")
+    if tab.get("CLK_11_2896_MHz", {}).get("ball") != "J2" or tab.get("CLK_48_MHz", {}).get("ball") != "H16":
+        g.fail("v55g table: clocks not at J2 / H16")
+    outs = sorted(s for s, r in tab.items() if r["dir"] != "input")
+    n_dc = sum(1 for s in outs if s.startswith(V55G_DC_PREFIX))
+    if n_dc != 24 or len(outs) != 41:
+        g.fail(f"v55g table: {len(outs)} outputs ({n_dc} DC), expected 41 (24 DC)")
+    g.note(f"v55g table: {len(tab)} ports, {len(outs)} output/bidir ({n_dc} G1 at 4mA)")
+
+
+def check_v55g_pin(g, text, device, tab):
+    chip, dev, rows = parse_pin(text)
+    if dev is None or dev.upper() != device.upper():
+        g.fail(f".pin: device {dev}, expected {device}")
+    balls = load_balls()
+    if len(rows) != 256:
+        g.fail(f".pin: {len(rows)} rows, expected 256")
+    at = {r["ball"]: s for s, r in tab.items()}
+    seen = set()
+    for b in sorted(set(balls) - {r["loc"] for r in rows}):
+        g.fail(f".pin: expected ball {b} missing")
+    for r in rows:
+        name, d, loc = r["name"], r["dir"], r["loc"]
+        where = f"{loc} {name!r} dir={d or '-'}"
+        role = balls.get(loc)
+        if role is None:
+            g.fail(f".pin: unknown ball {where}")
+            continue
+        if loc in at:
+            s = at[loc]
+            if name != s:
+                g.fail(f".pin: ball {loc} is {name!r}, expected {s}")
+                continue
+            if d != tab[s]["dir"]:
+                g.fail(f".pin: {s} dir {d}, expected {tab[s]['dir']}")
+            if role not in PORT_ROLES:
+                g.fail(f".pin: {s} on a non-I/O ball ({role})")
+            seen.add(s)
+            continue
+        if name in tab:
+            g.fail(f".pin: {name} at {loc}, expected {tab[name]['ball']}")
+            continue
+        m = DUAL.match(name)
+        if m:
+            if role != "RESERVED_INPUT" or (m.group(2) or "").strip() != "RESERVED_INPUT" \
+                    or d not in OK_INPUT_DIRS:
+                g.fail(f".pin: dual-purpose pin not input tri-stated: {where}")
+            continue
+        if role in ("RESERVED_INPUT", "USER"):
+            if name != "RESERVED_INPUT" or d not in OK_INPUT_DIRS:
+                g.fail(f".pin: unused I/O ball not RESERVED_INPUT: {where}")
+            continue
+        if name != role:
+            g.fail(f".pin: ball {loc} is {name!r}, expected {role!r}")
+        elif "*" in name or BAD_USAGE.search(name):
+            g.fail(f".pin: driving / pulled pin: {where}")
+        elif role in DEDICATED_ANY_DIR:
+            pass
+        elif role in DEDICATED_INPUT or role in ("NC", "GND+"):
+            if d not in OK_INPUT_DIRS:
+                g.fail(f".pin: pin not an input: {where}")
+        elif role.startswith(("VCC", "GND")):
+            if d not in POWER_DIRS | OK_INPUT_DIRS:
+                g.fail(f".pin: supply pin with direction: {where}")
+        else:
+            g.fail(f".pin: unknown role {role!r}: {where}")
+    for s in sorted(set(tab) - seen):
+        g.fail(f".pin: {s} not listed at {tab[s]['ball']}")
+    return rows
+
+
+def _summary_value(tables, label):
+    for t, rows in tables.items():
+        if not t.lower().startswith(("fitter summary", "flow summary")):
+            continue
+        for r in rows:
+            if len(r) >= 2 and r[0].strip().lower() == label.lower():
+                return r[1].strip()
+    return None
+
+
+def check_v55g_fit(g, text, tab, device):
+    tables = rpt_tables(text)
+    dev = _summary_value(tables, "Device")
+    if dev is None or dev.upper() != device.upper():
+        g.fail(f"fit.rpt: device {dev!r}, expected {device}")
+    for label in ("Total logic elements", "Total memory bits", "Total registers",
+                  "Total pins", "Total PLLs"):
+        g.note(f"fit.rpt: {label}: {_summary_value(tables, label)}")
+    # --- outputs / bidirs: exactly the table's, at their balls, 4 mA on G1
+    want_out = {s for s, r in tab.items() if r["dir"] != "input"}
+    seen = set()
+    for kind in ("Output Pins", "Bidir Pins"):
+        t, rows = find_table(tables, kind)
+        if not t or len(rows) < 2:
+            continue
+        hdr = rows[0]
+        iloc, ipu, ibh, icur = (col(hdr, "Pin #"), col(hdr, "Weak Pull Up"),
+                                col(hdr, "Bus Hold"), col(hdr, "Current Strength"))
+        if None in (iloc, ipu, ibh, icur):
+            g.fail(f"fit.rpt: {kind} table lacks Pin # / Weak Pull Up / Bus Hold / Current Strength")
+            continue
+        for r in rows[1:]:
+            name = r[0]
+            if len(r) <= max(iloc, ipu, ibh, icur):
+                g.fail(f"fit.rpt: short {kind} row {r}")
+                continue
+            if name not in want_out:
+                g.fail(f"fit.rpt: unexpected {kind} row {name} at {r[iloc]}")
+                continue
+            want_kind = "Bidir Pins" if tab[name]["dir"] == "bidir" else "Output Pins"
+            if kind != want_kind:
+                g.fail(f"fit.rpt: {name} in {kind}, expected {want_kind}")
+            if name in seen:
+                g.fail(f"fit.rpt: {name} listed twice")
+            seen.add(name)
+            if r[iloc] != tab[name]["ball"]:
+                g.fail(f"fit.rpt: {name} at {r[iloc]}, expected {tab[name]['ball']}")
+            exp_pu = "on" if tab[name]["pullup"] == "on" else "off"
+            if r[ipu].lower() != exp_pu:
+                g.fail(f"fit.rpt: {name} weak pull-up {r[ipu]}, expected {exp_pu}")
+            if not bh_ok(r[ibh], False):
+                g.fail(f"fit.rpt: {name} bus hold {r[ibh]}")
+            cur = r[icur].replace(" ", "").lower()
+            if tab[name]["strength"]:
+                if cur != tab[name]["strength"].lower():
+                    g.fail(f"fit.rpt: {name} current strength {r[icur]}, expected "
+                           f"{tab[name]['strength']}")
+                else:
+                    g.note(f"fit.rpt: {name} {r[iloc]} current strength {r[icur]}")
+            else:
+                g.note(f"fit.rpt: {name} {r[iloc]} current strength {r[icur]} (MCU side)")
+    for s in sorted(want_out - seen):
+        g.fail(f"fit.rpt: {s} missing from the Output / Bidir Pins tables")
+    n4 = sum(1 for s in seen if tab[s]["strength"])
+    g.note(f"fit.rpt: {len(seen)} output/bidir pins (expected {len(want_out)}), "
+           f"{n4} G1 pins at 4mA")
+    # --- inputs
+    want_in = {s for s, r in tab.items() if r["dir"] == "input"}
+    t, rows = find_table(tables, "Input Pins")
+    seen_in = set()
+    if t and len(rows) > 1:
+        hdr = rows[0]
+        iloc, ipu, ibh = col(hdr, "Pin #"), col(hdr, "Weak Pull Up"), col(hdr, "Bus Hold")
+        if None in (iloc, ipu, ibh):
+            g.fail("fit.rpt: Input Pins table lacks Pin # / Weak Pull Up / Bus Hold")
+        else:
+            for r in rows[1:]:
+                name = r[0]
+                if name not in want_in:
+                    g.fail(f"fit.rpt: unexpected input {name}")
+                    continue
+                seen_in.add(name)
+                if r[iloc] != tab[name]["ball"]:
+                    g.fail(f"fit.rpt: input {name} at {r[iloc]}, expected {tab[name]['ball']}")
+                exp_pu = "on" if tab[name]["pullup"] == "on" else "off"
+                if r[ipu].lower() != exp_pu:
+                    g.fail(f"fit.rpt: input {name} weak pull-up {r[ipu]}, expected {exp_pu}")
+                if not bh_ok(r[ibh], False):
+                    g.fail(f"fit.rpt: input {name} bus hold {r[ibh]}")
+    else:
+        g.fail("fit.rpt: Input Pins table missing")
+    for s in sorted(want_in - seen_in):
+        g.fail(f"fit.rpt: input {s} missing from the Input Pins table")
+    # --- every package pin: pull-up / bus hold / direction
+    at = {r["ball"]: s for s, r in tab.items()}
+    t, rows = find_table(tables, "All Package Pins")
+    if not t or len(rows) < 2:
+        g.fail("fit.rpt: All Package Pins table missing")
+    else:
+        hdr = rows[0]
+        iloc, iname, idir = col(hdr, "Location"), col(hdr, "Pin Name/Usage"), col(hdr, "Dir.")
+        ibh, ipu = col(hdr, "Bus Hold"), col(hdr, "Weak Pull Up")
+        if None in (iloc, iname, idir, ibh, ipu):
+            g.fail("fit.rpt: All Package Pins table lacks columns")
+        else:
+            for r in rows[1:]:
+                if len(r) <= max(iloc, iname, idir, ibh, ipu):
+                    continue
+                loc, name, d = r[iloc], r[iname], r[idir].lower()
+                pu = r[ipu].lower()
+                if not bh_ok(r[ibh], False):
+                    g.fail(f"fit.rpt: package pin {loc} {name} bus hold {r[ibh]}")
+                if loc in at:
+                    s = at[loc]
+                    exp_pu = "on" if tab[s]["pullup"] == "on" else "off"
+                    if name != s or d != tab[s]["dir"]:
+                        g.fail(f"fit.rpt: package pin {loc} is {name!r} {d}, expected "
+                               f"{s} {tab[s]['dir']}")
+                    if pu != exp_pu:
+                        g.fail(f"fit.rpt: package pin {loc} {s} weak pull-up {r[ipu]}")
+                else:
+                    if pu not in ("off", "--", ""):
+                        g.fail(f"fit.rpt: package pin {loc} {name} weak pull-up {r[ipu]}")
+                    if d in ("output", "bidir") and name not in ("#TDO", "^nSTATUS", "^CONF_DONE"):
+                        g.fail(f"fit.rpt: package pin {loc} {name} dir={d}")
+    # --- PLL policy: exactly Audio_PLL, fed by CLK_11_2896_MHz on J2
+    v = _summary_value(tables, "Total PLLs")
+    if v is None or not re.match(r"^1\s*/", v):
+        g.fail(f"fit.rpt: Total PLLs {v!r}, expected 1 (Audio_PLL only)")
+    plls = [rows for t, rows in tables.items() if t.lower().startswith("pll summary")]
+    if len(plls) != 1:
+        g.fail(f"fit.rpt: {len(plls)} PLL Summary tables, expected 1")
+    else:
+        kv = {r[0].strip().lower(): r[1].strip() for r in plls[0] if len(r) >= 2}
+        if "audio_pll" not in kv.get("name", "").lower():
+            g.fail(f"fit.rpt: PLL is {kv.get('name')!r}, expected Audio_PLL")
+        if kv.get("inclk0 signal") != "CLK_11_2896_MHz":
+            g.fail(f"fit.rpt: PLL inclk0 {kv.get('inclk0 signal')!r}, expected CLK_11_2896_MHz")
+        if kv.get("inclk0 signal type", "").lower() != "dedicated pin":
+            g.fail(f"fit.rpt: PLL inclk0 type {kv.get('inclk0 signal type')!r}")
+        if kv.get("inclk1 signal", "--") not in ("--", ""):
+            g.fail(f"fit.rpt: PLL inclk1 {kv.get('inclk1 signal')!r}")
+        g.note(f"fit.rpt: PLL {kv.get('name')} at {kv.get('pll location')}, inclk0 "
+               f"{kv.get('inclk0 signal')} ({kv.get('inclk0 signal type')}), "
+               f"{kv.get('input frequency 0')}")
+    check_dual_options(g, tables)
+
+
+STA_SUMMARY = re.compile(r"^(Slow|Fast) Model (Setup|Hold|Recovery|Removal|Minimum Pulse Width)"
+                         r" Summary$", re.I)
+
+
+def check_v55g_sta(g, text):
+    if "Timing requirements not met" in text:
+        g.fail("sta.rpt: timing requirements not met")
+    n = 0
+    clocks = set()
+    for t, rows in rpt_tables(text).items():
+        m = STA_SUMMARY.match(t.strip())
+        if not m:
+            continue
+        for r in rows[1:]:
+            if len(r) >= 2 and re.match(r"^-?\d+(\.\d+)?$", r[1]):
+                n += 1
+                clocks.add(r[0])
+                slack = float(r[1])
+                g.note(f"sta.rpt: {m.group(1)} {m.group(2)} {r[0]}: slack {slack}")
+                if slack < 0:
+                    g.fail(f"sta.rpt: {m.group(1)} {m.group(2)} {r[0]} slack {slack}")
+    if n == 0:
+        g.fail("sta.rpt: no slack summary found")
+    if "CLK_48_MHz" not in clocks:
+        g.fail("sta.rpt: CLK_48_MHz not in the slack summaries")
+
+
 # ----------------------------------------------------------------- main ----
 
 def locate(path, fit):
@@ -635,6 +942,63 @@ def locate(path, fit):
 def read(path):
     with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
+
+
+def report(g, a, rows, pin):
+    if a.rbf:
+        if os.path.exists(a.rbf):
+            with open(a.rbf, "rb") as f:
+                data = f.read()
+            print(f"rbf: {a.rbf} size {len(data)} bytes sha256 "
+                  f"{hashlib.sha256(data).hexdigest()}")
+        else:
+            g.fail(f"rbf not found: {a.rbf}")
+    if not a.quiet:
+        print(f"== {pin}: {len(rows)} pins")
+        for r in rows:
+            print(f"  {r['loc']:<5} {r['dir'] or '-':<7} {r['name']}"
+                  + (f"  [{r['std']}]" if r["std"] else ""))
+        for n in g.notes:
+            print("note:", n)
+    for e in g.errors:
+        print("FAIL:", e)
+    if g.errors:
+        print(f"ep2c5gate: FAIL ({len(g.errors)} problem(s))")
+        return 1
+    print("ep2c5gate: PASS")
+    return 0
+
+
+def main_v55g(a):
+    """--v55g: the v5.5 core + g1gate image (fpga/v55g-ep2c5).
+
+    Table (ep2c5_v55g.csv, from mk_v55g.py) against the pad map; .pin: every
+    port at its ball with its direction, nothing else used, unused balls
+    RESERVED_INPUT; fit.rpt: Output + Bidir Pins exactly the table's 41
+    (16 MCU_DATA + MCU_IRQn + 24 G1), Current Strength 4mA on each of the 24
+    G1 pins, weak pull-up exactly where the table says (R14, N8, MCU
+    strobes), bus hold off everywhere, inputs exactly the table's, PLL
+    policy (1 PLL = Audio_PLL, inclk0 CLK_11_2896_MHz on a dedicated pin),
+    stage-0 device options; sta.rpt: every slack summary >= 0.
+    """
+    table = a.table
+    if os.path.basename(table) == "ep2c5_scan.csv":
+        table = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ep2c5_v55g.csv")
+    tab = load_v55g(table)
+    pin, fit = locate(a.path, a.fit)
+    sta = a.sta or os.path.splitext(pin)[0] + ".sta.rpt"
+    g = Gate()
+    check_v55g_table(g, tab, a.padmap)
+    rows = check_v55g_pin(g, read(pin), a.device, tab)
+    if os.path.exists(fit):
+        check_v55g_fit(g, read(fit), tab, a.device)
+    else:
+        g.fail(f"fit.rpt not found: {fit}")
+    if os.path.exists(sta):
+        check_v55g_sta(g, read(sta))
+    else:
+        g.fail(f"sta.rpt not found: {sta}")
+    return report(g, a, rows, pin)
 
 
 def main(argv=None):
@@ -659,9 +1023,18 @@ def main(argv=None):
     ap.add_argument("--base", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                    "ep2c5_scan.csv"),
                     help="--scan2: the scan table the variant table is checked against")
+    ap.add_argument("--v55g", action="store_true",
+                    help="v55g image (fpga/v55g-ep2c5); table --table ep2c5_v55g.csv, "
+                         "--sta sta.rpt")
+    ap.add_argument("--padmap", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                     "ep2c5_padmap.csv"),
+                    help="--v55g: the pad map the table must follow")
+    ap.add_argument("--sta", help="--v55g: TimeQuest sta.rpt (default: next to the .pin)")
     ap.add_argument("--rbf", help="bitstream: print its size and SHA-256")
     ap.add_argument("-q", "--quiet", action="store_true")
     a = ap.parse_args(argv)
+    if a.v55g:
+        return main_v55g(a)
     code = None
     hold = None
     outs = frozenset()
