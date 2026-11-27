@@ -20,7 +20,8 @@
 //     synchroniser (c1/c2, the same structure as scan_core so the fitter
 //     can share the flops); c3 is one sample older for edges.
 //   H16 falling edge: a second 2-flop synchroniser for RDn only (timing,
-//     half-tick resolution), re-registered on the rising edge.
+//     half-tick resolution), re-registered on the rising edge before any
+//     logic (the half-cycle transfer is a plain flop-to-flop path).
 //   NRD (MCU read strobe): the command latch and ptr.
 //   B4 rising / RDn falling: the two async counters (g1x_acnt). Their
 //     enable is synchronised into their own domain (2 flops), they count
@@ -250,16 +251,20 @@ module g1x #(
     end
 
     // -------------------------------- (h) RDn timing, both H16 edges --
-    // Half-tick sample stream: per rising edge the pair (a, b) = (c2[21],
-    // rn2) = samples at t-2 and t-1.5 ticks; p = the previous pair's b.
+    // Half-tick sample stream: per rising edge a pair (a, b) of samples
+    // half a tick apart; p = the previous pair's b.
     // A pair holds at most one fall and at most one rise, so one min / max
     // update per tick suffices. hpc = samples from the last fall to p,
     // hlw = low samples of the current low run up to p (0 if p is high).
-    reg rn1, rn2;
+    // rn3 re-registers rn2 on the rising edge (a half-cycle path with no
+    // logic), and c3 is the matching rising-edge sample one tick older,
+    // so the pair is (t-3, t-2.5) and the logic below has a full cycle.
+    reg rn1, rn2, rn3;
     always @(negedge h16) begin rn1 <= dc[21]; rn2 <= rn1; end
+    always @(posedge h16) rn3 <= rn2;
     reg hp, hlv, hpv;
     reg [15:0] hlw, hpc, minw, maxw, minp, maxp;
-    wire ha = c2[21], hb2 = rn2;
+    wire ha = c3[21], hb2 = rn3;
     wire fa = hp & ~ha, fb = ha & ~hb2;          // fall at a / at b
     wire ra_ = ~hp & ha, rb = ~ha & hb2;         // rise at a / at b
     wire hfall = fa | fb, hrise = ra_ | rb;
