@@ -725,7 +725,13 @@ def check_v55g_pin(g, text, device, tab):
                     or d not in OK_INPUT_DIRS:
                 g.fail(f".pin: dual-purpose pin not input tri-stated: {where}")
             continue
-        if role in ("RESERVED_INPUT", "USER"):
+        if role == "USER":
+            # stage-0's input ball H1 is a dedicated clock input; unused it
+            # is listed as GND+ (input only in silicon)
+            if name not in ("GND+", "RESERVED_INPUT") or d not in OK_INPUT_DIRS:
+                g.fail(f".pin: unused clock ball not GND+ / RESERVED_INPUT: {where}")
+            continue
+        if role == "RESERVED_INPUT":
             if name != "RESERVED_INPUT" or d not in OK_INPUT_DIRS:
                 g.fail(f".pin: unused I/O ball not RESERVED_INPUT: {where}")
             continue

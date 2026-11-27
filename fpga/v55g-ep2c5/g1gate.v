@@ -289,6 +289,18 @@ module g1gate #(
         op1 <= op; vp1 <= vp; on1 <= onx; vn1 <= vn; mn1 <= mis_n;
     end
     wire new_fault = |(f_set & ~fault);
+    // Counters and the readback-follows flag use a registered copy (one
+    // tick later): the negedge samples leave only half a tick for logic,
+    // enough for the per-ball fault path but not for the wide reductions
+    // and adders (CI run 46035870326: -1.7 ns). The fault path itself is
+    // not delayed.
+    reg vp_any = 1'b0, vn_any = 1'b0, mp_any = 1'b0, mn_any = 1'b0;
+    reg [23:0] match_r = 24'd0;
+    always @(posedge clk) begin
+        vp_any <= |val_p; vn_any <= |val_n;
+        mp_any <= |mis_p; mn_any <= |mis_n;
+        match_r <= match;
+    end
 
     reg        f_valid = 1'b0;
     reg [4:0]  f_ball = 5'd0;
@@ -329,9 +341,9 @@ module g1gate #(
             c_valid <= 32'd0;
             c_mis   <= 16'd0;
         end else begin
-            c_valid <= c_valid + cnt2(|val_p, |val_n);
+            c_valid <= c_valid + cnt2(vp_any, vn_any);
             if (c_mis < 16'hFFFE)
-                c_mis <= c_mis + cnt2(|mis_p, |mis_n);
+                c_mis <= c_mis + cnt2(mp_any, mn_any);
         end
     end
 
@@ -390,7 +402,7 @@ module g1gate #(
             end else begin
                 if (e_tick)
                     e_tmr <= e_tmr - 1'b1;
-                if (e_drive && |(match & e_mask))
+                if (e_drive && |(match_r & e_mask))
                     e_seen <= 1'b1;
                 if (a_data) begin
                     // one window per qualified AltStatus read
@@ -401,7 +413,7 @@ module g1gate #(
                         e_drive  <= 1'b0;
                         e_seen   <= 1'b0;
                         e_pulses <= e_pulses + 1'b1;
-                        if (e_seen || |(match & e_mask))
+                        if (e_seen || |(match_r & e_mask))
                             e_follow <= e_follow + 1'b1;
                         if (last) begin
                             e_arm  <= 1'b0;
@@ -424,7 +436,7 @@ module g1gate #(
                             e_drive  <= 1'b0;
                             e_seen   <= 1'b0;
                             e_pulses <= e_pulses + 1'b1;
-                            if (e_seen || |(match & e_mask))
+                            if (e_seen || |(match_r & e_mask))
                                 e_follow <= e_follow + 1'b1;
                             if (last) begin
                                 e_arm  <= 1'b0;
@@ -436,7 +448,7 @@ module g1gate #(
                         // mode 0 (passive) / 1 (level): N + 1 periods
                         e_seen   <= 1'b0;
                         e_pulses <= e_pulses + 1'b1;
-                        if (a_mode == 2'd1 && (e_seen || |(match & e_mask)))
+                        if (a_mode == 2'd1 && (e_seen || |(match_r & e_mask)))
                             e_follow <= e_follow + 1'b1;
                         if (last) begin
                             e_arm   <= 1'b0;

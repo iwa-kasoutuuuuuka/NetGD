@@ -449,8 +449,61 @@ module tb;
         expect16(8'h24, 16'h0063, 16'h007F, "capture 2: CS0 write reg 1");
         expect16(8'h25, 16'h1234, 16'hFFFF, "capture 2 data");
         expect16(8'h1A, 16'h8000 | (3 << 10), 16'hFC00, "levels: RSTn, cap_n");
-        if (dut.fault != 24'h000003) fail("unexpected faults at the end");
-        if (fault_seen != 24'h000003) fail("fault history");
+        // ---------------- 18. W code 0: one EMPH low pulse of 12 ticks
+        stage(5'd23, 2'd2, 2'd0, 1'b1, 1'b1, 6'd0);
+        mon_start(23);
+        cmd(8'hB0);
+        wait (!dut.e_arm);
+        #50 mon_on = 0;
+        $display("EMPH W0: n=%0d width %0.1f..%0.1f ns", n_rise, w_min, w_max);
+        if (n_rise != 1 || w_min < 12*TCK - 2 || w_max > 12*TCK + 2 || w_max < 1.0) fail("W code 0 != 12 ticks");
+        // ---------------- 19. single-sample glitches must not latch a fault
+        stage(5'd23, 2'd1, 2'd0, 1'b1, 1'b1, 6'd20);
+        cmd(8'hB0);
+        wait (pin_oe[23] === 1'b1);
+        ticks(10);
+        for (i = 0; i < 16; i = i + 1) begin
+            @(posedge clk); #(1.3 * i);
+            ext_val[23] = 0; ext_on[23] = 1;
+            #6 ext_on[23] = 0;
+            ticks(5);
+        end
+        if (dut.fault[23]) fail("6 ns glitch latched a fault");
+        if (!dut.e_arm) fail("engine stopped by a glitch");
+        cmd(8'hB1); ticks(4);
+        // ---------------- 20. mid-drive fault latency over the clock phase
+        w_max = 0;
+        for (i = 0; i < 3; i = i + 1) begin
+            stage(5'd20 + i, 2'd1, 2'd0, 1'b1, 1'b1, 6'd20);
+            cmd(8'hB0);
+            wait (pin_oe[20 + i] === 1'b1);
+            ticks(20);
+            @(posedge clk); #(1.0 + 6.9 * i);
+            ext_val[20 + i] = 0; ext_on[20 + i] = 1; tr = $realtime;
+            wait (pin_oe[20 + i] === 1'b0); tf = $realtime;
+            if (tf - tr > w_max) w_max = tf - tr;
+            ext_on[20 + i] = 0;
+            ticks(4);
+        end
+        $display("mid-drive fault latency, worst of 3 phases: %0.1f ns", w_max);
+        if (w_max > 50.0) fail("mid-drive fault latency > 50 ns");
+        // ---------------- 21. a fault removes a core-path ball although its group stays on
+        core_oe = 24'hFFFFFF; core_val = 24'h000004;
+        cmd(8'hB4); cmd(8'hBB); ticks(4);
+        if (pin_oe !== 24'h000004) fail("core path IORDY");
+        ext_val[2] = 0; ext_on[2] = 1;
+        ticks(10);
+        if (!dut.fault[2]) fail("core-path fault not latched");
+        if (!dut.grp_en[3]) fail("group 3 should still be on");
+        for (i = 0; i < 100; i = i + 1) begin
+            @(posedge clk);
+            if (pin_oe[2]) fail("faulted core-path ball driven");
+        end
+        ext_on[2] = 0;
+        cmd(8'hB2); ticks(4);
+        core_oe = 0; core_val = 0;
+        if (dut.fault != 24'h700007) fail("unexpected faults at the end");
+        if (fault_seen != 24'h700007) fail("fault history");
         #100;
         if (errs == 0) $display("TB PASS");
         else $display("TB FAIL %0d", errs);
