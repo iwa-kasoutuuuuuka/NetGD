@@ -202,8 +202,18 @@ jobs:
             --base tools/pinfind/ep2c5_scan.csv --rbf "$rbf" | tee -a gate.txt
           { echo "### ep2c5gate --scan2 $K"; echo '```'; head -n 5 gate.txt; tail -n 40 gate.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Timing check (TimeQuest)
+        # A bitstream that misses timing is not published either.
+        run: |
+          grep -E "^; (Slow|Fast) Model (Setup|Hold|Recovery|Removal) Summary" -A 16 \
+            dist/scan2.sta.rpt | grep -E "^; clk" || true
+          if grep -q "Timing requirements not met" dist/scan2.sta.rpt; then
+            echo "::error::TimeQuest: timing requirements not met"; exit 1
+          fi
+          echo "timing met"
+
       - name: Upload bitstream
-        # Only a bitstream that passed the gate is published.
+        # Only a bitstream that passed the gate and timing is published.
         if: success()
         uses: actions/upload-artifact@v4
         with:
