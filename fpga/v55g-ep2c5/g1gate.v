@@ -348,7 +348,12 @@ module g1gate #(
     end
 
     // -------------------------------------------------- engine --
-    wire kill = ~mst_s | ~rstn_s | ~wrap_s | c_stop | c_release | new_fault;
+    // A new fault stops the engine one tick later (registered: the half-tick
+    // path from the negedge samples into the engine missed timing, CI run
+    // 46037003725 -0.7 ns); the faulted ball itself is already off.
+    reg new_fault_r = 1'b0;
+    always @(posedge clk) new_fault_r <= new_fault;
+    wire kill = ~mst_s | ~rstn_s | ~wrap_s | c_stop | c_release | new_fault_r;
     wire [23:0] tgt = (s_mode == 2'd3) ? {13'd0, s_msk, 3'd0} : onehot24(s_sel);
     wire tgt_lvl_ok = (s_mode == 2'd3) ? &(pad_s[10:3] | ~s_msk)
                                        : (pad_s[s_sel] == s_rest);
