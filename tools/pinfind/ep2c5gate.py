@@ -46,6 +46,17 @@ input ports. Weak Pull Up must be On exactly where the table says "on"
 everywhere, the Fitter Summary must show 0 PLLs, and the dual-purpose and
 device-option checks of stage-0 still apply.
 
+--scan2 K (variant K = 0, 1, 2 of the scan2 core, fpga/scan2-ep2c5, table
+--table ep2c5_scan2_vK.csv): all the --scan checks, with the bus hold
+expected per ball from the table's optional "bushold" column (On exactly
+where it says "on", Off elsewhere). Before reading the reports, the table
+itself is checked against --base (default ep2c5_scan.csv, the scan core):
+same balls, directions, kinds and signals; the outputs are exactly the 16
+MCU_DATA balls; and the balls whose pull-up / bus hold differ from the
+base are exactly the variant's set: v0 none; v1 the 33 DC_* balls plus
+C4 and C5 with pull-up Off; v2 the 33 DC_* balls with pull-up Off and bus
+hold On.
+
 --rbf prints the bitstream's size and SHA-256 (a missing file fails).
 
 Standard library only. Prints every pin it looked at, then PASS or FAIL.
@@ -159,9 +170,13 @@ def load_code(path, k):
     return out
 
 
-def load_scan(path):
-    """Return ({ball: pull-up expected}, {output balls}) from ep2c5_scan.csv."""
-    code, outs = {}, set()
+def load_scan(path, with_hold=False):
+    """Return ({ball: pull-up expected}, {output balls}) from ep2c5_scan.csv.
+
+    with_hold: also return {ball: bus hold expected} from the optional
+    "bushold" column (missing column or empty cell = off).
+    """
+    code, outs, hold = {}, set(), {}
     with open(path, encoding="utf-8") as f:
         for r in csv.DictReader(f):
             ball = r["ball"].strip()
@@ -170,14 +185,71 @@ def load_scan(path):
             d, pu = r["dir"].strip(), r["pullup"].strip()
             if d not in ("input", "output") or pu not in ("on", "off"):
                 raise SystemExit(f"ep2c5gate: bad dir/pullup {d!r}/{pu!r} for {ball}")
+            bh = (r.get("bushold") or "off").strip()
+            if bh not in ("on", "off") or (bh == "on" and (pu == "on" or d != "input")):
+                raise SystemExit(f"ep2c5gate: bad bushold {bh!r} for {ball}")
             code[ball] = pu == "on"
+            hold[ball] = bh == "on"
             if d == "output":
                 outs.add(ball)
+    if with_hold:
+        return code, outs, hold
     return code, outs
+
+
+SCAN2_V1_EXTRA = ("C4", "C5")
+
+
+def check_scan2_table(g, k, path, base):
+    """--scan2 K: the variant table differs from the scan table only as allowed."""
+    def rows_of(p):
+        with open(p, encoding="utf-8") as f:
+            return {r["ball"].strip(): r for r in csv.DictReader(f)}
+    v, b = rows_of(path), rows_of(base)
+    if set(v) != set(b):
+        g.fail(f"scan2 table: balls differ from {os.path.basename(base)}: "
+               f"{sorted(set(v) ^ set(b))}")
+        return
+    for ball in sorted(v):
+        for c in ("dir", "kind", "signal", "raw", "d_bit", "clk", "dc"):
+            if (v[ball].get(c) or "").strip() != (b[ball].get(c) or "").strip():
+                g.fail(f"scan2 table: {ball} {c} {v[ball].get(c)!r} != base {b[ball].get(c)!r}")
+        if (b[ball].get("bushold") or "off").strip() != "off":
+            g.fail(f"scan2 table: base has bus hold on {ball}")
+    outs = {x for x in v if v[x]["dir"].strip() == "output"}
+    want_outs = {x for x in v if re.fullmatch(r"MCU_DATA\[\d+\]", v[x]["signal"].strip())}
+    if outs != want_outs or len(outs) != 16:
+        g.fail(f"scan2 table: outputs {sorted(outs)} are not the 16 MCU_DATA balls")
+    dc = {x for x in v if v[x]["signal"].strip().startswith("DC_")}
+    if len(dc) != 33:
+        g.fail(f"scan2 table: {len(dc)} DC_* balls, expected 33")
+    want = {0: set(), 1: dc | set(SCAN2_V1_EXTRA), 2: dc}[k]
+    diff = set()
+    for ball in v:
+        pu = v[ball]["pullup"].strip()
+        bh = (v[ball].get("bushold") or "off").strip()
+        if pu != b[ball]["pullup"].strip() or bh != "off":
+            diff.add(ball)
+        if ball in want:
+            exp = ("off", "on" if k == 2 else "off")
+            if (pu, bh) != exp:
+                g.fail(f"scan2 table v{k}: {ball} pull-up {pu} / bus hold {bh}, expected "
+                       f"{exp[0]} / {exp[1]}")
+    if diff != want:
+        g.fail(f"scan2 table v{k}: I/O settings differ from the base on "
+               f"{sorted(diff - want)} (unexpected) / not on {sorted(want - diff)}")
+    g.note(f"scan2 table v{k}: {len(diff)} balls differ from the base "
+           f"({'pull-up off' if k == 1 else 'pull-up off, bus hold on' if k == 2 else 'none'})")
 
 
 def code_port(ball):
     return "p_" + ball
+
+
+def bh_ok(cell, want_on):
+    """Bus Hold cell matches the expectation (On = yes/on, Off = no/off/--/empty)."""
+    c = cell.strip().lower()
+    return c in ("yes", "on") if want_on else c in ("no", "off", "--", "")
 
 
 def check_pin(g, text, device, users, npins, balls=None, code=None, outs=frozenset()):
@@ -346,7 +418,7 @@ OPTIONAL_OPTIONS = [
 ]
 
 
-def check_package(g, tables, code, required, outs=frozenset()):
+def check_package(g, tables, code, required, outs=frozenset(), hold=None):
     """All Package Pins: Bus Hold off everywhere; Weak Pull Up as expected.
 
     code: {ball: pull-up expected} for the balls that must be input ports
@@ -371,8 +443,10 @@ def check_package(g, tables, code, required, outs=frozenset()):
             continue
         loc, name, d = r[iloc], r[iname], r[idir].lower()
         bh, pu = r[ibh].lower(), r[ipu].lower()
-        if bh not in ("no", "off", "--", ""):
-            g.fail(f"fit.rpt: package pin {loc} {name} bus hold {r[ibh]}")
+        want_bh = bool(hold and hold.get(loc))
+        if not bh_ok(bh, want_bh):
+            g.fail(f"fit.rpt: package pin {loc} {name} bus hold {r[ibh]}, "
+                   f"expected {'on' if want_bh else 'off'}")
         if pu == "on":
             npu += 1
         if code is not None and loc in code:
@@ -422,7 +496,7 @@ def check_drivers(g, tables, code, outs):
             if ipu >= len(r) or r[ipu].lower() != exp:
                 g.fail(f"fit.rpt: output {name} weak pull-up "
                        f"{r[ipu] if ipu < len(r) else '?'}, expected {exp}")
-            if ibh >= len(r) or r[ibh].lower() not in ("no", "off", ""):
+            if ibh >= len(r) or not bh_ok(r[ibh], False):
                 g.fail(f"fit.rpt: output {name} bus hold {r[ibh] if ibh < len(r) else '?'}")
     for name in sorted(set(want) - seen):
         g.fail(f"fit.rpt: scan output {name} not in the Output Pins / Bidir Pins tables")
@@ -448,7 +522,7 @@ def check_pll(g, tables, required):
         g.note(f"fit.rpt: Total PLLs {val}")
 
 
-def check_fit(g, text, users, code=None, outs=frozenset(), scan=False):
+def check_fit(g, text, users, code=None, outs=frozenset(), scan=False, hold=None):
     tables = rpt_tables(text)
     if scan:
         check_drivers(g, tables, code, outs)
@@ -482,8 +556,11 @@ def check_fit(g, text, users, code=None, outs=frozenset(), scan=False):
                            f"{'On' if code[loc] else 'Off'}")
             elif ipu is not None and r[ipu].lower() not in ("off", ""):
                 g.fail(f"fit.rpt: input {r[0]} weak pull-up {r[ipu]}")
-            if ibh is not None and r[ibh].lower() not in ("no", "off", ""):
-                g.fail(f"fit.rpt: input {r[0]} bus hold {r[ibh]}")
+            loc_bh = r[iloc] if iloc is not None and iloc < len(r) else ""
+            want_bh = bool(hold and hold.get(loc_bh))
+            if ibh is not None and not bh_ok(r[ibh], want_bh):
+                g.fail(f"fit.rpt: input {r[0]} bus hold {r[ibh]}, "
+                       f"expected {'on' if want_bh else 'off'}")
             if r[0] not in users:
                 g.fail(f"fit.rpt: unexpected input pin {r[0]}")
         if code is not None:
@@ -512,7 +589,7 @@ def check_fit(g, text, users, code=None, outs=frozenset(), scan=False):
                     g.fail(f"fit.rpt: dual-purpose pin {nm} reserved as {res!r}")
     else:
         g.note("fit.rpt: no Dual Purpose and Dedicated Pins table")
-    check_package(g, tables, pkg_code, required=pkg_code is not None, outs=outs)
+    check_package(g, tables, pkg_code, required=pkg_code is not None, outs=outs, hold=hold)
     opts = {}
     for t, rows in tables.items():
         if "device options" in t.lower() or t.lower().startswith("fitter settings"):
@@ -577,15 +654,25 @@ def main(argv=None):
     ap.add_argument("--table", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                     "ep2c5_scan.csv"),
                     help="scan table csv (default tools/pinfind/ep2c5_scan.csv)")
+    ap.add_argument("--scan2", type=int, default=None, metavar="K",
+                    help="scan2 core variant K (0..2, fpga/scan2-ep2c5); table from --table")
+    ap.add_argument("--base", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                   "ep2c5_scan.csv"),
+                    help="--scan2: the scan table the variant table is checked against")
     ap.add_argument("--rbf", help="bitstream: print its size and SHA-256")
     ap.add_argument("-q", "--quiet", action="store_true")
     a = ap.parse_args(argv)
     code = None
+    hold = None
     outs = frozenset()
+    if a.scan2 is not None:
+        if a.scan2 not in (0, 1, 2):
+            ap.error("--scan2 K needs K in 0..2")
+        a.scan = True
     if a.scan and a.pullcode is not None:
         ap.error("--scan and --pullcode are exclusive")
     if a.scan:
-        code, outs = load_scan(a.table)
+        code, outs, hold = load_scan(a.table, with_hold=True)
         outs = frozenset(outs)
         users = {code_port(b) for b in code}
     elif a.pullcode is not None:
@@ -597,6 +684,9 @@ def main(argv=None):
         users = set(a.user or ["stage0_in"])
     pin, fit = locate(a.path, a.fit)
     g = Gate()
+    if a.scan2 is not None:
+        check_scan2_table(g, a.scan2, a.table, a.base)
+        g.note(f"scan2 variant v{a.scan2}: bus hold On on {sum(hold.values())} balls")
     if a.scan:
         g.note(f"scan core: {len(code)} ports, {len(outs)} outputs "
                f"({' '.join(sorted(outs))}), {sum(code.values())} with weak pull-up On")
@@ -605,7 +695,7 @@ def main(argv=None):
                f"{sum(code.values())} with weak pull-up On")
     rows = check_pin(g, read(pin), a.device, users, a.pins, code=code, outs=outs)
     if os.path.exists(fit):
-        check_fit(g, read(fit), users, code=code, outs=outs, scan=a.scan)
+        check_fit(g, read(fit), users, code=code, outs=outs, scan=a.scan, hold=hold)
     else:
         g.fail(f"fit.rpt not found: {fit}")
     if a.rbf:
